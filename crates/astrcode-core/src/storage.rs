@@ -126,6 +126,13 @@ pub trait EventStore: Send + Sync {
     /// List all session IDs.
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;
 
+    /// Open an existing session from disk, preparing it for appends.
+    /// Must be called before append_event on a resumed session.
+    async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        // Default: replay events to verify session exists
+        self.replay_events(session_id).await.map(|_| ())
+    }
+
     /// Delete a session and all its data.
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError>;
 }

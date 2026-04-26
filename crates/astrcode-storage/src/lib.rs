@@ -5,5 +5,6 @@
 pub mod config_store;
 pub mod event_log;
 pub mod lock;
+pub mod noop;
 pub mod session_repo;
 pub mod snapshot;

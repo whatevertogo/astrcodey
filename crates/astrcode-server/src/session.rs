@@ -1,162 +1,151 @@
-//! Session management — the durable event-sourced unit of work.
+//! Session — the durable event-sourced unit of work.
+//! SessionManager — glue between memory and EventStore.
+//! SessionEventReducer — maps SessionEvent → SessionState update.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, RwLock};
 
-use astrcode_core::storage::SessionEvent;
+use astrcode_core::llm::LlmMessage;
+use astrcode_core::storage::{EventStore, SessionEvent, StorageError};
 use astrcode_core::types::*;
 
-use crate::agent::Agent;
-use astrcode_protocol::events::ServerEvent;
+// ─── Session ─────────────────────────────────────────────────────────────
 
-/// A session — an append-only event log with subscribers.
-///
-/// Sessions are the source of truth. Agents are created from
-/// session events and write back to the session.
 pub struct Session {
     pub id: SessionId,
     pub state: RwLock<SessionState>,
-    agent_handle: Mutex<Option<AgentHandle>>,
-    event_tx: broadcast::Sender<ServerEvent>,
+    event_tx: broadcast::Sender<astrcode_protocol::events::ServerEvent>,
 }
 
-/// Handle to the currently active agent in this session.
-pub struct AgentHandle {
-    pub agent: Agent,
-}
-
-/// In-memory state derived from session events.
+#[derive(Debug, Clone)]
 pub struct SessionState {
-    pub messages: Vec<astrcode_core::llm::LlmMessage>,
-    pub tool_results: Vec<astrcode_core::tool::ToolResult>,
-    pub model_id: String,
-    pub thinking_level: String,
+    pub messages: Vec<LlmMessage>,
     pub working_dir: String,
-    pub cursor: Cursor,
-    pub subscriber_count: usize,
+    pub model_id: String,
 }
 
 impl Session {
     pub fn new(id: SessionId, working_dir: String, model_id: String, capacity: usize) -> Self {
         let (event_tx, _) = broadcast::channel(capacity);
-        Self {
-            id,
-            state: RwLock::new(SessionState {
-                messages: Vec::new(),
-                tool_results: Vec::new(),
-                model_id,
-                thinking_level: "default".into(),
-                working_dir,
-                cursor: String::new(),
-                subscriber_count: 0,
-            }),
-            agent_handle: Mutex::new(None),
-            event_tx,
-        }
+        Self { id, state: RwLock::new(SessionState { messages: vec![], working_dir, model_id }), event_tx }
     }
 
-    /// Subscribe to session events.
-    pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<astrcode_protocol::events::ServerEvent> {
         self.event_tx.subscribe()
-    }
-
-    /// Broadcast an event to all subscribers.
-    pub fn broadcast(&self, event: ServerEvent) {
-        let _ = self.event_tx.send(event);
-    }
-
-    /// Attach an agent to this session.
-    pub async fn attach_agent(&self, agent: Agent) {
-        let mut handle = self.agent_handle.lock().await;
-        *handle = Some(AgentHandle { agent });
-    }
-
-    /// Detach the current agent.
-    pub async fn detach_agent(&self) {
-        let mut handle = self.agent_handle.lock().await;
-        *handle = None;
     }
 }
 
-/// Manages multiple sessions within the server.
+// ─── SessionEventReducer ─────────────────────────────────────────────────
+
+/// Pure function: applies a SessionEvent to SessionState.
+pub struct SessionEventReducer;
+
+impl SessionEventReducer {
+    pub fn reduce(event: &SessionEvent, state: &mut SessionState) {
+        match event {
+            SessionEvent::SessionStart { working_dir, model_id, .. } => {
+                state.working_dir = working_dir.clone();
+                state.model_id = model_id.clone();
+            }
+            SessionEvent::UserMessage { text, .. } => {
+                state.messages.push(LlmMessage::user(text));
+            }
+            SessionEvent::AssistantMessage { text, .. } => {
+                state.messages.push(LlmMessage::assistant(text));
+            }
+            SessionEvent::ToolCall { tool_name, arguments, .. } => {
+                state.messages.push(LlmMessage {
+                    role: astrcode_core::llm::LlmRole::Tool,
+                    content: vec![astrcode_core::llm::LlmContent::ToolResult {
+                        tool_call_id: String::new(), content: format!("call: {}({:?})", tool_name, arguments), is_error: false,
+                    }],
+                    name: Some(tool_name.clone()),
+                });
+            }
+            SessionEvent::ToolResult { content, is_error, .. } => {
+                state.messages.push(LlmMessage {
+                    role: astrcode_core::llm::LlmRole::Tool,
+                    content: vec![astrcode_core::llm::LlmContent::Text { text: content.clone() }],
+                    name: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Replay a list of events to build initial SessionState.
+    pub fn replay(events: &[SessionEvent]) -> SessionState {
+        let mut state = SessionState { messages: vec![], working_dir: String::new(), model_id: String::new() };
+        for event in events {
+            Self::reduce(event, &mut state);
+        }
+        state
+    }
+}
+
+// ─── SessionManager ──────────────────────────────────────────────────────
+
 pub struct SessionManager {
-    sessions: RwLock<HashMap<SessionId, Arc<Session>>>,
+    active: RwLock<HashMap<SessionId, Arc<Session>>>,
+    store: Arc<dyn EventStore>,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
+    pub fn new(store: Arc<dyn EventStore>) -> Self {
+        Self { active: RwLock::new(HashMap::new()), store }
+    }
+
+    /// Create a new session and persist SessionStart.
+    pub async fn create(&self, working_dir: &str, model_id: &str, capacity: usize) -> Result<SessionId, SessionError> {
+        let sid = new_session_id();
+        self.store.create_session(&sid, working_dir, model_id).await?;
+
+        let session = Arc::new(Session::new(sid.clone(), working_dir.into(), model_id.into(), capacity));
+        self.active.write().await.insert(sid.clone(), session);
+        Ok(sid)
+    }
+
+    /// Resume a session from disk, replay events, add to active set.
+    pub async fn resume(&self, session_id: &SessionId) -> Result<Arc<Session>, SessionError> {
+        if let Some(s) = self.active.read().await.get(session_id) { return Ok(s.clone()); }
+
+        self.store.open_session(session_id).await?;
+        let events = self.store.replay_events(session_id).await?;
+        let state = SessionEventReducer::replay(&events);
+
+        let session = Arc::new(Session {
+            id: session_id.clone(),
+            state: RwLock::new(state.clone()),
+            event_tx: broadcast::channel(2048).0,
+        });
+        self.active.write().await.insert(session_id.clone(), session.clone());
+        Ok(session)
+    }
+
+    /// Append an event to disk and update in-memory state.
+    pub async fn append_event(&self, session_id: &SessionId, event: SessionEvent) -> Result<(), SessionError> {
+        self.store.append_event(session_id, event.clone()).await?;
+        if let Some(s) = self.active.read().await.get(session_id) {
+            SessionEventReducer::reduce(&event, &mut *s.state.write().await);
         }
-    }
-
-    /// Create a new session.
-    pub async fn create(
-        &self,
-        working_dir: &str,
-        model_id: &str,
-        broadcast_capacity: usize,
-    ) -> SessionId {
-        let id = new_session_id();
-        let session = Arc::new(Session::new(
-            id.clone(),
-            working_dir.into(),
-            model_id.into(),
-            broadcast_capacity,
-        ));
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(id.clone(), session);
-        id
-    }
-
-    /// Get a session by ID.
-    pub async fn get(&self, id: &SessionId) -> Option<Arc<Session>> {
-        let sessions = self.sessions.read().await;
-        sessions.get(id).cloned()
-    }
-
-    /// List all session IDs.
-    pub async fn list(&self) -> Vec<SessionId> {
-        let sessions = self.sessions.read().await;
-        sessions.keys().cloned().collect()
-    }
-
-    /// Fork a session — creates a new session with shared history up to cursor.
-    pub async fn fork(
-        &self,
-        parent_id: &SessionId,
-        _at_cursor: Option<&Cursor>,
-        working_dir: &str,
-        model_id: &str,
-        broadcast_capacity: usize,
-    ) -> Result<SessionId, SessionError> {
-        let _parent = self
-            .get(parent_id)
-            .await
-            .ok_or_else(|| SessionError::NotFound(parent_id.clone()))?;
-
-        // Create child session
-        let child_id = self.create(working_dir, model_id, broadcast_capacity).await;
-
-        // TODO: Copy parent events up to cursor into child event log
-        // TODO: Emit SessionFork event in child
-
-        Ok(child_id)
-    }
-
-    /// Delete a session.
-    pub async fn delete(&self, id: &SessionId) -> Result<(), SessionError> {
-        let mut sessions = self.sessions.write().await;
-        sessions
-            .remove(id)
-            .ok_or_else(|| SessionError::NotFound(id.clone()))?;
         Ok(())
     }
 
-    /// Switch active session (handled by client reconnecting).
-    pub async fn switch(&self, _from: &SessionId, _to: &SessionId) -> Result<(), SessionError> {
-        // Switching is a client-side operation
+    /// Get active session by ID.
+    pub async fn get(&self, session_id: &SessionId) -> Option<Arc<Session>> {
+        self.active.read().await.get(session_id).cloned()
+    }
+
+    /// List all sessions (from disk).
+    pub async fn list(&self) -> Result<Vec<SessionId>, SessionError> {
+        Ok(self.store.list_sessions().await?)
+    }
+
+    /// Delete session from memory and disk.
+    pub async fn delete(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.active.write().await.remove(session_id);
+        self.store.delete_session(session_id).await?;
         Ok(())
     }
 }
@@ -165,4 +154,6 @@ impl SessionManager {
 pub enum SessionError {
     #[error("Session not found: {0}")]
     NotFound(SessionId),
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
 }

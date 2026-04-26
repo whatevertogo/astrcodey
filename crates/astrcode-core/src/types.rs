@@ -80,10 +80,16 @@ pub fn new_message_id() -> MessageId {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Derives a project hash from a working directory path.
+/// Derives a stable project hash from a working directory path.
+///
+/// Uses SHA-256 on the canonical path (not DefaultHasher — not stable across
+/// Rust versions). Truncated to 16 hex chars for readability.
 pub fn project_hash_from_path(path: &PathBuf) -> ProjectHash {
     use std::hash::Hasher;
-    let mut hasher = std::hash::DefaultHasher::new();
-    std::hash::Hash::hash(&path, &mut hasher);
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    // Use SHA-256 for stability across Rust versions and platforms
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    std::hash::Hash::hash(&canonical, &mut hasher);
     format!("{:016x}", hasher.finish())
 }

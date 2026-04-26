@@ -134,6 +134,27 @@ impl EventStore for FileSystemSessionRepository {
         Ok(())
     }
 
+    /// Open a session from disk and register its SessionMeta for future appends.
+    async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        let mut sessions = self.sessions.write().await;
+        if sessions.contains_key(session_id) { return Ok(()); }
+
+        let log = EventLog::open(self.event_log_path(session_id)).await?;
+        let snapshot_mgr = SnapshotManager::new(self.session_dir(session_id).join("snapshots"));
+        let lock = TurnLock::new(self.session_dir(session_id).join("active-turn.lock"));
+
+        // Read SessionStart to get working_dir and model_id
+        let events = log.replay_all().await?;
+        let (working_dir, model_id) = events.first().and_then(|e| match e {
+            astrcode_core::storage::SessionEvent::SessionStart { working_dir, model_id, .. } =>
+                Some((working_dir.clone(), model_id.clone())),
+            _ => None,
+        }).unwrap_or_default();
+
+        sessions.insert(session_id.clone(), SessionMeta { log, snapshot_mgr, lock, working_dir, model_id });
+        Ok(())
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         let sessions = self.sessions.read().await;
         Ok(sessions.keys().cloned().collect())

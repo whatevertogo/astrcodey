@@ -80,3 +80,7 @@ cargo clippy -p <crate> --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
+
+## 重要
+
+必须遵守：没有遇见bug不准写测试，非复杂逻辑不写测试

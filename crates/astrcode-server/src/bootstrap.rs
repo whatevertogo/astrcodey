@@ -97,20 +97,24 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let prompt_provider: Arc<dyn PromptProvider> = Arc::new(composer);
 
     // 4. Build capability router with stable built-in tools
-    let cwd = opts
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = opts.working_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let mut tool_registry = ToolRegistry::new();
-    tool_registry.register_builtins(cwd, effective.llm.read_timeout_secs);
+    tool_registry.register_builtins(cwd.clone(), effective.llm.read_timeout_secs);
 
     let capability = Arc::new(CapabilityRouter::new());
     for tool in tool_registry.into_tools() {
         capability.register_stable(tool).await;
     }
 
-    // 5. Session manager
-    let session_manager = Arc::new(SessionManager::new());
+    // 5. Session manager with storage backend
+    let project_hash = astrcode_core::types::project_hash_from_path(&cwd);
+    let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
+        // Test path → use memory-only store
+        Arc::new(astrcode_storage::noop::NoopEventStore::new())
+    } else {
+        Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new(project_hash))
+    };
+    let session_manager = Arc::new(SessionManager::new(store));
 
     // 6. Extension runner
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
