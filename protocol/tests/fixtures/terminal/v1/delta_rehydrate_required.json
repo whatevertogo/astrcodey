@@ -1,0 +1,13 @@
+{
+  "sessionId": "session-root",
+  "cursor": "cursor:opaque:v1:session-root/45==",
+  "kind": "rehydrate_required",
+  "error": {
+    "code": "cursor_expired",
+    "message": "cursor 已失效，请重新获取 snapshot",
+    "rehydrateRequired": true,
+    "details": {
+      "cursor": "cursor:opaque:v1:session-root/12=="
+    }
+  }
+}

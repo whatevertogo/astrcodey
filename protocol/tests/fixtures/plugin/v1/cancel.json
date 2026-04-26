@@ -1,0 +1,5 @@
+{
+  "type": "cancel",
+  "id": "req-1",
+  "reason": "user interrupted"
+}

@@ -1,0 +1,28 @@
+[package]
+name = "astrcode-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI entry point: tui, exec, and server commands"
+
+[[bin]]
+name = "astrcode"
+path = "src/main.rs"
+
+default-run = "astrcode"
+
+[dependencies]
+astrcode-server = { path = "../astrcode-server" }
+astrcode-client = { path = "../astrcode-client" }
+astrcode-core = { path = "../astrcode-core" }
+astrcode-protocol = { path = "../astrcode-protocol" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

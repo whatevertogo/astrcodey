@@ -1,0 +1,17 @@
+[package]
+name = "astrcode-adapter-agents"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+
+[dependencies]
+astrcode-core = { path = "../core" }
+astrcode-support = { path = "../support" }
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+astrcode-core = { path = "../core", features = ["test-support"] }
+tempfile.workspace = true

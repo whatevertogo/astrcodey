@@ -1,0 +1,11 @@
+[package]
+name = "astrcode-support"
+version = "0.1.0"
+edition = "2021"
+description = "Host environment utilities: path resolution, shell detection, tool result persistence"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+dirs = "6"

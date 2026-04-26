@@ -1,0 +1,17 @@
+{
+  "sessionId": "session-root",
+  "cursor": "cursor:opaque:v1:session-root/44.5==",
+  "kind": "patch_block",
+  "blockId": "block-tool-call-1",
+  "patch": {
+    "kind": "replace_metadata",
+    "metadata": {
+      "openSessionId": "session-child-1",
+      "agentRef": {
+        "agentId": "agent-child-1",
+        "subRunId": "subrun-1",
+        "openSessionId": "session-child-1"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "astrcode-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in tools: file ops, shell execution, agent collaboration, event emission"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+glob = "0.3"
+regex = "1"

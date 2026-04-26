@@ -1,0 +1,123 @@
+{
+  "type": "initialize",
+  "id": "init-1",
+  "protocolVersion": "1",
+  "supportedProtocolVersions": [
+    "1"
+  ],
+  "peer": {
+    "id": "worker-1",
+    "name": "repo-inspector",
+    "role": "worker",
+    "version": "0.1.0",
+    "supportedProfiles": [
+      "coding"
+    ],
+    "metadata": {
+      "transport": "stdio"
+    }
+  },
+  "capabilities": [
+    {
+      "name": "workspace.summary",
+      "kind": "tool",
+      "description": "Summarize the active coding workspace.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": {
+        "type": "object"
+      },
+      "invocationMode": "unary",
+      "profiles": [
+        "coding"
+      ],
+      "tags": [
+        "workspace",
+        "summary"
+      ],
+      "permissions": [
+        {
+          "name": "filesystem.read",
+          "rationale": "Need to inspect the active repository."
+        }
+      ],
+      "sideEffect": "none",
+      "stability": "stable"
+    }
+  ],
+  "handlers": [
+    {
+      "id": "command.workspace.summary",
+      "trigger": {
+        "kind": "command",
+        "value": "/workspace-summary",
+        "metadata": {
+          "aliases": [
+            "/ws"
+          ]
+        }
+      },
+      "inputSchema": {
+        "type": "object"
+      },
+      "profiles": [
+        "coding"
+      ],
+      "filters": [
+        {
+          "field": "profile",
+          "op": "eq",
+          "value": "coding"
+        }
+      ],
+      "permissions": [
+        {
+          "name": "filesystem.read",
+          "rationale": "Reads workspace files."
+        }
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "name": "coding",
+      "version": "1",
+      "description": "Coding workflow profile.",
+      "contextSchema": {
+        "type": "object",
+        "properties": {
+          "workingDir": {
+            "type": "string"
+          },
+          "repoRoot": {
+            "type": "string"
+          },
+          "openFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "activeFile": {
+            "type": "string"
+          },
+          "selection": {
+            "type": "object"
+          },
+          "approvalMode": {
+            "type": "string"
+          }
+        }
+      },
+      "metadata": {
+        "firstClass": true
+      }
+    }
+  ],
+  "metadata": {
+    "bootstrap": true,
+    "transport": "stdio"
+  }
+}

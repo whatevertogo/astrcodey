@@ -1,0 +1,11 @@
+{
+  "type": "event",
+  "id": "req-1",
+  "phase": "delta",
+  "event": "artifact.patch",
+  "payload": {
+    "path": "src/lib.rs",
+    "patch": "@@ -1 +1 @@\n-pub fn old() {}\n+pub fn new() {}\n"
+  },
+  "seq": 2
+}

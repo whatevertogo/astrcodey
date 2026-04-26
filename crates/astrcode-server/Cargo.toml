@@ -1,0 +1,29 @@
+[package]
+name = "astrcode-server"
+version = "0.1.0"
+edition = "2021"
+description = "Backend server: session manager, agent loop, JSON-RPC handler, config service"
+
+[[bin]]
+name = "astrcode-server"
+path = "src/main.rs"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+astrcode-protocol = { path = "../astrcode-protocol" }
+astrcode-ai = { path = "../astrcode-ai" }
+astrcode-prompt = { path = "../astrcode-prompt" }
+astrcode-tools = { path = "../astrcode-tools" }
+astrcode-storage = { path = "../astrcode-storage" }
+astrcode-context = { path = "../astrcode-context" }
+astrcode-extensions = { path = "../astrcode-extensions" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+notify = "7"

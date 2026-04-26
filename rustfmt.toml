@@ -1,0 +1,56 @@
+# Rust 格式化配置
+# 运行: cargo fmt
+# 最新版本: 2024-04
+
+edition = "2024"
+style_edition = "2024"
+max_width = 100
+hard_tabs = false
+tab_spaces = 4
+# 统一使用 Unix 风格换行符（LF）；由 .gitattributes 强制跨平台一致
+newline_style = "Unix"
+
+# 导入语句排序与分组
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+reorder_imports = true
+
+# 代码风格
+use_small_heuristics = "Default"
+fn_params_layout = "Tall"
+match_block_trailing_comma = true
+trailing_comma = "Vertical"
+trailing_semicolon = true
+
+# 注释与文档
+format_code_in_doc_comments = true
+doc_comment_code_block_width = 100
+comment_width = 100
+wrap_comments = true
+normalize_comments = true
+
+# 字符串与字面值
+format_strings = true
+format_macro_matchers = true
+format_macro_bodies = true
+
+# 空白与缩进
+blank_lines_upper_bound = 2
+merge_derives = true
+use_try_shorthand = true
+use_field_init_shorthand = true
+remove_nested_parens = true
+reorder_impl_items = false
+space_after_colon = true
+space_before_colon = false
+
+# 类型与泛型
+type_punctuation_density = "Wide"
+where_single_line = false
+force_explicit_abi = true
+
+# 不稳定的功能（需要 nightly）
+# 如需启用，请使用 nightly 并取消注释
+# unstable_features = true
+# wrap_comments = true
+# format_code_in_doc_comments = true

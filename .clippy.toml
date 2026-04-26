@@ -1,0 +1,8 @@
+# Clippy 配置
+# 允许警告通过 CI
+
+# 认知复杂度阈值
+cognitive-complexity-threshold = 25
+
+# 文档要求
+doc-valid-idents = ["CLAUDE.md", "README.md", "GitHub", "GitObjectsOwn"]

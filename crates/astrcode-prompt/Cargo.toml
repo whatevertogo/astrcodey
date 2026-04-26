@@ -1,0 +1,15 @@
+[package]
+name = "astrcode-prompt"
+version = "0.1.0"
+edition = "2021"
+description = "Prompt composition pipeline: Contributor pattern, 4-layer caching, template engine"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+anyhow = "1"

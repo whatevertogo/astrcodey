@@ -1,0 +1,13 @@
+[package]
+name = "astrcode-context"
+version = "0.1.0"
+edition = "2021"
+description = "Context window management: token estimation, compaction, pruning, file recovery"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

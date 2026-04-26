@@ -1,0 +1,15 @@
+[package]
+name = "astrcode-client"
+version = "0.1.0"
+edition = "2021"
+description = "RPC client library: typed JSON-RPC client, transport abstraction, stream subscription"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-protocol = { path = "../astrcode-protocol" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["stream"] }

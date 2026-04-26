@@ -1,0 +1,40 @@
+# Rust build outputs
+/target/
+**/*.rs.bk
+
+# Rust/Cargo diagnostics and profiling artifacts
+*.profraw
+*.profdata
+*.dSYM/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.code-workspace
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Patch / merge leftovers
+*.orig
+*.rej
+
+# Temporary files
+*.log
+*.tmp
+*.temp
+
+# Local agent runtime state
+/.omx/logs/
+/.omx/state/
+
+.claude/
+.codex/
+.agents/

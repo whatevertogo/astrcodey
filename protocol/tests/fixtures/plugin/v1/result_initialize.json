@@ -1,0 +1,94 @@
+{
+  "type": "result",
+  "id": "init-1",
+  "kind": "initialize",
+  "success": true,
+  "output": {
+    "protocolVersion": "1",
+    "peer": {
+      "id": "worker-1",
+      "name": "repo-inspector",
+      "role": "worker",
+      "version": "0.1.0",
+      "supportedProfiles": [
+        "coding"
+      ],
+      "metadata": {
+        "transport": "stdio"
+      }
+    },
+    "capabilities": [
+      {
+        "name": "workspace.summary",
+        "kind": "tool",
+        "description": "Summarize the active coding workspace.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "outputSchema": {
+          "type": "object"
+        },
+        "invocationMode": "unary",
+        "profiles": [
+          "coding"
+        ],
+        "tags": [
+          "workspace",
+          "summary"
+        ],
+        "permissions": [
+          {
+            "name": "filesystem.read",
+            "rationale": "Need to inspect the active repository."
+          }
+        ],
+        "sideEffect": "none",
+        "stability": "stable"
+      }
+    ],
+    "handlers": [],
+    "profiles": [
+      {
+        "name": "coding",
+        "version": "1",
+        "description": "Coding workflow profile.",
+        "contextSchema": {
+          "type": "object",
+          "properties": {
+            "workingDir": {
+              "type": "string"
+            },
+            "repoRoot": {
+              "type": "string"
+            },
+            "openFiles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "activeFile": {
+              "type": "string"
+            },
+            "selection": {
+              "type": "object"
+            },
+            "approvalMode": {
+              "type": "string"
+            }
+          }
+        },
+        "metadata": {
+          "firstClass": true
+        }
+      }
+    ],
+    "metadata": {
+      "transport": "stdio"
+    }
+  },
+  "metadata": {
+    "acceptedVersion": "1"
+  }
+}

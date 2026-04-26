@@ -1,0 +1,15 @@
+[package]
+name = "astrcode-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core shared types and traits for the astrcode AI coding agent platform"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

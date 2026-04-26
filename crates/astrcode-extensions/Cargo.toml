@@ -1,0 +1,14 @@
+[package]
+name = "astrcode-extensions"
+version = "0.1.0"
+edition = "2021"
+description = "Extension/hook system: lifecycle events, hook modes, extension loading and dispatch"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+dirs = "6"
