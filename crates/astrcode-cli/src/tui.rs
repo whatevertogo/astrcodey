@@ -234,13 +234,6 @@ async fn execute_slash_command(
                 .map_err(io_error)?;
             state.status = "Listing sessions".into();
         },
-        slash::SlashCommand::Abort => {
-            client
-                .send_command(&ClientCommand::Abort)
-                .await
-                .map_err(io_error)?;
-            state.status = "Abort requested".into();
-        },
         slash::SlashCommand::Quit => {
             state.should_quit = true;
         },

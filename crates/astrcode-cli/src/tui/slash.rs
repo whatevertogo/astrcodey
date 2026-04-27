@@ -13,7 +13,6 @@ pub enum SlashCommand {
     New,
     Resume(String),
     Sessions,
-    Abort,
     Quit,
     Help,
 }
@@ -35,12 +34,6 @@ const COMMANDS: &[SlashCommandSpec] = &[
         name: "sessions",
         usage: "/sessions",
         description: "List known sessions",
-        needs_argument: false,
-    },
-    SlashCommandSpec {
-        name: "abort",
-        usage: "/abort",
-        description: "Abort the active turn",
         needs_argument: false,
     },
     SlashCommandSpec {
@@ -88,7 +81,6 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
         "new" => Some(SlashCommand::New),
         "resume" | "r" => Some(SlashCommand::Resume(arg.to_string())),
         "sessions" | "ls" => Some(SlashCommand::Sessions),
-        "abort" | "stop" => Some(SlashCommand::Abort),
         "quit" | "q" | "exit" => Some(SlashCommand::Quit),
         "help" | "?" => Some(SlashCommand::Help),
         _ => None,
@@ -126,12 +118,5 @@ mod tests {
     fn parses_aliases() {
         assert_eq!(parse("/q"), Some(SlashCommand::Quit));
         assert_eq!(parse("/ls"), Some(SlashCommand::Sessions));
-    }
-
-    #[test]
-    fn rejects_commands_without_server_handlers() {
-        assert_eq!(parse("/model gpt-5"), None);
-        assert_eq!(parse("/mode plan"), None);
-        assert_eq!(parse("/compact"), None);
     }
 }
