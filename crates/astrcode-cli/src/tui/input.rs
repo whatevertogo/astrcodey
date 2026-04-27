@@ -8,7 +8,6 @@ pub enum Action {
     Quit,
     Tick,
     Key(KeyEvent),
-    StreamEvent(astrcode_protocol::events::ClientNotification),
 }
 
 /// Map a crossterm key event to an Action.

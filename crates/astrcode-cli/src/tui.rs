@@ -1,89 +1,209 @@
 //! Interactive terminal mode.
-//!
-//! This intentionally does not use an alternate screen or a fixed ratatui
-//! viewport. Output is appended to normal terminal scrollback, matching the
-//! Codex-style terminal transcript and preserving native scroll behavior.
 
+mod input;
+mod render;
 mod slash;
+mod state;
+mod theme;
 
 use std::{
-    io::{self, Write},
+    io::{self, Stdout},
     sync::Arc,
+    time::Duration,
 };
 
-use astrcode_client::client::AstrcodeClient;
-use astrcode_core::event::EventPayload;
-use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_client::{client::AstrcodeClient, stream::StreamItem};
+use astrcode_protocol::commands::ClientCommand;
+use crossterm::{
+    event::{self, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use input::Action;
+use ratatui::{Terminal, backend::CrosstermBackend};
+use state::TuiState;
+use tokio::sync::mpsc;
 
 use crate::transport::InProcessTransport;
 
+type Client = AstrcodeClient<InProcessTransport>;
+
 pub async fn run() -> io::Result<()> {
     let client = Arc::new(AstrcodeClient::new(InProcessTransport::start()));
-    let mut stream = client
-        .subscribe_events()
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    let mut stream = client.subscribe_events().await.map_err(io_error)?;
+    let mut terminal = TerminalSession::enter()?;
+    let theme = theme::Theme::detect();
+    let mut state = TuiState::new();
+    state.status = "Ready · type / for commands".into();
 
-    println!("Astrcode");
-    println!("Type a message, or /help. Ctrl+C or /quit to exit.");
-    println!();
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
+    spawn_keyboard_reader(action_tx.clone());
+
+    terminal.draw(&state, &theme)?;
 
     loop {
-        let Some(input) = read_prompt("> ")? else {
+        tokio::select! {
+            action = action_rx.recv() => {
+                let Some(action) = action else {
+                    break;
+                };
+                handle_action(action, &mut state, &client).await?;
+            },
+            item = stream.recv() => {
+                match item.map_err(io_error)? {
+                    StreamItem::Event(notification) => state.apply(&notification),
+                    StreamItem::Lagged(n) => {
+                        state.status = format!("Skipped {n} event(s)");
+                        state.mark_dirty();
+                    },
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                state.mark_dirty();
+            },
+        }
+
+        if state.should_quit {
             break;
-        };
-        let input = input.trim_end().to_string();
-        if input.trim().is_empty() {
-            continue;
         }
-
-        if let Some(command) = slash::parse(&input) {
-            if execute_slash_command(command, &client, &mut stream).await? {
-                break;
-            }
-            continue;
+        if state.dirty {
+            terminal.draw(&state, &theme)?;
+            state.dirty = false;
         }
-
-        println!();
-        println!("You");
-        print_indented(&input);
-        println!();
-        println!("Astrcode");
-        print!("  ");
-        io::stdout().flush()?;
-
-        client
-            .send_command(&ClientCommand::SubmitPrompt {
-                text: input,
-                attachments: vec![],
-            })
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        consume_until_turn_completed(&mut stream).await?;
-        println!();
     }
 
     Ok(())
 }
 
-fn read_prompt(prompt: &str) -> io::Result<Option<String>> {
-    print!("{prompt}");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    let bytes = io::stdin().read_line(&mut input)?;
-    if bytes == 0 {
-        return Ok(None);
+async fn handle_action(
+    action: Action,
+    state: &mut TuiState,
+    client: &Arc<Client>,
+) -> io::Result<()> {
+    match action {
+        Action::Quit => {
+            state.should_quit = true;
+            state.mark_dirty();
+        },
+        Action::Tick => state.mark_dirty(),
+        Action::Key(event) => handle_key(event, state, client).await?,
     }
-    Ok(Some(input))
+    Ok(())
+}
+
+async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
+    match event.code {
+        KeyCode::Esc => {
+            if state.show_slash_palette {
+                state.close_slash();
+            } else {
+                state.should_quit = true;
+                state.mark_dirty();
+            }
+        },
+        KeyCode::Enter => {
+            if event.modifiers.contains(KeyModifiers::SHIFT)
+                || event.modifiers.contains(KeyModifiers::ALT)
+            {
+                state.insert_newline();
+            } else if state.show_slash_palette {
+                accept_slash_selection(state, client).await?;
+            } else {
+                submit_current_input(state, client).await?;
+            }
+        },
+        KeyCode::Tab => {
+            if state.show_slash_palette {
+                accept_slash_selection(state, client).await?;
+            }
+        },
+        KeyCode::Backspace => state.backspace(),
+        KeyCode::Delete => state.delete(),
+        KeyCode::Left => state.move_left(),
+        KeyCode::Right => state.move_right(),
+        KeyCode::Home => state.move_home(),
+        KeyCode::End => state.move_end(),
+        KeyCode::Up => {
+            if state.show_slash_palette {
+                state.slash_move_up(slash::filtered(&state.slash_filter).len());
+            } else {
+                state.history_previous();
+            }
+        },
+        KeyCode::Down => {
+            if state.show_slash_palette {
+                state.slash_move_down(slash::filtered(&state.slash_filter).len());
+            } else {
+                state.history_next();
+            }
+        },
+        KeyCode::Char(ch) => {
+            if event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return Ok(());
+            }
+            state.insert_char(ch);
+        },
+        _ => {},
+    }
+
+    Ok(())
+}
+
+async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
+    let commands = slash::filtered(&state.slash_filter);
+    let Some(spec) = commands
+        .get(state.slash_selected.min(commands.len().saturating_sub(1)))
+        .copied()
+    else {
+        state.close_slash();
+        return Ok(());
+    };
+
+    let current_has_argument = state
+        .input
+        .split_once(char::is_whitespace)
+        .is_some_and(|(_, rest)| !rest.trim().is_empty());
+    if spec.needs_argument && !current_has_argument {
+        state.set_input(slash::command_line_for(spec));
+        return Ok(());
+    }
+
+    submit_current_input(state, client).await
+}
+
+async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
+    let input = state.take_input();
+    let input = input.trim_end().to_string();
+    if input.trim().is_empty() {
+        state.mark_dirty();
+        return Ok(());
+    }
+
+    if let Some(command) = slash::parse(&input) {
+        execute_slash_command(command, state, client).await?;
+        return Ok(());
+    }
+
+    state.remember_input(&input);
+    state.push_user(&input);
+    client
+        .send_command(&ClientCommand::SubmitPrompt {
+            text: input,
+            attachments: vec![],
+        })
+        .await
+        .map_err(io_error)?;
+    Ok(())
 }
 
 async fn execute_slash_command(
     command: slash::SlashCommand,
-    client: &AstrcodeClient<InProcessTransport>,
-    stream: &mut astrcode_client::stream::ConversationStream,
-) -> io::Result<bool> {
+    state: &mut TuiState,
+    client: &Arc<Client>,
+) -> io::Result<()> {
     match command {
         slash::SlashCommand::New => {
             let cwd = std::env::current_dir()
@@ -92,202 +212,116 @@ async fn execute_slash_command(
             client
                 .send_command(&ClientCommand::CreateSession { working_dir: cwd })
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            consume_one_protocol_response(stream).await?;
+                .map_err(io_error)?;
+            state.status = "Creating session".into();
         },
         slash::SlashCommand::Resume(session_id) => {
             if session_id.is_empty() {
-                println!("Usage: /resume <id>");
-                return Ok(false);
+                state.status = "Usage: /resume <id>".into();
+                state.mark_dirty();
+                return Ok(());
             }
             client
                 .send_command(&ClientCommand::ResumeSession { session_id })
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            consume_one_protocol_response(stream).await?;
+                .map_err(io_error)?;
+            state.status = "Resuming session".into();
         },
-        slash::SlashCommand::Model(model_id) => {
-            if model_id.is_empty() {
-                println!("Usage: /model <name>");
-                return Ok(false);
-            }
+        slash::SlashCommand::Sessions => {
             client
-                .send_command(&ClientCommand::SetModel { model_id })
+                .send_command(&ClientCommand::ListSessions)
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            println!("model updated");
+                .map_err(io_error)?;
+            state.status = "Listing sessions".into();
         },
-        slash::SlashCommand::Mode(mode) => {
-            if mode.is_empty() {
-                println!("Usage: /mode <name>");
-                return Ok(false);
-            }
+        slash::SlashCommand::Abort => {
             client
-                .send_command(&ClientCommand::SwitchMode { mode })
+                .send_command(&ClientCommand::Abort)
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            println!("mode updated");
+                .map_err(io_error)?;
+            state.status = "Abort requested".into();
         },
-        slash::SlashCommand::Compact => {
-            client
-                .send_command(&ClientCommand::Compact)
-                .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            println!("compaction requested");
+        slash::SlashCommand::Quit => {
+            state.should_quit = true;
         },
-        slash::SlashCommand::Quit => return Ok(true),
         slash::SlashCommand::Help => {
-            println!("Commands: /new /resume <id> /model <name> /mode <name> /compact /quit");
+            state.push_message(
+                state::MessageRole::System,
+                "Commands".into(),
+                slash::help_text(),
+                false,
+                None,
+            );
+            state.status = "Ready".into();
         },
     }
-
-    Ok(false)
+    state.mark_dirty();
+    Ok(())
 }
 
-async fn consume_one_protocol_response(
-    stream: &mut astrcode_client::stream::ConversationStream,
-) -> io::Result<()> {
-    loop {
-        match stream.recv().await {
-            Ok(astrcode_client::stream::StreamItem::Event(notification)) => {
-                print_notification(&notification)?;
-                return Ok(());
-            },
-            Ok(astrcode_client::stream::StreamItem::Lagged(_)) => continue,
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
-        }
-    }
-}
-
-async fn consume_until_turn_completed(
-    stream: &mut astrcode_client::stream::ConversationStream,
-) -> io::Result<()> {
-    loop {
-        match stream.recv().await {
-            Ok(astrcode_client::stream::StreamItem::Event(notification)) => {
-                if print_notification(&notification)? {
-                    return Ok(());
-                }
-            },
-            Ok(astrcode_client::stream::StreamItem::Lagged(n)) => {
-                println!();
-                println!("  [skipped {n} events]");
-                print!("  ");
-                io::stdout().flush()?;
-            },
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
-        }
-    }
-}
-
-/// Returns true when the current assistant turn is complete.
-fn print_notification(notification: &ClientNotification) -> io::Result<bool> {
-    match notification {
-        ClientNotification::Event(event) => match &event.payload {
-            EventPayload::SessionStarted { .. } => {
-                println!();
-                println!("Session {}", short_id(&event.session_id));
-                print!("  ");
-                io::stdout().flush()?;
-            },
-            EventPayload::AssistantTextDelta { delta, .. } => {
-                print!("{delta}");
-                io::stdout().flush()?;
-            },
-            EventPayload::AssistantMessageCompleted { .. } => {
-                println!();
-            },
-            EventPayload::TurnCompleted { finish_reason } => {
-                println!("  [{finish_reason}]");
-                return Ok(true);
-            },
-            EventPayload::ToolCallStarted { tool_name, .. } => {
-                println!();
-                println!("Tool");
-                println!("  {tool_name}");
-            },
-            EventPayload::ToolCallRequested {
-                tool_name,
-                arguments,
-                ..
-            } => {
-                println!("  {tool_name} {}", compact_json(arguments));
-            },
-            EventPayload::ToolCallCompleted { result, .. } => {
-                if result.is_error {
-                    println!("  error: {}", result.content);
-                } else if !result.content.is_empty() {
-                    print_indented(&result.content);
-                }
-                print!("  ");
-                io::stdout().flush()?;
-            },
-            EventPayload::ErrorOccurred { message, .. } => {
-                println!();
-                println!("Error");
-                print_indented(message);
-                return Ok(true);
-            },
-            EventPayload::CompactionCompleted {
-                pre_tokens,
-                post_tokens,
-                ..
-            } => {
-                println!("Compaction {pre_tokens} -> {post_tokens} tokens");
-            },
-            _ => {},
-        },
-        ClientNotification::SessionResumed {
-            session_id,
-            snapshot,
-        } => {
-            println!("Resumed {}", short_id(session_id));
-            for message in &snapshot.messages {
-                println!("{}", label_for_role(&message.role));
-                print_indented(&message.content);
+fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
+    std::thread::spawn(move || {
+        loop {
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => match event::read() {
+                    Ok(event::Event::Key(key)) => {
+                        if let Some(action) = input::map_key(key) {
+                            if action_tx.send(action).is_err() {
+                                break;
+                            }
+                        }
+                    },
+                    Ok(event::Event::Resize(_, _)) => {
+                        if action_tx.send(Action::Tick).is_err() {
+                            break;
+                        }
+                    },
+                    Ok(_) => {},
+                    Err(_) => {
+                        let _ = action_tx.send(Action::Quit);
+                        break;
+                    },
+                },
+                Ok(false) => {},
+                Err(_) => {
+                    let _ = action_tx.send(Action::Quit);
+                    break;
+                },
             }
-        },
-        ClientNotification::SessionList { sessions } => {
-            if sessions.is_empty() {
-                println!("No sessions");
-            } else {
-                for session in sessions {
-                    println!("{}", session.session_id);
-                }
-            }
-        },
-        ClientNotification::UiRequest { message, .. } => {
-            println!("{message}");
-        },
-        ClientNotification::Error { message, .. } => {
-            println!("Error");
-            print_indented(message);
-            return Ok(true);
-        },
-    }
-
-    Ok(false)
+        }
+    });
 }
 
-fn print_indented(text: &str) {
-    for line in text.lines() {
-        println!("  {line}");
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalSession {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.clear()?;
+        Ok(Self { terminal })
+    }
+
+    fn draw(&mut self, state: &TuiState, theme: &theme::Theme) -> io::Result<()> {
+        self.terminal
+            .draw(|frame| render::render(state, frame, theme))
+            .map(|_| ())
     }
 }
 
-fn label_for_role(role: &str) -> &'static str {
-    match role {
-        "user" => "You",
-        "assistant" => "Astrcode",
-        "tool" => "Tool",
-        _ => "System",
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
     }
 }
 
-fn compact_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-}
-
-fn short_id(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
+fn io_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, error.to_string())
 }

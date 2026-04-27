@@ -1,8 +1,13 @@
 //! Built-in prompt contributors. Default prompt text source of truth.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use astrcode_core::prompt::*;
+use astrcode_support::hostpaths::astrcode_dir;
 
 // ─── Default identity (source of truth) ─────────────────────────────────
 
@@ -14,19 +19,30 @@ pub const DEFAULT_IDENTITY: &str = concat!(
     "over new abstractions."
 );
 
+const MAX_IDENTITY_SIZE: usize = 4096;
+
 const TOOL_GUIDE: &str = concat!(
     "Use tools whenever local inspection, execution, or verification is needed. ",
     "Do not guess file contents, build behavior, or command results.\n\n",
-    "Tool use rules:\n",
-    "- Prefer readFile/findFiles/grep for repository inspection before shell.\n",
+    "Builtin tool responsibilities:\n",
+    "- findFiles: path glob search only. Use when you know a filename, extension, or path \
+     pattern. ",
+    "It does not search file contents.\n",
+    "- grep: content search only. Use when you know text, a symbol, or a regex to locate. ",
+    "Default outputMode is files_with_matches; request content only when matching lines are \
+     needed.\n",
+    "- readFile: read a known file after the path is identified by the user, findFiles, or grep. ",
+    "Use offset/limit for focused ranges.\n",
+    "- editFile: narrow exact replacement in an existing file. ",
+    "oldStr must include enough context to match once. ",
+    "Use replaceAll only when every match should change.\n",
+    "- writeFile: create a file or fully replace a file when the complete final content is known. ",
+    "Prefer editFile/apply_patch for existing-file edits.\n",
+    "- apply_patch: coordinated multi-file changes, multiple hunks, or create/delete via unified \
+     diff. ",
+    "Use editFile for one exact replacement.\n",
     "- Use shell for builds, tests, git, and commands without a dedicated tool. ",
     "Pass cwd instead of changing directories inside the command.\n",
-    "- Use editFile for narrow edits with exact oldStr/newStr. ",
-    "oldStr must include enough context to match once. ",
-    "Use replaceAll only when replacing every match is intended.\n",
-    "- Use writeFile only when creating a file or replacing the full content. ",
-    "Set createDirs when parent directories may not exist.\n",
-    "- Use apply_patch for multi-file or line-oriented patches.\n",
     "- Use adapter-style camelCase tool parameters: oldStr, newStr, replaceAll, createDirs, ",
     "maxResults, maxMatches, caseInsensitive, outputMode, cwd, timeout.\n",
     "- If a tool fails, read the error, correct the arguments or approach, and continue unless ",
@@ -54,23 +70,77 @@ impl PromptContributor for IdentityContributor {
     }
 
     fn cache_version(&self) -> &str {
-        "2"
+        "3"
     }
 
     fn cache_fingerprint(&self, _: &PromptContext) -> String {
-        "identity-v2".into()
+        let path = user_identity_md_path();
+        format!(
+            "identity-v3:{}={}",
+            path.display(),
+            cache_marker_for_path(&path)
+        )
     }
 
     async fn contribute(&self, _: &PromptContext) -> Vec<BlockSpec> {
+        let identity = load_identity_md(&user_identity_md_path())
+            .unwrap_or_else(|| DEFAULT_IDENTITY.to_string());
+
         vec![BlockSpec {
             name: "identity".into(),
-            content: DEFAULT_IDENTITY.into(),
+            content: identity,
             priority: 100,
             layer: PromptLayer::Stable,
             conditions: vec![],
             dependencies: vec![],
             metadata: Default::default(),
         }]
+    }
+}
+
+pub fn user_identity_md_path() -> PathBuf {
+    astrcode_dir().join("IDENTITY.md")
+}
+
+pub fn load_identity_md(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let identity = if trimmed.len() > MAX_IDENTITY_SIZE {
+        truncate_to_char_boundary(trimmed, MAX_IDENTITY_SIZE)
+    } else {
+        trimmed
+    };
+    Some(identity.to_string())
+}
+
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn cache_marker_for_path(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            format!("present:{}:{modified}", metadata.len())
+        },
+        Err(_) => "missing".to_string(),
     }
 }
 

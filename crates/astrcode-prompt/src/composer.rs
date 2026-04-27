@@ -1,6 +1,6 @@
 //! Prompt composer: collect → deduplicate → condition-filter → dependency-sort → render.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use astrcode_core::prompt::*;
 
@@ -73,40 +73,65 @@ fn evaluate_conditions(block: &BlockSpec, ctx: &PromptContext) -> bool {
     true
 }
 
-/// 按依赖关系对 block 做波前拓扑排序。
+/// 按依赖关系排序。缺失依赖或循环依赖保留原顺序追加，避免丢 prompt。
 fn topological_sort(blocks: Vec<BlockSpec>) -> Vec<BlockSpec> {
-    let names: HashSet<String> = blocks.iter().map(|b| b.name.clone()).collect();
-    let mut sorted = Vec::new();
-    let mut remaining = blocks;
+    let count = blocks.len();
+    let name_to_index: HashMap<String, usize> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.name.clone(), index))
+        .collect();
+    let mut dependents = vec![Vec::new(); count];
+    let mut indegree = vec![0usize; count];
+    let mut has_missing_dependency = vec![false; count];
 
-    loop {
-        let (ready, pending): (Vec<_>, Vec<_>) = remaining.into_iter().partition(|b| {
-            b.dependencies
-                .iter()
-                .all(|d| names.contains(d) && sorted.iter().any(|s: &BlockSpec| &s.name == d))
-        });
-
-        if ready.is_empty() {
-            // 剩余项存在未满足依赖或循环依赖；保留输出，避免整段 prompt 丢失。
-            sorted.extend(pending);
-            break;
-        }
-        sorted.extend(ready);
-        remaining = pending;
-
-        if remaining.is_empty() {
-            break;
-        }
-        let made_progress = !remaining.iter().all(|b| {
-            b.dependencies
-                .iter()
-                .any(|d| !names.contains(d) || !sorted.iter().any(|s| &s.name == d))
-        });
-        if !made_progress {
-            sorted.extend(remaining);
-            break;
+    for (index, block) in blocks.iter().enumerate() {
+        for dependency in &block.dependencies {
+            if let Some(&dependency_index) = name_to_index.get(dependency) {
+                indegree[index] += 1;
+                dependents[dependency_index].push(index);
+            } else {
+                has_missing_dependency[index] = true;
+            }
         }
     }
+
+    let mut queue: VecDeque<usize> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(index, degree)| {
+            (*degree == 0 && !has_missing_dependency[index]).then_some(index)
+        })
+        .collect();
+    let mut emitted = vec![false; count];
+    let mut order = Vec::with_capacity(count);
+
+    while let Some(index) = queue.pop_front() {
+        if emitted[index] {
+            continue;
+        }
+
+        emitted[index] = true;
+        order.push(index);
+
+        for &dependent_index in &dependents[index] {
+            indegree[dependent_index] -= 1;
+            if indegree[dependent_index] == 0 && !has_missing_dependency[dependent_index] {
+                queue.push_back(dependent_index);
+            }
+        }
+    }
+
+    let mut remaining_blocks: Vec<Option<BlockSpec>> = blocks.into_iter().map(Some).collect();
+    let mut sorted = Vec::with_capacity(count);
+
+    for index in order {
+        if let Some(block) = remaining_blocks[index].take() {
+            sorted.push(block);
+        }
+    }
+
+    sorted.extend(remaining_blocks.into_iter().flatten());
     sorted
 }
 
@@ -116,5 +141,58 @@ fn topological_sort(blocks: Vec<BlockSpec>) -> Vec<BlockSpec> {
 impl PromptProvider for PromptComposer {
     async fn assemble(&self, context: PromptContext) -> PromptPlan {
         self.assemble_impl(&context).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn block(name: &str, dependencies: &[&str]) -> BlockSpec {
+        BlockSpec {
+            name: name.to_string(),
+            content: name.to_string(),
+            priority: 0,
+            layer: PromptLayer::Stable,
+            conditions: vec![],
+            dependencies: dependencies
+                .iter()
+                .map(|dependency| dependency.to_string())
+                .collect(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn topological_sort_keeps_dependencies_before_dependents() {
+        let sorted = topological_sort(vec![
+            block("consumer", &["provider"]),
+            block("provider", &[]),
+            block("independent", &[]),
+        ]);
+
+        let names = sorted
+            .into_iter()
+            .map(|block| block.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["provider", "independent", "consumer"]);
+    }
+
+    #[test]
+    fn topological_sort_keeps_unresolved_blocks_in_original_order() {
+        let sorted = topological_sort(vec![
+            block("ready", &[]),
+            block("missing", &["unknown"]),
+            block("cycle-a", &["cycle-b"]),
+            block("cycle-b", &["cycle-a"]),
+        ]);
+
+        let names = sorted
+            .into_iter()
+            .map(|block| block.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["ready", "missing", "cycle-a", "cycle-b"]);
     }
 }

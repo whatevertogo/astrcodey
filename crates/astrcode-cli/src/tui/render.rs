@@ -1,17 +1,19 @@
 //! Codex-inspired render pass: transcript viewport on top, focused composer on bottom.
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 use unicode_width::UnicodeWidthChar;
 
-use super::slash;
-use super::state::{Focus, MessageRole, TuiState};
-use super::theme::Theme;
+use super::{
+    slash,
+    state::{Focus, MessageRole, TuiState},
+    theme::Theme,
+};
 
 pub fn render(state: &TuiState, frame: &mut Frame<'_>, theme: &Theme) {
     let area = frame.area();
@@ -194,7 +196,8 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
         return vec![
             Line::from(Span::styled("Astrcode", theme.assistant_label)),
             Line::from(Span::styled(
-                "  Start typing below. This view now stays fully inside the TUI instead of spilling into terminal scrollback.",
+                "  Start typing below. This view now stays fully inside the TUI instead of \
+                 spilling into terminal scrollback.",
                 theme.dim,
             )),
         ];

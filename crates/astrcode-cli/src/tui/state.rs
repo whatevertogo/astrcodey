@@ -341,6 +341,11 @@ impl TuiState {
                 self.mark_dirty();
             },
             EventPayload::ToolCallStarted { call_id, tool_name } => {
+                if !should_print_tool(tool_name) {
+                    self.status = format!("Running {}", tool_name);
+                    self.mark_dirty();
+                    return;
+                }
                 self.push_message(
                     MessageRole::Tool,
                     format!("Tool · {}", tool_name),
@@ -363,6 +368,11 @@ impl TuiState {
                 tool_name,
                 arguments,
             } => {
+                if !should_print_tool(tool_name) {
+                    self.status = format!("Running {}", tool_name);
+                    self.mark_dirty();
+                    return;
+                }
                 let args = serde_json::to_string(arguments).unwrap_or_default();
                 let body = if args.is_empty() || args == "{}" {
                     tool_name.clone()
@@ -392,8 +402,16 @@ impl TuiState {
                 }
             },
             EventPayload::ToolCallCompleted {
-                call_id, result, ..
+                call_id,
+                tool_name,
+                result,
             } => {
+                if !should_print_tool(tool_name) && !result.is_error {
+                    self.status = format!("{} completed", tool_name);
+                    self.mark_dirty();
+                    return;
+                }
+
                 if let Some(message) = self.find_message_mut(call_id) {
                     if !result.content.is_empty() && !message.content.contains(&result.content) {
                         if !message.content.is_empty() {
@@ -407,6 +425,17 @@ impl TuiState {
                     }
                     message.is_streaming = false;
                     self.mark_dirty();
+                } else if result.is_error {
+                    self.push_message(
+                        MessageRole::Error,
+                        "Tool Error".into(),
+                        result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| result.content.clone()),
+                        false,
+                        Some(call_id.clone()),
+                    );
                 }
             },
             EventPayload::CompactionStarted => {
@@ -470,7 +499,7 @@ impl TuiState {
         self.status = "Error".into();
     }
 
-    fn push_message(
+    pub(crate) fn push_message(
         &mut self,
         role: MessageRole,
         label: String,
@@ -522,4 +551,106 @@ impl TuiState {
 
 fn short_id(session_id: &str) -> &str {
     session_id.get(..8).unwrap_or(session_id)
+}
+
+fn should_print_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "shell" | "editFile" | "apply_patch" | "applyPatch"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use astrcode_core::{
+        event::{Event, EventPayload},
+        tool::ToolResult,
+    };
+
+    use super::*;
+
+    fn apply_payload(state: &mut TuiState, payload: EventPayload) {
+        let event = Event::new("session".into(), Some("turn".into()), payload);
+        state.apply_event(&event);
+    }
+
+    fn tool_result(content: &str, is_error: bool) -> ToolResult {
+        ToolResult {
+            call_id: "call-1".into(),
+            content: content.into(),
+            is_error,
+            error: None,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn search_tool_results_do_not_enter_transcript() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallStarted {
+                call_id: "call-1".into(),
+                tool_name: "grep".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-1".into(),
+                tool_name: "grep".into(),
+                result: tool_result("large search output", false),
+            },
+        );
+
+        assert!(state.messages.is_empty());
+        assert_eq!(state.status, "grep completed");
+    }
+
+    #[test]
+    fn shell_tool_results_still_enter_transcript() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallStarted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+                result: tool_result("command output", false),
+            },
+        );
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, MessageRole::Tool);
+        assert!(state.messages[0].content.contains("command output"));
+    }
+
+    #[test]
+    fn hidden_tool_errors_still_enter_transcript() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-1".into(),
+                tool_name: "findFiles".into(),
+                result: tool_result("glob failed", true),
+            },
+        );
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, MessageRole::Error);
+        assert_eq!(state.messages[0].content, "glob failed");
+    }
 }
