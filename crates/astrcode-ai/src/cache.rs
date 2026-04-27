@@ -1,7 +1,9 @@
 //! Prompt caching awareness and cache hit/miss tracking.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 /// Tracks cache breakpoints between requests.
 ///
@@ -48,6 +50,12 @@ impl CacheTracker {
         let mut hasher = DefaultHasher::new();
         s.hash(&mut hasher);
         hasher.finish()
+    }
+}
+
+impl Default for CacheTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

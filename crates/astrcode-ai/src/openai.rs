@@ -1,5 +1,7 @@
 //! OpenAI-compatible LLM provider implementation.
 
+use std::collections::BTreeMap;
+
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
@@ -11,7 +13,7 @@ pub struct OpenAiProvider {
     api_mode: OpenAiApiMode,
     model_id: String,
     model_limits_val: ModelLimits,
-    cache_tracker: CacheTracker,
+    _cache_tracker: CacheTracker,
     client: reqwest::Client,
 }
 
@@ -39,7 +41,7 @@ impl OpenAiProvider {
             api_mode,
             model_id,
             model_limits_val,
-            cache_tracker: CacheTracker::new(),
+            _cache_tracker: CacheTracker::new(),
             client,
         }
     }
@@ -63,35 +65,19 @@ impl OpenAiProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        let messages_json: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "role": match m.role {
-                        LlmRole::System => "system",
-                        LlmRole::User => "user",
-                        LlmRole::Assistant => "assistant",
-                        LlmRole::Tool => "tool",
-                    },
-                    "content": m.content.iter().map(|c| match c {
-                        LlmContent::Text { text } => serde_json::json!({"type": "text", "text": text}),
-                        LlmContent::Image { base64, media_type } => serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
-                        }),
-                        LlmContent::ToolCall { call_id, name, arguments } => serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Tool call {}: {}] {}", call_id, name, arguments)
-                        }),
-                        LlmContent::ToolResult { tool_call_id, content, is_error } => serde_json::json!({
-                            "type": "text",
-                            "text": format!("[Tool {}: {}] {}", tool_call_id, if *is_error { "Error" } else { "Result" }, content)
-                        }),
-                    }).collect::<Vec<_>>(),
-                    "name": m.name,
-                })
-            })
-            .collect();
+        match self.api_mode {
+            OpenAiApiMode::ChatCompletions => self.build_chat_request_body(messages, tools),
+            OpenAiApiMode::Responses => self.build_responses_request_body(messages, tools),
+        }
+    }
+
+    fn build_chat_request_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let messages_json: Vec<serde_json::Value> =
+            messages.iter().map(chat_message_to_json).collect();
 
         let tools_json: Vec<serde_json::Value> = tools
             .iter()
@@ -115,6 +101,222 @@ impl OpenAiProvider {
             "stream_options": {"include_usage": true},
         })
     }
+
+    fn build_responses_request_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let instructions = messages
+            .iter()
+            .filter(|message| matches!(message.role, LlmRole::System))
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                LlmContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let input: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|message| !matches!(message.role, LlmRole::System))
+            .flat_map(responses_input_items)
+            .collect();
+        let tools_json: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                    "strict": false,
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "model": self.model_id,
+            "instructions": instructions,
+            "input": input,
+            "tools": tools_json,
+            "stream": true,
+        })
+    }
+}
+
+fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
+    match message.role {
+        LlmRole::Tool => {
+            let Some(LlmContent::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            }) = message.content.first()
+            else {
+                return serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": "",
+                    "content": ""
+                });
+            };
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": content
+            })
+        },
+        LlmRole::Assistant
+            if message
+                .content
+                .iter()
+                .any(|c| matches!(c, LlmContent::ToolCall { .. })) =>
+        {
+            let tool_calls: Vec<serde_json::Value> = message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    LlmContent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    } => Some(serde_json::json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments.to_string()
+                        }
+                    })),
+                    _ => None,
+                })
+                .collect();
+            serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": tool_calls
+            })
+        },
+        _ => {
+            serde_json::json!({
+                "role": match message.role {
+                    LlmRole::System => "system",
+                    LlmRole::User => "user",
+                    LlmRole::Assistant => "assistant",
+                    LlmRole::Tool => "tool",
+                },
+                "content": chat_content_to_json(&message.content),
+                "name": message.name,
+            })
+        },
+    }
+}
+
+fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
+    let has_image = content
+        .iter()
+        .any(|part| matches!(part, LlmContent::Image { .. }));
+    if !has_image {
+        let text = content
+            .iter()
+            .filter_map(|part| match part {
+                LlmContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        return serde_json::json!(text);
+    }
+
+    serde_json::Value::Array(
+        content
+            .iter()
+            .filter_map(|part| match part {
+                LlmContent::Text { text } => {
+                    Some(serde_json::json!({"type": "text", "text": text}))
+                },
+                LlmContent::Image { base64, media_type } => Some(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
+                })),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
+    match message.role {
+        LlmRole::User => vec![serde_json::json!({
+            "role": "user",
+            "content": responses_message_content(&message.content, true)
+        })],
+        LlmRole::Assistant => {
+            let mut items = Vec::new();
+            let text_content = responses_message_content(&message.content, false);
+            if text_content
+                .as_array()
+                .is_some_and(|content| !content.is_empty())
+            {
+                items.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": text_content
+                }));
+            }
+            for content in &message.content {
+                if let LlmContent::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } = content
+                {
+                    items.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments.to_string()
+                    }));
+                }
+            }
+            items
+        },
+        LlmRole::Tool => message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                LlmContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                } => Some(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": content
+                })),
+                _ => None,
+            })
+            .collect(),
+        LlmRole::System => Vec::new(),
+    }
+}
+
+fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json::Value {
+    serde_json::Value::Array(
+        content
+            .iter()
+            .filter_map(|part| match part {
+                LlmContent::Text { text } => {
+                    let kind = if input { "input_text" } else { "output_text" };
+                    Some(serde_json::json!({"type": kind, "text": text}))
+                },
+                LlmContent::Image { base64, media_type } if input => Some(serde_json::json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{};base64,{}", media_type, base64)
+                })),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -280,21 +482,39 @@ impl Utf8StreamDecoder {
     }
 }
 
+impl Default for Utf8StreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Accumulates SSE deltas into a coherent output.
 pub struct LlmAccumulator {
     text: String,
-    current_tool_call_id: Option<String>,
-    current_tool_name: Option<String>,
-    current_tool_args: String,
+    tool_calls: BTreeMap<u64, ToolCallPartial>,
+    response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallPartial {
+    id: Option<String>,
+    name: Option<String>,
+    started: bool,
+}
+
+#[derive(Debug, Default)]
+struct ResponseToolCallPartial {
+    call_id: Option<String>,
+    name: Option<String>,
+    started: bool,
 }
 
 impl LlmAccumulator {
     pub fn new() -> Self {
         Self {
             text: String::new(),
-            current_tool_call_id: None,
-            current_tool_name: None,
-            current_tool_args: String::new(),
+            tool_calls: BTreeMap::new(),
+            response_tool_items: BTreeMap::new(),
         }
     }
 
@@ -317,22 +537,33 @@ impl LlmAccumulator {
                     if let Some(tool_calls) = delta["tool_calls"].as_array() {
                         for tc in tool_calls {
                             let idx = tc["index"].as_u64().unwrap_or(0);
+                            let partial = self.tool_calls.entry(idx).or_default();
                             if let Some(id) = tc["id"].as_str() {
-                                self.current_tool_call_id = Some(id.to_string());
+                                partial.id = Some(id.to_string());
                             }
                             if let Some(func) = tc.get("function") {
                                 if let Some(name) = func["name"].as_str() {
-                                    self.current_tool_name = Some(name.to_string());
-                                    let _ = tx.send(LlmEvent::ToolCallStart {
-                                        call_id: idx.to_string(),
-                                        name: name.to_string(),
-                                        arguments: String::new(),
-                                    });
+                                    partial.name = Some(name.to_string());
+                                }
+                                // Chat Completions 的后续 tool result 必须使用真实 call id；
+                                // 若提供商没有给 id，则退回 index，保证同一轮内仍可串起来。
+                                if !partial.started {
+                                    if let Some(name) = &partial.name {
+                                        let call_id =
+                                            partial.id.clone().unwrap_or_else(|| idx.to_string());
+                                        partial.started = true;
+                                        let _ = tx.send(LlmEvent::ToolCallStart {
+                                            call_id,
+                                            name: name.clone(),
+                                            arguments: String::new(),
+                                        });
+                                    }
                                 }
                                 if let Some(args) = func["arguments"].as_str() {
-                                    self.current_tool_args.push_str(args);
+                                    let call_id =
+                                        partial.id.clone().unwrap_or_else(|| idx.to_string());
                                     let _ = tx.send(LlmEvent::ToolCallDelta {
-                                        call_id: idx.to_string(),
+                                        call_id,
                                         delta: args.to_string(),
                                     });
                                 }
@@ -364,6 +595,75 @@ impl LlmAccumulator {
                         });
                     }
                 },
+                "response.output_item.added" => {
+                    let Some(item) = event["item"].as_object() else {
+                        return;
+                    };
+                    if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                        return;
+                    }
+                    let item_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| event["item_id"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&item_id)
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let partial = self.response_tool_items.entry(item_id).or_default();
+                    partial.call_id = Some(call_id.clone());
+                    partial.name = Some(name.clone());
+                    partial.started = true;
+                    let _ = tx.send(LlmEvent::ToolCallStart {
+                        call_id,
+                        name,
+                        arguments: String::new(),
+                    });
+                },
+                "response.function_call_arguments.delta" => {
+                    let item_id = event["item_id"].as_str().unwrap_or_default();
+                    let call_id = self
+                        .response_tool_items
+                        .get(item_id)
+                        .and_then(|partial| partial.call_id.clone())
+                        .unwrap_or_else(|| item_id.to_string());
+                    if let Some(delta) = event["delta"].as_str() {
+                        let _ = tx.send(LlmEvent::ToolCallDelta {
+                            call_id,
+                            delta: delta.to_string(),
+                        });
+                    }
+                },
+                "response.function_call_arguments.done" => {
+                    let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
+                    let partial = self.response_tool_items.entry(item_id.clone()).or_default();
+                    if let Some(name) = event["name"].as_str() {
+                        partial.name = Some(name.to_string());
+                    }
+                    let call_id = partial.call_id.clone().unwrap_or(item_id);
+                    if !partial.started {
+                        partial.started = true;
+                        let _ = tx.send(LlmEvent::ToolCallStart {
+                            call_id: call_id.clone(),
+                            name: partial.name.clone().unwrap_or_default(),
+                            arguments: String::new(),
+                        });
+                    }
+                    if let Some(arguments) = event["arguments"].as_str() {
+                        let _ = tx.send(LlmEvent::ToolCallDelta {
+                            call_id,
+                            delta: arguments.to_string(),
+                        });
+                    }
+                },
                 "response.completed" => {
                     let _ = tx.send(LlmEvent::Done {
                         finish_reason: "stop".into(),
@@ -372,5 +672,11 @@ impl LlmAccumulator {
                 _ => {},
             }
         }
+    }
+}
+
+impl Default for LlmAccumulator {
+    fn default() -> Self {
+        Self::new()
     }
 }

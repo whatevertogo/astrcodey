@@ -1,7 +1,8 @@
 //! 4-layer prompt builder with independent caching TTL.
 
-use astrcode_core::prompt::*;
 use std::collections::HashMap;
+
+use astrcode_core::prompt::*;
 
 pub struct LayeredPromptBuilder {
     layers: HashMap<PromptLayer, Vec<BlockSpec>>,
@@ -28,5 +29,11 @@ impl LayeredPromptBuilder {
 
     pub fn ttl(&self, layer: PromptLayer) -> u64 {
         self.ttl_secs.get(&layer).copied().unwrap_or(300)
+    }
+}
+
+impl Default for LayeredPromptBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

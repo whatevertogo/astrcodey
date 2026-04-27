@@ -9,6 +9,7 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
+use astrcode_support::shell::resolve_shell;
 use tokio::sync::mpsc;
 
 use crate::capability::CapabilityRouter;
@@ -63,7 +64,7 @@ impl Agent {
         let prompt_ctx = PromptContext {
             working_dir: self.working_dir.clone(),
             os: std::env::consts::OS.into(),
-            shell: "bash".into(),
+            shell: resolve_shell().name,
             date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
             available_tools: tools
                 .iter()

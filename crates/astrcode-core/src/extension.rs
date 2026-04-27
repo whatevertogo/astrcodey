@@ -5,10 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ModelSelection;
-use crate::prompt::BlockSpec;
-use crate::tool::{CapabilitySpec, ToolDefinition};
-use crate::types::SessionId;
+use crate::{
+    config::ModelSelection,
+    prompt::BlockSpec,
+    tool::{CapabilitySpec, ToolDefinition},
+};
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
 
