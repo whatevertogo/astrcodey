@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
 
 use astrcode_core::tool::*;
+use astrcode_support::hostpaths::resolve_path;
 use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
 use serde::Deserialize;
 use tokio::process::Command;
@@ -132,14 +133,6 @@ impl Tool for ShellTool {
             metadata: meta,
             duration_ms: None,
         })
-    }
-}
-
-fn resolve_path(cwd: &std::path::Path, raw: &std::path::Path) -> PathBuf {
-    if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        cwd.join(raw)
     }
 }
 

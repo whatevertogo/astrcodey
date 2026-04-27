@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // ─── Top-level Config ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "super::defaults::default_version")]
     pub version: String,

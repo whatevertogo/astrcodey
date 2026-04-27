@@ -14,6 +14,18 @@ pub enum LlmRole {
     Tool,
 }
 
+impl LlmRole {
+    /// Returns the role as a lowercase string for protocol serialization.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmRole::System => "system",
+            LlmRole::User => "user",
+            LlmRole::Assistant => "assistant",
+            LlmRole::Tool => "tool",
+        }
+    }
+}
+
 /// Content of an LLM message — can be text, image, tool call, or tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -68,6 +80,18 @@ impl LlmMessage {
             role: LlmRole::System,
             content: vec![LlmContent::Text { text: text.into() }],
             name: None,
+        }
+    }
+
+    pub fn tool(name: impl Into<String>, tool_call_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            role: LlmRole::Tool,
+            content: vec![LlmContent::ToolResult {
+                tool_call_id: tool_call_id.into(),
+                content: content.into(),
+                is_error,
+            }],
+            name: Some(name.into()),
         }
     }
 }

@@ -13,3 +13,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+sha2 = "0.10"

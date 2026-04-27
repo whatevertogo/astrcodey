@@ -129,21 +129,23 @@ impl Iterator for EventLogIterator {
     type Item = Result<(usize, Event), StorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None,
-            Ok(_) => {
-                self.line_number += 1;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return self.next();
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line) {
+                Ok(0) => return None,
+                Ok(_) => {
+                    self.line_number += 1;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<Event>(trimmed) {
+                        Ok(event) => return Some(Ok((self.line_number, event))),
+                        Err(e) => return Some(Err(StorageError::Serialization(e))),
+                    }
                 }
-                match serde_json::from_str::<Event>(trimmed) {
-                    Ok(event) => Some(Ok((self.line_number, event))),
-                    Err(e) => Some(Err(StorageError::Serialization(e))),
-                }
-            },
-            Err(e) => Some(Err(StorageError::Io(e))),
+                Err(e) => return Some(Err(StorageError::Io(e))),
+            }
         }
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Resolves paths for config, sessions, projects, and runtime data.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the user's home directory.
 ///
@@ -59,8 +59,19 @@ pub fn project_extensions_dir(workspace: &str) -> PathBuf {
 }
 
 /// Ensure a directory exists, creating parents as needed.
-pub fn ensure_dir(path: &PathBuf) -> std::io::Result<()> {
+pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
+}
+
+/// Resolve a path that may be relative against a working directory.
+///
+/// If `raw` is absolute, returns it unchanged. Otherwise joins it with `cwd`.
+pub fn resolve_path(cwd: &Path, raw: &Path) -> PathBuf {
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd.join(raw)
+    }
 }
 
 #[cfg(test)]

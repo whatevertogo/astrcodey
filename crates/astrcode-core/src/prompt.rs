@@ -31,9 +31,9 @@ pub struct BlockSpec {
 pub enum PromptLayer {
     /// Never expires — tool guides, identity, core instructions.
     Stable = 0,
-    /// Short TTL (5min) — environment, project context.
+    /// environment, project context.
     SemiStable = 1,
-    /// Medium TTL (5min) — inherited rules, AGENTS.md.
+    /// inherited rules, AGENTS.md.
     Inherited = 2,
     /// Never cached — user messages, recent history.
     Dynamic = 3,

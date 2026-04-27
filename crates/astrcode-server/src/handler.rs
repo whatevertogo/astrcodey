@@ -5,10 +5,13 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    config::ModelSelection,
     event::{Event, EventPayload},
+    extension::ExtensionEvent,
     llm::{LlmContent, LlmMessage},
     types::{SessionId, TurnId, new_message_id, new_turn_id},
 };
+use astrcode_extensions::context::ServerExtensionContext;
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, MessageDto, SessionListItem, SessionSnapshot},
@@ -91,6 +94,27 @@ impl CommandHandler {
             },
 
             ClientCommand::DeleteSession { session_id } => {
+                // Dispatch SessionShutdown hook before deletion
+                {
+                    let ext_ctx = ServerExtensionContext::new(
+                        session_id.clone(),
+                        String::new(),
+                        ModelSelection {
+                            profile_name: String::new(),
+                            model: self.runtime.effective.llm.model_id.clone(),
+                            provider_kind: String::new(),
+                        },
+                    );
+                    if let Err(e) = self
+                        .runtime
+                        .extension_runner
+                        .dispatch(ExtensionEvent::SessionShutdown, &ext_ctx)
+                        .await
+                    {
+                        self.send_error(-32603, &e.to_string());
+                        return Ok(());
+                    }
+                }
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
                         if self.active_session_id.as_ref() == Some(&session_id) {
@@ -118,6 +142,24 @@ impl CommandHandler {
         {
             Ok(event) => {
                 self.active_session_id = Some(event.session_id.clone());
+                let ext_ctx = ServerExtensionContext::new(
+                    event.session_id.clone(),
+                    working_dir.clone(),
+                    ModelSelection {
+                        profile_name: String::new(),
+                        model: self.runtime.effective.llm.model_id.clone(),
+                        provider_kind: String::new(),
+                    },
+                );
+                if let Err(e) = self
+                    .runtime
+                    .extension_runner
+                    .dispatch(ExtensionEvent::SessionStart, &ext_ctx)
+                    .await
+                {
+                    self.send_error(-32603, &e.to_string());
+                    return;
+                }
                 let _ = self.event_tx.send(ClientNotification::Event(event));
             },
             Err(e) => self.send_error(-32603, &e.to_string()),
@@ -131,6 +173,30 @@ impl CommandHandler {
         }
 
         let sid = self.ensure_session().await?;
+
+        // Dispatch UserPromptSubmit hook
+        {
+            let ext_ctx = ServerExtensionContext::new(
+                sid.clone(),
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| ".".into()),
+                ModelSelection {
+                    profile_name: String::new(),
+                    model: self.runtime.effective.llm.model_id.clone(),
+                    provider_kind: String::new(),
+                },
+            );
+            if let Err(e) = self
+                .runtime
+                .extension_runner
+                .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
+                .await
+            {
+                self.send_error(-32603, &e.to_string());
+                return Ok(());
+            }
+        }
         let session = self
             .runtime
             .session_manager
@@ -293,7 +359,9 @@ fn spawn_agent_turn(
             runtime.llm_provider.clone(),
             runtime.prompt_provider.clone(),
             runtime.capability.clone(),
+            runtime.extension_runner.clone(),
             runtime.effective.llm.model_id.clone(),
+            runtime.context_settings.summary_reserve_tokens * 3,
         );
 
         let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel();
@@ -422,7 +490,7 @@ async fn record_and_broadcast(
 
 fn message_to_dto(message: &LlmMessage) -> MessageDto {
     MessageDto {
-        role: format!("{:?}", message.role).to_lowercase(),
+        role: message.role.as_str().to_string(),
         content: message
             .content
             .iter()
@@ -523,6 +591,10 @@ mod tests {
     }
 
     fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+        use astrcode_context::{
+            budget::ToolResultBudget, file_access::FileAccessTracker,
+            settings::ContextWindowSettings,
+        };
         Arc::new(ServerRuntime {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
             llm_provider,
@@ -546,6 +618,9 @@ mod tests {
                     retry_base_delay_ms: 0,
                 },
             },
+            context_settings: ContextWindowSettings::default(),
+            tool_result_budget: Arc::new(ToolResultBudget::new(8192, 65536, 24576)),
+            file_access_tracker: Arc::new(std::sync::Mutex::new(FileAccessTracker::new(64))),
         })
     }
 

@@ -125,7 +125,7 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
     let session = state
         .active_session_id
         .as_deref()
-        .map(short_id)
+        .map(super::short_id)
         .unwrap_or("none");
     let model = if state.model_name.is_empty() {
         "model: pending".to_string()
@@ -298,9 +298,6 @@ fn composer_height(state: &TuiState, width: u16) -> u16 {
     (lines + 2).min(8)
 }
 
-fn short_id(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
-}
 
 #[derive(Debug, Default)]
 struct VisualLayout {

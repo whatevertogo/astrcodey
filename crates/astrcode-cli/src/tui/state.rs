@@ -250,7 +250,7 @@ impl TuiState {
                     };
                     self.push_message(role, label.into(), message.content.clone(), false, None);
                 }
-                self.status = format!("Resumed {}", short_id(session_id));
+                self.status = format!("Resumed {}", super::short_id(session_id));
             },
             ClientNotification::SessionList { sessions } => {
                 self.available_sessions = sessions
@@ -282,7 +282,7 @@ impl TuiState {
                 self.push_message(
                     MessageRole::System,
                     "Session".into(),
-                    format!("Created session {}", short_id(&event.session_id)),
+                    format!("Created session {}", super::short_id(&event.session_id)),
                     false,
                     None,
                 );
@@ -549,9 +549,6 @@ impl TuiState {
     }
 }
 
-fn short_id(session_id: &str) -> &str {
-    session_id.get(..8).unwrap_or(session_id)
-}
 
 fn should_print_tool(tool_name: &str) -> bool {
     matches!(

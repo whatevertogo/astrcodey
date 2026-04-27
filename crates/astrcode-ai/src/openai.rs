@@ -420,6 +420,7 @@ impl OpenAiProvider {
                         }
                         let data = &line[6..]; // Strip "data: " prefix
                         if data == "[DONE]" {
+                            accumulator.done_sent = true;
                             let _ = tx.send(LlmEvent::Done {
                                 finish_reason: "stop".into(),
                             });
@@ -443,6 +444,12 @@ impl OpenAiProvider {
                     }
                 },
             }
+        }
+        // Send Done if stream ended without explicit [DONE] marker or finish_reason
+        if !accumulator.done_sent() {
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
         }
         Ok(())
     }
@@ -475,6 +482,14 @@ impl Utf8StreamDecoder {
                     self.buffer = self.buffer[valid_up_to..].to_vec();
                     result
                 } else {
+                    // All bytes are invalid UTF-8 — discard to prevent unbounded growth
+                    if self.buffer.len() > 4096 {
+                        tracing::warn!(
+                            "Discarding {} bytes of invalid UTF-8 in SSE stream",
+                            self.buffer.len()
+                        );
+                        self.buffer.clear();
+                    }
                     String::new()
                 }
             },
@@ -493,6 +508,7 @@ pub struct LlmAccumulator {
     text: String,
     tool_calls: BTreeMap<u64, ToolCallPartial>,
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
+    done_sent: bool,
 }
 
 #[derive(Debug, Default)]
@@ -515,7 +531,13 @@ impl LlmAccumulator {
             text: String::new(),
             tool_calls: BTreeMap::new(),
             response_tool_items: BTreeMap::new(),
+            done_sent: false,
         }
+    }
+
+    /// Whether a Done event was already emitted for this stream.
+    pub fn done_sent(&self) -> bool {
+        self.done_sent
     }
 
     pub fn ingest_chat_completion(
@@ -572,9 +594,12 @@ impl LlmAccumulator {
                     }
                 }
                 if let Some(finish) = choice["finish_reason"].as_str() {
-                    let _ = tx.send(LlmEvent::Done {
-                        finish_reason: finish.to_string(),
-                    });
+                    if !self.done_sent {
+                        self.done_sent = true;
+                        let _ = tx.send(LlmEvent::Done {
+                            finish_reason: finish.to_string(),
+                        });
+                    }
                 }
             }
         }

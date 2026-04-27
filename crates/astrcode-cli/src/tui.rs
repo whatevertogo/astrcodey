@@ -58,9 +58,6 @@ pub async fn run() -> io::Result<()> {
                     },
                 }
             },
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                state.mark_dirty();
-            },
         }
 
         if state.should_quit {
@@ -322,12 +319,16 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = disable_raw_mode();
     }
 }
 
 fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::Other, error.to_string())
+}
+
+fn short_id(session_id: &str) -> &str {
+    session_id.get(..8).unwrap_or(session_id)
 }

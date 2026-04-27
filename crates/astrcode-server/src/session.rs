@@ -96,7 +96,7 @@ impl EventReducer {
             },
             EventPayload::AssistantMessageCompleted { text, .. } => {
                 state.messages.push(LlmMessage::assistant(text));
-                state.phase = Phase::Streaming;
+                state.phase = Phase::Idle;
             },
             EventPayload::ToolCallStarted { call_id, .. } => {
                 state.pending_tool_calls.insert(call_id.clone());

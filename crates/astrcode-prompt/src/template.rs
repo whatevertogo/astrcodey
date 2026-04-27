@@ -7,25 +7,30 @@ pub struct PromptTemplate;
 
 impl PromptTemplate {
     /// Render a template string with variables from the context.
+    ///
+    /// Variables are replaced in descending key-length order so that
+    /// `{{os_type}}` is matched before `{{os}}`, preventing prefix corruption.
     pub fn render(template: &str, context: &PromptContext) -> String {
         let mut result = template.to_string();
 
-        // Replace {{os}}, {{date}}, {{shell}}, {{working_dir}}, {{available_tools}}
-        let replacements: Vec<(&str, &str)> = vec![
-            ("{{os}}", &context.os),
-            ("{{date}}", &context.date),
-            ("{{shell}}", &context.shell),
-            ("{{working_dir}}", &context.working_dir),
-            ("{{available_tools}}", &context.available_tools),
+        // Collect all replacements: (template_key, value)
+        let mut replacements: Vec<(String, &str)> = vec![
+            ("{{os}}".into(), &context.os),
+            ("{{date}}".into(), &context.date),
+            ("{{shell}}".into(), &context.shell),
+            ("{{working_dir}}".into(), &context.working_dir),
+            ("{{available_tools}}".into(), &context.available_tools),
         ];
 
-        for (key, value) in replacements {
-            result = result.replace(key, value);
+        for (key, value) in &context.custom {
+            replacements.push((format!("{{{{{}}}}}", key), value));
         }
 
-        // Replace custom variables
-        for (key, value) in &context.custom {
-            result = result.replace(&format!("{{{{{}}}}}", key), value);
+        // Sort by key length descending to prevent prefix collisions
+        replacements.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()));
+
+        for (key, value) in replacements {
+            result = result.replace(&key, value);
         }
 
         result

@@ -4,6 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use astrcode_ai::openai::OpenAiProvider;
+use astrcode_context::{
+    budget::ToolResultBudget,
+    file_access::FileAccessTracker,
+    settings::ContextWindowSettings,
+};
 use astrcode_core::config::{ConfigStore, EffectiveConfig};
 use astrcode_core::llm::{LlmClientConfig, LlmProvider};
 use astrcode_core::prompt::PromptProvider;
@@ -27,6 +32,10 @@ pub struct ServerRuntime {
     pub extension_runner: Arc<ExtensionRunner>,
     /// Resolved config (read-only)
     pub effective: EffectiveConfig,
+    /// Context window management
+    pub context_settings: ContextWindowSettings,
+    pub tool_result_budget: Arc<ToolResultBudget>,
+    pub file_access_tracker: Arc<std::sync::Mutex<FileAccessTracker>>,
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -119,6 +128,16 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 6. Extension runner
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
 
+    // 7. Context window management
+    let context_settings = ContextWindowSettings::default();
+    let tool_result_budget = Arc::new(ToolResultBudget::new(
+        context_settings.summary_reserve_tokens * 3,          // aggregate
+        context_settings.max_tracked_files * 1024,            // inline
+        context_settings.recovery_token_budget * 3,           // preview
+    ));
+    let file_access_tracker =
+        Arc::new(std::sync::Mutex::new(FileAccessTracker::new(context_settings.max_tracked_files)));
+
     Ok(ServerRuntime {
         session_manager,
         llm_provider,
@@ -126,6 +145,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         capability,
         extension_runner,
         effective,
+        context_settings,
+        tool_result_budget,
+        file_access_tracker,
     })
 }
 

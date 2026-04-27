@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     config::ModelSelection,
     prompt::BlockSpec,
-    tool::{CapabilitySpec, ToolDefinition},
+    tool::{CapabilitySpec, ToolDefinition, ToolResult},
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
@@ -60,41 +60,46 @@ pub trait Extension: Send + Sync {
 
 /// Core lifecycle events that extensions can subscribe to.
 ///
-/// 12 events covering the full session/agent/turn/message/tool lifecycle.
+/// 7 events covering the session/turn/tool/input lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionEvent {
     // Session-level
     SessionStart,
-    SessionBeforeFork,
-    SessionBeforeCompact,
     SessionShutdown,
-
-    // Agent-level
-    AgentStart,
-    AgentEnd,
 
     // Turn-level
     TurnStart,
     TurnEnd,
 
-    // Message-level
-    MessageDelta,
-
-    // Tool-level (primary hook points)
-    BeforeToolCall,
-    AfterToolCall,
+    // Tool-level — primary hook points
+    PreToolUse,
+    PostToolUse,
 
     // User input
     UserPromptSubmit,
 }
 
+// ─── Hook Input / Output ─────────────────────────────────────────────────
+
+/// Input provided to PreToolUse hooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreToolUseInput {
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+}
+
+/// Input provided to PostToolUse hooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostToolUseInput {
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub tool_result: ToolResult,
+}
+
 // ─── Hook Mode ───────────────────────────────────────────────────────────
 
 /// Execution mode for a hook subscription.
-///
-/// Determines whether the hook can block the action, runs asynchronously,
-/// or is purely advisory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookMode {
@@ -124,26 +129,11 @@ pub enum HookEffect {
     /// Only valid from Blocking hooks.
     Block { reason: String },
 
-    /// Modify the action's data.
-    /// For AfterToolCall: patches tool result content.
-    Modify { patches: Vec<Modification> },
-}
+    /// Modify the tool input before execution (PreToolUse).
+    ModifiedInput { tool_input: serde_json::Value },
 
-/// A modification made by a hook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Modification {
-    /// Replace text in the target.
-    Replace {
-        /// Old text to find.
-        old: String,
-        /// New text to substitute.
-        new: String,
-    },
-    /// Truncate the target to a maximum length.
-    Truncate { max_len: usize },
-    /// Prepend text.
-    Prepend { text: String },
+    /// Modify the tool result content after execution (PostToolUse).
+    ModifiedResult { content: String },
 }
 
 // ─── Extension Capabilities Summary ──────────────────────────────────────
@@ -199,6 +189,22 @@ pub trait ExtensionContext: Send + Sync {
 
     /// Look up a tool definition by name from the tool registry.
     fn find_tool(&self, name: &str) -> Option<ToolDefinition>;
+
+    /// Current PreToolUse payload, if this context is for a tool hook.
+    fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
+        None
+    }
+
+    /// Current PostToolUse payload, if this context is for a tool hook.
+    fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        None
+    }
+
+    /// Log a warning diagnostic (visible in server logs).
+    fn log_warn(&self, msg: &str);
+
+    /// Create a clone of this context suitable for use in fire-and-forget hooks.
+    fn snapshot(&self) -> std::sync::Arc<dyn ExtensionContext>;
 }
 
 // ─── Extension Error ─────────────────────────────────────────────────────

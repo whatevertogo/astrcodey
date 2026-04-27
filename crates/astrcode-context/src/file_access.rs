@@ -1,32 +1,34 @@
 //! File access tracking for post-compaction recovery.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 
+/// Tracks recently accessed files with FIFO eviction when capacity is reached.
 pub struct FileAccessTracker {
-    accessed: HashMap<String, String>,
+    order: VecDeque<String>,
     max_tracked: usize,
 }
 
 impl FileAccessTracker {
     pub fn new(max_tracked: usize) -> Self {
         Self {
-            accessed: HashMap::new(),
+            order: VecDeque::with_capacity(max_tracked),
             max_tracked,
         }
     }
 
-    /// Record a file access.
-    pub fn record(&mut self, path: &str, content: &str) {
-        if self.accessed.len() < self.max_tracked {
-            self.accessed.insert(path.into(), content.into());
+    /// Record a file access. Evicts the oldest entry when at capacity.
+    pub fn record(&mut self, path: &str) {
+        // Remove previous entry if re-accessed (move to end)
+        if let Some(pos) = self.order.iter().position(|p| p == path) {
+            self.order.remove(pos);
+        } else if self.order.len() >= self.max_tracked {
+            self.order.pop_front();
         }
+        self.order.push_back(path.into());
     }
 
-    /// Get tracked files for recovery.
-    pub fn get_tracked(&self) -> Vec<(String, String)> {
-        self.accessed
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+    /// Get tracked file paths, most recent first.
+    pub fn get_tracked(&self) -> Vec<String> {
+        self.order.iter().rev().cloned().collect()
     }
 }

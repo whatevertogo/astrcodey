@@ -1,16 +1,15 @@
 //! Extension runner — dispatches lifecycle events to registered extensions.
 
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::RwLock;
+use std::{sync::Arc, time::Duration};
 
 use astrcode_core::extension::*;
+use tokio::sync::RwLock;
 
 /// Dispatches lifecycle events to all registered extensions.
 ///
 /// Enforces HookMode semantics:
-/// - Blocking: synchronous, can return Block
-/// - NonBlocking: spawned as fire-and-forget task
+/// - Blocking: synchronous, can return Block or ModifiedInput/ModifiedResult
+/// - NonBlocking: spawned as fire-and-forget task with snapshot context
 /// - Advisory: result logged but not enforced
 pub struct ExtensionRunner {
     extensions: RwLock<Vec<Arc<dyn Extension>>>,
@@ -31,23 +30,20 @@ impl ExtensionRunner {
         exts.push(ext);
     }
 
-    /// Dispatch an event to all registered extensions that subscribe to it.
+    /// Dispatch an event to all subscribed extensions.
     ///
-    /// Returns `Err` if any Blocking hook returns `Block`.
+    /// Copies the extension list before iterating so the read lock is not held
+    /// during hook execution.
     pub async fn dispatch(
         &self,
         event: ExtensionEvent,
         ctx: &dyn ExtensionContext,
     ) -> Result<(), ExtensionError> {
-        let exts = self.extensions.read().await;
+        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
 
-        for ext in exts.iter() {
-            let subs = ext.subscriptions();
-            let mode = subs.iter().find(|(e, _)| *e == event).map(|(_, m)| *m);
-
-            let Some(mode) = mode else {
-                continue;
-            };
+        for ext in &exts {
+            let mode = match_ext_mode(ext.as_ref(), &event);
+            let Some(mode) = mode else { continue };
 
             match mode {
                 HookMode::Blocking => {
@@ -61,48 +57,102 @@ impl ExtensionRunner {
                     if let HookEffect::Block { reason } = result {
                         return Err(ExtensionError::Internal(reason));
                     }
-                }
+                },
                 HookMode::NonBlocking => {
                     let ext = Arc::clone(ext);
                     let evt = event.clone();
-                    // Note: ctx is shared, but we need to manage lifetimes
+                    // Use a snapshot so we release the borrow before spawning
+                    let snap_ctx = ctx.snapshot();
                     tokio::spawn(async move {
-                        let _ = ext.on_event(evt, &NoopContext).await;
+                        let _ = ext.on_event(evt, snap_ctx.as_ref()).await;
                     });
-                }
+                },
                 HookMode::Advisory => {
                     let _ = ext.on_event(event.clone(), ctx).await;
-                }
+                },
             }
         }
 
         Ok(())
     }
+
+    /// Dispatch a PreToolUse or PostToolUse event and collect the first
+    /// Blocking result (ModifiedInput / ModifiedResult / Block).
+    pub async fn dispatch_tool_hook(
+        &self,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<ToolHookOutcome, ExtensionError> {
+        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
+
+        let mut modified_input: Option<serde_json::Value> = None;
+        let mut modified_result: Option<String> = None;
+
+        for ext in &exts {
+            let mode = match_ext_mode(ext.as_ref(), &event);
+            let Some(mode) = mode else { continue };
+
+            match mode {
+                HookMode::Blocking => {
+                    let result =
+                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), ctx))
+                            .await
+                            .map_err(|_| {
+                                ExtensionError::Timeout(self.timeout.as_millis() as u64)
+                            })??;
+
+                    match result {
+                        HookEffect::Block { reason } => {
+                            return Ok(ToolHookOutcome::Blocked { reason });
+                        },
+                        HookEffect::ModifiedInput { tool_input } => {
+                            modified_input = Some(tool_input);
+                        },
+                        HookEffect::ModifiedResult { content } => {
+                            modified_result = Some(content);
+                        },
+                        HookEffect::Allow => {},
+                    }
+                },
+                HookMode::NonBlocking => {
+                    let ext = Arc::clone(ext);
+                    let evt = event.clone();
+                    let snap_ctx = ctx.snapshot();
+                    tokio::spawn(async move {
+                        let _ = ext.on_event(evt, snap_ctx.as_ref()).await;
+                    });
+                },
+                HookMode::Advisory => {
+                    let _ = ext.on_event(event.clone(), ctx).await;
+                },
+            }
+        }
+
+        Ok(match (modified_input, modified_result) {
+            (Some(input), _) => ToolHookOutcome::ModifiedInput { tool_input: input },
+            (_, Some(content)) => ToolHookOutcome::ModifiedResult { content },
+            _ => ToolHookOutcome::Allow,
+        })
+    }
+
+    /// Current number of registered extensions.
+    pub async fn count(&self) -> usize {
+        self.extensions.read().await.len()
+    }
 }
 
-/// No-op context for fire-and-forget NonBlocking hooks.
-struct NoopContext;
+/// Outcome of a tool-level hook dispatch.
+#[derive(Debug, Clone)]
+pub enum ToolHookOutcome {
+    Allow,
+    Blocked { reason: String },
+    ModifiedInput { tool_input: serde_json::Value },
+    ModifiedResult { content: String },
+}
 
-#[async_trait::async_trait]
-impl ExtensionContext for NoopContext {
-    fn session_id(&self) -> &str {
-        ""
-    }
-    fn working_dir(&self) -> &str {
-        ""
-    }
-    fn model_selection(&self) -> astrcode_core::config::ModelSelection {
-        astrcode_core::config::ModelSelection {
-            profile_name: String::new(),
-            model: String::new(),
-            provider_kind: String::new(),
-        }
-    }
-    fn config_value(&self, _key: &str) -> Option<String> {
-        None
-    }
-    async fn emit_custom_event(&self, _name: &str, _data: serde_json::Value) {}
-    fn find_tool(&self, _name: &str) -> Option<astrcode_core::tool::ToolDefinition> {
-        None
-    }
+fn match_ext_mode(ext: &dyn Extension, event: &ExtensionEvent) -> Option<HookMode> {
+    ext.subscriptions()
+        .iter()
+        .find(|(e, _)| e == event)
+        .map(|(_, m)| *m)
 }

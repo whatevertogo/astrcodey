@@ -40,18 +40,9 @@ pub enum TransportError {
 /// stdio transport: JSON-RPC 2.0 over stdin/stdout.
 pub struct StdioTransport {
     rx: mpsc::UnboundedReceiver<ClientCommand>,
-    initialized: bool,
 }
 
 impl StdioTransport {
-    pub fn new() -> Self {
-        let (_tx, rx) = mpsc::unbounded_channel();
-        Self {
-            rx,
-            initialized: false,
-        }
-    }
-
     /// Create a channel pair: the sender for stdin reader, and the transport.
     pub fn new_channel() -> (mpsc::UnboundedSender<ClientCommand>, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -59,7 +50,6 @@ impl StdioTransport {
             tx,
             Self {
                 rx,
-                initialized: false,
             },
         )
     }

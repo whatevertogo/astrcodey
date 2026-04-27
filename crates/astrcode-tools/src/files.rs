@@ -16,6 +16,7 @@ use std::{
 };
 
 use astrcode_core::tool::*;
+use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -1525,20 +1526,13 @@ fn matches_file_type(path: &Path, file_type: &str) -> bool {
 
 // ─── Shared ──────────────────────────────────────────────────────────────
 
-fn resolve_path(cwd: &Path, raw: &Path) -> PathBuf {
-    if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        cwd.join(raw)
-    }
-}
 
 fn is_unc_path(path: &Path) -> bool {
     let path = path.to_string_lossy();
     path.starts_with("\\\\") || path.starts_with("//")
 }
 
-fn is_binary(p: &PathBuf) -> bool {
+fn is_binary(p: &Path) -> bool {
     std::fs::read(p)
         .map(|d| d.iter().take(8192).any(|&b| b == 0))
         .unwrap_or(false)
