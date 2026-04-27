@@ -3,8 +3,9 @@
 //! Tools are the primary way the agent interacts with the world.
 //! Extensions can register additional tools beyond the built-in set.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 /// Definition of a tool, sent to the LLM as part of the function calling schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +21,7 @@ pub struct ToolDefinition {
 }
 
 /// Result of a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     /// The tool call ID this result corresponds to.
     pub call_id: String,
@@ -28,8 +29,14 @@ pub struct ToolResult {
     pub content: String,
     /// Whether this result represents an error.
     pub is_error: bool,
+    /// Optional normalized error message for consumers that need structured error display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Optional metadata (e.g., file path, line count).
     pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Tool execution duration in milliseconds, when measured by the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Error that can occur during tool execution.

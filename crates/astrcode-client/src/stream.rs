@@ -1,15 +1,15 @@
 //! Conversation stream wrapper for SSE events.
 
-use astrcode_protocol::events::ServerEvent;
+use astrcode_protocol::events::ClientNotification;
 use tokio::sync::broadcast;
 
 /// A subscription to the server event stream.
 pub struct ConversationStream {
-    rx: broadcast::Receiver<ServerEvent>,
+    rx: broadcast::Receiver<ClientNotification>,
 }
 
 impl ConversationStream {
-    pub fn new(rx: broadcast::Receiver<ServerEvent>) -> Self {
+    pub fn new(rx: broadcast::Receiver<ClientNotification>) -> Self {
         Self { rx }
     }
 
@@ -26,7 +26,7 @@ impl ConversationStream {
 /// Items received from the conversation stream.
 #[derive(Debug)]
 pub enum StreamItem {
-    Event(ServerEvent),
+    Event(ClientNotification),
     /// Client fell behind; `n` events were skipped.
     Lagged(u64),
 }

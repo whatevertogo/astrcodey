@@ -1,12 +1,9 @@
 //! OpenAI-compatible LLM provider implementation.
 
-use astrcode_core::config::OpenAiApiMode;
-use astrcode_core::llm::*;
-use astrcode_core::tool::ToolDefinition;
+use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
-use crate::cache::CacheTracker;
-use crate::retry::RetryPolicy;
+use crate::{cache::CacheTracker, retry::RetryPolicy};
 
 /// OpenAI-compatible LLM provider.
 pub struct OpenAiProvider {
@@ -54,10 +51,10 @@ impl OpenAiProvider {
                     "{}/chat/completions",
                     self.config.base_url.trim_end_matches('/')
                 )
-            }
+            },
             OpenAiApiMode::Responses => {
                 format!("{}/responses", self.config.base_url.trim_end_matches('/'))
-            }
+            },
         }
     }
 
@@ -81,6 +78,10 @@ impl OpenAiProvider {
                         LlmContent::Image { base64, media_type } => serde_json::json!({
                             "type": "image_url",
                             "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
+                        }),
+                        LlmContent::ToolCall { call_id, name, arguments } => serde_json::json!({
+                            "type": "text",
+                            "text": format!("[Tool call {}: {}] {}", call_id, name, arguments)
                         }),
                         LlmContent::ToolResult { tool_call_id, content, is_error } => serde_json::json!({
                             "type": "text",
@@ -226,7 +227,7 @@ impl OpenAiProvider {
                             accumulator.ingest_chat_completion(&event, tx);
                         }
                     }
-                }
+                },
                 OpenAiApiMode::Responses => {
                     for line in text.lines() {
                         if line.is_empty() {
@@ -238,7 +239,7 @@ impl OpenAiProvider {
                             }
                         }
                     }
-                }
+                },
             }
         }
         Ok(())
@@ -262,7 +263,7 @@ impl Utf8StreamDecoder {
                 let result = s.to_string();
                 self.buffer.clear();
                 result
-            }
+            },
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
                 if valid_up_to > 0 {
@@ -274,7 +275,7 @@ impl Utf8StreamDecoder {
                 } else {
                     String::new()
                 }
-            }
+            },
         }
     }
 }
@@ -362,13 +363,13 @@ impl LlmAccumulator {
                             delta: delta.to_string(),
                         });
                     }
-                }
+                },
                 "response.completed" => {
                     let _ = tx.send(LlmEvent::Done {
                         finish_reason: "stop".into(),
                     });
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }

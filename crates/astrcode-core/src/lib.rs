@@ -4,6 +4,7 @@
 //! that other crates implement or consume. No business logic lives here.
 
 pub mod config;
+pub mod event;
 pub mod extension;
 pub mod llm;
 pub mod prompt;
@@ -13,6 +14,7 @@ pub mod types;
 
 // Re-export commonly used types
 pub use config::*;
+pub use event::*;
 pub use extension::*;
 pub use llm::*;
 pub use prompt::*;

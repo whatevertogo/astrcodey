@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
-use astrcode_protocol::commands::*;
-use astrcode_protocol::events::*;
+use astrcode_core::event::EventPayload;
+use astrcode_protocol::{commands::*, events::*};
 
-use crate::error::ClientError;
-use crate::stream::ConversationStream;
-use crate::transport::{ClientTransport, TransportError};
+use crate::{
+    error::ClientError,
+    stream::ConversationStream,
+    transport::{ClientTransport, TransportError},
+};
 
 /// Typed client for the astrcode JSON-RPC server.
 pub struct AstrcodeClient<T: ClientTransport> {
@@ -21,7 +23,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
         }
     }
 
-    async fn send(&self, cmd: &ClientCommand) -> Result<ServerEvent, ClientError> {
+    async fn send(&self, cmd: &ClientCommand) -> Result<ClientNotification, ClientError> {
         self.transport
             .execute(cmd)
             .await
@@ -34,8 +36,11 @@ impl<T: ClientTransport> AstrcodeClient<T> {
             working_dir: working_dir.into(),
         };
         match self.send(&cmd).await? {
-            ServerEvent::SessionCreated { session_id, .. } => Ok(session_id),
-            ServerEvent::Error { message, .. } => Err(ClientError::Server(message)),
+            ClientNotification::Event(event) => match event.payload {
+                EventPayload::SessionStarted { .. } => Ok(event.session_id),
+                _ => Err(ClientError::UnexpectedResponse),
+            },
+            ClientNotification::Error { message, .. } => Err(ClientError::Server(message)),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -54,8 +59,8 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     pub async fn list_sessions(&self) -> Result<Vec<SessionListItem>, ClientError> {
         let cmd = ClientCommand::ListSessions;
         match self.send(&cmd).await? {
-            ServerEvent::SessionList { sessions } => Ok(sessions),
-            ServerEvent::Error { message, .. } => Err(ClientError::Server(message)),
+            ClientNotification::SessionList { sessions } => Ok(sessions),
+            ClientNotification::Error { message, .. } => Err(ClientError::Server(message)),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -71,8 +76,11 @@ impl<T: ClientTransport> AstrcodeClient<T> {
             at_cursor: at_cursor.map(String::from),
         };
         match self.send(&cmd).await? {
-            ServerEvent::SessionCreated { session_id, .. } => Ok(session_id),
-            ServerEvent::Error { message, .. } => Err(ClientError::Server(message)),
+            ClientNotification::Event(event) => match event.payload {
+                EventPayload::SessionStarted { .. } => Ok(event.session_id),
+                _ => Err(ClientError::UnexpectedResponse),
+            },
+            ClientNotification::Error { message, .. } => Err(ClientError::Server(message)),
             _ => Err(ClientError::UnexpectedResponse),
         }
     }
@@ -97,7 +105,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     }
 
     /// Send a command and get the raw server event response.
-    pub async fn send_raw(&self, cmd: &ClientCommand) -> Result<ServerEvent, ClientError> {
+    pub async fn send_raw(&self, cmd: &ClientCommand) -> Result<ClientNotification, ClientError> {
         self.send(cmd).await
     }
 
@@ -120,7 +128,7 @@ impl ClientTransport for MockTransport {
 
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ServerEvent>, TransportError> {
+    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError> {
         let (_, rx) = tokio::sync::broadcast::channel(16);
         Ok(rx)
     }

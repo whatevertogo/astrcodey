@@ -1,25 +1,33 @@
 //! Append-only JSONL event log for session persistence.
 
-use astrcode_core::storage::{SessionEvent, StorageError};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+};
+
+use astrcode_core::{event::Event, storage::StorageError};
 
 /// An append-only JSONL event log.
 ///
 /// Each session has one event log file. Events are written as newline-delimited
-/// JSON objects and never modified. Recovery replays from the beginning or
-/// from a snapshot cursor.
+/// flat JSON objects and never modified. Storage assigns `seq` at append time.
 pub struct EventLog {
     path: PathBuf,
 }
 
 impl EventLog {
     /// Create a new event log file with an initial event.
-    pub async fn create(path: PathBuf, initial_event: &SessionEvent) -> Result<Self, StorageError> {
+    pub async fn create(
+        path: PathBuf,
+        initial_event: Event,
+    ) -> Result<(Self, Event), StorageError> {
+        let mut event = initial_event;
+        event.seq = Some(0);
+
         let mut file = std::fs::File::create(&path)?;
-        let line = serde_json::to_string(initial_event)?;
+        let line = serde_json::to_string(&event)?;
         writeln!(file, "{}", line)?;
-        Ok(Self { path })
+        Ok((Self { path }, event))
     }
 
     /// Open an existing event log.
@@ -33,19 +41,22 @@ impl EventLog {
         Ok(Self { path })
     }
 
-    /// Append an event to the log (atomic single-line write).
-    pub async fn append(&self, event: &SessionEvent) -> Result<(), StorageError> {
+    /// Append a durable event to the log and return it with its assigned seq.
+    pub async fn append(&self, mut event: Event) -> Result<Event, StorageError> {
+        let seq = self.count().await? as u64;
+        event.seq = Some(seq);
+
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let line = serde_json::to_string(event)?;
+        let line = serde_json::to_string(&event)?;
         writeln!(file, "{}", line)?;
-        Ok(())
+        Ok(event)
     }
 
     /// Replay all events from the beginning.
-    pub async fn replay_all(&self) -> Result<Vec<SessionEvent>, StorageError> {
+    pub async fn replay_all(&self) -> Result<Vec<Event>, StorageError> {
         let file = std::fs::File::open(&self.path)?;
         let reader = BufReader::new(file);
         let mut events = Vec::new();
@@ -54,7 +65,7 @@ impl EventLog {
             if line.is_empty() {
                 continue;
             }
-            let event: SessionEvent = serde_json::from_str(&line)?;
+            let event: Event = serde_json::from_str(&line)?;
             events.push(event);
         }
         Ok(events)
@@ -90,7 +101,7 @@ impl EventLogIterator {
 }
 
 impl Iterator for EventLogIterator {
-    type Item = Result<(usize, SessionEvent), StorageError>;
+    type Item = Result<(usize, Event), StorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut line = String::new();
@@ -102,11 +113,11 @@ impl Iterator for EventLogIterator {
                 if trimmed.is_empty() {
                     return self.next();
                 }
-                match serde_json::from_str::<SessionEvent>(trimmed) {
+                match serde_json::from_str::<Event>(trimmed) {
                     Ok(event) => Some(Ok((self.line_number, event))),
                     Err(e) => Some(Err(StorageError::Serialization(e))),
                 }
-            }
+            },
             Err(e) => Some(Err(StorageError::Io(e))),
         }
     }
@@ -114,11 +125,11 @@ impl Iterator for EventLogIterator {
 
 /// Batch appender for write efficiency.
 ///
-/// Buffers concurrent append requests and flushes them in batches
-/// within a configurable time window.
+/// Buffers append requests and flushes them in batches within a configurable
+/// time window. The window is currently consumed by higher-level schedulers.
 pub struct BatchAppender {
     log: EventLog,
-    buffer: Vec<SessionEvent>,
+    buffer: Vec<Event>,
     flush_window_ms: u64,
 }
 
@@ -131,7 +142,7 @@ impl BatchAppender {
         }
     }
 
-    pub async fn push(&mut self, event: SessionEvent) -> Result<(), StorageError> {
+    pub async fn push(&mut self, event: Event) -> Result<(), StorageError> {
         self.buffer.push(event);
         Ok(())
     }
@@ -140,46 +151,86 @@ impl BatchAppender {
         if self.buffer.is_empty() {
             return Ok(0);
         }
+
         let count = self.buffer.len();
+        let mut next_seq = self.log.count().await? as u64;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log.path())?;
-        for event in &self.buffer {
+        for event in &mut self.buffer {
+            event.seq = Some(next_seq);
+            next_seq += 1;
             let line = serde_json::to_string(event)?;
             writeln!(file, "{}", line)?;
         }
         self.buffer.clear();
         Ok(count)
     }
+
+    pub fn flush_window_ms(&self) -> u64 {
+        self.flush_window_ms
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use astrcode_core::storage::SessionEvent;
-    use chrono::Utc;
+    use astrcode_core::event::EventPayload;
     use tempfile::tempdir;
 
-    fn make_start_event(id: &str) -> SessionEvent {
-        SessionEvent::SessionStart {
-            session_id: id.into(),
-            timestamp: Utc::now(),
-            working_dir: "/tmp".into(),
-            model_id: "test-model".into(),
-        }
+    use super::*;
+
+    fn make_start_event(id: &str) -> Event {
+        Event::new(
+            id.into(),
+            None,
+            EventPayload::SessionStarted {
+                working_dir: "/tmp".into(),
+                model_id: "test-model".into(),
+            },
+        )
     }
 
     #[tokio::test]
-    async fn test_create_and_replay() {
+    async fn create_append_and_replay_assigns_stable_seq() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
-        let log = EventLog::create(path.clone(), &make_start_event("s1"))
+        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
             .await
             .unwrap();
-        log.append(&make_start_event("s2")).await.unwrap();
 
+        assert_eq!(start.seq, Some(0));
+
+        let appended = log
+            .append(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnStarted,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(appended.seq, Some(1));
         let events = log.replay_all().await.unwrap();
         assert_eq!(events.len(), 2);
+        assert_eq!(events[0].seq, Some(0));
+        assert_eq!(events[1].seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn event_log_only_receives_durable_events_from_callers() {
+        assert!(
+            !EventPayload::AssistantTextDelta {
+                message_id: "m1".into(),
+                delta: "partial".into(),
+            }
+            .is_durable()
+        );
+        assert!(
+            EventPayload::TurnCompleted {
+                finish_reason: "stop".into(),
+            }
+            .is_durable()
+        );
     }
 }

@@ -1,11 +1,15 @@
 //! Client transport abstraction.
 
-use std::io::{BufRead, BufReader, Write};
-use std::sync::{Arc, Mutex};
+use std::{
+    io::{BufRead, BufReader, Write},
+    sync::{Arc, Mutex},
+};
 
-use astrcode_protocol::commands::ClientCommand;
-use astrcode_protocol::events::ServerEvent;
-use astrcode_protocol::framing::{from_jsonl_line, to_jsonl_line};
+use astrcode_protocol::{
+    commands::ClientCommand,
+    events::ClientNotification,
+    framing::{from_jsonl_line, to_jsonl_line},
+};
 
 /// Transport for client-server communication.
 #[async_trait::async_trait]
@@ -16,7 +20,7 @@ pub trait ClientTransport: Send + Sync {
 
     /// Send a command and wait for the first response event.
     /// Convenience wrapper around send + subscribe.
-    async fn execute(&self, command: &ClientCommand) -> Result<ServerEvent, TransportError> {
+    async fn execute(&self, command: &ClientCommand) -> Result<ClientNotification, TransportError> {
         let mut rx = self.subscribe().await?;
         self.send(command).await?;
         loop {
@@ -25,7 +29,7 @@ pub trait ClientTransport: Send + Sync {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     return Err(TransportError::StreamDisconnected);
-                }
+                },
             }
         }
     }
@@ -33,7 +37,7 @@ pub trait ClientTransport: Send + Sync {
     /// Subscribe to the server event stream.
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ServerEvent>, TransportError>;
+    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -58,7 +62,7 @@ pub enum TransportError {
 /// reads events from its stdout.
 pub struct StdioClientTransport {
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
-    event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
+    event_tx: tokio::sync::broadcast::Sender<ClientNotification>,
     _child: std::process::Child,
 }
 
@@ -98,7 +102,7 @@ impl StdioClientTransport {
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(event) = from_jsonl_line::<ServerEvent>(&line) {
+                if let Ok(event) = from_jsonl_line::<ClientNotification>(&line) {
                     let _ = tx.send(event);
                 }
             }
@@ -129,7 +133,7 @@ impl ClientTransport for StdioClientTransport {
 
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ServerEvent>, TransportError> {
+    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

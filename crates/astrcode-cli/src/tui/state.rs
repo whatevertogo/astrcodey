@@ -1,6 +1,7 @@
 //! TUI state backing the transcript and composer surfaces.
 
-use astrcode_protocol::events::ServerEvent;
+use astrcode_core::event::{Event, EventPayload};
+use astrcode_protocol::events::ClientNotification;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {
@@ -223,24 +224,10 @@ impl TuiState {
         self.mark_dirty();
     }
 
-    pub fn apply(&mut self, event: &ServerEvent) {
-        match event {
-            ServerEvent::SessionCreated {
-                session_id,
-                working_dir,
-            } => {
-                self.active_session_id = Some(session_id.clone());
-                self.working_dir = working_dir.clone();
-                self.push_message(
-                    MessageRole::System,
-                    "Session".into(),
-                    format!("Created session {}", short_id(session_id)),
-                    false,
-                    None,
-                );
-                self.status = "Ready".into();
-            }
-            ServerEvent::SessionResumed {
+    pub fn apply(&mut self, notification: &ClientNotification) {
+        match notification {
+            ClientNotification::Event(event) => self.apply_event(event),
+            ClientNotification::SessionResumed {
                 session_id,
                 snapshot,
             } => {
@@ -251,6 +238,7 @@ impl TuiState {
                     let role = match message.role.as_str() {
                         "user" => MessageRole::User,
                         "assistant" => MessageRole::Assistant,
+                        "tool" => MessageRole::Tool,
                         _ => MessageRole::System,
                     };
                     let label = match role {
@@ -263,88 +251,149 @@ impl TuiState {
                     self.push_message(role, label.into(), message.content.clone(), false, None);
                 }
                 self.status = format!("Resumed {}", short_id(session_id));
-            }
-            ServerEvent::SessionList { sessions } => {
+            },
+            ClientNotification::SessionList { sessions } => {
                 self.available_sessions = sessions
                     .iter()
                     .map(|item| item.session_id.clone())
                     .collect();
                 self.status = format!("{} session(s)", sessions.len());
                 self.mark_dirty();
-            }
-            ServerEvent::TurnStarted { .. } => {
+            },
+            ClientNotification::UiRequest { message, .. } => {
+                self.status = message.clone();
+                self.mark_dirty();
+            },
+            ClientNotification::Error { message, .. } => {
+                self.show_error(message);
+            },
+        }
+    }
+
+    fn apply_event(&mut self, event: &Event) {
+        match &event.payload {
+            EventPayload::SessionStarted {
+                working_dir,
+                model_id,
+            } => {
+                self.active_session_id = Some(event.session_id.clone());
+                self.working_dir = working_dir.clone();
+                self.model_name = model_id.clone();
+                self.push_message(
+                    MessageRole::System,
+                    "Session".into(),
+                    format!("Created session {}", short_id(&event.session_id)),
+                    false,
+                    None,
+                );
+                self.status = "Ready".into();
+            },
+            EventPayload::SessionDeleted => {
+                self.active_session_id = None;
+                self.status = "Session deleted".into();
+                self.mark_dirty();
+            },
+            EventPayload::TurnStarted => {
                 self.is_streaming = true;
                 self.error = None;
                 self.status = "Working".into();
                 self.mark_dirty();
-            }
-            ServerEvent::TurnEnded { finish_reason, .. } => {
+            },
+            EventPayload::TurnCompleted { finish_reason } => {
                 self.is_streaming = false;
                 self.status = format!("Ready · {}", finish_reason);
                 self.mark_dirty();
-            }
-            ServerEvent::MessageStart { message_id, role } => {
-                let (msg_role, label) = match role.as_str() {
-                    "assistant" => (MessageRole::Assistant, "Astrcode"),
-                    "user" => (MessageRole::User, "You"),
-                    "system" => (MessageRole::System, "System"),
-                    _ => (MessageRole::Assistant, "Astrcode"),
-                };
+            },
+            // User messages are pushed optimistically when Enter is pressed.
+            EventPayload::UserMessage { .. } => {},
+            EventPayload::AssistantMessageStarted { message_id } => {
                 self.push_message(
-                    msg_role,
-                    label.into(),
+                    MessageRole::Assistant,
+                    "Astrcode".into(),
                     String::new(),
                     true,
                     Some(message_id.clone()),
                 );
-            }
-            ServerEvent::MessageDelta { message_id, delta } => {
+            },
+            EventPayload::AssistantTextDelta { message_id, delta } => {
                 if let Some(message) = self.find_message_mut(message_id) {
                     message.content.push_str(delta);
                     self.mark_dirty();
                 }
-            }
-            ServerEvent::MessageEnd { message_id } => {
+            },
+            EventPayload::AssistantMessageCompleted { message_id, text } => {
                 if let Some(message) = self.find_message_mut(message_id) {
+                    message.content = text.clone();
                     message.is_streaming = false;
                     self.mark_dirty();
+                } else {
+                    self.push_message(
+                        MessageRole::Assistant,
+                        "Astrcode".into(),
+                        text.clone(),
+                        false,
+                        Some(message_id.clone()),
+                    );
                 }
-            }
-            ServerEvent::ToolCallStart {
+            },
+            EventPayload::ThinkingDelta { delta } => {
+                self.status = format!("Thinking · {}", delta);
+                self.mark_dirty();
+            },
+            EventPayload::ToolCallStarted { call_id, tool_name } => {
+                self.push_message(
+                    MessageRole::Tool,
+                    format!("Tool · {}", tool_name),
+                    tool_name.clone(),
+                    true,
+                    Some(call_id.clone()),
+                );
+            },
+            EventPayload::ToolCallArgumentsDelta { call_id, delta } => {
+                if let Some(message) = self.find_message_mut(call_id) {
+                    if !message.content.ends_with('\n') {
+                        message.content.push('\n');
+                    }
+                    message.content.push_str(delta);
+                    self.mark_dirty();
+                }
+            },
+            EventPayload::ToolCallRequested {
                 call_id,
                 tool_name,
                 arguments,
             } => {
-                let args = match arguments {
-                    serde_json::Value::Null => String::new(),
-                    _ => serde_json::to_string(arguments).unwrap_or_default(),
+                let args = serde_json::to_string(arguments).unwrap_or_default();
+                let body = if args.is_empty() || args == "{}" {
+                    tool_name.clone()
+                } else {
+                    format!("{tool_name}\n{args}")
                 };
-                let mut body = tool_name.clone();
-                if !args.is_empty() && args != "{}" {
-                    body.push('\n');
-                    body.push_str(&args);
+                if let Some(message) = self.find_message_mut(call_id) {
+                    message.content = body;
+                    self.mark_dirty();
+                } else {
+                    self.push_message(
+                        MessageRole::Tool,
+                        format!("Tool · {}", tool_name),
+                        body,
+                        true,
+                        Some(call_id.clone()),
+                    );
                 }
-                self.push_message(
-                    MessageRole::Tool,
-                    format!("Tool · {}", tool_name),
-                    body,
-                    true,
-                    Some(call_id.clone()),
-                );
-            }
-            ServerEvent::ToolCallDelta {
-                call_id,
-                output_delta,
-            } => {
+            },
+            EventPayload::ToolOutputDelta { call_id, delta, .. } => {
                 if let Some(message) = self.find_message_mut(call_id) {
                     if !message.content.is_empty() {
                         message.content.push('\n');
                     }
-                    message.content.push_str(output_delta);
+                    message.content.push_str(delta);
                     self.mark_dirty();
                 }
-            }
-            ServerEvent::ToolCallEnd { call_id, result } => {
+            },
+            EventPayload::ToolCallCompleted {
+                call_id, result, ..
+            } => {
                 if let Some(message) = self.find_message_mut(call_id) {
                     if !result.content.is_empty() && !message.content.contains(&result.content) {
                         if !message.content.is_empty() {
@@ -359,17 +408,17 @@ impl TuiState {
                     message.is_streaming = false;
                     self.mark_dirty();
                 }
-            }
-            ServerEvent::CompactionStarted => {
+            },
+            EventPayload::CompactionStarted => {
                 self.push_message(
                     MessageRole::System,
                     "System".into(),
-                    "Compacting context…".into(),
+                    "Compacting context...".into(),
                     true,
                     Some("compaction".into()),
                 );
-            }
-            ServerEvent::CompactionEnded {
+            },
+            EventPayload::CompactionCompleted {
                 pre_tokens,
                 post_tokens,
                 ..
@@ -383,25 +432,42 @@ impl TuiState {
                 }
                 self.status = "Ready".into();
                 self.mark_dirty();
-            }
-            ServerEvent::Error { message, .. } => {
-                self.error = Some(message.clone());
+            },
+            EventPayload::AgentRunStarted => {
+                self.is_streaming = true;
+                self.status = "Agent running".into();
+                self.mark_dirty();
+            },
+            EventPayload::AgentRunCompleted { reason } => {
                 self.is_streaming = false;
-                self.push_message(
-                    MessageRole::Error,
-                    "Error".into(),
-                    message.clone(),
-                    false,
-                    None,
-                );
-                self.status = "Error".into();
-            }
-            _ => {}
+                self.status = format!("Ready · {}", reason);
+                self.mark_dirty();
+            },
+            EventPayload::ErrorOccurred { message, .. } => {
+                self.show_error(message);
+            },
+            EventPayload::Custom { name, .. } => {
+                self.status = format!("Event: {name}");
+                self.mark_dirty();
+            },
         }
     }
 
     pub fn push_user(&mut self, text: &str) {
         self.push_message(MessageRole::User, "You".into(), text.into(), false, None);
+    }
+
+    fn show_error(&mut self, message: &str) {
+        self.error = Some(message.into());
+        self.is_streaming = false;
+        self.push_message(
+            MessageRole::Error,
+            "Error".into(),
+            message.into(),
+            false,
+            None,
+        );
+        self.status = "Error".into();
     }
 
     fn push_message(

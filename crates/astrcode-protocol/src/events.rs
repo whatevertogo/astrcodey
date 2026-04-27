@@ -1,79 +1,23 @@
-//! Server-to-client event types (JSON-RPC notifications and responses).
+//! Server-to-client protocol notifications.
 
+use astrcode_core::event::Event;
 use serde::{Deserialize, Serialize};
 
-/// Events that the server streams to connected clients.
+/// Notifications that the server streams to connected clients.
+///
+/// Runtime/session facts are carried as core `Event`s. Protocol-only
+/// interactions such as session lists and UI requests stay out of the event log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
-pub enum ServerEvent {
-    // Session lifecycle
-    SessionCreated {
-        session_id: String,
-        working_dir: String,
-    },
+pub enum ClientNotification {
+    Event(Event),
     SessionResumed {
         session_id: String,
         snapshot: SessionSnapshot,
     },
-    SessionDeleted {
-        session_id: String,
-    },
     SessionList {
         sessions: Vec<SessionListItem>,
     },
-
-    // Agent lifecycle
-    AgentStarted,
-    AgentEnded {
-        reason: String,
-    },
-
-    // Turn lifecycle
-    TurnStarted {
-        turn_id: String,
-    },
-    TurnEnded {
-        turn_id: String,
-        finish_reason: String,
-    },
-
-    // Message streaming (Server → Client incremental updates)
-    MessageStart {
-        message_id: String,
-        role: String,
-    },
-    MessageDelta {
-        message_id: String,
-        delta: String,
-    },
-    MessageEnd {
-        message_id: String,
-    },
-
-    // Tool execution streaming
-    ToolCallStart {
-        call_id: String,
-        tool_name: String,
-        arguments: serde_json::Value,
-    },
-    ToolCallDelta {
-        call_id: String,
-        output_delta: String,
-    },
-    ToolCallEnd {
-        call_id: String,
-        result: ToolCallResultDto,
-    },
-
-    // Compaction
-    CompactionStarted,
-    CompactionEnded {
-        pre_tokens: usize,
-        post_tokens: usize,
-        summary: String,
-    },
-
-    // UI request (Server → Client, requires response)
     UiRequest {
         request_id: String,
         kind: UiRequestKind,
@@ -83,8 +27,6 @@ pub enum ServerEvent {
         #[serde(default)]
         timeout_secs: u64,
     },
-
-    // Errors
     Error {
         code: i32,
         message: String,
@@ -103,14 +45,6 @@ pub enum UiRequestKind {
     Input,
     /// Informational notification.
     Notify,
-}
-
-/// Result of a tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallResultDto {
-    pub call_id: String,
-    pub content: String,
-    pub is_error: bool,
 }
 
 /// Session list item.

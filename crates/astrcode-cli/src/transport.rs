@@ -3,10 +3,8 @@
 use std::sync::Arc;
 
 use astrcode_client::transport::{ClientTransport, TransportError};
-use astrcode_protocol::commands::ClientCommand;
-use astrcode_protocol::events::ServerEvent;
-use astrcode_server::bootstrap;
-use astrcode_server::handler::CommandHandler;
+use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_server::{bootstrap, handler::CommandHandler};
 use tokio::sync::{broadcast, mpsc};
 
 /// Transport that runs the server in a background tokio task.
@@ -14,26 +12,26 @@ use tokio::sync::{broadcast, mpsc};
 /// Commands go through an mpsc channel, events come back through a broadcast.
 pub struct InProcessTransport {
     cmd_tx: mpsc::UnboundedSender<ClientCommand>,
-    event_tx: broadcast::Sender<ServerEvent>,
+    event_tx: broadcast::Sender<ClientNotification>,
 }
 
 impl InProcessTransport {
     /// Start the server in a background task and return a connected transport.
     pub fn start() -> Self {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
-        let (event_tx, _) = broadcast::channel::<ServerEvent>(256);
+        let (event_tx, _) = broadcast::channel::<ClientNotification>(256);
         let tx = event_tx.clone();
 
         tokio::spawn(async move {
             let runtime = match bootstrap::bootstrap().await {
                 Ok(rt) => Arc::new(rt),
                 Err(e) => {
-                    let _ = tx.send(ServerEvent::Error {
+                    let _ = tx.send(ClientNotification::Error {
                         code: -32603,
                         message: e.to_string(),
                     });
                     return;
-                }
+                },
             };
 
             let mut handler = CommandHandler::new(runtime, tx);
@@ -54,7 +52,7 @@ impl ClientTransport for InProcessTransport {
             .map_err(|_| TransportError::Connection("server task ended".into()))
     }
 
-    async fn subscribe(&self) -> Result<broadcast::Receiver<ServerEvent>, TransportError> {
+    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

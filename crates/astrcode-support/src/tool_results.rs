@@ -65,9 +65,11 @@ fn sanitize_for_filename(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use astrcode_core::tool::ToolResult;
     use std::collections::BTreeMap;
+
+    use astrcode_core::tool::ToolResult;
+
+    use super::*;
 
     #[test]
     fn test_maybe_persist_small_result() {
@@ -75,7 +77,9 @@ mod tests {
             call_id: "abc123".into(),
             content: "Hello World".into(),
             is_error: false,
+            error: None,
             metadata: BTreeMap::new(),
+            duration_ms: None,
         };
         let dir = PathBuf::from("/tmp/test-results");
         // Content is small, should not persist
@@ -91,7 +95,9 @@ mod tests {
             call_id: "abc123".into(),
             content: large_content,
             is_error: false,
+            error: None,
             metadata: BTreeMap::new(),
+            duration_ms: None,
         };
         let dir = PathBuf::from("/tmp/test-results");
         let path = maybe_persist_tool_result(&mut result, 100, &dir).unwrap();
@@ -107,7 +113,9 @@ mod tests {
             call_id: "../etc/passwd".into(),
             content: "data".into(),
             is_error: false,
+            error: None,
             metadata: BTreeMap::new(),
+            duration_ms: None,
         };
         let dir = PathBuf::from("/tmp/test-results");
         let _ = maybe_persist_tool_result(&mut result, 10, &dir);

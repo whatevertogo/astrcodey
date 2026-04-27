@@ -1,14 +1,14 @@
 //! Server transport abstraction and stdio implementation.
 
 use std::io::{BufRead, BufReader, Write};
-use tokio::sync::mpsc;
 
-use astrcode_protocol::commands::ClientCommand;
-use astrcode_protocol::events::ServerEvent;
-use astrcode_protocol::framing::{from_jsonl_line, to_jsonl_line, PROTOCOL_VERSION};
-use astrcode_protocol::version::{
-    InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo,
+use astrcode_protocol::{
+    commands::ClientCommand,
+    events::ClientNotification,
+    framing::{PROTOCOL_VERSION, from_jsonl_line, to_jsonl_line},
+    version::{InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo},
 };
+use tokio::sync::mpsc;
 
 /// Transport trait for server communication.
 ///
@@ -19,7 +19,7 @@ pub trait ServerTransport: Send + Sync {
     async fn read_command(&mut self) -> Option<ClientCommand>;
 
     /// Write an event to the transport.
-    async fn write_event(&self, event: &ServerEvent) -> Result<(), TransportError>;
+    async fn write_event(&self, event: &ClientNotification) -> Result<(), TransportError>;
 
     /// Initialize the connection with version negotiation.
     async fn initialize(&mut self) -> Result<InitializeRequest, TransportError>;
@@ -93,7 +93,7 @@ impl ServerTransport for StdioTransport {
         self.rx.recv().await
     }
 
-    async fn write_event(&self, event: &ServerEvent) -> Result<(), TransportError> {
+    async fn write_event(&self, event: &ClientNotification) -> Result<(), TransportError> {
         let line = to_jsonl_line(event)?;
         // Write to stdout
         let stdout = std::io::stdout();

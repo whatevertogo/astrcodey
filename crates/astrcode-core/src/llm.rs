@@ -14,7 +14,7 @@ pub enum LlmRole {
     Tool,
 }
 
-/// Content of an LLM message — can be text, image, or tool result.
+/// Content of an LLM message — can be text, image, tool call, or tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmContent {
@@ -22,6 +22,12 @@ pub enum LlmContent {
     Text { text: String },
     /// Base64-encoded image.
     Image { base64: String, media_type: String },
+    /// Assistant-requested tool call content.
+    ToolCall {
+        call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
     /// Tool result content.
     ToolResult {
         tool_call_id: String,

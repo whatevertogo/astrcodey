@@ -1,27 +1,29 @@
 //! Agent — the ephemeral turn processor created from session events.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
-use crate::capability::CapabilityRouter;
-use astrcode_core::llm::{LlmEvent, LlmMessage, LlmProvider, LlmRole};
-use astrcode_core::prompt::{PromptContext, PromptProvider};
-use astrcode_core::tool::ToolResult;
-use astrcode_core::types::*;
-use astrcode_protocol::events::ServerEvent;
+use astrcode_core::{
+    event::EventPayload,
+    llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
+    prompt::{PromptContext, PromptProvider},
+    tool::ToolResult,
+    types::*,
+};
 use tokio::sync::mpsc;
 
+use crate::capability::CapabilityRouter;
 
 /// Agent — a transient turn processor.
 ///
-/// Created from a session's event log, processes one turn,
-/// appends new events to the session, and is discarded.
+/// Created from a session projection, processes one turn, emits event payloads,
+/// and is discarded. Session identity and persistence stay in the handler.
 pub struct Agent {
-    session_id: SessionId,
+    _session_id: SessionId,
     working_dir: String,
     llm: Arc<dyn LlmProvider>,
     prompt: Arc<dyn PromptProvider>,
     capability: Arc<CapabilityRouter>,
-    model_id: String,
+    _model_id: String,
 }
 
 impl Agent {
@@ -34,38 +36,30 @@ impl Agent {
         model_id: String,
     ) -> Self {
         Self {
-            session_id,
+            _session_id: session_id,
             working_dir,
             llm,
             prompt,
             capability,
-            model_id,
+            _model_id: model_id,
         }
     }
 
     /// Process a user prompt through the full agent loop.
     ///
-    /// When `event_tx` is Some, real-time ServerEvents are streamed.
-    /// When None, only the final AgentTurnOutput is returned (useful for tests).
+    /// When `event_tx` is Some, real-time event payloads are streamed. The
+    /// handler wraps them with session/turn metadata and decides durability.
     pub async fn process_prompt(
         &self,
         user_text: &str,
         history: Vec<LlmMessage>,
-        event_tx: Option<mpsc::UnboundedSender<ServerEvent>>,
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     ) -> Result<AgentTurnOutput, AgentError> {
-        let turn_id = new_turn_id();
-        let _ = event_tx.as_ref().map(|tx| {
-            tx.send(ServerEvent::TurnStarted {
-                turn_id: turn_id.clone(),
-            })
-        });
-
         let mut messages = history;
         messages.push(LlmMessage::user(user_text));
 
         let tools = self.capability.list_definitions().await;
 
-        // Build prompt context
         let prompt_ctx = PromptContext {
             working_dir: self.working_dir.clone(),
             os: std::env::consts::OS.into(),
@@ -91,7 +85,6 @@ impl Agent {
         }
 
         let mut final_text = String::new();
-        let mut final_reason = String::new();
         let mut all_tool_results: Vec<ToolResult> = Vec::new();
 
         loop {
@@ -104,109 +97,129 @@ impl Agent {
             while let Some(event) = rx.recv().await {
                 match event {
                     LlmEvent::ContentDelta { delta } => {
-                        if let Some(ref tx) = event_tx {
+                        if let Some(tx) = &event_tx {
                             if !message_started {
-                                let _ = tx.send(ServerEvent::MessageStart {
+                                let _ = tx.send(EventPayload::AssistantMessageStarted {
                                     message_id: message_id.clone(),
-                                    role: "assistant".into(),
                                 });
                                 message_started = true;
                             }
-                            let _ = tx.send(ServerEvent::MessageDelta {
+                            let _ = tx.send(EventPayload::AssistantTextDelta {
                                 message_id: message_id.clone(),
                                 delta: delta.clone(),
                             });
                         }
                         current_text.push_str(&delta);
-                    }
+                    },
                     LlmEvent::ToolCallStart {
                         call_id,
                         name,
                         arguments,
                     } => {
-                        let _ = event_tx.as_ref().map(|tx| {
-                            tx.send(ServerEvent::ToolCallStart {
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ToolCallStarted {
                                 call_id: call_id.clone(),
                                 tool_name: name.clone(),
-                                arguments: serde_json::json!({"raw": arguments}),
-                            })
-                        });
+                            });
+                            if !arguments.is_empty() {
+                                let _ = tx.send(EventPayload::ToolCallArgumentsDelta {
+                                    call_id: call_id.clone(),
+                                    delta: arguments.clone(),
+                                });
+                            }
+                        }
                         tool_calls.push(PendingToolCall {
                             call_id,
                             name,
                             arguments,
                         });
-                    }
+                    },
                     LlmEvent::ToolCallDelta { call_id, delta } => {
                         if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
                             tc.arguments.push_str(&delta);
                         }
-                    }
-                    LlmEvent::Done { finish_reason } => {
-                        // End the current message if started
-                        if let Some(ref tx) = event_tx {
-                            if message_started {
-                                let _ = tx.send(ServerEvent::MessageEnd {
-                                    message_id: message_id.clone(),
-                                });
-                            }
+                        if let Some(tx) = &event_tx {
+                            let _ =
+                                tx.send(EventPayload::ToolCallArgumentsDelta { call_id, delta });
                         }
-                        if tool_calls.is_empty() {
-                            final_text = current_text;
-                            final_reason = finish_reason;
-                            if !final_text.is_empty() {
-                                messages.push(LlmMessage::assistant(&final_text));
+                    },
+                    LlmEvent::Done { finish_reason } => {
+                        if !current_text.is_empty() {
+                            if let Some(tx) = &event_tx {
+                                if message_started {
+                                    let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                                        message_id: message_id.clone(),
+                                        text: current_text.clone(),
+                                    });
+                                }
                             }
-                            let _ = event_tx.as_ref().map(|tx| {
-                                tx.send(ServerEvent::TurnEnded {
-                                    turn_id: turn_id.clone(),
-                                    finish_reason: final_reason.clone(),
-                                })
-                            });
+                            messages.push(LlmMessage::assistant(&current_text));
+                            final_text.push_str(&current_text);
+                        }
+
+                        if tool_calls.is_empty() {
                             return Ok(AgentTurnOutput {
-                                turn_id,
                                 text: final_text,
-                                finish_reason: final_reason,
+                                finish_reason,
                                 tool_results: all_tool_results,
                             });
                         }
-                        break; // Process tool calls below
-                    }
+                        break;
+                    },
                     LlmEvent::Error { message } => {
-                        let _ = event_tx.as_ref().map(|tx| {
-                            let _ = tx.send(ServerEvent::Error {
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ErrorOccurred {
                                 code: -32603,
                                 message: message.clone(),
+                                recoverable: false,
                             });
-                            let _ = tx.send(ServerEvent::TurnEnded {
-                                turn_id: turn_id.clone(),
-                                finish_reason: "error".into(),
-                            });
-                        });
+                        }
                         return Err(AgentError::Llm(message));
-                    }
+                    },
                 }
             }
 
-            // Execute tool calls
             for tc in &tool_calls {
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(EventPayload::ToolCallRequested {
+                        call_id: tc.call_id.clone(),
+                        tool_name: tc.name.clone(),
+                        arguments: args.clone(),
+                    });
+                }
+
+                messages.push(LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![LlmContent::ToolCall {
+                        call_id: tc.call_id.clone(),
+                        name: tc.name.clone(),
+                        arguments: args.clone(),
+                    }],
+                    name: None,
+                });
+
+                let started_at = Instant::now();
                 match self.capability.execute(&tc.name, args).await {
-                    Ok(result) => {
-                        let _ = event_tx.as_ref().map(|tx| {
-                            tx.send(ServerEvent::ToolCallEnd {
+                    Ok(mut result) => {
+                        result.call_id = tc.call_id.clone();
+                        result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
+                        if result.is_error && result.error.is_none() {
+                            result.error = Some(result.content.clone());
+                        }
+
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ToolCallCompleted {
                                 call_id: tc.call_id.clone(),
-                                result: astrcode_protocol::events::ToolCallResultDto {
-                                    call_id: tc.call_id.clone(),
-                                    content: result.content.clone(),
-                                    is_error: result.is_error,
-                                },
-                            })
-                        });
+                                tool_name: tc.name.clone(),
+                                result: result.clone(),
+                            });
+                        }
                         messages.push(LlmMessage {
                             role: LlmRole::Tool,
-                            content: vec![astrcode_core::llm::LlmContent::ToolResult {
+                            content: vec![LlmContent::ToolResult {
                                 tool_call_id: tc.call_id.clone(),
                                 content: result.content.clone(),
                                 is_error: result.is_error,
@@ -214,28 +227,28 @@ impl Agent {
                             name: Some(tc.name.clone()),
                         });
                         all_tool_results.push(result);
-                    }
+                    },
                     Err(e) => {
                         let err_msg = format!("Error: {}", e);
-                        let _ = event_tx.as_ref().map(|tx| {
-                            tx.send(ServerEvent::ToolCallEnd {
-                                call_id: tc.call_id.clone(),
-                                result: astrcode_protocol::events::ToolCallResultDto {
-                                    call_id: tc.call_id.clone(),
-                                    content: err_msg.clone(),
-                                    is_error: true,
-                                },
-                            })
-                        });
                         let err_result = ToolResult {
                             call_id: tc.call_id.clone(),
                             content: err_msg.clone(),
                             is_error: true,
+                            error: Some(err_msg.clone()),
                             metadata: Default::default(),
+                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
                         };
+
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ToolCallCompleted {
+                                call_id: tc.call_id.clone(),
+                                tool_name: tc.name.clone(),
+                                result: err_result.clone(),
+                            });
+                        }
                         messages.push(LlmMessage {
                             role: LlmRole::Tool,
-                            content: vec![astrcode_core::llm::LlmContent::ToolResult {
+                            content: vec![LlmContent::ToolResult {
                                 tool_call_id: tc.call_id.clone(),
                                 content: err_msg,
                                 is_error: true,
@@ -243,7 +256,7 @@ impl Agent {
                             name: Some(tc.name.clone()),
                         });
                         all_tool_results.push(err_result);
-                    }
+                    },
                 }
             }
         }
@@ -252,7 +265,6 @@ impl Agent {
 
 /// Output from an agent turn.
 pub struct AgentTurnOutput {
-    pub turn_id: TurnId,
     pub text: String,
     pub finish_reason: String,
     pub tool_results: Vec<ToolResult>,

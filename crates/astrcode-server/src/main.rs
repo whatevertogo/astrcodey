@@ -1,9 +1,12 @@
 //! astrcode-server binary — stdio JSON-RPC server.
 
-use astrcode_protocol::events::ServerEvent;
-use astrcode_server::handler::CommandHandler;
-use astrcode_server::transport::{write_initialize_response, ServerTransport, StdioTransport};
 use std::sync::Arc;
+
+use astrcode_protocol::events::ClientNotification;
+use astrcode_server::{
+    handler::CommandHandler,
+    transport::{ServerTransport, StdioTransport, write_initialize_response},
+};
 
 #[tokio::main]
 async fn main() {
@@ -17,7 +20,7 @@ async fn main() {
         Err(e) => {
             tracing::error!("Bootstrap failed: {e}");
             std::process::exit(1);
-        }
+        },
     };
 
     let (cmd_tx, mut transport) = StdioTransport::new_channel();
@@ -40,7 +43,7 @@ async fn main() {
                     let mut handle = stdout.lock();
                     let _ = handle.write_all(line.as_bytes());
                     let _ = handle.flush();
-                }
+                },
                 Err(_) => break,
             }
         }
@@ -49,7 +52,7 @@ async fn main() {
     tracing::info!("Server ready");
     while let Some(cmd) = transport.read_command().await {
         if let Err(e) = handler.handle(cmd).await {
-            let _ = event_tx.send(ServerEvent::Error {
+            let _ = event_tx.send(ClientNotification::Error {
                 code: -32603,
                 message: e.to_string(),
             });
