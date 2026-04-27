@@ -3,11 +3,10 @@
 //! Two-layer design prevents extension reloads from losing core tools.
 //! Pattern adopted from astrcode reference.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::tool::{Tool, ToolDefinition, ToolError, ToolResult};
+use tokio::sync::RwLock;
 
 /// Routes tool calls to the correct invoker.
 ///

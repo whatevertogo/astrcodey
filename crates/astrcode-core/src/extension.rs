@@ -60,7 +60,7 @@ pub trait Extension: Send + Sync {
 
 /// Core lifecycle events that extensions can subscribe to.
 ///
-/// 7 events covering the session/turn/tool/input lifecycle.
+/// 9 events covering the session/turn/tool/provider lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionEvent {
@@ -76,8 +76,44 @@ pub enum ExtensionEvent {
     PreToolUse,
     PostToolUse,
 
+    // LLM provider hooks
+    BeforeProviderRequest,
+    AfterProviderResponse,
+
     // User input
     UserPromptSubmit,
+}
+
+// ─── Extension Manifest ──────────────────────────────────────────────────
+
+/// Manifest parsed from an extension's `extension.json`.
+///
+/// Used by the filesystem loader to discover extensions before
+/// loading their native library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionManifest {
+    pub id: String,
+    pub name: String,
+    /// Native library path relative to the extension directory (`.dll` / `.so`).
+    pub library: String,
+    /// Events this extension subscribes to.
+    #[serde(default)]
+    pub subscriptions: Vec<ManifestSubscription>,
+    /// Static tool definitions.
+    #[serde(default)]
+    pub tools: Vec<ToolDefinition>,
+    /// Static slash command definitions.
+    #[serde(default)]
+    pub slash_commands: Vec<SlashCommand>,
+}
+
+/// A subscription entry in the manifest JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestSubscription {
+    #[serde(rename = "event")]
+    pub event: ExtensionEvent,
+    #[serde(rename = "mode")]
+    pub mode: HookMode,
 }
 
 // ─── Hook Input / Output ─────────────────────────────────────────────────
@@ -134,6 +170,14 @@ pub enum HookEffect {
 
     /// Modify the tool result content after execution (PostToolUse).
     ModifiedResult { content: String },
+
+    /// Modify the message list before sending to the LLM (BeforeProviderRequest).
+    ModifiedMessages {
+        messages: Vec<crate::llm::LlmMessage>,
+    },
+
+    /// Modify the LLM output text after streaming (AfterProviderResponse).
+    ModifiedOutput { text: String },
 }
 
 // ─── Extension Capabilities Summary ──────────────────────────────────────
@@ -197,6 +241,22 @@ pub trait ExtensionContext: Send + Sync {
 
     /// Current PostToolUse payload, if this context is for a tool hook.
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        None
+    }
+
+    /// Register a tool for dynamic injection into the capability router.
+    ///
+    /// Tools registered via this method are collected after SessionStart
+    /// and applied via `apply_dynamic()`.
+    fn register_tool(&self, _def: ToolDefinition) {}
+
+    /// Drain all tools registered through `register_tool()`.
+    fn drain_registered_tools(&self) -> Vec<ToolDefinition> {
+        vec![]
+    }
+
+    /// Messages about to be sent to the LLM (for BeforeProviderRequest hooks).
+    fn provider_messages(&self) -> Option<Vec<crate::llm::LlmMessage>> {
         None
     }
 

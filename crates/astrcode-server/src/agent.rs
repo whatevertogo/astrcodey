@@ -14,7 +14,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::{
     context::ServerExtensionContext,
-    runner::{ExtensionRunner, ToolHookOutcome},
+    runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
 };
 use astrcode_support::shell::resolve_shell;
 use tokio::sync::mpsc;
@@ -125,7 +125,29 @@ impl Agent {
         let mut all_tool_results: Vec<ToolResult> = Vec::new();
 
         loop {
-            let mut rx = self.llm.generate(messages.clone(), tools.clone()).await?;
+            // --- BeforeProviderRequest hook ---
+            let mut send_messages = messages.clone();
+            {
+                let mut ext_ctx = self.build_ext_ctx();
+                ext_ctx.set_provider_messages(send_messages.clone());
+                match self
+                    .extension_runner
+                    .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &ext_ctx)
+                    .await?
+                {
+                    ProviderHookOutcome::Blocked { reason } => {
+                        self.extension_runner
+                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                            .await?;
+                        return Err(AgentError::Llm(reason));
+                    },
+                    ProviderHookOutcome::ModifiedMessages { messages } => {
+                        send_messages = messages;
+                    },
+                    ProviderHookOutcome::Allow => {},
+                }
+            }
+            let mut rx = self.llm.generate(send_messages, tools.clone()).await?;
             let message_id = new_message_id();
             let mut message_started = false;
             let mut current_text = String::new();
@@ -221,6 +243,12 @@ impl Agent {
                     },
                 }
             }
+
+            // --- AfterProviderResponse hook ---
+            let _ = self
+                .extension_runner
+                .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
+                .await;
 
             for tc in &tool_calls {
                 let args: serde_json::Value =

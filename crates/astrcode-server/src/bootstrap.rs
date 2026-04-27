@@ -1,23 +1,21 @@
 //! Server bootstrap — assembles all services from config.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use astrcode_ai::openai::OpenAiProvider;
 use astrcode_context::{
-    budget::ToolResultBudget,
-    file_access::FileAccessTracker,
-    settings::ContextWindowSettings,
+    budget::ToolResultBudget, file_access::FileAccessTracker, settings::ContextWindowSettings,
 };
-use astrcode_core::config::{ConfigStore, EffectiveConfig};
-use astrcode_core::llm::{LlmClientConfig, LlmProvider};
-use astrcode_core::prompt::PromptProvider;
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_core::{
+    config::{ConfigStore, EffectiveConfig},
+    llm::{LlmClientConfig, LlmProvider},
+    prompt::PromptProvider,
+};
+use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_tools::registry::ToolRegistry;
 
-use crate::capability::CapabilityRouter;
-use crate::session::SessionManager;
+use crate::{capability::CapabilityRouter, session::SessionManager};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -106,7 +104,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let prompt_provider: Arc<dyn PromptProvider> = Arc::new(composer);
 
     // 4. Build capability router with stable built-in tools
-    let cwd = opts.working_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let cwd = opts
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let mut tool_registry = ToolRegistry::new();
     tool_registry.register_builtins(cwd.clone(), effective.llm.read_timeout_secs);
 
@@ -125,18 +126,30 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     };
     let session_manager = Arc::new(SessionManager::new(store));
 
-    // 6. Extension runner
+    // 6. Extension runner — load from disk then bind core services
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
+    let wd_str = opts
+        .working_dir
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let load_result = ExtensionLoader::load_all(wd_str.as_deref()).await;
+    for ext in load_result.extensions {
+        extension_runner.register(ext).await;
+    }
+    for err in &load_result.errors {
+        tracing::warn!("Extension load error: {err}");
+    }
 
     // 7. Context window management
     let context_settings = ContextWindowSettings::default();
     let tool_result_budget = Arc::new(ToolResultBudget::new(
-        context_settings.summary_reserve_tokens * 3,          // aggregate
-        context_settings.max_tracked_files * 1024,            // inline
-        context_settings.recovery_token_budget * 3,           // preview
+        context_settings.summary_reserve_tokens * 3, // aggregate
+        context_settings.max_tracked_files * 1024,   // inline
+        context_settings.recovery_token_budget * 3,  // preview
     ));
-    let file_access_tracker =
-        Arc::new(std::sync::Mutex::new(FileAccessTracker::new(context_settings.max_tracked_files)));
+    let file_access_tracker = Arc::new(std::sync::Mutex::new(FileAccessTracker::new(
+        context_settings.max_tracked_files,
+    )));
 
     Ok(ServerRuntime {
         session_manager,

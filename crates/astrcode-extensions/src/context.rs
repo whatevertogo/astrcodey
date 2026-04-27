@@ -1,11 +1,15 @@
 //! Extension context — restricted session/services view for extensions.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
     extension::{ExtensionContext, PostToolUseInput, PreToolUseInput},
+    llm::LlmMessage,
     tool::ToolDefinition,
 };
 use tokio::sync::mpsc;
@@ -24,6 +28,8 @@ pub struct ServerExtensionContext {
     custom_event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     pre_tool_use_input: Option<PreToolUseInput>,
     post_tool_use_input: Option<PostToolUseInput>,
+    pending_tools: Mutex<Vec<ToolDefinition>>,
+    provider_messages: Option<Vec<LlmMessage>>,
 }
 
 impl ServerExtensionContext {
@@ -37,6 +43,8 @@ impl ServerExtensionContext {
             custom_event_tx: None,
             pre_tool_use_input: None,
             post_tool_use_input: None,
+            pending_tools: Mutex::new(Vec::new()),
+            provider_messages: None,
         }
     }
 
@@ -67,6 +75,16 @@ impl ServerExtensionContext {
         self.post_tool_use_input = Some(input);
     }
 
+    /// Attach provider messages for BeforeProviderRequest hooks.
+    pub fn set_provider_messages(&mut self, messages: Vec<LlmMessage>) {
+        self.provider_messages = Some(messages);
+    }
+
+    /// Take the pending tool registrations out.
+    pub fn take_pending_tools(&mut self) -> Vec<ToolDefinition> {
+        std::mem::take(&mut *self.pending_tools.lock().unwrap())
+    }
+
     /// Build a lightweight snapshot of this context, shareable across threads.
     pub fn snapshot(&self) -> Arc<ServerExtensionContextSnapshot> {
         Arc::new(ServerExtensionContextSnapshot {
@@ -75,6 +93,7 @@ impl ServerExtensionContext {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            provider_messages: self.provider_messages.clone(),
         })
     }
 }
@@ -86,6 +105,7 @@ pub struct ServerExtensionContextSnapshot {
     model_selection: ModelSelection,
     pre_tool_use_input: Option<PreToolUseInput>,
     post_tool_use_input: Option<PostToolUseInput>,
+    provider_messages: Option<Vec<LlmMessage>>,
 }
 
 #[async_trait::async_trait]
@@ -112,6 +132,9 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.post_tool_use_input.clone()
     }
+    fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
+        self.provider_messages.clone()
+    }
     fn log_warn(&self, msg: &str) {
         tracing::warn!("[extension] {msg}");
     }
@@ -122,6 +145,7 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            provider_messages: self.provider_messages.clone(),
         })
     }
 }
@@ -165,6 +189,18 @@ impl ExtensionContext for ServerExtensionContext {
         self.post_tool_use_input.clone()
     }
 
+    fn register_tool(&self, def: ToolDefinition) {
+        self.pending_tools.lock().unwrap().push(def);
+    }
+
+    fn drain_registered_tools(&self) -> Vec<ToolDefinition> {
+        std::mem::take(&mut *self.pending_tools.lock().unwrap())
+    }
+
+    fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
+        self.provider_messages.clone()
+    }
+
     fn log_warn(&self, msg: &str) {
         tracing::warn!("[extension] {msg}");
     }
@@ -176,6 +212,7 @@ impl ExtensionContext for ServerExtensionContext {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            provider_messages: self.provider_messages.clone(),
         })
     }
 }
