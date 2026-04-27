@@ -1,6 +1,6 @@
 //! Keyboard input → Action mapping.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyEvent, KeyEventKind};
 
 /// Actions that drive the TUI event loop.
 #[derive(Debug, Clone)]
@@ -16,23 +16,13 @@ pub fn map_key(event: KeyEvent) -> Option<Action> {
         return None;
     }
 
-    match event {
-        KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::Quit),
-        KeyEvent {
-            code: KeyCode::Char('q'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => Some(Action::Quit),
-        _ => Some(Action::Key(event)),
-    }
+    Some(Action::Key(event))
 }
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
     use super::*;
 
     #[test]
@@ -49,6 +39,16 @@ mod tests {
     fn keeps_press_events() {
         let event =
             KeyEvent::new_with_kind(KeyCode::Char('好'), KeyModifiers::NONE, KeyEventKind::Press);
+        assert!(matches!(map_key(event), Some(Action::Key(_))));
+    }
+
+    #[test]
+    fn ctrl_c_is_not_a_quit_shortcut() {
+        let event = KeyEvent::new_with_kind(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
         assert!(matches!(map_key(event), Some(Action::Key(_))));
     }
 }

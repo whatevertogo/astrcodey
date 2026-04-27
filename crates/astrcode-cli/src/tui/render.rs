@@ -138,7 +138,7 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
         format!("  ·  sessions: {}", state.available_sessions.len())
     };
     let line = format!(
-        "{}  ·  session: {}{}  ·  Enter send  ·  Shift+Enter newline  ·  Ctrl+C quit",
+        "{}  ·  session: {}{}  ·  Enter send  ·  Shift+Enter newline  ·  Esc stop  ·  /quit exit",
         model, session, sessions
     );
     frame.render_widget(

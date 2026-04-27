@@ -96,8 +96,14 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
         KeyCode::Esc => {
             if state.show_slash_palette {
                 state.close_slash();
+            } else if state.is_streaming {
+                client
+                    .send_command(&ClientCommand::Abort)
+                    .await
+                    .map_err(io_error)?;
+                state.status = "Stopping turn".into();
+                state.mark_dirty();
             } else {
-                state.should_quit = true;
                 state.mark_dirty();
             }
         },
@@ -175,18 +181,25 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
 }
 
 async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
-    let input = state.take_input();
-    let input = input.trim_end().to_string();
+    let input = state.input.trim_end().to_string();
     if input.trim().is_empty() {
         state.mark_dirty();
         return Ok(());
     }
 
     if let Some(command) = slash::parse(&input) {
+        state.take_input();
         execute_slash_command(command, state, client).await?;
         return Ok(());
     }
 
+    if state.is_streaming {
+        state.status = "Turn running · Esc stop".into();
+        state.mark_dirty();
+        return Ok(());
+    }
+
+    let input = state.take_input().trim_end().to_string();
     state.remember_input(&input);
     state.push_user(&input);
     client

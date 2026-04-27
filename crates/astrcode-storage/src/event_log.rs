@@ -3,6 +3,7 @@
 use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
+    sync::Mutex,
 };
 
 use astrcode_core::{event::Event, storage::StorageError};
@@ -13,6 +14,7 @@ use astrcode_core::{event::Event, storage::StorageError};
 /// flat JSON objects and never modified. Storage assigns `seq` at append time.
 pub struct EventLog {
     path: PathBuf,
+    next_seq: Mutex<u64>,
 }
 
 impl EventLog {
@@ -27,7 +29,13 @@ impl EventLog {
         let mut file = std::fs::File::create(&path)?;
         let line = serde_json::to_string(&event)?;
         writeln!(file, "{}", line)?;
-        Ok((Self { path }, event))
+        Ok((
+            Self {
+                path,
+                next_seq: Mutex::new(1),
+            },
+            event,
+        ))
     }
 
     /// Open an existing event log.
@@ -38,12 +46,20 @@ impl EventLog {
                 path.display()
             )));
         }
-        Ok(Self { path })
+        let next_seq = count_lines(&path)? as u64;
+        Ok(Self {
+            path,
+            next_seq: Mutex::new(next_seq),
+        })
     }
 
     /// Append a durable event to the log and return it with its assigned seq.
     pub async fn append(&self, mut event: Event) -> Result<Event, StorageError> {
-        let seq = self.count().await? as u64;
+        let mut next_seq = self
+            .next_seq
+            .lock()
+            .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
+        let seq = *next_seq;
         event.seq = Some(seq);
 
         let mut file = std::fs::OpenOptions::new()
@@ -52,6 +68,7 @@ impl EventLog {
             .open(&self.path)?;
         let line = serde_json::to_string(&event)?;
         writeln!(file, "{}", line)?;
+        *next_seq += 1;
         Ok(event)
     }
 
@@ -73,15 +90,23 @@ impl EventLog {
 
     /// Count total events.
     pub async fn count(&self) -> Result<usize, StorageError> {
-        let file = std::fs::File::open(&self.path)?;
-        let reader = BufReader::new(file);
-        Ok(reader.lines().count())
+        let next_seq = self
+            .next_seq
+            .lock()
+            .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
+        Ok(*next_seq as usize)
     }
 
     /// Get the file path.
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
+}
+
+fn count_lines(path: &PathBuf) -> Result<usize, StorageError> {
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    Ok(reader.lines().count())
 }
 
 /// Streaming iterator over event log lines.
@@ -153,17 +178,23 @@ impl BatchAppender {
         }
 
         let count = self.buffer.len();
-        let mut next_seq = self.log.count().await? as u64;
+        let mut next_seq = self
+            .log
+            .next_seq
+            .lock()
+            .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
+        let mut seq = *next_seq;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log.path())?;
         for event in &mut self.buffer {
-            event.seq = Some(next_seq);
-            next_seq += 1;
+            event.seq = Some(seq);
+            seq += 1;
             let line = serde_json::to_string(event)?;
             writeln!(file, "{}", line)?;
         }
+        *next_seq = seq;
         self.buffer.clear();
         Ok(count)
     }
@@ -215,6 +246,37 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, Some(0));
         assert_eq!(events[1].seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn open_continues_seq_from_existing_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        let (log, _) = EventLog::create(path.clone(), make_start_event("s1"))
+            .await
+            .unwrap();
+        log.append(Event::new(
+            "s1".into(),
+            Some("turn-1".into()),
+            EventPayload::TurnStarted,
+        ))
+        .await
+        .unwrap();
+
+        let reopened = EventLog::open(path).await.unwrap();
+        let appended = reopened
+            .append(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnCompleted {
+                    finish_reason: "stop".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(appended.seq, Some(2));
+        assert_eq!(reopened.count().await.unwrap(), 3);
     }
 
     #[tokio::test]

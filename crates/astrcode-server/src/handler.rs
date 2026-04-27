@@ -13,7 +13,10 @@ use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, MessageDto, SessionListItem, SessionSnapshot},
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::{
+    sync::{broadcast, mpsc},
+    task::JoinHandle,
+};
 
 use crate::{agent::Agent, bootstrap::ServerRuntime};
 
@@ -22,6 +25,13 @@ pub struct CommandHandler {
     runtime: Arc<ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
     active_session_id: Option<SessionId>,
+    active_turn: Option<ActiveTurn>,
+}
+
+struct ActiveTurn {
+    session_id: SessionId,
+    turn_id: TurnId,
+    handle: JoinHandle<()>,
 }
 
 impl CommandHandler {
@@ -33,10 +43,13 @@ impl CommandHandler {
             runtime,
             event_tx,
             active_session_id: None,
+            active_turn: None,
         }
     }
 
     pub async fn handle(&mut self, cmd: ClientCommand) -> Result<(), String> {
+        self.clear_finished_turn();
+
         match cmd {
             ClientCommand::CreateSession { working_dir } => {
                 self.create_session(working_dir).await;
@@ -69,19 +82,7 @@ impl CommandHandler {
             },
 
             ClientCommand::Abort => {
-                if let Some(sid) = self.active_session_id.clone() {
-                    let _ = self
-                        .record_and_broadcast(
-                            &sid,
-                            None,
-                            EventPayload::AgentRunCompleted {
-                                reason: "aborted".into(),
-                            },
-                        )
-                        .await;
-                } else {
-                    self.send_error(40400, "No active session");
-                }
+                self.abort_active_turn().await?;
             },
 
             ClientCommand::ResumeSession { session_id }
@@ -124,6 +125,11 @@ impl CommandHandler {
     }
 
     async fn submit_prompt(&mut self, text: String) -> Result<(), String> {
+        if self.active_turn.is_some() {
+            self.send_error(40900, "A turn is already running");
+            return Ok(());
+        }
+
         let sid = self.ensure_session().await?;
         let session = self
             .runtime
@@ -151,87 +157,64 @@ impl CommandHandler {
         self.record_and_broadcast(&sid, Some(&turn_id), EventPayload::AgentRunStarted)
             .await?;
 
-        let agent = Agent::new(
+        let handle = spawn_agent_turn(
+            self.runtime.clone(),
+            self.event_tx.clone(),
             sid.clone(),
+            turn_id.clone(),
             working_dir,
-            self.runtime.llm_provider.clone(),
-            self.runtime.prompt_provider.clone(),
-            self.runtime.capability.clone(),
-            self.runtime.effective.llm.model_id.clone(),
+            history,
+            text,
         );
-
-        let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel();
-        let text_for_agent = text.clone();
-        let agent_task = tokio::spawn(async move {
-            agent
-                .process_prompt(&text_for_agent, history, Some(agent_event_tx))
-                .await
+        self.active_turn = Some(ActiveTurn {
+            session_id: sid,
+            turn_id,
+            handle,
         });
-
-        let mut emitted_error = false;
-        while let Some(payload) = agent_event_rx.recv().await {
-            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-                emitted_error = true;
-            }
-            self.record_and_broadcast(&sid, Some(&turn_id), payload)
-                .await?;
-        }
-
-        match agent_task
-            .await
-            .map_err(|e| format!("agent task failed: {e}"))?
-        {
-            Ok(output) => {
-                self.record_and_broadcast(
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::TurnCompleted {
-                        finish_reason: output.finish_reason.clone(),
-                    },
-                )
-                .await?;
-                self.record_and_broadcast(
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::AgentRunCompleted {
-                        reason: output.finish_reason,
-                    },
-                )
-                .await?;
-            },
-            Err(e) => {
-                if !emitted_error {
-                    self.record_and_broadcast(
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: e.to_string(),
-                            recoverable: false,
-                        },
-                    )
-                    .await?;
-                }
-                self.record_and_broadcast(
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::TurnCompleted {
-                        finish_reason: "error".into(),
-                    },
-                )
-                .await?;
-                self.record_and_broadcast(
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::AgentRunCompleted {
-                        reason: "error".into(),
-                    },
-                )
-                .await?;
-            },
-        }
-
         Ok(())
+    }
+
+    async fn abort_active_turn(&mut self) -> Result<(), String> {
+        let Some(active_turn) = self.active_turn.take() else {
+            self.send_error(40400, "No active turn");
+            return Ok(());
+        };
+
+        if !active_turn.handle.is_finished() {
+            active_turn.handle.abort();
+        }
+
+        record_and_broadcast(
+            &self.runtime,
+            &self.event_tx,
+            &active_turn.session_id,
+            Some(&active_turn.turn_id),
+            EventPayload::TurnCompleted {
+                finish_reason: "aborted".into(),
+            },
+        )
+        .await?;
+        record_and_broadcast(
+            &self.runtime,
+            &self.event_tx,
+            &active_turn.session_id,
+            Some(&active_turn.turn_id),
+            EventPayload::AgentRunCompleted {
+                reason: "aborted".into(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn clear_finished_turn(&mut self) {
+        if self
+            .active_turn
+            .as_ref()
+            .is_some_and(|active_turn| active_turn.handle.is_finished())
+        {
+            self.active_turn = None;
+        }
     }
 
     async fn resume_session(&mut self, session_id: SessionId) {
@@ -283,19 +266,7 @@ impl CommandHandler {
         turn_id: Option<&TurnId>,
         payload: EventPayload,
     ) -> Result<Event, String> {
-        let event = Event::new(session_id.clone(), turn_id.cloned(), payload);
-        let event = if event.payload.is_durable() {
-            self.runtime
-                .session_manager
-                .append_event(event)
-                .await
-                .map_err(|e| e.to_string())?
-        } else {
-            event
-        };
-
-        let _ = self.event_tx.send(ClientNotification::Event(event.clone()));
-        Ok(event)
+        record_and_broadcast(&self.runtime, &self.event_tx, session_id, turn_id, payload).await
     }
 
     fn send_error(&self, code: i32, message: &str) {
@@ -304,6 +275,149 @@ impl CommandHandler {
             message: message.into(),
         });
     }
+}
+
+fn spawn_agent_turn(
+    runtime: Arc<ServerRuntime>,
+    event_tx: broadcast::Sender<ClientNotification>,
+    sid: SessionId,
+    turn_id: TurnId,
+    working_dir: String,
+    history: Vec<LlmMessage>,
+    text: String,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let agent = Agent::new(
+            sid.clone(),
+            working_dir,
+            runtime.llm_provider.clone(),
+            runtime.prompt_provider.clone(),
+            runtime.capability.clone(),
+            runtime.effective.llm.model_id.clone(),
+        );
+
+        let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel();
+        let agent_future = agent.process_prompt(&text, history, Some(agent_event_tx));
+        tokio::pin!(agent_future);
+
+        let mut emitted_error = false;
+        let mut events_closed = false;
+        let output = loop {
+            tokio::select! {
+                result = &mut agent_future => break result,
+                payload = agent_event_rx.recv(), if !events_closed => {
+                    match payload {
+                        Some(payload) => {
+                            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                                emitted_error = true;
+                            }
+                            let _ = record_and_broadcast(
+                                &runtime,
+                                &event_tx,
+                                &sid,
+                                Some(&turn_id),
+                                payload,
+                            )
+                            .await;
+                        },
+                        None => {
+                            events_closed = true;
+                        },
+                    }
+                },
+            }
+        };
+
+        while let Some(payload) = agent_event_rx.recv().await {
+            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                emitted_error = true;
+            }
+            let _ = record_and_broadcast(&runtime, &event_tx, &sid, Some(&turn_id), payload).await;
+        }
+
+        match output {
+            Ok(output) => {
+                let _ = record_and_broadcast(
+                    &runtime,
+                    &event_tx,
+                    &sid,
+                    Some(&turn_id),
+                    EventPayload::TurnCompleted {
+                        finish_reason: output.finish_reason.clone(),
+                    },
+                )
+                .await;
+                let _ = record_and_broadcast(
+                    &runtime,
+                    &event_tx,
+                    &sid,
+                    Some(&turn_id),
+                    EventPayload::AgentRunCompleted {
+                        reason: output.finish_reason,
+                    },
+                )
+                .await;
+            },
+            Err(e) => {
+                if !emitted_error {
+                    let _ = record_and_broadcast(
+                        &runtime,
+                        &event_tx,
+                        &sid,
+                        Some(&turn_id),
+                        EventPayload::ErrorOccurred {
+                            code: -32603,
+                            message: e.to_string(),
+                            recoverable: false,
+                        },
+                    )
+                    .await;
+                }
+                let _ = record_and_broadcast(
+                    &runtime,
+                    &event_tx,
+                    &sid,
+                    Some(&turn_id),
+                    EventPayload::TurnCompleted {
+                        finish_reason: "error".into(),
+                    },
+                )
+                .await;
+                let _ = record_and_broadcast(
+                    &runtime,
+                    &event_tx,
+                    &sid,
+                    Some(&turn_id),
+                    EventPayload::AgentRunCompleted {
+                        reason: "error".into(),
+                    },
+                )
+                .await;
+            },
+        }
+    })
+}
+
+async fn record_and_broadcast(
+    runtime: &ServerRuntime,
+    event_tx: &broadcast::Sender<ClientNotification>,
+    session_id: &SessionId,
+    turn_id: Option<&TurnId>,
+    payload: EventPayload,
+) -> Result<Event, String> {
+    let event = Event::new(session_id.clone(), turn_id.cloned(), payload);
+    let event = if event.payload.is_durable() {
+        runtime
+            .session_manager
+            .append_event(event)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        event
+    };
+
+    let _ = event_tx.send(ClientNotification::Event(event.clone()));
+    Ok(event)
 }
 
 fn message_to_dto(message: &LlmMessage) -> MessageDto {
@@ -331,7 +445,7 @@ fn content_to_text(content: &LlmContent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{future, sync::Arc, time::Duration};
 
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
@@ -388,10 +502,30 @@ mod tests {
         }
     }
 
-    fn test_runtime() -> Arc<ServerRuntime> {
+    struct PendingLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for PendingLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            future::pending().await
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         Arc::new(ServerRuntime {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
-            llm_provider: Arc::new(MockLlm),
+            llm_provider,
             prompt_provider: Arc::new(EmptyPrompt),
             capability: Arc::new(CapabilityRouter::new()),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
@@ -415,6 +549,57 @@ mod tests {
         })
     }
 
+    fn test_runtime() -> Arc<ServerRuntime> {
+        test_runtime_with_llm(Arc::new(MockLlm))
+    }
+
+    async fn recv_event(
+        event_rx: &mut broadcast::Receiver<ClientNotification>,
+    ) -> ClientNotification {
+        tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open")
+    }
+
+    async fn wait_for_turn_completed(
+        event_rx: &mut broadcast::Receiver<ClientNotification>,
+    ) -> String {
+        loop {
+            let notification = recv_event(event_rx).await;
+            let ClientNotification::Event(event) = notification else {
+                continue;
+            };
+            if let EventPayload::TurnCompleted { finish_reason } = event.payload {
+                return finish_reason;
+            }
+        }
+    }
+
+    async fn collect_turn_ids_until_completed(
+        event_rx: &mut broadcast::Receiver<ClientNotification>,
+    ) -> (String, Vec<Option<TurnId>>) {
+        let mut turn_ids = Vec::new();
+        loop {
+            let notification = recv_event(event_rx).await;
+            let ClientNotification::Event(event) = notification else {
+                continue;
+            };
+            match event.payload {
+                EventPayload::TurnStarted
+                | EventPayload::UserMessage { .. }
+                | EventPayload::AssistantMessageCompleted { .. } => {
+                    turn_ids.push(event.turn_id);
+                },
+                EventPayload::TurnCompleted { finish_reason } => {
+                    turn_ids.push(event.turn_id);
+                    return (finish_reason, turn_ids);
+                },
+                _ => {},
+            }
+        }
+    }
+
     #[tokio::test]
     async fn submit_prompt_uses_one_turn_id_for_turn_events() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
@@ -433,22 +618,8 @@ mod tests {
             })
             .await
             .unwrap();
-
-        let mut turn_ids = Vec::new();
-        while let Ok(notification) = event_rx.try_recv() {
-            let ClientNotification::Event(event) = notification else {
-                continue;
-            };
-            match event.payload {
-                EventPayload::TurnStarted
-                | EventPayload::UserMessage { .. }
-                | EventPayload::AssistantMessageCompleted { .. }
-                | EventPayload::TurnCompleted { .. } => {
-                    turn_ids.push(event.turn_id);
-                },
-                _ => {},
-            }
-        }
+        let (finish_reason, turn_ids) = collect_turn_ids_until_completed(&mut event_rx).await;
+        assert_eq!(finish_reason, "stop");
 
         assert!(
             turn_ids.len() >= 4,
@@ -460,5 +631,71 @@ mod tests {
             turn_ids.iter().all(|turn_id| *turn_id == first),
             "all events in one prompt should share the same turn_id"
         );
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_rejects_second_running_turn() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+        let mut handler =
+            CommandHandler::new(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "first".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "second".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+
+        let mut saw_busy = false;
+        while let Ok(notification) = event_rx.try_recv() {
+            if let ClientNotification::Error { code: 40900, .. } = notification {
+                saw_busy = true;
+                break;
+            }
+        }
+        assert!(saw_busy, "second prompt should be rejected while turn runs");
+
+        handler.handle(ClientCommand::Abort).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abort_stops_active_turn_and_records_completion() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+        let mut handler =
+            CommandHandler::new(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "keep running".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(handler.active_turn.is_some());
+
+        handler.handle(ClientCommand::Abort).await.unwrap();
+
+        assert!(handler.active_turn.is_none());
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
     }
 }
