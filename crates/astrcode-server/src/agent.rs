@@ -15,7 +15,6 @@ use astrcode_core::{
     event::EventPayload,
     extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    prompt::{PromptContext, PromptProvider},
     tool::{ExecutionMode, ToolDefinition, ToolResult},
     types::*,
 };
@@ -23,7 +22,6 @@ use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
 };
-use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
@@ -43,20 +41,16 @@ pub struct Agent {
     model_id: String,
     /// LLM 提供者，负责与语言模型通信。
     llm: Arc<dyn LlmProvider>,
-    /// 提示词组装器，负责生成系统提示词和上下文。
-    prompt: Arc<dyn PromptProvider>,
+    /// 会话初始化时固定下来的完整 system prompt。
+    system_prompt: String,
     /// 工具注册表，包含当前会话可用的所有工具定义。
     tool_registry: Arc<ToolRegistry>,
     /// 扩展运行器，用于分发 PreToolUse / PostToolUse 等钩子事件。
     extension_runner: Arc<ExtensionRunner>,
     /// 工具结果裁剪状态，用于在超出字节限制时截断工具输出。
     pruner: PruneState,
-    /// 当前会话的 prompt 自定义变量快照，由 PromptBuild 钩子在会话初始化时生成。
-    prompt_custom: BTreeMap<String, String>,
     /// 工具白名单。设置后仅允许调用列表中的工具，用于子会话等受限场景。
     tool_allowlist: Option<HashSet<String>>,
-    /// 追加到系统提示词末尾的额外内容。
-    system_prompt_suffix: Option<String>,
 }
 
 impl Agent {
@@ -66,7 +60,7 @@ impl Agent {
     /// - `session_id`: 所属会话的唯一标识
     /// - `working_dir`: 当前工作目录
     /// - `llm`: LLM 提供者（如 OpenAI）
-    /// - `prompt`: 提示词组装器
+    /// - `system_prompt`: 会话初始化时固定下来的完整 system prompt
     /// - `tool_registry`: 当前会话快照中的工具注册表
     /// - `extension_runner`: 扩展运行器，用于分发钩子事件
     /// - `model_id`: 使用的模型标识
@@ -76,7 +70,7 @@ impl Agent {
         session_id: SessionId,
         working_dir: String,
         llm: Arc<dyn LlmProvider>,
-        prompt: Arc<dyn PromptProvider>,
+        system_prompt: String,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
         model_id: String,
@@ -87,38 +81,18 @@ impl Agent {
             working_dir,
             model_id,
             llm,
-            prompt,
+            system_prompt,
             tool_registry,
             extension_runner,
             pruner: PruneState::new(max_tool_result_bytes),
-            prompt_custom: BTreeMap::new(),
             tool_allowlist: None,
-            system_prompt_suffix: None,
         }
-    }
-
-    /// 设置当前会话的 prompt 自定义变量快照。
-    ///
-    /// 这些变量来自 `PromptBuild` 扩展钩子，在会话创建/恢复时刷新一次；
-    /// Agent 回合内只读取快照，避免每轮重新收集插件提示导致上下文漂移。
-    pub fn with_prompt_custom(mut self, custom: BTreeMap<String, String>) -> Self {
-        self.prompt_custom = custom;
-        self
     }
 
     /// 设置工具白名单，仅允许调用指定名称的工具。
     /// 用于子会话等需要限制可用工具的场景。
     pub fn with_tool_allowlist(mut self, allowed_tools: Vec<String>) -> Self {
         self.tool_allowlist = Some(allowed_tools.into_iter().collect());
-        self
-    }
-
-    /// 设置系统提示词后缀，会追加到提示词组装器生成的系统提示词之后。
-    /// 如果后缀为空白字符串则忽略。
-    pub fn with_system_prompt_suffix(mut self, suffix: String) -> Self {
-        if !suffix.trim().is_empty() {
-            self.system_prompt_suffix = Some(suffix);
-        }
         self
     }
 
@@ -445,8 +419,8 @@ impl Agent {
     ///
     /// 整体流程：
     /// 1. 分发 `TurnStart` 和 `UserPromptSubmit` 扩展事件。
-    /// 2. 读取会话级插件提示快照，组装系统提示词。
-    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM）， 直到 LLM 不再请求工具调用为止。
+    /// 2. 使用 session 初始化时固定下来的 system prompt 构造消息前缀。
+    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM），直到 LLM 不再请求工具调用为止。
     ///
     /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
     /// 由 handler 层包装会话/回合元数据后决定持久化策略。
@@ -485,39 +459,17 @@ impl Agent {
             return Err(e.into());
         }
 
-        // 将用户消息追加到历史记录，作为本轮对话的起点
-        let mut messages = history;
-        messages.push(LlmMessage::user(user_text));
-
-        // 构建提示词上下文，包含运行环境信息和会话级插件提示快照。
-        let prompt_ctx = PromptContext {
-            working_dir: self.working_dir.clone(),
-            os: std::env::consts::OS.into(),
-            shell: resolve_shell().name,
-            date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-            available_tools: tools
-                .iter()
-                .map(|t| t.name.clone())
-                .collect::<Vec<_>>()
-                .join(", "),
-            custom: self.prompt_custom.clone(),
-        };
-
-        // 通过提示词组装器生成最终方案，并将系统提示词（含后缀）插入消息列表头部
-        let plan = self.prompt.assemble(prompt_ctx).await;
-        if plan.system_prompt.is_some() || self.system_prompt_suffix.is_some() {
-            let mut system_parts: Vec<String> = plan.system_prompt.into_iter().collect();
-            if let Some(suffix) = &self.system_prompt_suffix {
-                system_parts.push(suffix.clone());
-            }
-            let system_text = system_parts.join("\n\n");
-            // 若消息列表中已有系统消息则替换，否则插入到最前面
-            if let Some(pos) = messages.iter().position(|m| m.role == LlmRole::System) {
-                messages[pos] = LlmMessage::system(system_text);
-            } else {
-                messages.insert(0, LlmMessage::system(system_text));
-            }
+        // 每轮都以同一份 session system prompt 开头；历史来自 eventlog 投影。
+        let mut messages = Vec::with_capacity(history.len() + 2);
+        if !self.system_prompt.trim().is_empty() {
+            messages.push(LlmMessage::system(self.system_prompt.clone()));
         }
+        messages.extend(
+            history
+                .into_iter()
+                .filter(|message| message.role != LlmRole::System),
+        );
+        messages.push(LlmMessage::user(user_text));
 
         // 累积本轮 Agent 的最终文本输出和所有工具执行结果
         let mut final_text = String::new();

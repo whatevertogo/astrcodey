@@ -60,6 +60,17 @@ pub enum EventPayload {
         parent_session_id: Option<String>,
     },
 
+    /// 会话 system prompt 已固定。
+    ///
+    /// 这是 session 级事实：同一 session 后续回合复用这份提示词，
+    /// 不再按轮次重新组装。
+    SystemPromptConfigured {
+        /// 完整 system prompt 文本。
+        text: String,
+        /// system prompt 文本的稳定指纹，用于调试 prompt 是否漂移。
+        fingerprint: String,
+    },
+
     /// 会话已删除。
     SessionDeleted,
 

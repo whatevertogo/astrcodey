@@ -1,10 +1,10 @@
 //! 会话模块 — 基于事件溯源的持久化会话管理。
 //!
 //! 核心组件：
-//! - [`Session`]: 会话实体，持有内存中的状态和事件广播通道
-//! - [`SessionState`]: 会话的内存投影状态（消息列表、阶段等）
-//! - [`EventReducer`]: 纯函数式事件归约器，将事件应用到状态上
-//! - [`SessionManager`]: 会话管理器，协调内存缓存与持久化存储
+//! - [`Session`][]: 会话实体，持有内存中的状态和事件广播通道
+//! - [`SessionState`][]: 会话的内存投影状态（消息列表、阶段等）
+//! - [`EventReducer`][]: 纯函数式事件归约器，将事件应用到状态上
+//! - [`SessionManager`][]: 会话管理器，协调内存缓存与持久化存储
 
 use std::{
     collections::{HashMap, HashSet},
@@ -47,6 +47,11 @@ pub struct SessionState {
     pub model_id: String,
     /// 当前会话阶段（空闲、思考中、流式输出、调用工具等）
     pub phase: Phase,
+    /// 会话初始化时固定下来的完整 system prompt。
+    ///
+    /// 它来自 durable `SystemPromptConfigured` 事件，不进入 `messages`，
+    /// 避免恢复会话时把大段系统提示展示给用户。
+    pub system_prompt: Option<String>,
     /// 正在等待完成的工具调用 ID 集合
     pub pending_tool_calls: HashSet<ToolCallId>,
     /// ISO 8601 格式的创建时间，由 SessionStarted 事件填充
@@ -61,6 +66,7 @@ impl SessionState {
             working_dir,
             model_id,
             phase: Phase::Idle,
+            system_prompt: None,
             pending_tool_calls: HashSet::new(),
             created_at: String::new(),
         }
@@ -127,7 +133,11 @@ impl EventReducer {
                 state.phase = Phase::Idle;
                 // 清理完整状态，避免已删除 session 的残留数据被误用
                 state.messages.clear();
+                state.system_prompt = None;
                 state.pending_tool_calls.clear();
+            },
+            EventPayload::SystemPromptConfigured { text, .. } => {
+                state.system_prompt = Some(text.clone());
             },
             EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
                 state.phase = Phase::Thinking;

@@ -60,11 +60,11 @@ impl SystemPromptParts {
     pub fn render_system_prompt(&self) -> String {
         let mut sections = Vec::new();
 
-        push_vec_section(&mut sections, "Plugin Instructions", &self.plugin_system);
         push_optional_section(&mut sections, "Identity", self.identity.as_deref());
         push_vec_section(&mut sections, "Environment", &self.environment);
         push_vec_section(&mut sections, "User Rules", &self.user_rules);
         push_vec_section(&mut sections, "Project Rules", &self.project_rules);
+        push_vec_section(&mut sections, "Plugin Instructions", &self.plugin_system);
         push_vec_section(&mut sections, "Skills", &self.skills);
         push_vec_section(&mut sections, "Agents", &self.agents);
         push_vec_section(&mut sections, "Few Shot", &self.few_shot);
@@ -167,5 +167,21 @@ mod tests {
         assert!(plan.prepend_messages.is_empty());
         assert!(plan.append_messages.is_empty());
         assert!(plan.extra_tools.is_empty());
+    }
+
+    #[test]
+    fn system_prompt_renders_plugin_after_project_rules() {
+        let mut parts = SystemPromptParts::default();
+        parts.set_identity("identity");
+        parts.push(PromptSection::ProjectRules, "project");
+        parts.push(PromptSection::PluginSystem, "plugin");
+
+        let rendered = parts.render_system_prompt();
+
+        let identity = rendered.find("# Identity").unwrap();
+        let project = rendered.find("# Project Rules").unwrap();
+        let plugin = rendered.find("# Plugin Instructions").unwrap();
+        assert!(identity < project);
+        assert!(project < plugin);
     }
 }

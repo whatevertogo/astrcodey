@@ -448,6 +448,9 @@ impl TuiState {
                 );
                 self.status = "Ready".into();
             },
+            EventPayload::SystemPromptConfigured { .. } => {
+                // Session context fact only; do not render the full system prompt in transcript.
+            },
             EventPayload::SessionDeleted => {
                 self.active_session_id = None;
                 self.status = "Session deleted".into();

@@ -12,7 +12,6 @@ use std::{
 use astrcode_core::{
     extension::{Extension, ExtensionContext, ExtensionError, HookEffect, HookMode},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
-    prompt::{PromptPlan, PromptProvider},
     tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
@@ -71,29 +70,6 @@ impl Extension for BlockingPreToolExtension {
             }
         }
         Ok(HookEffect::Allow)
-    }
-}
-
-struct EmptyPrompt;
-
-#[async_trait::async_trait]
-impl PromptProvider for EmptyPrompt {
-    async fn assemble(&self, _context: PromptContext) -> PromptPlan {
-        PromptPlan {
-            system_prompt: None,
-            prepend_messages: vec![],
-            append_messages: vec![],
-            extra_tools: vec![],
-        }
-    }
-}
-
-struct FixedPrompt;
-
-#[async_trait::async_trait]
-impl PromptProvider for FixedPrompt {
-    async fn assemble(&self, _context: PromptContext) -> PromptPlan {
-        PromptPlan::from_system_prompt("test system prompt".to_string())
     }
 }
 
@@ -436,7 +412,7 @@ async fn parallel_tools_in_same_batch_overlap() {
             calls: vec![("call-1", "first"), ("call-2", "second")],
             captured_messages: Arc::new(Mutex::new(Vec::new())),
         }),
-        Arc::new(EmptyPrompt),
+        String::new(),
         tool_registry,
         Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
@@ -487,7 +463,7 @@ async fn sequential_tool_splits_parallel_batches() {
             calls: vec![("call-1", "before"), ("call-2", "seq"), ("call-3", "after")],
             captured_messages: Arc::new(Mutex::new(Vec::new())),
         }),
-        Arc::new(EmptyPrompt),
+        String::new(),
         tool_registry,
         Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
@@ -532,7 +508,7 @@ async fn parallel_results_are_committed_in_model_order() {
             calls: vec![("call-1", "slow"), ("call-2", "fast")],
             captured_messages: Arc::clone(&captured_messages),
         }),
-        Arc::new(EmptyPrompt),
+        String::new(),
         tool_registry,
         Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
@@ -574,7 +550,7 @@ async fn parallel_failure_does_not_drop_sibling_result() {
             calls: vec![("call-1", "fail"), ("call-2", "ok")],
             captured_messages: Arc::clone(&captured_messages),
         }),
-        Arc::new(EmptyPrompt),
+        String::new(),
         tool_registry,
         Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
@@ -617,7 +593,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
         Arc::new(ToolThenFinalLlm {
             call_count: AtomicUsize::new(0),
         }),
-        Arc::new(EmptyPrompt),
+        String::new(),
         tool_registry,
         extension_runner,
         "mock".into(),
@@ -654,7 +630,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
 }
 
 #[tokio::test]
-async fn prompt_provider_system_prompt_is_sent_to_llm() {
+async fn session_system_prompt_is_sent_to_llm() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         "session-1".into(),
@@ -662,7 +638,7 @@ async fn prompt_provider_system_prompt_is_sent_to_llm() {
         Arc::new(CapturingLlm {
             messages: Arc::clone(&captured_messages),
         }),
-        Arc::new(FixedPrompt),
+        "test system prompt".to_string(),
         Arc::new(ToolRegistry::new()),
         Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
@@ -680,5 +656,10 @@ async fn prompt_provider_system_prompt_is_sent_to_llm() {
         messages.first().map(|message| &message.role),
         Some(&LlmRole::System)
     );
+    assert!(messages.first().is_some_and(|message| {
+        message.content.iter().any(
+            |content| matches!(content, LlmContent::Text { text } if text == "test system prompt"),
+        )
+    }));
     assert!(messages.iter().any(|message| message.role == LlmRole::User));
 }

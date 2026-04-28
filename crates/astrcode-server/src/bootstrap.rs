@@ -13,13 +13,14 @@ use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
     extension::ExtensionError,
     llm::{LlmClientConfig, LlmProvider},
-    prompt::PromptProvider,
+    prompt::{PromptContext, PromptProvider},
     tool::ToolDefinition,
 };
 use astrcode_extensions::{
     context::ServerExtensionContext, loader::ExtensionLoader, runner::ExtensionRunner,
 };
 use astrcode_storage::config_store::FileConfigStore;
+use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::ToolRegistry;
 
 use crate::{session::SessionManager, session_spawner::ServerSessionSpawner};
@@ -236,12 +237,52 @@ pub(crate) async fn build_tool_registry_snapshot(
     Arc::new(tool_registry)
 }
 
-/// 构建一个会话绑定的插件提示快照。
+/// 构建完整的 session 级 system prompt 快照。
 ///
-/// `PromptBuild` 扩展钩子在这里执行一次，结果写入 `PromptContext.custom`。
-/// 后续同一 session 的每个回合都复用这份快照；创建新 session 或恢复 session
-/// 时会重新刷新。
-pub(crate) async fn build_prompt_custom_snapshot(
+/// `PromptBuild` 扩展钩子、内置 prompt composer 和可选的子 agent 指令
+/// 都只在这里汇合一次。调用方应把结果写入 eventlog，后续回合直接复用。
+pub(crate) async fn build_system_prompt_snapshot(
+    extension_runner: &ExtensionRunner,
+    prompt_provider: &dyn PromptProvider,
+    session_id: &str,
+    working_dir: &str,
+    model_id: &str,
+    tools: &[ToolDefinition],
+    extra_system_prompt: Option<&str>,
+) -> Result<(String, String), ExtensionError> {
+    let mut custom =
+        collect_prompt_custom_sections(extension_runner, session_id, working_dir, model_id, tools)
+            .await?;
+
+    if let Some(extra) = non_empty(extra_system_prompt.unwrap_or_default()) {
+        append_custom_section(&mut custom, "system_prompts", extra);
+    }
+
+    let prompt_ctx = PromptContext {
+        working_dir: working_dir.to_string(),
+        os: std::env::consts::OS.into(),
+        shell: resolve_shell().name,
+        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        available_tools: tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        custom,
+    };
+
+    let plan = prompt_provider.assemble(prompt_ctx).await;
+    let system_prompt = plan.system_prompt.unwrap_or_default();
+    let fingerprint = prompt_fingerprint(&system_prompt);
+    Ok((system_prompt, fingerprint))
+}
+
+/// 构建一次 prompt composer 可消费的插件提示 section。
+///
+/// 这里是 extensions 与 prompt 系统之间的桥接层：插件返回结构化的
+/// `PromptContributions`，server 将其映射成 prompt crate 能消费的通用
+/// `custom` section 文本。prompt crate 不直接知道这些文本来自插件。
+async fn collect_prompt_custom_sections(
     extension_runner: &ExtensionRunner,
     session_id: &str,
     working_dir: &str,
@@ -267,18 +308,31 @@ pub(crate) async fn build_prompt_custom_snapshot(
     let prompt_contributions = extension_runner
         .collect_prompt_contributions(&ext_ctx)
         .await?;
-    let mut prompt_custom = BTreeMap::new();
+    let mut custom_sections = BTreeMap::new();
+    // 这些 key 是 server 到 prompt composer 的内部约定，不属于 extension API。
     if let Some(system_prompts) = join_prompt_parts(prompt_contributions.system_prompts) {
-        prompt_custom.insert("system_prompts".to_string(), system_prompts);
+        custom_sections.insert("system_prompts".to_string(), system_prompts);
     }
     if let Some(skills) = join_prompt_parts(prompt_contributions.skills) {
-        prompt_custom.insert("skills".to_string(), skills);
+        custom_sections.insert("skills".to_string(), skills);
     }
     if let Some(agents) = join_prompt_parts(prompt_contributions.agents) {
-        prompt_custom.insert("agents".to_string(), agents);
+        custom_sections.insert("agents".to_string(), agents);
     }
 
-    Ok(prompt_custom)
+    Ok(custom_sections)
+}
+
+fn append_custom_section(custom: &mut BTreeMap<String, String>, key: &str, value: String) {
+    custom
+        .entry(key.to_string())
+        .and_modify(|existing| {
+            if !existing.trim().is_empty() {
+                existing.push_str("\n\n");
+            }
+            existing.push_str(&value);
+        })
+        .or_insert(value);
 }
 
 fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
@@ -290,6 +344,67 @@ fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
         .join("\n\n");
 
     (!text.is_empty()).then_some(text)
+}
+
+fn non_empty(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn prompt_fingerprint(text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use astrcode_core::prompt::{PromptContext, PromptPlan};
+
+    use super::*;
+
+    struct EchoSystemPrompts;
+
+    #[async_trait::async_trait]
+    impl PromptProvider for EchoSystemPrompts {
+        async fn assemble(&self, context: PromptContext) -> PromptPlan {
+            PromptPlan::from_system_prompt(
+                context
+                    .custom
+                    .get("system_prompts")
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn child_extra_system_prompt_participates_in_snapshot_build() {
+        let runner = ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        );
+
+        let (system_prompt, fingerprint) = build_system_prompt_snapshot(
+            &runner,
+            &EchoSystemPrompts,
+            "session-1",
+            ".",
+            "mock",
+            &[],
+            Some("child body"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(system_prompt, "child body");
+        assert!(!fingerprint.is_empty());
+    }
 }
 
 /// 引导过程中可能出现的错误。

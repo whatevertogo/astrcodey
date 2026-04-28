@@ -21,7 +21,7 @@ use crate::{
     agent::Agent,
     agent_turn::drive_agent,
     agent_types::tool_name_matches_allowlist,
-    bootstrap::{build_prompt_custom_snapshot, build_tool_registry_snapshot},
+    bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot},
     session::SessionManager,
 };
 
@@ -75,6 +75,40 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let child_sid = create_event.session_id.to_string();
         let child_turn_id = new_turn_id();
 
+        let tool_registry = build_tool_registry_snapshot(
+            &self.extension_runner,
+            &request.working_dir,
+            self.read_timeout_secs,
+        )
+        .await;
+
+        let allowed_tools: HashSet<String> = request.allowed_tools.iter().cloned().collect();
+        let mut prompt_tools = tool_registry.list_definitions();
+        if !allowed_tools.is_empty() {
+            prompt_tools.retain(|tool| tool_name_matches_allowlist(&allowed_tools, &tool.name));
+        }
+        let (system_prompt, fingerprint) = build_system_prompt_snapshot(
+            &self.extension_runner,
+            self.prompt.as_ref(),
+            &child_sid,
+            &request.working_dir,
+            &model_id,
+            &prompt_tools,
+            Some(&request.system_prompt),
+        )
+        .await
+        .map_err(|e| format!("build child system prompt: {e}"))?;
+
+        append_child_session_payload(
+            self.session_manager.as_ref(),
+            &child_sid,
+            EventPayload::SystemPromptConfigured {
+                text: system_prompt.clone(),
+                fingerprint,
+            },
+        )
+        .await?;
+
         append_child_payload(
             self.session_manager.as_ref(),
             &child_sid,
@@ -98,40 +132,16 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             format!("child agent '{child_name}' started: {child_sid} using {model_id}\n"),
         );
 
-        let tool_registry = build_tool_registry_snapshot(
-            &self.extension_runner,
-            &request.working_dir,
-            self.read_timeout_secs,
-        )
-        .await;
-
-        let allowed_tools: HashSet<String> = request.allowed_tools.iter().cloned().collect();
-        let mut prompt_tools = tool_registry.list_definitions();
-        if !allowed_tools.is_empty() {
-            prompt_tools.retain(|tool| tool_name_matches_allowlist(&allowed_tools, &tool.name));
-        }
-        let prompt_custom = build_prompt_custom_snapshot(
-            &self.extension_runner,
-            &child_sid,
-            &request.working_dir,
-            &model_id,
-            &prompt_tools,
-        )
-        .await
-        .map_err(|e| format!("build child prompt snapshot: {e}"))?;
-
         let agent = Agent::new(
             child_sid.clone(),
             request.working_dir.clone(),
             Arc::clone(&self.llm),
-            Arc::clone(&self.prompt),
+            system_prompt,
             tool_registry,
             Arc::clone(&self.extension_runner),
             model_id,
             8192,
         )
-        .with_prompt_custom(prompt_custom)
-        .with_system_prompt_suffix(request.system_prompt)
         .with_tool_allowlist(request.allowed_tools);
 
         let cs = child_sid.clone();
@@ -258,6 +268,20 @@ async fn append_child_payload(
             ))
             .await
             .map_err(|e| format!("append child event: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn append_child_session_payload(
+    session_manager: &SessionManager,
+    child_sid: &str,
+    payload: EventPayload,
+) -> Result<(), String> {
+    if payload.is_durable() {
+        session_manager
+            .append_event(Event::new(child_sid.to_string(), None, payload))
+            .await
+            .map_err(|e| format!("append child session event: {e}"))?;
     }
     Ok(())
 }

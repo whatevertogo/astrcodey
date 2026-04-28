@@ -3,12 +3,11 @@ name = "astrcode-cli"
 version = "0.1.0"
 edition = "2021"
 description = "CLI entry point: tui, exec, and server commands"
+default-run = "astrcode"
 
 [[bin]]
 name = "astrcode"
 path = "src/main.rs"
-
-default-run = "astrcode"
 
 [dependencies]
 astrcode-server = { path = "../astrcode-server" }

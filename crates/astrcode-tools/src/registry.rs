@@ -32,7 +32,13 @@ impl ToolRegistry {
 
     /// 返回所有已注册工具的定义列表。
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.definition()).collect()
+        let mut definitions = self
+            .tools
+            .values()
+            .map(|tool| tool.definition())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        definitions
     }
 
     /// 按名称执行已注册的工具。
@@ -133,5 +139,43 @@ mod tests {
         assert!(names.iter().any(|name| name == "apply_patch"));
         assert!(names.iter().any(|name| name == "editFile"));
         assert!(names.iter().any(|name| name == "shell"));
+    }
+
+    #[test]
+    fn list_definitions_is_sorted_by_tool_name() {
+        struct NamedTool(&'static str);
+
+        #[async_trait::async_trait]
+        impl Tool for NamedTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: self.0.to_string(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    is_builtin: false,
+                }
+            }
+
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &ToolExecutionContext,
+            ) -> Result<ToolResult, ToolError> {
+                unreachable!("registry ordering test does not execute tools")
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(NamedTool("zeta")));
+        registry.register(Arc::new(NamedTool("alpha")));
+        registry.register(Arc::new(NamedTool("middle")));
+
+        let names = registry
+            .list_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, ["alpha", "middle", "zeta"]);
     }
 }

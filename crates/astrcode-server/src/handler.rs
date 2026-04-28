@@ -3,10 +3,7 @@
 //! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     config::ModelSelection,
@@ -26,7 +23,7 @@ use tokio::{sync::broadcast, task::JoinHandle};
 use crate::{
     agent::Agent,
     agent_turn::drive_agent,
-    bootstrap::{ServerRuntime, build_prompt_custom_snapshot, build_tool_registry_snapshot},
+    bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
 };
 
 struct AgentTurnInput {
@@ -34,7 +31,7 @@ struct AgentTurnInput {
     turn_id: TurnId,
     working_dir: String,
     tool_registry: Arc<ToolRegistry>,
-    prompt_custom: BTreeMap<String, String>,
+    system_prompt: String,
     history: Vec<LlmMessage>,
     text: String,
 }
@@ -50,8 +47,6 @@ pub struct CommandHandler {
     active_session_id: Option<SessionId>,
     /// 每个会话在创建/恢复时固定下来的工具表快照。
     session_tool_registries: HashMap<SessionId, Arc<ToolRegistry>>,
-    /// 每个会话在创建/恢复时固定下来的插件提示快照。
-    session_prompt_custom: HashMap<SessionId, BTreeMap<String, String>>,
     /// 当前正在执行的回合（如有）
     active_turn: Option<ActiveTurn>,
 }
@@ -79,7 +74,6 @@ impl CommandHandler {
             event_tx,
             active_session_id: None,
             session_tool_registries: HashMap::new(),
-            session_prompt_custom: HashMap::new(),
             active_turn: None,
         }
     }
@@ -181,7 +175,6 @@ impl CommandHandler {
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
                         self.session_tool_registries.remove(&session_id);
-                        self.session_prompt_custom.remove(&session_id);
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
                         }
@@ -197,7 +190,7 @@ impl CommandHandler {
         Ok(())
     }
 
-    /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具快照。
+    /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具和 system prompt 快照。
     async fn create_session(&mut self, working_dir: String) {
         let model_id = self.runtime.effective.llm.model_id.clone();
         match self
@@ -208,6 +201,7 @@ impl CommandHandler {
         {
             Ok(event) => {
                 self.active_session_id = Some(event.session_id.clone());
+                let _ = self.event_tx.send(ClientNotification::Event(event.clone()));
                 let ext_ctx = ServerExtensionContext::new(
                     event.session_id.clone(),
                     working_dir.clone(),
@@ -227,15 +221,13 @@ impl CommandHandler {
                     return;
                 }
 
-                if let Err(e) = self
-                    .refresh_session_snapshots(&event.session_id, &working_dir)
+                match self
+                    .initialize_session_prompt(&event.session_id, &working_dir)
                     .await
                 {
-                    self.send_error(-32603, &e);
-                    return;
+                    Ok(_) => {},
+                    Err(e) => self.send_error(-32603, &e),
                 }
-
-                let _ = self.event_tx.send(ClientNotification::Event(event));
             },
             Err(e) => self.send_error(-32603, &e.to_string()),
         }
@@ -263,8 +255,15 @@ impl CommandHandler {
         let state = session.state.read().await.clone();
         let history = state.messages;
         let working_dir = state.working_dir;
-        let (tool_registry, prompt_custom) =
-            self.ensure_session_snapshots(&sid, &working_dir).await?;
+        let system_prompt = state.system_prompt;
+        let tool_registry = self.ensure_tool_registry(&sid, &working_dir).await;
+        let system_prompt = match system_prompt {
+            Some(system_prompt) => system_prompt,
+            None => {
+                self.configure_session_prompt(&sid, &working_dir, &tool_registry, None)
+                    .await?
+            },
+        };
         let turn_id = new_turn_id();
 
         self.record_and_broadcast(&sid, Some(&turn_id), EventPayload::TurnStarted)
@@ -286,7 +285,7 @@ impl CommandHandler {
             turn_id: turn_id.clone(),
             working_dir,
             tool_registry,
-            prompt_custom,
+            system_prompt,
             history,
             text,
         });
@@ -349,6 +348,7 @@ impl CommandHandler {
             Ok(session) => {
                 let state = session.state.read().await;
                 let working_dir = state.working_dir.clone();
+                let needs_prompt = state.system_prompt.is_none();
                 let snapshot = SessionSnapshot {
                     session_id: session_id.clone(),
                     cursor: String::new(),
@@ -358,12 +358,15 @@ impl CommandHandler {
                 };
                 drop(state);
 
-                if let Err(e) = self
-                    .refresh_session_snapshots(&session_id, &working_dir)
-                    .await
-                {
-                    self.send_error(-32603, &e);
-                    return;
+                let tool_registry = self.ensure_tool_registry(&session_id, &working_dir).await;
+                if needs_prompt {
+                    if let Err(e) = self
+                        .configure_session_prompt(&session_id, &working_dir, &tool_registry, None)
+                        .await
+                    {
+                        self.send_error(-32603, &e);
+                        return;
+                    }
                 }
                 self.active_session_id = Some(session_id.clone());
                 let _ = self.event_tx.send(ClientNotification::SessionResumed {
@@ -394,49 +397,57 @@ impl CommandHandler {
             .map_err(|e| format!("create session: {e}"))?;
 
         let sid = event.session_id.clone();
-        self.refresh_session_snapshots(&sid, &wd).await?;
         self.active_session_id = Some(sid.clone());
         let _ = self.event_tx.send(ClientNotification::Event(event));
+        let ext_ctx = ServerExtensionContext::new(
+            sid.clone(),
+            wd.clone(),
+            ModelSelection {
+                profile_name: String::new(),
+                model: self.runtime.effective.llm.model_id.clone(),
+                provider_kind: String::new(),
+            },
+        );
+        self.runtime
+            .extension_runner
+            .dispatch(ExtensionEvent::SessionStart, &ext_ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.initialize_session_prompt(&sid, &wd).await?;
         Ok(sid)
     }
 
-    async fn ensure_session_snapshots(
+    async fn initialize_session_prompt(
         &mut self,
         session_id: &SessionId,
         working_dir: &str,
-    ) -> Result<(Arc<ToolRegistry>, BTreeMap<String, String>), String> {
-        if let (Some(tool_registry), Some(prompt_custom)) = (
-            self.session_tool_registries.get(session_id),
-            self.session_prompt_custom.get(session_id),
-        ) {
-            return Ok((Arc::clone(tool_registry), prompt_custom.clone()));
-        }
-
-        let tool_registry = self
-            .refresh_session_snapshots(session_id, working_dir)
-            .await?;
-        let prompt_custom = self
-            .session_prompt_custom
-            .get(session_id)
-            .cloned()
-            .unwrap_or_default();
-        Ok((tool_registry, prompt_custom))
+    ) -> Result<String, String> {
+        let tool_registry = self.refresh_tool_registry(session_id, working_dir).await;
+        self.configure_session_prompt(session_id, working_dir, &tool_registry, None)
+            .await
     }
 
-    async fn refresh_session_snapshots(
+    async fn ensure_tool_registry(
         &mut self,
         session_id: &SessionId,
         working_dir: &str,
-    ) -> Result<Arc<ToolRegistry>, String> {
+    ) -> Arc<ToolRegistry> {
+        if let Some(tool_registry) = self.session_tool_registries.get(session_id) {
+            return Arc::clone(tool_registry);
+        }
+
+        self.refresh_tool_registry(session_id, working_dir).await
+    }
+
+    async fn refresh_tool_registry(
+        &mut self,
+        session_id: &SessionId,
+        working_dir: &str,
+    ) -> Arc<ToolRegistry> {
         let tool_registry = self.build_tool_registry_for(working_dir).await;
-        let prompt_custom = self
-            .build_prompt_custom_for(session_id, working_dir, &tool_registry)
-            .await?;
         self.session_tool_registries
             .insert(session_id.clone(), Arc::clone(&tool_registry));
-        self.session_prompt_custom
-            .insert(session_id.clone(), prompt_custom);
-        Ok(tool_registry)
+        tool_registry
     }
 
     async fn build_tool_registry_for(&self, working_dir: &str) -> Arc<ToolRegistry> {
@@ -448,22 +459,36 @@ impl CommandHandler {
         .await
     }
 
-    async fn build_prompt_custom_for(
+    async fn configure_session_prompt(
         &self,
         session_id: &SessionId,
         working_dir: &str,
         tool_registry: &ToolRegistry,
-    ) -> Result<BTreeMap<String, String>, String> {
+        extra_system_prompt: Option<&str>,
+    ) -> Result<String, String> {
         let tools = tool_registry.list_definitions();
-        build_prompt_custom_snapshot(
+        let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.runtime.extension_runner,
+            self.runtime.prompt_provider.as_ref(),
             session_id,
             working_dir,
             &self.runtime.effective.llm.model_id,
             &tools,
+            extra_system_prompt,
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+        self.record_and_broadcast(
+            session_id,
+            None,
+            EventPayload::SystemPromptConfigured {
+                text: system_prompt.clone(),
+                fingerprint,
+            },
+        )
+        .await?;
+        Ok(system_prompt)
     }
 
     /// 在后台 tokio 任务中启动 Agent 回合处理。
@@ -480,7 +505,7 @@ impl CommandHandler {
                 turn_id,
                 working_dir,
                 tool_registry,
-                prompt_custom,
+                system_prompt,
                 history,
                 text,
             } = input;
@@ -489,13 +514,12 @@ impl CommandHandler {
                 sid.clone(),
                 working_dir,
                 runtime.llm_provider.clone(),
-                runtime.prompt_provider.clone(),
+                system_prompt,
                 tool_registry,
                 runtime.extension_runner.clone(),
                 runtime.effective.llm.model_id.clone(),
                 runtime.context_settings.summary_reserve_tokens * 3,
-            )
-            .with_prompt_custom(prompt_custom);
+            );
 
             let (output, emitted_error) = drive_agent(&agent, &text, history, |payload| {
                 let runtime = runtime.clone();
@@ -645,7 +669,14 @@ fn content_to_text(content: &LlmContent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{future, sync::Arc, time::Duration};
+    use std::{
+        future,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
@@ -702,6 +733,19 @@ mod tests {
         }
     }
 
+    struct CountingPrompt {
+        calls: Arc<AtomicUsize>,
+        text: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl PromptProvider for CountingPrompt {
+        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            PromptPlan::from_system_prompt(self.text.to_string())
+        }
+    }
+
     struct PendingLlm;
 
     #[async_trait::async_trait]
@@ -722,7 +766,10 @@ mod tests {
         }
     }
 
-    fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+    fn test_runtime_with(
+        llm_provider: Arc<dyn LlmProvider>,
+        prompt_provider: Arc<dyn PromptProvider>,
+    ) -> Arc<ServerRuntime> {
         use astrcode_context::{
             budget::ToolResultBudget, file_access::FileAccessTracker,
             settings::ContextWindowSettings,
@@ -730,7 +777,7 @@ mod tests {
         Arc::new(ServerRuntime {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
             llm_provider,
-            prompt_provider: Arc::new(EmptyPrompt),
+            prompt_provider,
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
@@ -754,6 +801,10 @@ mod tests {
             tool_result_budget: Arc::new(ToolResultBudget::new(8192, 65536, 24576)),
             file_access_tracker: Arc::new(std::sync::Mutex::new(FileAccessTracker::new(64))),
         })
+    }
+
+    fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+        test_runtime_with(llm_provider, Arc::new(EmptyPrompt))
     }
 
     fn test_runtime() -> Arc<ServerRuntime> {
@@ -805,6 +856,123 @@ mod tests {
                 _ => {},
             }
         }
+    }
+
+    #[tokio::test]
+    async fn create_session_configures_system_prompt_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = test_runtime_with(
+            Arc::new(MockLlm),
+            Arc::new(CountingPrompt {
+                calls: Arc::clone(&calls),
+                text: "session system",
+            }),
+        );
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+
+        let mut saw_configured = false;
+        for _ in 0..2 {
+            if let ClientNotification::Event(event) = recv_event(&mut event_rx).await {
+                if let EventPayload::SystemPromptConfigured { text, fingerprint } = event.payload {
+                    saw_configured = true;
+                    assert_eq!(text, "session system");
+                    assert!(!fingerprint.is_empty());
+                }
+            }
+        }
+        assert!(saw_configured);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let sid = handler.active_session_id.clone().unwrap();
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let state = session.state.read().await;
+        assert_eq!(state.system_prompt.as_deref(), Some("session system"));
+        assert!(state.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_reuses_session_system_prompt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = test_runtime_with(
+            Arc::new(MockLlm),
+            Arc::new(CountingPrompt {
+                calls: Arc::clone(&calls),
+                text: "stable system",
+            }),
+        );
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+        let mut handler = CommandHandler::new(runtime, event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "one".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "two".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_backfills_legacy_session_system_prompt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = test_runtime_with(
+            Arc::new(MockLlm),
+            Arc::new(CountingPrompt {
+                calls: Arc::clone(&calls),
+                text: "backfilled system",
+            }),
+        );
+        let start_event = runtime
+            .session_manager
+            .create(".", "mock-model", 2048, None)
+            .await
+            .unwrap();
+        let sid = start_event.session_id.clone();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        handler.active_session_id = Some(sid.clone());
+
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "hello".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let state = session.state.read().await;
+        assert_eq!(state.system_prompt.as_deref(), Some("backfilled system"));
     }
 
     #[tokio::test]

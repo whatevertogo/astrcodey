@@ -85,6 +85,9 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 // ─── Fixed section fillers ──────────────────────────────────────────────
 
 pub fn add_plugin_system(parts: &mut SystemPromptParts, ctx: &PromptContext) {
+    // `custom` 故意是通用的：提示程序集使用命名文本
+    // 不依赖扩展的部分。服务器决定哪些来源
+    // 填充这个键。
     if let Some(system_prompts) = ctx.custom.get("system_prompts") {
         parts.push(PromptSection::PluginSystem, system_prompts.clone());
     }

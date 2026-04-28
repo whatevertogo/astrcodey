@@ -256,22 +256,26 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
             MessageRole::User => push_message_body_lines(
                 &mut lines,
                 message,
-                "› ",
-                "  ",
-                theme.user_label,
-                body_style,
-                content_width,
-                theme,
+                BodyLineRender {
+                    first_prefix: "› ",
+                    next_prefix: "  ",
+                    prefix_style: theme.user_label,
+                    body_style,
+                    content_width,
+                    theme,
+                },
             ),
             MessageRole::Assistant => push_message_body_lines(
                 &mut lines,
                 message,
-                "● ",
-                "  ",
-                theme.assistant_label,
-                body_style,
-                content_width,
-                theme,
+                BodyLineRender {
+                    first_prefix: "● ",
+                    next_prefix: "  ",
+                    prefix_style: theme.assistant_label,
+                    body_style,
+                    content_width,
+                    theme,
+                },
             ),
             MessageRole::Tool => {
                 lines.push(Line::from(vec![
@@ -281,12 +285,14 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
                 push_message_body_lines(
                     &mut lines,
                     message,
-                    "  ⎿ ",
-                    "    ",
-                    theme.dim,
-                    body_style,
-                    content_width,
-                    theme,
+                    BodyLineRender {
+                        first_prefix: "  ⎿ ",
+                        next_prefix: "    ",
+                        prefix_style: theme.dim,
+                        body_style,
+                        content_width,
+                        theme,
+                    },
                 );
             },
             MessageRole::System => {
@@ -297,12 +303,14 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
                 push_message_body_lines(
                     &mut lines,
                     message,
-                    "  ",
-                    "  ",
-                    theme.dim,
-                    body_style,
-                    content_width,
-                    theme,
+                    BodyLineRender {
+                        first_prefix: "  ",
+                        next_prefix: "  ",
+                        prefix_style: theme.dim,
+                        body_style,
+                        content_width,
+                        theme,
+                    },
                 );
             },
             MessageRole::Error => {
@@ -313,12 +321,14 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
                 push_message_body_lines(
                     &mut lines,
                     message,
-                    "  ⎿ ",
-                    "    ",
-                    theme.dim,
-                    body_style,
-                    content_width,
-                    theme,
+                    BodyLineRender {
+                        first_prefix: "  ⎿ ",
+                        next_prefix: "    ",
+                        prefix_style: theme.dim,
+                        body_style,
+                        content_width,
+                        theme,
+                    },
                 );
             },
         }
@@ -335,76 +345,66 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
     lines
 }
 
-fn push_message_body_lines(
-    lines: &mut Vec<Line<'static>>,
-    message: &Message,
-    first_prefix: &str,
-    next_prefix: &str,
+#[derive(Clone, Copy)]
+struct BodyLineRender<'a> {
+    first_prefix: &'static str,
+    next_prefix: &'static str,
     prefix_style: Style,
     body_style: Style,
     content_width: usize,
-    theme: &Theme,
+    theme: &'a Theme,
+}
+
+fn push_message_body_lines(
+    lines: &mut Vec<Line<'static>>,
+    message: &Message,
+    render: BodyLineRender<'_>,
 ) {
     if let Some(spec) = message.body.render_spec() {
         let rendered = render_spec_to_lines_with_prefix(
             spec,
-            content_width,
-            theme,
-            first_prefix,
-            prefix_style,
+            render.content_width,
+            render.theme,
+            render.first_prefix,
+            render.prefix_style,
         );
         if rendered.is_empty() {
-            push_prefixed_text_lines(
-                lines,
-                message.body.plain_text(),
-                first_prefix,
-                next_prefix,
-                prefix_style,
-                body_style,
-                content_width,
-                theme,
-            );
+            push_prefixed_text_lines(lines, message.body.plain_text(), render);
         } else {
             lines.extend(rendered);
         }
     } else {
-        push_prefixed_text_lines(
-            lines,
-            message.body.plain_text(),
-            first_prefix,
-            next_prefix,
-            prefix_style,
-            body_style,
-            content_width,
-            theme,
-        );
+        push_prefixed_text_lines(lines, message.body.plain_text(), render);
     }
 }
 
 fn push_prefixed_text_lines(
     lines: &mut Vec<Line<'static>>,
     text: &str,
-    first_prefix: &str,
-    next_prefix: &str,
-    prefix_style: Style,
-    body_style: Style,
-    content_width: usize,
-    theme: &Theme,
+    render: BodyLineRender<'_>,
 ) {
-    let prefix_width = string_display_width(first_prefix).max(string_display_width(next_prefix));
-    let wrapped = visual_lines(text, content_width.saturating_sub(prefix_width).max(1));
+    let prefix_width =
+        string_display_width(render.first_prefix).max(string_display_width(render.next_prefix));
+    let wrapped = visual_lines(
+        text,
+        render.content_width.saturating_sub(prefix_width).max(1),
+    );
     if wrapped.is_empty() {
         // 空内容显示省略号
         lines.push(Line::from(vec![
-            Span::styled(first_prefix.to_string(), prefix_style),
-            Span::styled("…", theme.dim),
+            Span::styled(render.first_prefix.to_string(), render.prefix_style),
+            Span::styled("…", render.theme.dim),
         ]));
     } else {
         for (idx, line) in wrapped.into_iter().enumerate() {
-            let prefix = if idx == 0 { first_prefix } else { next_prefix };
+            let prefix = if idx == 0 {
+                render.first_prefix
+            } else {
+                render.next_prefix
+            };
             lines.push(Line::from(vec![
-                Span::styled(prefix.to_string(), prefix_style),
-                Span::styled(line, body_style),
+                Span::styled(prefix.to_string(), render.prefix_style),
+                Span::styled(line, render.body_style),
             ]));
         }
     }
@@ -686,7 +686,7 @@ fn strip_ansi_limited(text: &str) -> String {
         }
         if ch == '\u{1b}' {
             if chars.next() == Some('[') {
-                while let Some(next) = chars.next() {
+                for next in chars.by_ref() {
                     if ('@'..='~').contains(&next) {
                         break;
                     }
@@ -695,7 +695,7 @@ fn strip_ansi_limited(text: &str) -> String {
             continue;
         }
         if ch == '\u{9b}' {
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
                     break;
                 }
