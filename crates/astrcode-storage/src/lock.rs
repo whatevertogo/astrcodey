@@ -1,4 +1,7 @@
-//! Turn-level file locking for session concurrency control.
+//! 回合级别的文件锁，用于会话并发控制。
+//!
+//! 确保每个会话同一时间只有一个回合在执行。
+//! 使用原子文件创建（`File::create_new`）防止 TOCTOU 竞态条件。
 
 use std::{path::PathBuf, time::Duration};
 
@@ -63,7 +66,9 @@ impl TurnLock {
     }
 }
 
+/// 回合锁的守卫，释放时自动删除锁文件（RAII 模式）。
 pub struct TurnLockGuard {
+    /// 锁文件路径
     path: PathBuf,
 }
 

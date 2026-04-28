@@ -1,6 +1,10 @@
-//! Session — the durable event-sourced unit of work.
-//! SessionManager — glue between memory and EventStore.
-//! EventReducer — maps Event → SessionState projection.
+//! 会话模块 — 基于事件溯源的持久化会话管理。
+//!
+//! 核心组件：
+//! - [`Session`]: 会话实体，持有内存中的状态和事件广播通道
+//! - [`SessionState`]: 会话的内存投影状态（消息列表、阶段等）
+//! - [`EventReducer`]: 纯函数式事件归约器，将事件应用到状态上
+//! - [`SessionManager`]: 会话管理器，协调内存缓存与持久化存储
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,24 +22,39 @@ use tokio::sync::{RwLock, broadcast};
 
 // ─── Session ─────────────────────────────────────────────────────────────
 
+/// 会话实体，代表一个与用户的对话上下文。
+///
+/// 持有读写锁保护的状态和广播通道，支持多个消费者订阅会话事件。
 pub struct Session {
+    /// 会话唯一标识
     pub id: SessionId,
+    /// 会话的内存投影状态，通过读写锁支持并发访问
     pub state: RwLock<SessionState>,
+    /// 事件广播发送端，用于向订阅者推送通知
     event_tx: broadcast::Sender<ClientNotification>,
 }
 
+/// 会话的内存投影状态，由事件归约器从事件流中构建。
+///
+/// 每次追加事件后，归约器会更新此状态以反映最新的会话快照。
 #[derive(Debug, Clone)]
 pub struct SessionState {
+    /// 对话消息历史（包含用户、助手和工具消息）
     pub messages: Vec<LlmMessage>,
+    /// 会话的工作目录
     pub working_dir: String,
+    /// 使用的模型标识
     pub model_id: String,
+    /// 当前会话阶段（空闲、思考中、流式输出、调用工具等）
     pub phase: Phase,
+    /// 正在等待完成的工具调用 ID 集合
     pub pending_tool_calls: HashSet<ToolCallId>,
     /// ISO 8601 格式的创建时间，由 SessionStarted 事件填充
     pub created_at: String,
 }
 
 impl SessionState {
+    /// 创建初始的空会话状态。
     fn new(working_dir: String, model_id: String) -> Self {
         Self {
             messages: Vec::new(),
@@ -49,6 +68,13 @@ impl SessionState {
 }
 
 impl Session {
+    /// 创建新的会话实例。
+    ///
+    /// # 参数
+    /// - `id`: 会话唯一标识
+    /// - `working_dir`: 工作目录
+    /// - `model_id`: 模型标识
+    /// - `capacity`: 广播通道容量
     pub fn new(id: SessionId, working_dir: String, model_id: String, capacity: usize) -> Self {
         let (event_tx, _) = broadcast::channel(capacity);
         Self {
@@ -58,6 +84,7 @@ impl Session {
         }
     }
 
+    /// 订阅此会话的事件广播，返回一个新的接收端。
     pub fn subscribe(&self) -> broadcast::Receiver<ClientNotification> {
         self.event_tx.subscribe()
     }
@@ -65,10 +92,21 @@ impl Session {
 
 // ─── EventReducer ────────────────────────────────────────────────────────
 
-/// Pure projection reducer: applies an Event to SessionState.
+/// 纯函数式事件归约器，将事件应用到会话状态上。
+///
+/// 不持有任何状态，所有方法都是纯函数。
+/// 根据事件类型更新会话的阶段、消息列表和工具调用状态。
 pub struct EventReducer;
 
 impl EventReducer {
+    /// 将单个事件归约到会话状态上。
+    ///
+    /// 根据事件负载类型执行不同的状态更新：
+    /// - 会话启动/删除：更新基础信息和阶段
+    /// - 回合启动/完成：更新阶段和消息
+    /// - 助手消息：追加到消息列表
+    /// - 工具调用：管理待完成调用集合并追加消息
+    /// - 错误：设置错误阶段
     pub fn reduce(event: &Event, state: &mut SessionState) {
         match &event.payload {
             EventPayload::SessionStarted {
@@ -186,12 +224,22 @@ impl EventReducer {
 
 // ─── SessionManager ──────────────────────────────────────────────────────
 
+/// 会话管理器，协调内存中的活跃会话与持久化事件存储。
+///
+/// 提供会话的完整生命周期管理：创建、恢复、事件追加、列表查询和删除。
+/// 内存中维护一个活跃会话的缓存映射，避免频繁从磁盘重放事件。
 pub struct SessionManager {
+    /// 活跃会话的内存缓存，按会话 ID 索引
     active: RwLock<HashMap<SessionId, Arc<Session>>>,
+    /// 持久化事件存储后端
     store: Arc<dyn EventStore>,
 }
 
 impl SessionManager {
+    /// 创建新的会话管理器。
+    ///
+    /// # 参数
+    /// - `store`: 事件存储后端实现
     pub fn new(store: Arc<dyn EventStore>) -> Self {
         Self {
             active: RwLock::new(HashMap::new()),
@@ -279,6 +327,7 @@ impl SessionManager {
     }
 }
 
+/// 会话操作中可能出现的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("Session not found: {0}")]

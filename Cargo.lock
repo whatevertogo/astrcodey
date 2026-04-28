@@ -160,10 +160,22 @@ dependencies = [
 name = "astrcode-extension-agent-tools"
 version = "0.1.0"
 dependencies = [
+ "astrcode-core",
+ "async-trait",
  "serde",
  "serde_json",
  "serde_yaml",
- "uuid",
+]
+
+[[package]]
+name = "astrcode-extension-task-tools"
+version = "0.1.0"
+dependencies = [
+ "astrcode-core",
+ "astrcode-support",
+ "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -211,6 +223,8 @@ dependencies = [
  "astrcode-ai",
  "astrcode-context",
  "astrcode-core",
+ "astrcode-extension-agent-tools",
+ "astrcode-extension-task-tools",
  "astrcode-extensions",
  "astrcode-prompt",
  "astrcode-protocol",

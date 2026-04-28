@@ -1,28 +1,46 @@
-//! Resolution: raw Config → EffectiveConfig. Pure functions, no IO.
+//! 配置解析：将原始 Config 转换为 EffectiveConfig。纯函数，无 IO 操作。
+//!
+//! 本模块包含：
+//! - [`Config::into_effective()`]：将原始配置解析为有效配置
+//! - [`resolve_api_key()`]：解析 API 密钥（支持环境变量引用）
+//! - [`merge_overlay()`]：合并项目级覆盖配置
 
 use crate::config::{effective::*, raw::*};
 
+/// 配置解析过程中可能发生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
+    /// 找不到指定的配置文件。
     #[error("Profile not found: {0}")]
     ProfileNotFound(String),
+    /// 在指定配置文件中找不到模型。
     #[error("Model not found in profile '{profile}': {model}")]
     ModelNotFound { profile: String, model: String },
+    /// 缺少必需的配置字段。
     #[error("Missing field: {0}")]
     MissingField(String),
+    /// 缺少必需的环境变量。
     #[error("Missing environment variable: {0}")]
     MissingEnvVar(String),
 }
 
 impl Config {
-    /// Resolve raw config into an `EffectiveConfig` with all defaults filled.
+    /// 将原始配置解析为 [`EffectiveConfig`]，填充所有默认值。
+    ///
+    /// 解析流程：
+    /// 1. 根据 `active_profile` 查找对应的配置文件
+    /// 2. 根据 `active_model` 查找对应的模型配置
+    /// 3. 解析 API 密钥（支持 `env:` 前缀和环境变量名）
+    /// 4. 合并运行时配置段的超时/重试参数与默认值
     pub fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
+        // 查找激活的配置文件
         let profile = self
             .profiles
             .iter()
             .find(|p| p.name == self.active_profile)
             .ok_or_else(|| ResolveError::ProfileNotFound(self.active_profile.clone()))?;
 
+        // 查找激活的模型
         let model = profile
             .models
             .iter()
@@ -32,10 +50,13 @@ impl Config {
                 model: self.active_model.clone(),
             })?;
 
+        // 解析 API 密钥
         let api_key = match profile.api_key.as_deref() {
             Some(s) if !s.is_empty() => resolve_api_key(s)?,
             _ => return Err(ResolveError::MissingField("api_key".into())),
         };
+
+        // 默认使用 ChatCompletions 模式
         let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
 
         let llm = LlmSettings {
@@ -44,8 +65,10 @@ impl Config {
             api_key,
             api_mode,
             model_id: self.active_model.clone(),
+            // 模型参数使用配置值或默认值
             max_tokens: model.max_tokens.unwrap_or(8192),
             context_limit: model.context_limit.unwrap_or(65536),
+            // 运行时参数优先使用配置值，否则使用全局默认值
             connect_timeout_secs: self
                 .runtime
                 .llm_connect_timeout_secs
@@ -68,22 +91,30 @@ impl Config {
     }
 }
 
-/// Resolve API key: handles `env:VAR` prefix and plain text.
+/// 解析 API 密钥：支持 `env:VAR` 前缀和环境变量名。
 ///
-/// Plain text values that are all-uppercase with underscores are treated as
-/// environment variable names (with the raw value as fallback). Empty strings
-/// are rejected before reaching this function.
+/// 解析规则：
+/// - `env:VAR_NAME` 前缀：从环境变量 `VAR_NAME` 读取，不存在则报错
+/// - 全大写加下划线的字符串：视为环境变量名，读取失败则使用原始值作为回退
+/// - 其他字符串：直接作为密钥使用
+///
+/// 空字符串在此函数被调用前已由调用方（`into_effective`）拦截。
 pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
     if let Some(var) = raw.strip_prefix("env:") {
+        // "env:VAR_NAME" 格式：必须存在该环境变量
         std::env::var(var).map_err(|_| ResolveError::MissingEnvVar(var.into()))
     } else if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+        // 全大写加下划线：尝试作为环境变量名，失败则使用原始值
         Ok(std::env::var(raw).unwrap_or_else(|_| raw.into()))
     } else {
+        // 其他情况：直接作为密钥
         Ok(raw.into())
     }
 }
 
-/// Merge a project overlay into base config.
+/// 将项目级覆盖配置合并到基础配置中。
+///
+/// 覆盖配置中的非 `None` 字段会替换基础配置中的对应字段。
 pub fn merge_overlay(mut base: Config, overlay: ConfigOverlay) -> Config {
     if let Some(p) = overlay.active_profile {
         base.active_profile = p;
@@ -118,15 +149,14 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_empty_not_treated_as_env_var() {
-        // Empty string falls through to plain-text (the uppercase vacuous-truth
-        // is guarded by !is_empty()). The caller (into_effective) rejects
-        // missing keys with MissingField before reaching this function.
+        // 空字符串走明文路径（全大写的空真条件由 !is_empty() 守卫）。
+        // 调用方（into_effective）在到达此函数之前已拦截缺失的密钥。
         assert_eq!(resolve_api_key("").unwrap(), "");
     }
 
     #[test]
     fn test_missing_api_key_returns_error() {
-        // A Config with no api_key should produce MissingField
+        // 没有 api_key 的 Config 应产生 MissingField 错误
         let config = Config {
             profiles: vec![Profile {
                 name: "test".into(),

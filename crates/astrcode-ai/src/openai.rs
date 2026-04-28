@@ -1,4 +1,7 @@
-//! OpenAI-compatible LLM provider implementation.
+//! OpenAI 兼容的 LLM 提供商实现。
+//!
+//! 支持 Chat Completions 和 Responses 两种 API 模式，提供 SSE 流式响应解析、
+//! UTF-8 多字节边界安全解码、工具调用累积以及 prompt 缓存断点注入。
 
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -7,18 +10,34 @@ use tokio::sync::mpsc;
 
 use crate::{cache::CacheTracker, retry::RetryPolicy};
 
-/// OpenAI-compatible LLM provider.
+/// OpenAI 兼容的 LLM 提供商。
+///
+/// 封装了与 OpenAI 兼容 API 的通信逻辑，支持 Chat Completions 和 Responses 两种模式，
+/// 内置缓存追踪、重试策略和流式响应解析。
 pub struct OpenAiProvider {
+    /// LLM 客户端配置（API 密钥、超时、重试参数等）
     config: LlmClientConfig,
+    /// API 模式：Chat Completions 或 Responses
     api_mode: OpenAiApiMode,
+    /// 模型标识符
     model_id: String,
+    /// 模型令牌限制
     model_limits_val: ModelLimits,
     /// 跟踪 system prompt 和 tool schema 的缓存状态，用于设置 cache_control 断点
     cache_tracker: Mutex<CacheTracker>,
+    /// HTTP 客户端
     client: reqwest::Client,
 }
 
 impl OpenAiProvider {
+    /// 创建新的 OpenAI 提供商实例。
+    ///
+    /// # 参数
+    /// - `config`: LLM 客户端配置
+    /// - `api_mode`: API 模式（Chat Completions 或 Responses）
+    /// - `model_id`: 模型标识符
+    /// - `max_tokens`: 最大输出令牌数（默认 8192）
+    /// - `context_limit`: 上下文窗口大小限制（默认 65536）
     pub fn new(
         config: LlmClientConfig,
         api_mode: OpenAiApiMode,
@@ -47,6 +66,7 @@ impl OpenAiProvider {
         }
     }
 
+    /// 根据 API 模式构建请求端点 URL。
     fn endpoint(&self) -> String {
         match self.api_mode {
             OpenAiApiMode::ChatCompletions => {
@@ -61,6 +81,7 @@ impl OpenAiProvider {
         }
     }
 
+    /// 根据 API 模式构建请求体。
     fn build_request_body(
         &self,
         messages: &[LlmMessage],
@@ -72,6 +93,10 @@ impl OpenAiProvider {
         }
     }
 
+    /// 构建 Chat Completions API 的请求体。
+    ///
+    /// 将消息和工具定义转换为 OpenAI Chat Completions 格式的 JSON，
+    /// 启用流式响应并请求 usage 统计信息。
     fn build_chat_request_body(
         &self,
         messages: &[LlmMessage],
@@ -103,11 +128,16 @@ impl OpenAiProvider {
         })
     }
 
+    /// 构建 Responses API 的请求体。
+    ///
+    /// 将消息拆分为 `instructions`（system prompt）和 `input`（非 system 消息），
+    /// 工具定义使用 Responses API 的扁平格式。
     fn build_responses_request_body(
         &self,
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
+        // 提取所有 system 消息的文本内容作为 instructions
         let instructions = messages
             .iter()
             .filter(|message| matches!(message.role, LlmRole::System))
@@ -118,6 +148,7 @@ impl OpenAiProvider {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        // 非 system 消息作为 input
         let input: Vec<serde_json::Value> = messages
             .iter()
             .filter(|message| !matches!(message.role, LlmRole::System))
@@ -146,6 +177,12 @@ impl OpenAiProvider {
     }
 }
 
+/// 将 LLM 消息转换为 Chat Completions API 格式的 JSON。
+///
+/// 处理三种情况：
+/// - Tool 角色：提取 tool_call_id 和内容
+/// - Assistant 且包含 ToolCall：序列化 tool_calls 数组
+/// - 其他（System/User/Assistant 纯文本）：标准角色 + 内容格式
 fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
     match message.role {
         LlmRole::Tool => {
@@ -173,6 +210,7 @@ fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. })) =>
         {
+            // Assistant 消息包含工具调用时，序列化为 tool_calls 数组格式
             let tool_calls: Vec<serde_json::Value> = message
                 .content
                 .iter()
@@ -213,11 +251,16 @@ fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
     }
 }
 
+/// 将 LLM 内容列表转换为 Chat Completions API 的 content 字段格式。
+///
+/// 如果内容中包含图片，则使用多部分数组格式（text + image_url）；
+/// 否则合并为纯文本字符串。
 fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
     let has_image = content
         .iter()
         .any(|part| matches!(part, LlmContent::Image { .. }));
     if !has_image {
+        // 纯文本内容：合并为单个字符串
         let text = content
             .iter()
             .filter_map(|part| match part {
@@ -229,6 +272,7 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
         return serde_json::json!(text);
     }
 
+    // 包含图片时使用多部分内容数组格式
     serde_json::Value::Array(
         content
             .iter()
@@ -246,6 +290,12 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
     )
 }
 
+/// 将 LLM 消息转换为 Responses API 的 input item 格式。
+///
+/// Responses API 使用不同的消息结构：
+/// - User → `{role: "user", content: [...]}`
+/// - Assistant → 分离为 assistant 消息 + function_call 项
+/// - Tool → `function_call_output` 项
 fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
     match message.role {
         LlmRole::User => vec![serde_json::json!({
@@ -254,6 +304,7 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
         })],
         LlmRole::Assistant => {
             let mut items = Vec::new();
+            // 先添加文本内容部分
             let text_content = responses_message_content(&message.content, false);
             if text_content
                 .as_array()
@@ -264,6 +315,7 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
                     "content": text_content
                 }));
             }
+            // 再添加工具调用部分
             for content in &message.content {
                 if let LlmContent::ToolCall {
                     call_id,
@@ -301,6 +353,10 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
     }
 }
 
+/// 将 LLM 内容列表转换为 Responses API 的 content 格式。
+///
+/// Responses API 使用 `input_text`/`output_text`/`input_image` 类型标识，
+/// 通过 `input` 参数区分是用户输入还是助手输出。
 fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json::Value {
     serde_json::Value::Array(
         content
@@ -322,6 +378,17 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
+    /// 发送消息到 LLM 并返回流式事件接收器。
+    ///
+    /// 自动检测 system prompt 和 tool schema 的缓存状态，在缓存命中时
+    /// 注入 `cache_control` 断点以复用已缓存的 prompt 前缀，降低成本和延迟。
+    ///
+    /// # 参数
+    /// - `messages`: 对话消息列表
+    /// - `tools`: 可用工具定义列表
+    ///
+    /// # 返回
+    /// 流式事件的 `UnboundedReceiver`，调用者通过它接收 `LlmEvent`。
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
@@ -390,6 +457,7 @@ impl LlmProvider for OpenAiProvider {
             base_delay_ms: self.config.retry_base_delay_ms,
         };
 
+        // 在后台任务中执行流式请求，避免阻塞调用者
         tokio::spawn(async move {
             let result =
                 Self::stream_request(client, endpoint, api_key, body, api_mode, retry, tx.clone())
@@ -404,12 +472,26 @@ impl LlmProvider for OpenAiProvider {
         Ok(rx)
     }
 
+    /// 返回当前模型的令牌限制。
     fn model_limits(&self) -> ModelLimits {
         self.model_limits_val.clone()
     }
 }
 
 impl OpenAiProvider {
+    /// 带重试的流式 HTTP 请求。
+    ///
+    /// 向 LLM API 发送 POST 请求，在遇到可重试错误时按指数退避策略重试。
+    /// 成功响应后交给 `parse_stream` 解析 SSE 事件流。
+    ///
+    /// # 参数
+    /// - `client`: HTTP 客户端
+    /// - `endpoint`: API 端点 URL
+    /// - `api_key`: API 密钥
+    /// - `body`: 请求体 JSON
+    /// - `api_mode`: API 模式
+    /// - `retry`: 重试策略
+    /// - `tx`: 事件发送通道
     async fn stream_request(
         client: reqwest::Client,
         endpoint: String,
@@ -436,6 +518,7 @@ impl OpenAiProvider {
                 return Self::parse_stream(response, api_mode, &tx).await;
             }
 
+            // 判断是否应该重试
             if retry.should_retry(attempt, status.as_u16()) {
                 let delay = retry.delay(attempt);
                 tracing::warn!(
@@ -449,6 +532,7 @@ impl OpenAiProvider {
                 continue;
             }
 
+            // 不可重试的错误，直接返回
             let text = response.text().await.unwrap_or_default();
             if status.as_u16() >= 500 {
                 return Err(LlmError::ServerError {
@@ -463,6 +547,12 @@ impl OpenAiProvider {
         }
     }
 
+    /// 解析 SSE 流式响应。
+    ///
+    /// 从 HTTP 响应中逐块读取字节，经过 UTF-8 解码后按行解析 SSE 事件，
+    /// 使用 `LlmAccumulator` 将增量数据累积为完整的 `LlmEvent` 发送给调用者。
+    ///
+    /// 如果流结束时未收到显式的完成标记，会自动发送 `Done` 事件。
     async fn parse_stream(
         response: reqwest::Response,
         api_mode: OpenAiApiMode,
@@ -483,7 +573,7 @@ impl OpenAiProvider {
                         if line.is_empty() || !line.starts_with("data: ") {
                             continue;
                         }
-                        let data = &line[6..]; // Strip "data: " prefix
+                        let data = &line[6..]; // 去掉 "data: " 前缀
                         if data == "[DONE]" {
                             accumulator.done_sent = true;
                             let _ = tx.send(LlmEvent::Done {
@@ -520,7 +610,7 @@ impl OpenAiProvider {
                 },
             }
         }
-        // Send Done if stream ended without explicit [DONE] marker or finish_reason
+        // 如果流结束但未收到显式的完成标记，自动发送 Done 事件
         if !accumulator.done_sent() {
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
@@ -530,16 +620,27 @@ impl OpenAiProvider {
     }
 }
 
-/// Streaming UTF-8 decoder for handling multi-byte boundary splits.
+/// 流式 UTF-8 解码器，处理跨块的多字节字符边界分割。
+///
+/// SSE 流的数据块可能在 UTF-8 多字节字符的中间被截断，
+/// 此解码器将不完整的尾部字节暂存到缓冲区，等待下一个块到达后继续解码。
 pub struct Utf8StreamDecoder {
+    /// 暂存不完整的尾部字节
     buffer: Vec<u8>,
 }
 
 impl Utf8StreamDecoder {
+    /// 创建新的 UTF-8 流解码器。
     pub fn new() -> Self {
         Self { buffer: Vec::new() }
     }
 
+    /// 解码一个字节块，返回已完成的 UTF-8 字符串。
+    ///
+    /// 将新字节追加到内部缓冲区后尝试整体解码为 UTF-8：
+    /// - 成功：清空缓冲区并返回完整字符串
+    /// - 部分成功：返回已有效的部分，保留剩余字节等待下次解码
+    /// - 完全无效：当缓冲区超过 4096 字节时丢弃，防止无限增长
     pub fn decode(&mut self, bytes: &[u8]) -> String {
         self.buffer.extend_from_slice(bytes);
         match std::str::from_utf8(&self.buffer) {
@@ -551,13 +652,14 @@ impl Utf8StreamDecoder {
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
                 if valid_up_to > 0 {
+                    // 部分有效：返回已解码的前缀，保留剩余字节
                     let result = std::str::from_utf8(&self.buffer[..valid_up_to])
                         .unwrap()
                         .to_string();
                     self.buffer = self.buffer[valid_up_to..].to_vec();
                     result
                 } else {
-                    // All bytes are invalid UTF-8 — discard to prevent unbounded growth
+                    // 所有字节都是无效 UTF-8 — 丢弃以防止缓冲区无限增长
                     if self.buffer.len() > 4096 {
                         tracing::warn!(
                             "Discarding {} bytes of invalid UTF-8 in SSE stream",
@@ -578,29 +680,48 @@ impl Default for Utf8StreamDecoder {
     }
 }
 
-/// Accumulates SSE deltas into a coherent output.
+/// SSE 增量数据累积器，将流式增量合并为连贯的输出。
+///
+/// 维护文本内容、工具调用的中间状态，在收到完整的增量数据后
+/// 通过事件通道发送 `LlmEvent` 给调用者。
 pub struct LlmAccumulator {
+    /// 累积的文本内容
     text: String,
+    /// Chat Completions 模式下的工具调用中间状态（按索引组织）
     tool_calls: BTreeMap<u64, ToolCallPartial>,
+    /// Responses 模式下的工具调用中间状态（按 item_id 组织）
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
+    /// 是否已发送 Done 事件
     done_sent: bool,
 }
 
+/// Chat Completions 模式下工具调用的中间状态。
+///
+/// 由于工具调用的 id、name 和 arguments 可能分多个 delta 到达，
+/// 需要暂存已收到的部分信息。
 #[derive(Debug, Default)]
 struct ToolCallPartial {
+    /// 工具调用的唯一标识
     id: Option<String>,
+    /// 工具名称
     name: Option<String>,
+    /// 是否已发送 ToolCallStart 事件
     started: bool,
 }
 
+/// Responses 模式下工具调用的中间状态。
 #[derive(Debug, Default)]
 struct ResponseToolCallPartial {
+    /// 工具调用的唯一标识
     call_id: Option<String>,
+    /// 工具名称
     name: Option<String>,
+    /// 是否已发送 ToolCallStart 事件
     started: bool,
 }
 
 impl LlmAccumulator {
+    /// 创建新的累积器。
     pub fn new() -> Self {
         Self {
             text: String::new(),
@@ -610,11 +731,15 @@ impl LlmAccumulator {
         }
     }
 
-    /// Whether a Done event was already emitted for this stream.
+    /// 是否已为此流发送过 Done 事件。
     pub fn done_sent(&self) -> bool {
         self.done_sent
     }
 
+    /// 处理 Chat Completions API 的 SSE 事件。
+    ///
+    /// 解析 `choices` 数组中的 `delta`，提取文本增量和工具调用增量，
+    /// 并在适当时机发送 `ContentDelta`、`ToolCallStart`、`ToolCallDelta` 和 `Done` 事件。
     pub fn ingest_chat_completion(
         &mut self,
         event: &serde_json::Value,
@@ -623,22 +748,24 @@ impl LlmAccumulator {
         if let Some(choices) = event["choices"].as_array() {
             for choice in choices {
                 if let Some(delta) = choice.get("delta") {
-                    // Text content
+                    // 文本内容增量
                     if let Some(content) = delta["content"].as_str() {
                         self.text.push_str(content);
                         let _ = tx.send(LlmEvent::ContentDelta {
                             delta: content.to_string(),
                         });
                     }
-                    // Tool calls
+                    // 工具调用增量
                     if let Some(tool_calls) = delta["tool_calls"].as_array() {
                         for tc in tool_calls {
                             let idx = tc["index"].as_u64().unwrap_or(0);
                             let partial = self.tool_calls.entry(idx).or_default();
+                            // 收到工具调用 ID
                             if let Some(id) = tc["id"].as_str() {
                                 partial.id = Some(id.to_string());
                             }
                             if let Some(func) = tc.get("function") {
+                                // 收到工具名称
                                 if let Some(name) = func["name"].as_str() {
                                     partial.name = Some(name.to_string());
                                 }
@@ -656,6 +783,7 @@ impl LlmAccumulator {
                                         });
                                     }
                                 }
+                                // 收到参数增量
                                 if let Some(args) = func["arguments"].as_str() {
                                     let call_id =
                                         partial.id.clone().unwrap_or_else(|| idx.to_string());
@@ -668,6 +796,7 @@ impl LlmAccumulator {
                         }
                     }
                 }
+                // 收到完成原因
                 if let Some(finish) = choice["finish_reason"].as_str() {
                     if !self.done_sent {
                         self.done_sent = true;
@@ -680,14 +809,18 @@ impl LlmAccumulator {
         }
     }
 
+    /// 处理 Responses API 的 SSE 事件。
+    ///
+    /// 解析 Responses API 特有的事件类型（如 `response.output_text.delta`、
+    /// `response.output_item.added` 等），提取文本增量和工具调用信息。
     pub fn ingest_responses(
         &mut self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) {
-        // Handle Responses API format
         if let Some(event_type) = event["event"].as_str() {
             match event_type {
+                // 文本增量输出
                 "response.output_text.delta" => {
                     if let Some(delta) = event["delta"].as_str() {
                         let _ = tx.send(LlmEvent::ContentDelta {
@@ -695,10 +828,12 @@ impl LlmAccumulator {
                         });
                     }
                 },
+                // 新的输出项添加（可能是工具调用）
                 "response.output_item.added" => {
                     let Some(item) = event["item"].as_object() else {
                         return;
                     };
+                    // 仅处理 function_call 类型的输出项
                     if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
                         return;
                     }
@@ -718,6 +853,7 @@ impl LlmAccumulator {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
+                    // 记录工具调用的中间状态
                     let partial = self.response_tool_items.entry(item_id).or_default();
                     partial.call_id = Some(call_id.clone());
                     partial.name = Some(name.clone());
@@ -728,6 +864,7 @@ impl LlmAccumulator {
                         arguments: String::new(),
                     });
                 },
+                // 工具调用参数增量
                 "response.function_call_arguments.delta" => {
                     let item_id = event["item_id"].as_str().unwrap_or_default();
                     let call_id = self
@@ -742,6 +879,7 @@ impl LlmAccumulator {
                         });
                     }
                 },
+                // 工具调用参数完成
                 "response.function_call_arguments.done" => {
                     let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
                     let partial = self.response_tool_items.entry(item_id.clone()).or_default();
@@ -749,6 +887,7 @@ impl LlmAccumulator {
                         partial.name = Some(name.to_string());
                     }
                     let call_id = partial.call_id.clone().unwrap_or(item_id);
+                    // 如果之前没有发送过 ToolCallStart（例如缺少 output_item.added 事件），在此补发
                     if !partial.started {
                         partial.started = true;
                         let _ = tx.send(LlmEvent::ToolCallStart {
@@ -764,6 +903,7 @@ impl LlmAccumulator {
                         });
                     }
                 },
+                // 响应完成
                 "response.completed" => {
                     let _ = tx.send(LlmEvent::Done {
                         finish_reason: "stop".into(),

@@ -1,22 +1,23 @@
-//! FFI boundary — C ABI vtable for extension ↔ host communication.
+//! FFI 边界 — 扩展与宿主之间通信的 C ABI vtable。
 //!
-//! Extensions are `.dll`/`.so` files. They export a single function:
+//! 扩展是 `.dll`/`.so` 文件。它们导出一个单一函数：
 //! ```c
 //! void extension_factory(const ExtensionApi *api);
 //! ```
 //!
-//! Strings cross the FFI boundary as `(ptr: *const u8, len: u32)` pairs.
+//! 字符串以 `(ptr: *const u8, len: u32)` 对的形式穿越 FFI 边界。
 
 use std::ffi::c_void;
 
 use astrcode_core::extension::{ExtensionEvent, HookMode};
 
-/// Signature of a hook handler callback registered by an extension.
+/// 扩展注册的钩子处理回调函数签名。
 ///
-/// `effect_out`: 0=Allow, 1=Block, 2=ModifiedResult, 3=ModifiedInput.
-/// For Block (1): `output_ptr/len` carries the block reason.
-/// For ModifiedResult (2): `output_ptr/len` carries the modified content string.
-/// For ModifiedInput (3): `output_ptr/len` carries the replacement tool input JSON.
+/// `effect_out` 取值: 0=Allow, 1=Block, 2=ModifiedResult, 3=ModifiedInput。
+/// - Block (1): `output_ptr/len` 携带阻止原因字符串。
+/// - ModifiedResult (2): `output_ptr/len` 携带修改后的内容字符串。
+/// - ModifiedInput (3): `output_ptr/len` 携带替换的工具输入 JSON。
+/// - PromptContributions (4): `output_ptr/len` 携带 PromptContributions JSON。
 pub type EventCallback = unsafe extern "C" fn(
     event: u8,
     ctx: *const c_void,
@@ -25,14 +26,14 @@ pub type EventCallback = unsafe extern "C" fn(
     output_len_out: *mut u32,
 );
 
-/// Signature of an executable tool callback registered by an extension.
+/// 扩展注册的可执行工具回调函数签名。
 ///
-/// Return code semantics (u8):
-///   `0` — Plain text success. `output_ptr/len` carries result content string.
-///   `1` — Tool error. `error_ptr/len` carries the error message.
-///   `2` — JSON outcome. `output_ptr/len` carries serialized `ExtensionToolOutcome`.
+/// 返回值语义 (u8):
+///   `0` — 纯文本成功。`output_ptr/len` 携带结果内容字符串。
+///   `1` — 工具错误。`error_ptr/len` 携带错误消息。
+///   `2` — JSON 结果。`output_ptr/len` 携带序列化的 `ExtensionToolOutcome`。
 ///
-/// Code 0 is the historical default — existing callbacks are compatible without changes.
+/// 返回码 0 是历史默认值 — 现有回调无需修改即可兼容。
 pub type ToolCallback = unsafe extern "C" fn(
     ctx: *const c_void,
     output_ptr_out: *mut *const u8,
@@ -41,16 +42,21 @@ pub type ToolCallback = unsafe extern "C" fn(
     error_len_out: *mut u32,
 ) -> u8;
 
-/// Parse a `ToolCallback` return into an `ExtensionToolOutcome`.
+/// 扩展注册的输出释放回调。
 ///
-/// - Ret 0 → `Text { content, is_error: false }`
-/// - Ret 1 → `Text { content: error, is_error: true }`
-/// - Ret 2 → deserialize `output_ptr/len` as JSON `ExtensionToolOutcome`
+/// 插件通过它释放自己写入 `output_ptr/error_ptr` 的字符串内存。
+/// 宿主只在读完输出后调用，不跨动态库直接释放插件内存。
+pub type OutputFreeCallback = unsafe extern "C" fn(ptr: *const u8, len: u32);
+
+/// 将 `ToolCallback` 的返回值解析为 `ExtensionToolOutcome`。
+///
+/// - 返回 0 → `Text { content, is_error: false }`
+/// - 返回 1 → `Text { content: error, is_error: true }`
+/// - 返回 2 → 将 `output_ptr/len` 反序列化为 JSON `ExtensionToolOutcome`
 ///
 /// # Safety
 ///
-/// Any non-null pointer/length pair passed in must point to valid UTF-8 bytes
-/// for the duration of this call.
+/// 传入的任何非空指针/长度对必须在此调用期间指向有效的 UTF-8 字节。
 pub unsafe fn parse_tool_outcome(
     ret: u8,
     output_ptr: *const u8,
@@ -93,13 +99,13 @@ pub unsafe fn parse_tool_outcome(
     }
 }
 
-/// The vtable passed to `extension_factory()`.
+/// 传递给 `extension_factory()` 的 vtable。
 #[repr(C)]
 pub struct ExtensionApi {
-    /// Opaque host data for event handler registrations.
+    /// 用于事件处理器注册的不透明宿主数据
     pub user_data: *mut c_void,
 
-    /// Register an event handler.
+    /// 注册事件处理器
     pub on: unsafe extern "C" fn(
         api: *const ExtensionApi,
         event: u8,
@@ -107,7 +113,7 @@ pub struct ExtensionApi {
         callback: EventCallback,
     ),
 
-    /// Register a tool definition.
+    /// 注册工具定义
     pub register_tool: unsafe extern "C" fn(
         api: *const ExtensionApi,
         name_ptr: *const u8,
@@ -118,7 +124,7 @@ pub struct ExtensionApi {
         params_json_len: u32,
     ),
 
-    /// Register the executable handler for a previously declared tool.
+    /// 为先前声明的工具注册可执行处理器
     pub register_tool_handler: unsafe extern "C" fn(
         api: *const ExtensionApi,
         name_ptr: *const u8,
@@ -126,7 +132,7 @@ pub struct ExtensionApi {
         callback: ToolCallback,
     ),
 
-    /// Register a slash command.
+    /// 注册斜杠命令
     pub register_command: unsafe extern "C" fn(
         api: *const ExtensionApi,
         name_ptr: *const u8,
@@ -134,10 +140,15 @@ pub struct ExtensionApi {
         desc_ptr: *const u8,
         desc_len: u32,
     ),
+
+    /// 注册插件侧输出释放回调。
+    pub register_output_free_handler:
+        unsafe extern "C" fn(api: *const ExtensionApi, callback: OutputFreeCallback),
 }
 
-// ─── Discriminant helpers ────────────────────────────────────────────────
+// ─── 判别值辅助函数 ────────────────────────────────────────────────
 
+/// 将 [`ExtensionEvent`] 转换为 FFI 层的 u8 判别值。
 pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
     match event {
         ExtensionEvent::SessionStart => 0,
@@ -149,9 +160,11 @@ pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
         ExtensionEvent::BeforeProviderRequest => 6,
         ExtensionEvent::AfterProviderResponse => 7,
         ExtensionEvent::UserPromptSubmit => 8,
+        ExtensionEvent::PromptBuild => 9,
     }
 }
 
+/// 将 u8 判别值转换回 [`ExtensionEvent`]。
 pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
     match d {
         0 => Some(ExtensionEvent::SessionStart),
@@ -163,10 +176,12 @@ pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
         6 => Some(ExtensionEvent::BeforeProviderRequest),
         7 => Some(ExtensionEvent::AfterProviderResponse),
         8 => Some(ExtensionEvent::UserPromptSubmit),
+        9 => Some(ExtensionEvent::PromptBuild),
         _ => None,
     }
 }
 
+/// 将 [`HookMode`] 转换为 FFI 层的 u8 判别值。
 pub const fn mode_discriminant(mode: HookMode) -> u8 {
     match mode {
         HookMode::Blocking => 0,
@@ -175,6 +190,7 @@ pub const fn mode_discriminant(mode: HookMode) -> u8 {
     }
 }
 
+/// 将 u8 判别值转换回 [`HookMode`]。
 pub fn mode_from_discriminant(d: u8) -> Option<HookMode> {
     match d {
         0 => Some(HookMode::Blocking),
@@ -184,10 +200,10 @@ pub fn mode_from_discriminant(d: u8) -> Option<HookMode> {
     }
 }
 
-/// Read a (ptr, len) string from FFI into a Rust &str.
+/// 从 FFI 的 (ptr, len) 对读取 Rust &str。
 ///
 /// # Safety
-/// `ptr` must point to `len` bytes of valid UTF-8.
+/// `ptr` 必须指向 `len` 字节的有效 UTF-8 数据。
 pub unsafe fn read_ffi_str<'a>(ptr: *const u8, len: u32) -> &'a str {
     if ptr.is_null() || len == 0 {
         return "";
@@ -196,36 +212,37 @@ pub unsafe fn read_ffi_str<'a>(ptr: *const u8, len: u32) -> &'a str {
     std::str::from_utf8_unchecked(bytes)
 }
 
-// ─── FFI Context ────────────────────────────────────────────────────────
+// ─── FFI 上下文 ────────────────────────────────────────────────
 
-/// Context passed to extension event and tool callbacks.
+/// 传递给扩展事件和工具回调的上下文。
 ///
-/// Contains a minimal read-only view of the session and current execution data.
-/// All strings are (ptr, len) pairs pointing to host-owned UTF-8 data valid
-/// for the duration of the callback.
+/// 包含会话的最小只读视图和当前执行数据。
+/// 所有字符串都是 (ptr, len) 对，指向宿主拥有的 UTF-8 数据，
+/// 在回调期间保持有效。
 #[repr(C)]
 pub struct FfiCtx {
-    /// Session ID (ptr, len).
+    /// 会话 ID (ptr, len)
     pub session_id_ptr: *const u8,
     pub session_id_len: u32,
-    /// Working directory (ptr, len).
+    /// 工作目录 (ptr, len)
     pub working_dir_ptr: *const u8,
     pub working_dir_len: u32,
-    /// Tool name (ptr, len) — only set for PreToolUse/PostToolUse and tool execution.
+    /// 工具名称 (ptr, len) — 仅在 PreToolUse/PostToolUse 和工具执行时设置
     pub tool_name_ptr: *const u8,
     pub tool_name_len: u32,
-    /// Tool input JSON (ptr, len) — only set for PreToolUse/PostToolUse and tool execution.
+    /// 工具输入 JSON (ptr, len) — 仅在 PreToolUse/PostToolUse 和工具执行时设置
     pub tool_input_ptr: *const u8,
     pub tool_input_len: u32,
-    /// Current model ID (ptr, len) — set for tool execution.
+    /// 当前模型 ID (ptr, len) — 在工具执行时设置
     pub model_id_ptr: *const u8,
     pub model_id_len: u32,
-    /// Available tools JSON (ptr, len) — serialized Vec<ToolDefinition>, set for tool execution.
+    /// 可用工具 JSON (ptr, len) — 序列化的 Vec<ToolDefinition>，在工具执行时设置
     pub tools_json_ptr: *const u8,
     pub tools_json_len: u32,
 }
 
 impl FfiCtx {
+    /// 从各字符串部分构建 FFI 上下文。
     fn from_parts(
         session_id: &str,
         working_dir: &str,
@@ -257,10 +274,10 @@ impl FfiCtx {
     }
 }
 
-/// Owned backing storage for `FfiCtx`.
+/// `FfiCtx` 的拥有型后备存储。
 ///
-/// `FfiCtx` itself is a raw C view, so this wrapper keeps all pointed-to
-/// strings alive for the duration of the callback.
+/// `FfiCtx` 本身是原始 C 视图，因此此包装器保持所有被指向的
+/// 字符串在回调期间存活。
 pub struct FfiCtxOwned {
     session_id: String,
     working_dir: String,
@@ -272,12 +289,14 @@ pub struct FfiCtxOwned {
 }
 
 impl FfiCtxOwned {
+    /// 从扩展上下文构建 FFI 上下文（用于事件钩子）。
     pub fn from_ext_ctx(ctx: &dyn astrcode_core::extension::ExtensionContext) -> Self {
         let session_id = ctx.session_id().to_string();
         let working_dir = ctx.working_dir().to_string();
         let pre = ctx.pre_tool_use_input();
         let post = ctx.post_tool_use_input();
         let model_id = ctx.model_selection().model;
+        // 优先使用 PreToolUse 输入，其次使用 PostToolUse 输入
         let (tool_name, tool_input) = if let Some(input) = pre {
             (input.tool_name, input.tool_input)
         } else if let Some(input) = post {
@@ -296,10 +315,11 @@ impl FfiCtxOwned {
             tool_name,
             tool_input_json,
             model_id,
-            String::new(), // tools_json — event hooks don't need it
+            String::new(), // tools_json — 事件钩子不需要
         )
     }
 
+    /// 从工具执行上下文构建 FFI 上下文（用于工具回调）。
     pub fn from_tool_execution(
         working_dir: &str,
         tool_name: &str,
@@ -317,6 +337,7 @@ impl FfiCtxOwned {
         )
     }
 
+    /// 内部构造函数：先创建拥有型字符串，再构建指向它们的原始 FfiCtx。
     fn new(
         session_id: String,
         working_dir: String,
@@ -347,6 +368,7 @@ impl FfiCtxOwned {
                 tools_json_len: 0,
             },
         };
+        // 让 raw 中的指针指向 owned 中的字符串数据
         owned.raw = FfiCtx::from_parts(
             &owned.session_id,
             &owned.working_dir,
@@ -358,6 +380,7 @@ impl FfiCtxOwned {
         owned
     }
 
+    /// 返回底层 `FfiCtx` 的原始指针，用于传递给 FFI 回调。
     pub fn as_ptr(&self) -> *const c_void {
         &self.raw as *const FfiCtx as *const c_void
     }

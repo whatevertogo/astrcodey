@@ -1,4 +1,8 @@
-//! Interactive terminal mode.
+//! 交互式终端模式。
+//!
+//! 实现 astrcode 的 TUI（Terminal User Interface），包含消息记录视图、
+//! 输入编辑器、斜杠命令面板和状态栏。使用 ratatui 框架进行终端渲染，
+//! 通过 tokio 异步事件循环处理键盘输入和服务器事件。
 
 mod input;
 mod render;
@@ -26,8 +30,13 @@ use tokio::sync::mpsc;
 
 use crate::transport::InProcessTransport;
 
+/// 客户端类型别名，绑定进程内传输层。
 type Client = AstrcodeClient<InProcessTransport>;
 
+/// TUI 主入口：初始化终端、启动事件循环。
+///
+/// 创建客户端连接、进入备用终端屏幕、启动键盘读取线程，
+/// 然后在主循环中通过 `tokio::select!` 同时处理键盘动作和服务器事件。
 pub async fn run() -> io::Result<()> {
     let client = Arc::new(AstrcodeClient::new(InProcessTransport::start()));
     let mut stream = client.subscribe_events().await.map_err(io_error)?;
@@ -36,11 +45,14 @@ pub async fn run() -> io::Result<()> {
     let mut state = TuiState::new();
     state.status = "Ready · type / for commands".into();
 
+    // 创建无界通道用于键盘事件传递
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
     spawn_keyboard_reader(action_tx.clone());
 
+    // 首帧绘制
     terminal.draw(&state, &theme)?;
 
+    // 主事件循环：同时等待键盘动作和服务器事件
     loop {
         tokio::select! {
             action = action_rx.recv() => {
@@ -51,6 +63,7 @@ pub async fn run() -> io::Result<()> {
             },
             item = stream.recv() => {
                 match item.map_err(io_error)? {
+                    // 将服务器事件应用到 TUI 状态
                     StreamItem::Event(notification) => state.apply(&notification),
                     StreamItem::Lagged(n) => {
                         state.status = format!("Skipped {n} event(s)");
@@ -63,6 +76,7 @@ pub async fn run() -> io::Result<()> {
         if state.should_quit {
             break;
         }
+        // 仅在状态变更时重绘，避免不必要的终端刷新
         if state.dirty {
             terminal.draw(&state, &theme)?;
             state.dirty = false;
@@ -72,6 +86,7 @@ pub async fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// 处理从键盘读取线程发来的 Action。
 async fn handle_action(
     action: Action,
     state: &mut TuiState,
@@ -88,8 +103,12 @@ async fn handle_action(
     Ok(())
 }
 
+/// 处理单个键盘事件，将其映射到 TUI 操作。
+///
+/// 包括光标移动、文本编辑、斜杠命令面板导航、提交输入等。
 async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
     match event.code {
+        // Esc：关闭斜杠面板 / 中止当前对话轮次
         KeyCode::Esc => {
             if state.show_slash_palette {
                 state.close_slash();
@@ -104,6 +123,7 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
                 state.mark_dirty();
             }
         },
+        // Enter：Shift/Alt+Enter 插入换行，否则提交输入或确认斜杠命令
         KeyCode::Enter => {
             if event.modifiers.contains(KeyModifiers::SHIFT)
                 || event.modifiers.contains(KeyModifiers::ALT)
@@ -115,6 +135,7 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
                 submit_current_input(state, client).await?;
             }
         },
+        // Tab：在斜杠面板中确认选择
         KeyCode::Tab if state.show_slash_palette => {
             accept_slash_selection(state, client).await?;
         },
@@ -125,6 +146,7 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
         KeyCode::Right => state.move_right(),
         KeyCode::Home => state.move_home(),
         KeyCode::End => state.move_end(),
+        // Up/Down：在斜杠面板中导航，否则浏览历史输入
         KeyCode::Up => {
             if state.show_slash_palette {
                 state.slash_move_up(slash::filtered(&state.slash_filter).len());
@@ -139,6 +161,7 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
                 state.history_next();
             }
         },
+        // 普通字符输入：忽略 Ctrl/Alt 组合键
         KeyCode::Char(ch) => {
             if event
                 .modifiers
@@ -154,6 +177,10 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
     Ok(())
 }
 
+/// 确认斜杠命令面板中的当前选中项。
+///
+/// 如果选中的命令需要参数但用户尚未输入，则仅补全命令前缀；
+/// 否则直接提交当前输入行。
 async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
     let commands = slash::filtered(&state.slash_filter);
     let Some(spec) = commands
@@ -164,11 +191,13 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
         return Ok(());
     };
 
+    // 检查当前输入是否已包含参数
     let current_has_argument = state
         .input
         .split_once(char::is_whitespace)
         .is_some_and(|(_, rest)| !rest.trim().is_empty());
     if spec.needs_argument && !current_has_argument {
+        // 仅补全命令前缀，等待用户输入参数
         state.set_input(slash::command_line_for(spec));
         return Ok(());
     }
@@ -176,6 +205,10 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
     submit_current_input(state, client).await
 }
 
+/// 提交当前输入框内容。
+///
+/// 空输入仅触发重绘；斜杠命令走专门的执行路径；
+/// 正在流式输出时拒绝重复提交；否则将输入作为提示发送到服务器。
 async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
     let input = state.input.trim_end().to_string();
     if input.trim().is_empty() {
@@ -183,18 +216,21 @@ async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io:
         return Ok(());
     }
 
+    // 尝试解析为斜杠命令
     if let Some(command) = slash::parse(&input) {
         state.take_input();
         execute_slash_command(command, state, client).await?;
         return Ok(());
     }
 
+    // 正在流式输出时，不允许提交新提示
     if state.is_streaming {
         state.status = "Turn running · Esc stop".into();
         state.mark_dirty();
         return Ok(());
     }
 
+    // 取出输入、记录历史、推送到消息列表、发送到服务器
     let input = state.take_input().trim_end().to_string();
     state.remember_input(&input);
     state.push_user(&input);
@@ -208,6 +244,7 @@ async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io:
     Ok(())
 }
 
+/// 执行已解析的斜杠命令。
 async fn execute_slash_command(
     command: slash::SlashCommand,
     state: &mut TuiState,
@@ -261,6 +298,10 @@ async fn execute_slash_command(
     Ok(())
 }
 
+/// 在独立线程中轮询键盘事件，通过通道发送给主事件循环。
+///
+/// 使用 100ms 轮询间隔，将 crossterm 键盘事件转换为 Action。
+/// 终端窗口大小变化会触发 Tick 以强制重绘。
 fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
     std::thread::spawn(move || {
         loop {
@@ -294,11 +335,15 @@ fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
     });
 }
 
+/// 终端会话封装，管理 ratatui Terminal 的生命周期。
 struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
 impl TerminalSession {
+    /// 进入备用终端屏幕并初始化 ratatui。
+    ///
+    /// 启用 raw 模式、切换到备用屏幕缓冲区、清屏。
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -309,6 +354,7 @@ impl TerminalSession {
         Ok(Self { terminal })
     }
 
+    /// 根据当前 TUI 状态绘制一帧。
     fn draw(&mut self, state: &TuiState, theme: &theme::Theme) -> io::Result<()> {
         self.terminal
             .draw(|frame| render::render(state, frame, theme))
@@ -317,6 +363,7 @@ impl TerminalSession {
 }
 
 impl Drop for TerminalSession {
+    /// 退出时恢复终端状态：显示光标、离开备用屏幕、关闭 raw 模式。
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
@@ -324,10 +371,12 @@ impl Drop for TerminalSession {
     }
 }
 
+/// 将实现了 Display 的错误转换为 io::Error。
 fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
+/// 截取会话 ID 的前 8 个字符作为短标识。
 fn short_id(session_id: &str) -> &str {
     session_id.get(..8).unwrap_or(session_id)
 }

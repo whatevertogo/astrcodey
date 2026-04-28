@@ -1,4 +1,11 @@
-//! astrcode-server binary — stdio JSON-RPC server.
+//! astrcode-server 二进制入口 — 基于 stdio 的 JSON-RPC 服务器。
+//!
+//! 启动流程：
+//! 1. 初始化日志（输出到 stderr，避免与 stdout 的 JSON-RPC 通信冲突）
+//! 2. 引导服务器运行时（加载配置、初始化各组件）
+//! 3. 启动 stdio 传输层（从 stdin 读取命令，向 stdout 写入事件）
+//! 4. 写入初始化响应，声明服务器能力
+//! 5. 进入主循环，持续处理客户端命令
 
 use std::sync::Arc;
 

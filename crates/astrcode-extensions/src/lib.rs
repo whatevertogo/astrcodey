@@ -1,8 +1,7 @@
-//! astrcode-extensions: Extension/hook system.
+//! astrcode-extensions: 扩展/钩子系统。
 //!
-//! Lifecycle event dispatch, extension loading, hook mode enforcement,
-//! and extension context provisioning. This is the primary extensibility
-//! mechanism — skills, agent profiles, custom tools are all extensions.
+//! 负责生命周期事件分发、扩展加载、钩子模式强制执行以及扩展上下文提供。
+//! 这是主要的可扩展性机制 — 技能、Agent 配置文件、自定义工具都是扩展。
 
 pub mod context;
 pub mod events;

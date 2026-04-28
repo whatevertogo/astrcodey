@@ -1,13 +1,18 @@
-//! End-to-end integration test: CLI -> client -> server -> agent loop -> response.
+//! 端到端集成测试：CLI → 客户端 → 服务器 → 代理循环 → 响应。
 //!
-//! This test spawns the astrcode-server binary and communicates via stdio JSON-RPC.
-//! Verifies the full pipeline: session creation, prompt submission, response streaming.
+//! 通过 stdio JSON-RPC 与 astrcode-server 二进制文件通信，
+//! 验证完整流水线：会话创建、提示提交、响应流式输出。
+//!
+//! 默认跳过，需设置环境变量 `ASTRCODE_RUN_STDIO_E2E=1` 才会执行。
 
 use astrcode_client::{client::AstrcodeClient, transport::StdioClientTransport};
 use astrcode_core::event::EventPayload;
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 
-/// Build the server binary before running integration tests.
+/// 获取服务器二进制文件路径。
+///
+/// 优先使用 `ASTRCODE_SERVER_BIN` 环境变量指定的路径，
+/// 否则在 `target/debug/` 目录下查找。
 fn server_binary() -> String {
     std::env::var("ASTRCODE_SERVER_BIN").unwrap_or_else(|_| {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
@@ -19,10 +24,17 @@ fn server_binary() -> String {
     })
 }
 
+/// 检查端到端测试是否启用。
 fn stdio_e2e_enabled() -> bool {
     std::env::var("ASTRCODE_RUN_STDIO_E2E").as_deref() == Ok("1")
 }
 
+/// 端到端测试：创建会话并提交提示，验证完整的响应流式输出。
+///
+/// 测试流程：
+/// 1. 启动服务器进程并通过 stdio 连接
+/// 2. 创建新会话，验证收到 SessionStarted 事件
+/// 3. 提交提示文本，验证收到 TurnStarted → AssistantTextDelta → TurnCompleted 事件序列
 #[tokio::test]
 async fn test_e2e_create_session_and_prompt() {
     if !stdio_e2e_enabled() {
@@ -37,6 +49,7 @@ async fn test_e2e_create_session_and_prompt() {
         return;
     }
 
+    // 通过 stdio 启动服务器进程
     let transport = match StdioClientTransport::spawn(&bin, &[]) {
         Ok(t) => t,
         Err(e) => {
@@ -48,6 +61,7 @@ async fn test_e2e_create_session_and_prompt() {
     let client = AstrcodeClient::new(transport);
     let mut stream = client.subscribe_events().await.unwrap();
 
+    // 创建会话
     client
         .send_command(&ClientCommand::CreateSession {
             working_dir: ".".into(),
@@ -55,6 +69,7 @@ async fn test_e2e_create_session_and_prompt() {
         .await
         .unwrap();
 
+    // 验证收到 SessionStarted 事件
     let session_id = match stream.recv().await.unwrap() {
         astrcode_client::stream::StreamItem::Event(ClientNotification::Event(event))
             if matches!(event.payload, EventPayload::SessionStarted { .. }) =>
@@ -65,6 +80,7 @@ async fn test_e2e_create_session_and_prompt() {
     };
     assert!(!session_id.is_empty());
 
+    // 提交提示
     client
         .send_command(&ClientCommand::SubmitPrompt {
             text: "Hello, astrcode!".into(),
@@ -73,6 +89,7 @@ async fn test_e2e_create_session_and_prompt() {
         .await
         .unwrap();
 
+    // 验证完整的事件序列：TurnStarted → AssistantTextDelta → TurnCompleted
     let mut got_turn_start = false;
     let mut got_message = false;
     let mut got_turn_end = false;
@@ -114,6 +131,9 @@ async fn test_e2e_create_session_and_prompt() {
     assert!(got_turn_end, "Should have received TurnCompleted");
 }
 
+/// 端到端测试：列出会话。
+///
+/// 验证服务器能正确响应 ListSessions 命令并返回 SessionList 通知。
 #[tokio::test]
 async fn test_e2e_list_sessions() {
     if !stdio_e2e_enabled() {
@@ -131,11 +151,13 @@ async fn test_e2e_list_sessions() {
     let client = AstrcodeClient::new(transport);
     let mut stream = client.subscribe_events().await.unwrap();
 
+    // 发送 ListSessions 命令
     client
         .send_command(&ClientCommand::ListSessions)
         .await
         .unwrap();
 
+    // 验证收到 SessionList 通知
     match stream.recv().await.unwrap() {
         astrcode_client::stream::StreamItem::Event(ClientNotification::SessionList {
             sessions,

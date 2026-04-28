@@ -1,15 +1,15 @@
 [package]
-name = "astrcode-extension-agent-tools"
+name = "astrcode-extension-task-tools"
 version = "0.1.0"
 edition = "2021"
-description = "Subagent delegation extension"
+description = "Task tracking tools extension"
 
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
 async-trait = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"

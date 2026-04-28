@@ -1,282 +1,106 @@
-//! astrcode-extension-agent-tools — Subagent delegation + task management.
+//! astrcode-extension-agent-tools — 子 Agent 委派。
 //!
-//! Loaded via libloading. Entry point: `extension_factory(&api)`.
+//! 注册的工具：
+//! - `agent`: 派生子 Agent 执行委派任务
 
 mod agent;
-mod ffi_types;
-mod task;
 
-use std::sync::{LazyLock, Mutex};
+use std::{collections::BTreeMap, sync::Arc};
 
-use ffi_types::*;
-use task::TaskStore;
+use astrcode_core::{
+    extension::{
+        Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
+        HookEffect, HookMode, PromptContributions,
+    },
+    tool::{ToolDefinition, ToolResult},
+};
 
-static AGENTS: Mutex<Vec<agent::AgentConfig>> = Mutex::new(Vec::new());
-static WORKING_DIR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::from(".")));
+use agent::AgentConfig;
 
-// ─── Entry point ─────────────────────────────────────────────────────────
+// ─── 内置扩展入口 ─────────────────────────────────────────────────────
 
-#[no_mangle]
-/// # Safety
-///
-/// `api` must be a valid pointer to an `ExtensionApi` for the duration of this
-/// call. The host owns the vtable and all pointers passed through it.
-pub unsafe extern "C" fn extension_factory(api: *const ExtensionApi) {
-    let Some(api) = api.as_ref() else {
-        return;
-    };
+/// 返回内置 Agent 工具扩展。
+pub fn extension() -> Arc<dyn Extension> {
+    Arc::new(AgentToolsExtension)
+}
 
-    unsafe {
-        (api.on)(api, EVENT_SESSION_START, MODE_BLOCKING, on_session_start);
+struct AgentToolsExtension;
+
+#[async_trait::async_trait]
+impl Extension for AgentToolsExtension {
+    fn id(&self) -> &str {
+        "astrcode-agent-tools"
     }
 
-    register_tool(
-        api,
-        "agent",
-        "Spawn a subagent to handle a delegated task. Call agentList first when choosing \
-         subagent_type. mode=single for one task, mode=chain for sequential steps with {previous} \
-         placeholder.",
-        r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description"},"prompt":{"type":"string","description":"Task for the subagent"},"subagent_type":{"type":"string","description":"Agent name from agents/ directory"},"mode":{"type":"string","enum":["single","chain"],"default":"single"},"chain":{"type":"array","items":{"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"}}}}},"required":["prompt","description"]}"#,
-        execute_agent_tool,
-    );
-    register_tool(
-        api,
-        "agentList",
-        "List available subagents with descriptions, declared tools, and model preferences.",
-        r#"{"type":"object","properties":{}}"#,
-        execute_agent_list_tool,
-    );
-    register_tool(
-        api,
-        "taskCreate",
-        "Create a tracked task",
-        r#"{"type":"object","properties":{"subject":{"type":"string"},"description":{"type":"string"},"blocks":{"type":"array","items":{"type":"string"}}},"required":["subject","description"]}"#,
-        execute_task_create_tool,
-    );
-    register_tool(
-        api,
-        "taskList",
-        "List all tracked tasks",
-        r#"{"type":"object","properties":{}}"#,
-        execute_task_list_tool,
-    );
-    register_tool(
-        api,
-        "taskUpdate",
-        "Update task status",
-        r#"{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]},"subject":{"type":"string"},"description":{"type":"string"}},"required":["id"]}"#,
-        execute_task_update_tool,
-    );
-}
-
-fn register_tool(api: &ExtensionApi, name: &str, desc: &str, params: &str, callback: ToolCallback) {
-    unsafe {
-        (api.register_tool)(
-            api,
-            name.as_ptr(),
-            name.len() as u32,
-            desc.as_ptr(),
-            desc.len() as u32,
-            params.as_ptr(),
-            params.len() as u32,
-        );
-        (api.register_tool_handler)(api, name.as_ptr(), name.len() as u32, callback);
-    }
-}
-
-// ─── Event handlers ──────────────────────────────────────────────────────
-
-unsafe extern "C" fn on_session_start(
-    _event: u8,
-    ctx: *const std::ffi::c_void,
-    effect_out: *mut u8,
-    _out_ptr: *mut *const u8,
-    _out_len: *mut u32,
-) {
-    if !effect_out.is_null() {
-        *effect_out = EFFECT_ALLOW;
-    }
-    if ctx.is_null() {
-        return;
+    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+        vec![(ExtensionEvent::PromptBuild, HookMode::Blocking)]
     }
 
-    let ffi_ctx = read_ffi_ctx(ctx);
-    let wd = read_ffi_str(ffi_ctx.working_dir_ptr, ffi_ctx.working_dir_len).to_string();
-    let working_dir = if wd.is_empty() { String::from(".") } else { wd };
-
-    if let Ok(mut current_dir) = WORKING_DIR.lock() {
-        *current_dir = working_dir.clone();
-    }
-    if let Ok(mut agents) = AGENTS.lock() {
-        *agents = agent::discover_agents(Some(&working_dir));
-    }
-}
-
-// ─── Tool callbacks ──────────────────────────────────────────────────────
-
-unsafe extern "C" fn execute_agent_tool(
-    ctx: *const std::ffi::c_void,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    // Agent tool returns a declarative outcome JSON — use code 2.
-    complete_tool_json_or_error(
-        handle_agent(tool_input_json(ctx)),
-        output_ptr,
-        output_len,
-        error_ptr,
-        error_len,
-    )
-}
-
-unsafe extern "C" fn execute_task_create_tool(
-    ctx: *const std::ffi::c_void,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    complete_tool(
-        handle_task_create(tool_input_json(ctx)),
-        output_ptr,
-        output_len,
-        error_ptr,
-        error_len,
-    )
-}
-
-unsafe extern "C" fn execute_agent_list_tool(
-    _ctx: *const std::ffi::c_void,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    complete_tool(
-        handle_agent_list(),
-        output_ptr,
-        output_len,
-        error_ptr,
-        error_len,
-    )
-}
-
-unsafe extern "C" fn execute_task_list_tool(
-    _ctx: *const std::ffi::c_void,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    complete_tool(
-        handle_task_list(),
-        output_ptr,
-        output_len,
-        error_ptr,
-        error_len,
-    )
-}
-
-unsafe extern "C" fn execute_task_update_tool(
-    ctx: *const std::ffi::c_void,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    complete_tool(
-        handle_task_update(tool_input_json(ctx)),
-        output_ptr,
-        output_len,
-        error_ptr,
-        error_len,
-    )
-}
-
-fn complete_tool_json_or_error(
-    result: Result<String, String>,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    match result {
-        Ok(json) => {
-            write_ffi_string(output_ptr, output_len, json);
-            TOOL_STATUS_OUTCOME_JSON
-        },
-        Err(error) => {
-            write_ffi_string(error_ptr, error_len, error);
-            TOOL_STATUS_ERROR
-        },
-    }
-}
-
-fn complete_tool(
-    result: Result<String, String>,
-    output_ptr: *mut *const u8,
-    output_len: *mut u32,
-    error_ptr: *mut *const u8,
-    error_len: *mut u32,
-) -> u8 {
-    match result {
-        Ok(output) => {
-            write_ffi_string(output_ptr, output_len, output);
-            TOOL_STATUS_OK
-        },
-        Err(error) => {
-            write_ffi_string(error_ptr, error_len, error);
-            TOOL_STATUS_ERROR
-        },
-    }
-}
-
-unsafe fn tool_input_json(ctx: *const std::ffi::c_void) -> &'static str {
-    if ctx.is_null() {
-        return "{}";
-    }
-    let ffi_ctx = read_ffi_ctx(ctx);
-    let input = read_ffi_str(ffi_ctx.tool_input_ptr, ffi_ctx.tool_input_len);
-    if input.is_empty() { "{}" } else { input }
-}
-
-fn write_ffi_string(ptr_out: *mut *const u8, len_out: *mut u32, text: String) {
-    let boxed = text.into_boxed_str();
-    let ptr = boxed.as_ptr();
-    let len = boxed.len() as u32;
-    let _leaked = Box::leak(boxed);
-    unsafe {
-        if !ptr_out.is_null() {
-            *ptr_out = ptr;
-        }
-        if !len_out.is_null() {
-            *len_out = len;
+    async fn on_event(
+        &self,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        match event {
+            ExtensionEvent::PromptBuild => {
+                let agents = agent::discover_agents(Some(ctx.working_dir()));
+                Ok(HookEffect::PromptContributions(PromptContributions {
+                    agents: vec![format_agents_for_model(&agents)],
+                    ..Default::default()
+                }))
+            },
+            _ => Ok(HookEffect::Allow),
         }
     }
+
+    fn tools(&self) -> Vec<ToolDefinition> {
+        vec![agent_tool_definition()]
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        working_dir: &str,
+        _ctx: &astrcode_core::tool::ToolExecutionContext,
+    ) -> Result<ToolResult, ExtensionError> {
+        if tool_name != "agent" {
+            return Err(ExtensionError::NotFound(tool_name.into()));
+        }
+
+        let agents = agent::discover_agents(Some(working_dir));
+        let outcome = build_agent_outcome(&arguments, &agents).map_err(ExtensionError::Internal)?;
+        let outcome_json = serde_json::to_value(&outcome)
+            .map_err(|e| ExtensionError::Internal(format!("serialize agent outcome: {e}")))?;
+        let mut metadata = BTreeMap::new();
+        metadata.insert("extension_tool_outcome".into(), outcome_json);
+        Ok(ToolResult {
+            call_id: String::new(),
+            content: String::new(),
+            is_error: false,
+            error: None,
+            metadata,
+            duration_ms: None,
+        })
+    }
 }
 
-// ─── Tool implementations ────────────────────────────────────────────────
+// ─── 工具实现 ────────────────────────────────────────────────────────
 
-fn handle_agent(input_json: &str) -> Result<String, String> {
-    let input: serde_json::Value =
-        serde_json::from_str(input_json).map_err(|e| format!("parse: {e}"))?;
+/// 解析输入 + 可用 Agent 列表，返回声明式 RunSession 结果。
+fn build_agent_outcome(
+    input: &serde_json::Value,
+    agents: &[AgentConfig],
+) -> Result<ExtensionToolOutcome, String> {
     let prompt = input["prompt"].as_str().ok_or("prompt required")?;
     let agent_name = input["subagent_type"].as_str().unwrap_or("");
     let mode = input["mode"].as_str().unwrap_or("single");
-    let agents = AGENTS.lock().map_err(|e| e.to_string())?;
 
     match mode {
-        "chain" => {
-            // v1: chain mode not yet supported via outcome pattern.
-            // The host would need sequential outcome support.
-            Err(
-                "chain mode is not yet supported — use single mode or list each agent step \
-                 manually"
-                    .into(),
-            )
-        },
+        "chain" => Err(
+            "chain mode is not yet supported — use single mode or list each agent step manually"
+                .into(),
+        ),
         _ => {
             let agent = if agent_name.is_empty() {
                 agents.first().ok_or("no agents configured")?
@@ -287,32 +111,43 @@ fn handle_agent(input_json: &str) -> Result<String, String> {
                     .ok_or_else(|| {
                         format!(
                             "agent '{agent_name}' not found.\n\n{}",
-                            format_agents_for_model(&agents)
+                            format_agents_for_model(agents)
                         )
                     })?
             };
 
-            // Return declarative RunSession outcome as JSON.
-            // The host runner will interpret and spawn the child session.
-            let outcome = serde_json::json!({
-                "kind": "run_session",
-                "name": agent.name,
-                "system_prompt": agent.body,
-                "user_prompt": prompt,
-                "allowed_tools": agent.tools,
-                "model_preference": agent.model,
-            });
-            Ok(outcome.to_string())
+            Ok(ExtensionToolOutcome::RunSession {
+                name: agent.name.clone(),
+                system_prompt: agent.body.clone(),
+                user_prompt: prompt.to_string(),
+                allowed_tools: agent.tools.clone(),
+                model_preference: agent.model.clone(),
+            })
         },
     }
 }
 
-fn handle_agent_list() -> Result<String, String> {
-    let agents = AGENTS.lock().map_err(|e| e.to_string())?;
-    Ok(format_agents_for_model(&agents))
+const AGENT_TOOL_DESCRIPTION: &str =
+    "Spawn a subagent to handle one delegated task. Choose subagent_type from the Agents section.";
+
+const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description"},"prompt":{"type":"string","description":"Task for the subagent"},"subagent_type":{"type":"string","description":"Agent name from agents/ directory"},"mode":{"type":"string","enum":["single"],"default":"single"}},"required":["prompt","description"]}"#;
+
+fn agent_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "agent".into(),
+        description: AGENT_TOOL_DESCRIPTION.into(),
+        parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS).unwrap_or_else(|_| {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            })
+        }),
+        is_builtin: false,
+    }
 }
 
-fn format_agents_for_model(agents: &[agent::AgentConfig]) -> String {
+/// 将 Agent 列表格式化为模型可读的文本。
+fn format_agents_for_model(agents: &[AgentConfig]) -> String {
     if agents.is_empty() {
         return String::from("No agents configured.");
     }
@@ -332,80 +167,6 @@ fn format_agents_for_model(agents: &[agent::AgentConfig]) -> String {
         ));
     }
     lines.join("\n")
-}
-
-fn handle_task_create(input_json: &str) -> Result<String, String> {
-    let input: serde_json::Value =
-        serde_json::from_str(input_json).map_err(|e| format!("parse: {e}"))?;
-    let subject = input["subject"].as_str().ok_or("subject required")?;
-    let desc = input["description"].as_str().unwrap_or("");
-    let blocks: Vec<String> = input["blocks"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let store = TaskStore::new();
-    let task = store.create(subject, desc, &blocks);
-    Ok(format!("Created task {}: {}", task.id, task.subject))
-}
-
-fn handle_task_list() -> Result<String, String> {
-    let store = TaskStore::new();
-    let tasks = store.list();
-    if tasks.is_empty() {
-        return Ok("No tasks.".into());
-    }
-    let lines: Vec<String> = tasks
-        .iter()
-        .map(|task| {
-            format!(
-                "[{}] {} - {}",
-                task.id,
-                status_icon(&task.status),
-                task.subject
-            )
-        })
-        .collect();
-    Ok(lines.join("\n"))
-}
-
-fn handle_task_update(input_json: &str) -> Result<String, String> {
-    let input: serde_json::Value =
-        serde_json::from_str(input_json).map_err(|e| format!("parse: {e}"))?;
-    let id = input["id"].as_str().ok_or("id required")?;
-    let status = match input["status"].as_str() {
-        Some("in_progress") => Some(task::TaskStatus::InProgress),
-        Some("completed") => Some(task::TaskStatus::Completed),
-        Some("pending") => Some(task::TaskStatus::Pending),
-        _ => None,
-    };
-    let store = TaskStore::new();
-    let task = store
-        .update(
-            id,
-            status,
-            input["subject"].as_str(),
-            input["description"].as_str(),
-        )
-        .ok_or_else(|| format!("task '{id}' not found"))?;
-    Ok(format!(
-        "Updated task {}: {} - {}",
-        task.id,
-        task.subject,
-        status_icon(&task.status)
-    ))
-}
-
-fn status_icon(status: &task::TaskStatus) -> &str {
-    match status {
-        task::TaskStatus::Pending => "pending",
-        task::TaskStatus::InProgress => "in_progress",
-        task::TaskStatus::Completed => "completed",
-    }
 }
 
 #[cfg(test)]
@@ -434,5 +195,23 @@ mod tests {
     #[test]
     fn formats_empty_agent_list() {
         assert_eq!(format_agents_for_model(&[]), "No agents configured.");
+    }
+
+    #[test]
+    fn agent_tool_schema_exposes_only_supported_modes() {
+        let definition = agent_tool_definition();
+        let properties = definition.parameters["properties"]
+            .as_object()
+            .expect("tool schema properties");
+
+        let modes: Vec<&str> = properties["mode"]["enum"]
+            .as_array()
+            .expect("mode enum")
+            .iter()
+            .map(|value| value.as_str().expect("mode value"))
+            .collect();
+
+        assert_eq!(modes, vec!["single"]);
+        assert!(!properties.contains_key("chain"));
     }
 }

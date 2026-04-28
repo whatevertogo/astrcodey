@@ -37,7 +37,9 @@ impl CapabilityRouter {
         let mut dynamic = self.dynamic.write().await;
         dynamic.clear();
         for t in tools {
-            dynamic.insert(t.definition().name.clone(), t);
+            let name = t.definition().name.clone();
+            // Extension order carries priority; keep the first tool for each name.
+            dynamic.entry(name).or_insert(t);
         }
     }
 

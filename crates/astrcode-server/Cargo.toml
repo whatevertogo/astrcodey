@@ -18,6 +18,8 @@ astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-context = { path = "../astrcode-context" }
 astrcode-extensions = { path = "../astrcode-extensions" }
+astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", default-features = false }
+astrcode-extension-task-tools = { path = "../astrcode-extension-task-tools", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

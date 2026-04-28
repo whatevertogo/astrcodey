@@ -15,6 +15,7 @@ members = [
     "crates/astrcode-client",
     "crates/astrcode-cli",
     "crates/astrcode-extension-agent-tools",
+    "crates/astrcode-extension-task-tools",
 ]
 
 [workspace.dependencies]

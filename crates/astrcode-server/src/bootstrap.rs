@@ -1,4 +1,7 @@
-//! Server bootstrap — assembles all services from config.
+//! 服务器引导模块 — 从配置组装所有服务。
+//!
+//! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
+//! 工具路由器、会话管理器、扩展运行器和上下文窗口管理。
 
 use std::{sync::Arc, time::Duration};
 
@@ -23,36 +26,57 @@ use crate::{agent::Agent, capability::CapabilityRouter, session::SessionManager}
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
-/// All services assembled at startup. Grouped by domain.
+/// 启动时组装的所有服务集合，按领域分组。
+///
+/// 这是服务器运行时的核心容器，持有所有共享服务的引用。
+/// 各组件通过 `Arc` 共享，支持并发访问。
 pub struct ServerRuntime {
-    /// Core services
+    /// 会话管理器，负责会话的创建、恢复、事件追加和删除
     pub session_manager: Arc<SessionManager>,
+    /// LLM 提供者，用于生成 AI 回复
     pub llm_provider: Arc<dyn LlmProvider>,
+    /// 提示词组装器，负责构建发送给 LLM 的系统提示词
     pub prompt_provider: Arc<dyn PromptProvider>,
+    /// 工具路由器，管理内置工具和扩展工具的注册与调用
     pub capability: Arc<CapabilityRouter>,
-    /// Extension system
+    /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
-    /// Resolved config (read-only)
+    /// 已解析的最终配置（只读快照）
     pub effective: EffectiveConfig,
-    /// Context window management
+    /// 上下文窗口管理设置
     pub context_settings: ContextWindowSettings,
+    /// 工具结果预算控制器，限制工具返回数据的大小
     pub tool_result_budget: Arc<ToolResultBudget>,
+    /// 文件访问追踪器，记录 Agent 访问过的文件
     pub file_access_tracker: Arc<std::sync::Mutex<FileAccessTracker>>,
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
-/// Bootstrap options for testability.
+/// 引导选项，支持自定义配置路径和工作目录，主要用于测试。
 #[derive(Default)]
 pub struct BootstrapOptions {
+    /// 自定义配置文件路径，为 None 时使用默认路径
     pub config_path: Option<std::path::PathBuf>,
+    /// 自定义工作目录，为 None 时使用当前目录
     pub working_dir: Option<std::path::PathBuf>,
 }
 
+/// 使用默认选项引导服务器运行时。
 pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
     bootstrap_with(BootstrapOptions::default()).await
 }
 
+/// 使用指定选项引导服务器运行时。
+///
+/// 按顺序完成以下步骤：
+/// 1. 加载并解析配置
+/// 2. 构建 LLM 提供者
+/// 3. 构建提示词组装器
+/// 4. 注册内置工具到工具路由器
+/// 5. 初始化会话管理器和存储后端
+/// 6. 加载扩展并绑定核心服务
+/// 7. 初始化上下文窗口管理
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
     // 1. Load + resolve config
     let config_store = if let Some(ref path) = opts.config_path {
@@ -82,22 +106,8 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     ));
 
     // 3. Build prompt provider
-    let mut composer = astrcode_prompt::composer::PromptComposer::new();
-    composer.add_contributor(Box::new(astrcode_prompt::contributors::IdentityContributor));
-    composer.add_contributor(Box::new(
-        astrcode_prompt::contributors::EnvironmentContributor,
-    ));
-    composer.add_contributor(Box::new(astrcode_prompt::contributors::AgentsMdContributor));
-    composer.add_contributor(Box::new(
-        astrcode_prompt::contributors::CapabilityContributor,
-    ));
-    composer.add_contributor(Box::new(
-        astrcode_prompt::contributors::ResponseStyleContributor,
-    ));
-    composer.add_contributor(Box::new(
-        astrcode_prompt::contributors::SystemInstructionContributor,
-    ));
-    let prompt_provider: Arc<dyn PromptProvider> = Arc::new(composer);
+    let prompt_provider: Arc<dyn PromptProvider> =
+        Arc::new(astrcode_prompt::composer::PromptComposer::new());
 
     // 4. Build capability router with stable built-in tools
     let cwd = opts
@@ -129,6 +139,12 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Duration::from_secs(30),
         load_result.runtime,
     ));
+    extension_runner
+        .register(astrcode_extension_agent_tools::extension())
+        .await;
+    extension_runner
+        .register(astrcode_extension_task_tools::extension())
+        .await;
     for ext in load_result.extensions {
         extension_runner.register(ext).await;
     }
@@ -173,6 +189,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     })
 }
 
+/// 引导过程中可能出现的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
     #[error("Config: {0}")]
@@ -183,8 +200,10 @@ pub enum BootstrapError {
 
 // ─── ServerSessionSpawner ─────────────────────────────────────────────────
 
-/// Implements `SessionSpawner` so the extension runner can spawn child sessions
-/// when extensions return `ExtensionToolOutcome::RunSession`.
+/// 服务器端的会话派生器，实现 `SessionSpawner` trait。
+///
+/// 当扩展返回 `ExtensionToolOutcome::RunSession` 时，
+/// 扩展运行器通过此派生器创建子会话并运行 Agent 回合。
 struct ServerSessionSpawner {
     session_manager: Arc<SessionManager>,
     llm: Arc<dyn LlmProvider>,
@@ -195,6 +214,14 @@ struct ServerSessionSpawner {
 
 #[async_trait::async_trait]
 impl SessionSpawner for ServerSessionSpawner {
+    /// 派生一个子会话，创建 Agent 并执行用户提示词。
+    ///
+    /// # 参数
+    /// - `parent_session_id`: 父会话 ID
+    /// - `request`: 派生请求，包含工作目录、提示词、工具白名单等
+    ///
+    /// # 返回
+    /// 子会话的执行结果，包含输出文本和子会话 ID。
     async fn spawn(
         &self,
         parent_session_id: &str,

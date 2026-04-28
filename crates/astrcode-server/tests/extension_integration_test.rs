@@ -146,6 +146,63 @@ impl Extension for EchoToolExtension {
     }
 }
 
+struct FixedToolExtension {
+    id: &'static str,
+    tool_name: &'static str,
+    content: &'static str,
+}
+
+#[async_trait::async_trait]
+impl Extension for FixedToolExtension {
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+        vec![]
+    }
+
+    async fn on_event(
+        &self,
+        _event: ExtensionEvent,
+        _ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        Ok(HookEffect::Allow)
+    }
+
+    fn tools(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: self.tool_name.into(),
+            description: format!("{} tool", self.id),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            is_builtin: false,
+        }]
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        _arguments: serde_json::Value,
+        _working_dir: &str,
+        _ctx: &astrcode_core::tool::ToolExecutionContext,
+    ) -> Result<ToolResult, ExtensionError> {
+        if tool_name != self.tool_name {
+            return Err(ExtensionError::NotFound(tool_name.into()));
+        }
+        Ok(ToolResult {
+            call_id: String::new(),
+            content: self.content.into(),
+            is_error: false,
+            error: None,
+            metadata: Default::default(),
+            duration_ms: None,
+        })
+    }
+}
+
 /// Checks that the block outcome carries the expected reason.
 fn assert_blocked(outcome: &ToolHookOutcome, expected_reason: &str) {
     match outcome {
@@ -178,6 +235,42 @@ fn context_with_pre_tool_input(command: &str) -> ServerExtensionContext {
         tool_input: serde_json::json!({ "command": command }),
     });
     ctx
+}
+
+#[tokio::test]
+async fn duplicate_dynamic_tools_keep_first_registration() {
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    runner
+        .register(Arc::new(FixedToolExtension {
+            id: "project",
+            tool_name: "sharedTool",
+            content: "project",
+        }))
+        .await;
+    runner
+        .register(Arc::new(FixedToolExtension {
+            id: "global",
+            tool_name: "sharedTool",
+            content: "global",
+        }))
+        .await;
+
+    let capability = CapabilityRouter::new();
+    let tools = runner.collect_tool_adapters("/workspace").await;
+    capability.apply_dynamic(tools).await;
+
+    let ctx = astrcode_core::tool::ToolExecutionContext {
+        session_id: "test".into(),
+        working_dir: String::new(),
+        model_id: String::new(),
+        available_tools: vec![],
+    };
+    let result = capability
+        .execute("sharedTool", serde_json::json!({}), &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result.content, "project");
 }
 
 #[tokio::test]

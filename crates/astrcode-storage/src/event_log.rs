@@ -1,4 +1,7 @@
-//! Append-only JSONL event log for session persistence.
+//! 追加式 JSONL 事件日志，用于会话持久化。
+//!
+//! 每个会话对应一个事件日志文件，事件以换行分隔的扁平 JSON 对象写入，
+//! 写入后不可修改。存储层在追加时分配单调递增的 `seq` 序号。
 
 use std::{
     fs::File,
@@ -124,13 +127,15 @@ fn count_lines(path: &Path) -> Result<usize, StorageError> {
     Ok(reader.lines().count())
 }
 
-/// Streaming iterator over event log lines.
+/// 事件日志的流式迭代器，逐行读取并解析事件。
 pub struct EventLogIterator {
     reader: BufReader<File>,
+    /// 当前读取的行号（从 0 开始）
     line_number: usize,
 }
 
 impl EventLogIterator {
+    /// 从指定路径创建事件日志迭代器。
     pub fn new(path: &PathBuf) -> Result<Self, StorageError> {
         let file = File::open(path)?;
         Ok(Self {
@@ -141,6 +146,7 @@ impl EventLogIterator {
 }
 
 impl Iterator for EventLogIterator {
+    /// 返回 (行号, 事件) 元组，跳过空行。
     type Item = Result<(usize, Event), StorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -165,17 +171,25 @@ impl Iterator for EventLogIterator {
     }
 }
 
-/// Batch appender for write efficiency.
+/// 批量追加器，用于提高写入效率。
 ///
-/// Buffers append requests and flushes them in batches within a configurable
-/// time window. The window is currently consumed by higher-level schedulers.
+/// 缓冲追加请求，在可配置的时间窗口内批量刷盘。
+/// 适用于高频事件写入场景，减少磁盘 I/O 次数。
 pub struct BatchAppender {
+    /// 底层事件日志
     log: EventLog,
+    /// 待刷盘的事件缓冲区
     buffer: Vec<Event>,
+    /// 刷盘时间窗口（毫秒）
     flush_window_ms: u64,
 }
 
 impl BatchAppender {
+    /// 创建新的批量追加器。
+    ///
+    /// # 参数
+    /// - `log`: 底层事件日志
+    /// - `flush_window_ms`: 刷盘时间窗口（毫秒）
     pub fn new(log: EventLog, flush_window_ms: u64) -> Self {
         Self {
             log,
@@ -184,11 +198,16 @@ impl BatchAppender {
         }
     }
 
+    /// 将事件推入缓冲区，等待后续刷盘。
     pub async fn push(&mut self, event: Event) -> Result<(), StorageError> {
         self.buffer.push(event);
         Ok(())
     }
 
+    /// 将缓冲区中的所有事件批量写入日志文件并刷盘。
+    ///
+    /// 返回本次刷盘的事件数量。刷盘成功后才更新 seq 和清空缓冲区，
+    /// 避免部分写入导致事件丢失。
     pub async fn flush(&mut self) -> Result<usize, StorageError> {
         if self.buffer.is_empty() {
             return Ok(0);
@@ -219,6 +238,7 @@ impl BatchAppender {
         Ok(count)
     }
 
+    /// 获取配置的刷盘时间窗口（毫秒）。
     pub fn flush_window_ms(&self) -> u64 {
         self.flush_window_ms
     }

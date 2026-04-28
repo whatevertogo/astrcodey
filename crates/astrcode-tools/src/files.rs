@@ -22,26 +22,37 @@ use serde_json::{Map, Value};
 
 // ─── readFile ────────────────────────────────────────────────────────────
 
+/// 文件读取工具，读取已知路径的文件内容并返回带行号的文本。
+///
+/// 支持行偏移/限制和字符级别的截断，适用于大文件的分页读取。
 pub struct ReadFileTool {
+    /// 工具的工作目录，用于解析相对路径和做路径遍历防护
     pub working_dir: PathBuf,
 }
 
+/// readFile 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReadFileArgs {
+    /// 要读取的文件路径（绝对或相对路径）
     path: PathBuf,
+    /// 返回内容的最大字符数（默认 20000）
     #[serde(default)]
     max_chars: Option<usize>,
+    /// 字符偏移量，用于续读被截断的内容
     #[serde(default)]
     char_offset: Option<usize>,
+    /// 起始行偏移（0-based）
     #[serde(default)]
     offset: Option<usize>,
+    /// 从 offset 开始返回的最大行数
     #[serde(default)]
     limit: Option<usize>,
 }
 
 #[async_trait::async_trait]
 impl Tool for ReadFileTool {
+    /// 返回 readFile 工具的定义，包含参数 schema。
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "readFile".into(),
@@ -87,6 +98,7 @@ impl Tool for ReadFileTool {
         ExecutionMode::Parallel
     }
 
+    /// 执行文件读取：解析路径 → 安全校验 → 读取内容 → 按行编号格式化输出。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -152,15 +164,23 @@ impl Tool for ReadFileTool {
 
 // ─── writeFile ───────────────────────────────────────────────────────────
 
+/// 文件写入工具，创建新文件或完整覆盖已有文件。
+///
+/// 当已知完整的目标内容时使用此工具；对于小范围编辑，优先使用 `EditFileTool`。
 pub struct WriteFileTool {
+    /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
+/// writeFile 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteFileArgs {
+    /// 目标文件路径
     path: PathBuf,
+    /// 要写入的完整 UTF-8 内容（覆盖整个文件）
     content: String,
+    /// 是否自动创建缺失的父目录
     #[serde(default)]
     create_dirs: bool,
 }
@@ -197,6 +217,9 @@ impl Tool for WriteFileTool {
         }
     }
 
+    /// 执行文件写入：解析路径 → 安全校验 → 可选创建目录 → 写入文件。
+    ///
+    /// 如果文件已存在则覆盖，返回旧/新文件大小的变化信息。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -246,18 +269,27 @@ impl Tool for WriteFileTool {
 
 // ─── editFile ────────────────────────────────────────────────────────────
 
+/// 文件精确编辑工具，对已有文件执行窄范围的字符串替换。
+///
+/// `oldStr` 在文件中必须唯一匹配（除非启用 `replaceAll`），适用于小范围精确修改。
 pub struct EditFileTool {
+    /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
+/// editFile 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EditFileArgs {
+    /// 要编辑的文件路径
     path: PathBuf,
+    /// 要被替换的原始文本（需包含足够的上下文以确保唯一匹配）
     #[serde(rename = "oldStr", alias = "old_string")]
     old_str: String,
+    /// 替换后的新文本
     #[serde(rename = "newStr", alias = "new_string")]
     new_str: String,
+    /// 是否替换所有匹配项（默认仅替换第一个）
     #[serde(default, alias = "replace_all")]
     replace_all: bool,
 }
@@ -298,6 +330,7 @@ impl Tool for EditFileTool {
         }
     }
 
+    /// 执行文件编辑：解析参数 → 清理引号 → 查找匹配 → 执行替换 → 写回文件。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -355,55 +388,86 @@ impl Tool for EditFileTool {
 
 // ─── applyPatch ──────────────────────────────────────────────────────────
 
+/// 统一差异补丁应用工具，支持多文件协调变更、文件创建和删除。
+///
+/// 适用于需要同时修改多个文件或进行远距离 hunk 编辑的场景；
+/// 单文件的精确替换优先使用 `EditFileTool`。
 pub struct ApplyPatchTool {
+    /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
+/// applyPatch 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplyPatchArgs {
+    /// 统一差异格式的补丁文本
     patch: String,
 }
 
+/// 解析后的单个文件补丁，包含旧/新路径和所有 hunk。
 #[derive(Debug)]
 struct FilePatch {
+    /// 原始文件路径（`/dev/null` 表示新建文件时为 None）
     old_path: Option<String>,
+    /// 目标文件路径（`/dev/null` 表示删除文件时为 None）
     new_path: Option<String>,
+    /// 该文件的所有变更块
     hunks: Vec<Hunk>,
 }
 
+/// 单个 hunk（差异块），描述一段连续的行级变更。
 #[derive(Debug)]
 struct Hunk {
+    /// 旧文件的起始行号（1-based）
     old_start: usize,
+    /// 旧文件的行数
     _old_count: usize,
+    /// 新文件的起始行号（1-based）
     _new_start: usize,
+    /// 新文件的行数
     _new_count: usize,
+    /// hunk 中的每一行（上下文/新增/删除）
     lines: Vec<HunkLine>,
 }
 
+/// hunk 中的行类型。
 #[derive(Debug, Clone)]
 enum HunkLine {
+    /// 上下文行（未变更，用于定位）
     Context(String),
+    /// 新增行
     Add(String),
+    /// 删除行
     Delete(String),
 }
 
+/// 单个文件的补丁应用结果。
 #[derive(Debug)]
 struct FileChange {
+    /// 变更类型：created / updated / deleted / error
     change_type: String,
+    /// 文件路径
     path: String,
+    /// 是否成功应用
     applied: bool,
+    /// 结果摘要
     summary: String,
+    /// 错误信息（如果有）
     error: Option<String>,
 }
 
+/// 行尾符类型，用于在应用补丁时保留原始文件的行尾风格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineEnding {
+    /// Unix 风格 `\n`
     Lf,
+    /// Windows 风格 `\r\n`
     Crlf,
 }
 
 impl LineEnding {
+    /// 返回行尾符的字符串表示。
     fn as_str(self) -> &'static str {
         match self {
             Self::Lf => "\n",
@@ -412,10 +476,14 @@ impl LineEnding {
     }
 }
 
+/// 解析后的文本文档，按行分割并保留行尾符和末尾换行信息。
 #[derive(Debug)]
 struct TextDocument {
+    /// 文档的所有行
     lines: Vec<String>,
+    /// 检测到的行尾符类型
     line_ending: LineEnding,
+    /// 原文是否以换行符结尾
     has_trailing_newline: bool,
 }
 
@@ -442,6 +510,9 @@ impl Tool for ApplyPatchTool {
             }),
         }
     }
+    /// 执行补丁应用：解析补丁文本 → 逐文件应用 → 汇总结果。
+    ///
+    /// 即使部分文件应用失败，已成功的变更也会保留（partial commit）。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -494,6 +565,9 @@ impl Tool for ApplyPatchTool {
     }
 }
 
+/// 解析统一差异格式的补丁文本，返回每个文件的补丁列表。
+///
+/// 跳过 diff 头部元信息（index、mode 等），提取 `---`/`+++` 路径对和后续的 hunk 块。
 fn parse_patch(patch: &str) -> std::result::Result<Vec<FilePatch>, String> {
     let lines: Vec<&str> = patch.lines().collect();
     let mut file_patches = Vec::new();
@@ -547,6 +621,7 @@ fn parse_patch(patch: &str) -> std::result::Result<Vec<FilePatch>, String> {
     Ok(file_patches)
 }
 
+/// 去除 diff 路径前缀（`a/`、`b/`）和尾部时间戳。
 fn strip_diff_prefix(s: &str) -> &str {
     if s.starts_with("/dev/null") {
         return "/dev/null";
@@ -558,6 +633,7 @@ fn strip_diff_prefix(s: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
+/// 从当前位置开始解析所有连续的 hunk 块，直到遇到下一个文件头或补丁结束。
 fn parse_hunks(lines: &[&str], i: &mut usize) -> std::result::Result<Vec<Hunk>, String> {
     let mut hunks = Vec::new();
     while *i < lines.len() {
@@ -611,6 +687,9 @@ fn parse_hunks(lines: &[&str], i: &mut usize) -> std::result::Result<Vec<Hunk>, 
     Ok(hunks)
 }
 
+/// 解析 hunk 头部 `@@ -old_start,old_count +new_start,new_count @@`。
+///
+/// 返回 (old_start, old_count, new_start, new_count)。
 fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize, usize), String> {
     let content = header
         .strip_prefix("@@")
@@ -627,6 +706,9 @@ fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize, 
     Ok((old_start, old_count, new_start, new_count))
 }
 
+/// 解析 hunk 头部中的范围值（如 `-3,5` 或 `+1`），返回 (start, count)。
+///
+/// 当省略 count 时，默认为 1（start 为 0 时默认为 0）。
 fn parse_range(value: &str, kind: &str) -> std::result::Result<(usize, usize), String> {
     let inner = value
         .strip_prefix('-')
@@ -650,6 +732,9 @@ fn parse_range(value: &str, kind: &str) -> std::result::Result<(usize, usize), S
     }
 }
 
+/// 将单个文件的补丁应用到工作目录。
+///
+/// 处理新建文件、删除文件和更新文件三种情况，包含路径遍历防护和符号链接拒绝。
 fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
     let Some(target_path_str) = file_patch
         .new_path
@@ -811,6 +896,7 @@ fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
     }
 }
 
+/// 构造一个失败的文件变更结果。
 fn failed_file_change(change_type: &str, path: &str, error: String) -> FileChange {
     FileChange {
         change_type: change_type.into(),
@@ -821,6 +907,7 @@ fn failed_file_change(change_type: &str, path: &str, error: String) -> FileChang
     }
 }
 
+/// 将文本内容解析为 `TextDocument`，自动检测行尾符类型和末尾换行。
 fn parse_text_document(text: &str) -> TextDocument {
     TextDocument {
         lines: if text.is_empty() {
@@ -837,6 +924,7 @@ fn parse_text_document(text: &str) -> TextDocument {
     }
 }
 
+/// 将行列表重新渲染为字符串，使用指定的行尾符并可选追加末尾换行。
 fn render_text_document(
     lines: &[String],
     line_ending: LineEnding,
@@ -853,6 +941,10 @@ fn render_text_document(
     content
 }
 
+/// 依次应用所有 hunk 到内容行列表。
+///
+/// 使用模糊匹配（`find_context_match`）定位每个 hunk 的插入位置，
+/// 并通过 `line_delta` 跟踪前面 hunk 造成的行偏移。
 fn apply_hunks(
     content_lines: &[String],
     hunks: &[Hunk],
@@ -882,6 +974,9 @@ fn apply_hunks(
     Ok(result)
 }
 
+/// 在指定位置将单个 hunk 的行变更应用到内容行列表中（原地修改）。
+///
+/// 逐行验证上下文行和删除行是否匹配，收集新增行，最后用 splice 替换。
 fn apply_hunk_in_place(
     content_lines: &mut Vec<String>,
     hunk: &Hunk,
@@ -921,6 +1016,7 @@ fn apply_hunk_in_place(
     Ok(())
 }
 
+/// 根据 hunk 的 old_start 和之前 hunk 累积的行偏移，计算期望的锚点行位置。
 fn expected_anchor(hunk: &Hunk, line_delta: isize, content_len: usize) -> usize {
     let base = if hunk.old_start == 0 {
         0
@@ -930,11 +1026,15 @@ fn expected_anchor(hunk: &Hunk, line_delta: isize, content_len: usize) -> usize 
     (base as isize + line_delta).clamp(0, content_len as isize) as usize
 }
 
+/// 计算单个 hunk 造成的行数变化（新增行数 - 删除行数）。
 fn hunk_line_delta(hunk: &Hunk) -> isize {
     let (added, removed) = hunk_line_counts(hunk);
     added as isize - removed as isize
 }
 
+/// 在内容行中查找 hunk 上下文行的匹配位置。
+///
+/// 先尝试锚点位置，再向前搜索，最后向后搜索，实现模糊匹配以容忍行偏移。
 fn find_context_match(content_lines: &[String], hunk: &Hunk, anchor: usize) -> Option<usize> {
     let pattern: Vec<&str> = hunk
         .lines
@@ -964,6 +1064,7 @@ fn find_context_match(content_lines: &[String], hunk: &Hunk, anchor: usize) -> O
     ((anchor + 1)..=upper_limit).find(|&offset| try_match_at(content_lines, &pattern, offset))
 }
 
+/// 检查从 start 位置开始，内容行是否与模式完全匹配。
 fn try_match_at(content_lines: &[String], pattern: &[&str], start: usize) -> bool {
     if start + pattern.len() > content_lines.len() {
         return false;
@@ -975,6 +1076,7 @@ fn try_match_at(content_lines: &[String], pattern: &[&str], start: usize) -> boo
     })
 }
 
+/// 统计整个文件补丁的新增行数和删除行数。
 fn patch_line_counts(file_patch: &FilePatch) -> (usize, usize) {
     file_patch
         .hunks
@@ -985,6 +1087,7 @@ fn patch_line_counts(file_patch: &FilePatch) -> (usize, usize) {
         })
 }
 
+/// 统计单个 hunk 的新增行数和删除行数。
 fn hunk_line_counts(hunk: &Hunk) -> (usize, usize) {
     hunk.lines
         .iter()
@@ -995,6 +1098,7 @@ fn hunk_line_counts(hunk: &Hunk) -> (usize, usize) {
         })
 }
 
+/// 构建 applyPatch 工具返回的 metadata，包含每个文件的变更详情和汇总统计。
 fn build_apply_patch_metadata(
     results: &[FileChange],
     applied: usize,
@@ -1023,6 +1127,7 @@ fn build_apply_patch_metadata(
     ])
 }
 
+/// 构造一个 applyPatch 错误结果（无文件变更）。
 fn apply_patch_error(error: &str) -> ToolResult {
     ToolResult {
         call_id: String::new(),
@@ -1040,24 +1145,35 @@ fn apply_patch_error(error: &str) -> ToolResult {
 
 // ─── findFiles ───────────────────────────────────────────────────────────
 
+/// 文件查找工具，按 glob 模式搜索文件路径（不搜索内容）。
+///
+/// 结果按修改时间倒序排列，支持 gitignore 过滤和隐藏文件控制。
 pub struct FindFilesTool {
+    /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
+/// findFiles 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FindFilesArgs {
+    /// glob 匹配模式，如 `*.rs`、`**/*.ts`、`*.{json,toml}`
     pattern: String,
+    /// 搜索的根目录（默认为工作目录）
     #[serde(default)]
     root: Option<PathBuf>,
+    /// 返回结果的最大数量（默认 500）
     #[serde(default)]
     max_results: Option<usize>,
+    /// 是否遵循 .gitignore 排除规则（默认 true）
     #[serde(default = "default_true")]
     respect_gitignore: bool,
+    /// 是否包含隐藏文件和目录（默认 true）
     #[serde(default = "default_true")]
     include_hidden: bool,
 }
 
+/// serde 默认值函数：返回 true。
 fn default_true() -> bool {
     true
 }
@@ -1106,6 +1222,7 @@ impl Tool for FindFilesTool {
         ExecutionMode::Parallel
     }
 
+    /// 执行文件查找：解析 glob 模式 → 遍历匹配 → 过滤隐藏/gitignore → 按时间排序。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -1168,53 +1285,80 @@ impl Tool for FindFilesTool {
 
 // ─── grep ────────────────────────────────────────────────────────────────
 
+/// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
+///
+/// 默认返回匹配的文件列表（`files_with_matches` 模式），可切换为返回匹配行内容或计数。
 pub struct GrepTool {
+    /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
+/// grep 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GrepArgs {
+    /// 搜索模式（正则表达式，除非 literal 为 true）
     pattern: String,
+    /// 是否将 pattern 视为字面量文本（自动转义特殊字符）
     #[serde(default)]
     literal: bool,
+    /// 搜索的文件或目录路径（默认为工作目录）
     #[serde(default)]
     path: Option<PathBuf>,
+    /// 是否递归搜索子目录（默认对目录为 true）
     #[serde(default)]
     recursive: Option<bool>,
+    /// 是否大小写不敏感
     #[serde(default, alias = "case_insensitive")]
     case_insensitive: bool,
+    /// 最大匹配数/文件数（默认 250）
     #[serde(default, alias = "max_matches")]
     max_matches: Option<usize>,
+    /// 跳过的匹配数量（用于分页）
     #[serde(default)]
     offset: Option<usize>,
+    /// 路径过滤 glob 模式，如 `*.rs`
     #[serde(default)]
     glob: Option<String>,
+    /// 文件类型过滤，如 `rust`、`typescript`
     #[serde(default, alias = "file_type")]
     file_type: Option<String>,
+    /// 匹配行前的上下文行数
     #[serde(default, alias = "before_context")]
     before_context: Option<usize>,
+    /// 匹配行后的上下文行数
     #[serde(default, alias = "after_context")]
     after_context: Option<usize>,
+    /// 输出模式
     #[serde(default, alias = "output_mode")]
     output_mode: GrepOutputMode,
 }
 
+/// grep 的输出模式。
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum GrepOutputMode {
+    /// 返回匹配行的内容（含行号和上下文）
     Content,
+    /// 仅返回包含匹配的文件路径（默认）
     #[default]
     FilesWithMatches,
+    /// 返回每个文件的匹配计数
     Count,
 }
 
+/// 单个 grep 匹配结果。
 #[derive(Debug)]
 struct GrepMatch {
+    /// 匹配所在的文件路径
     file: String,
+    /// 匹配的行号（1-based）
     line_no: usize,
+    /// 匹配的行内容
     line: String,
+    /// 匹配行前的上下文行
     before: Vec<String>,
+    /// 匹配行后的上下文行
     after: Vec<String>,
 }
 
@@ -1291,6 +1435,7 @@ impl Tool for GrepTool {
         ExecutionMode::Parallel
     }
 
+    /// 执行内容搜索：标准化参数 → 编译正则 → 遍历文件 → 收集匹配 → 格式化输出。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -1350,6 +1495,8 @@ impl Tool for GrepTool {
     }
 }
 
+/// 标准化 grep 参数：将各种别名（如 `-i`、`-A`、`head_limit`）映射到规范字段名，
+/// 并将字符串形式的布尔值/数字转换为正确的 JSON 类型。
 fn normalize_grep_args(mut args: Value) -> Value {
     let Some(object) = args.as_object_mut() else {
         return args;
@@ -1385,6 +1532,7 @@ fn normalize_grep_args(mut args: Value) -> Value {
     args
 }
 
+/// 将别名键移动到规范键（如果规范键已存在则删除别名键）。
 fn move_alias(object: &mut Map<String, Value>, from: &str, to: &str) {
     if object.contains_key(to) {
         object.remove(from);
@@ -1395,6 +1543,7 @@ fn move_alias(object: &mut Map<String, Value>, from: &str, to: &str) {
     }
 }
 
+/// 将字符串形式的布尔值（"true"/"1"/"yes"/"on" 等）转换为 JSON bool。
 fn normalize_bool_field(object: &mut Map<String, Value>, key: &str) {
     let Some(value) = object.get_mut(key) else {
         return;
@@ -1409,6 +1558,7 @@ fn normalize_bool_field(object: &mut Map<String, Value>, key: &str) {
     }
 }
 
+/// 将字符串形式的数字转换为 JSON 数字，对 maxMatches 为 0 的情况重置为默认值 250。
 fn normalize_usize_field(object: &mut Map<String, Value>, key: &str) {
     let Some(value) = object.get_mut(key) else {
         return;
@@ -1430,23 +1580,39 @@ fn normalize_usize_field(object: &mut Map<String, Value>, key: &str) {
     }
 }
 
+/// 文件遍历搜索的配置选项。
 struct GrepWalkOptions<'a> {
+    /// 是否递归搜索子目录
     recursive: bool,
+    /// 路径过滤 glob 模式
     glob: Option<&'a str>,
+    /// 文件类型过滤
     file_type: Option<&'a str>,
+    /// 匹配行前的上下文行数
     before_context: usize,
+    /// 匹配行后的上下文行数
     after_context: usize,
 }
 
+/// grep 搜索过程中的累积状态。
 struct GrepState {
+    /// 已发现的匹配总数（含被 offset 跳过的）
     seen: usize,
+    /// 最大返回匹配数
     max_matches: usize,
+    /// 跳过的匹配数（用于分页）
     offset: usize,
+    /// 收集到的匹配详情
     matches: Vec<GrepMatch>,
+    /// 每个文件的匹配计数
     counts: BTreeMap<String, usize>,
+    /// 包含匹配的文件路径集合
     files: BTreeSet<String>,
 }
 
+/// 递归遍历目录树，对每个文件执行 grep 搜索。
+///
+/// 跳过 `.git` 目录，达到最大匹配数后提前返回。
 fn walk_grep(
     root: &Path,
     re: &regex::Regex,
@@ -1476,6 +1642,7 @@ fn walk_grep(
     Ok(())
 }
 
+/// 对单个文件执行 grep 搜索，收集匹配行及其上下文。
 fn grep_file(path: &Path, re: &regex::Regex, options: &GrepWalkOptions<'_>, state: &mut GrepState) {
     if !matches_grep_filters(path, options) {
         return;
@@ -1520,6 +1687,7 @@ fn grep_file(path: &Path, re: &regex::Regex, options: &GrepWalkOptions<'_>, stat
     }
 }
 
+/// 根据输出模式将搜索状态渲染为文本行列表。
 fn render_grep_output(mode: GrepOutputMode, state: &GrepState) -> Vec<String> {
     match mode {
         GrepOutputMode::FilesWithMatches => state.files.iter().cloned().collect(),
@@ -1546,6 +1714,7 @@ fn render_grep_output(mode: GrepOutputMode, state: &GrepState) -> Vec<String> {
     }
 }
 
+/// 检查文件路径是否通过 glob 和文件类型过滤器。
 fn matches_grep_filters(path: &Path, options: &GrepWalkOptions<'_>) -> bool {
     if let Some(file_type) = options.file_type {
         if !matches_file_type(path, file_type) {
@@ -1563,6 +1732,9 @@ fn matches_grep_filters(path: &Path, options: &GrepWalkOptions<'_>) -> bool {
     true
 }
 
+/// 根据文件类型名称匹配文件扩展名。
+///
+/// 支持常见类型别名，如 `rust`/`rs` → `.rs`，`typescript`/`ts` → `.ts`/`.tsx`。
 fn matches_file_type(path: &Path, file_type: &str) -> bool {
     let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     match file_type {
@@ -1579,17 +1751,20 @@ fn matches_file_type(path: &Path, file_type: &str) -> bool {
 // ─── Shared ──────────────────────────────────────────────────────────────
 
 
+/// 检查路径是否为 UNC 路径（`\\server\share` 或 `//server/share`）。
 fn is_unc_path(path: &Path) -> bool {
     let path = path.to_string_lossy();
     path.starts_with("\\\\") || path.starts_with("//")
 }
 
+/// 通过检测前 8KB 中是否包含 NULL 字节来判断文件是否为二进制文件。
 fn is_binary(p: &Path) -> bool {
     std::fs::read(p)
         .map(|d| d.iter().take(8192).any(|&b| b == 0))
         .unwrap_or(false)
 }
 
+/// 按字符偏移和最大字符数截取字符串，超出时追加截断标记。
 fn slice_chars(s: &str, char_offset: usize, max_chars: usize) -> String {
     let mut iter = s.chars().skip(char_offset);
     let mut out: String = iter.by_ref().take(max_chars).collect();
@@ -1599,6 +1774,10 @@ fn slice_chars(s: &str, char_offset: usize, max_chars: usize) -> String {
     out
 }
 
+/// 在 haystack 中查找 needle 的唯一出现位置。
+///
+/// 如果出现多次则返回错误（编辑不安全），未找到则返回 `Ok(None)`。
+/// 逐 UTF-8 标量前进以正确处理重叠匹配。
 fn find_unique_occurrence(haystack: &str, needle: &str) -> Result<Option<usize>, ToolError> {
     let mut first_match = None;
     let mut offset = 0usize;
@@ -1622,6 +1801,7 @@ fn find_unique_occurrence(haystack: &str, needle: &str) -> Result<Option<usize>,
     Ok(first_match)
 }
 
+/// 检查路径中是否包含隐藏组件（以 `.` 开头的目录或文件名，排除 `.` 和 `..`）。
 fn has_hidden_component(path: &Path) -> bool {
     path.components().any(|component| {
         component
@@ -1631,6 +1811,7 @@ fn has_hidden_component(path: &Path) -> bool {
     })
 }
 
+/// 加载简化的 .gitignore 规则（仅支持简单模式，不支持 `!` 否定和 glob）。
 fn load_simple_gitignore(root: &Path) -> BTreeSet<String> {
     let Ok(content) = std::fs::read_to_string(root.join(".gitignore")) else {
         return BTreeSet::new();
@@ -1643,6 +1824,9 @@ fn load_simple_gitignore(root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// 检查给定路径是否匹配 gitignore 模式集合。
+///
+/// 支持精确匹配、前缀匹配和文件名匹配。
 fn is_gitignored(root: &Path, path: &Path, patterns: &BTreeSet<String>) -> bool {
     if patterns.is_empty() {
         return false;
@@ -1656,6 +1840,7 @@ fn is_gitignored(root: &Path, path: &Path, patterns: &BTreeSet<String>) -> bool 
     })
 }
 
+/// 构造"文件未找到"的工具返回结果。
 fn not_found(p: &Path) -> ToolResult {
     ToolResult {
         call_id: String::new(),
@@ -1667,6 +1852,7 @@ fn not_found(p: &Path) -> ToolResult {
     }
 }
 
+/// 构造"路径是目录"的工具返回结果。
 fn directory(p: &Path) -> ToolResult {
     ToolResult {
         call_id: String::new(),
@@ -1681,6 +1867,7 @@ fn directory(p: &Path) -> ToolResult {
     }
 }
 
+/// 构造"二进制文件"的工具返回结果。
 fn binary(p: &Path) -> ToolResult {
     ToolResult {
         call_id: String::new(),
@@ -1692,6 +1879,7 @@ fn binary(p: &Path) -> ToolResult {
     }
 }
 
+/// 截断字符串到最大长度，在 UTF-8 边界处安全截断并添加省略号。
 fn trunc(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.into();
@@ -1703,6 +1891,7 @@ fn trunc(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
+/// 将中文引号（""''）替换为 ASCII 引号，修正 LLM 可能产生的引号问题。
 fn clean_quotes(s: &str) -> String {
     s.replace(['\u{201C}', '\u{201D}'], "\"")
         .replace(['\u{2018}', '\u{2019}'], "'")

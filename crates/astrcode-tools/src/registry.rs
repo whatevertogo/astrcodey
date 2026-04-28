@@ -12,12 +12,14 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// 创建一个空的工具注册表。
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
         }
     }
 
+    /// 注册一个工具。如果同名工具已存在，会覆盖并输出警告日志。
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.definition().name.clone();
         if self.tools.contains_key(&name) {
@@ -26,10 +28,18 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// 返回所有已注册工具的定义列表。
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|t| t.definition()).collect()
     }
 
+    /// 按名称执行已注册的工具。
+    ///
+    /// - `name`：工具名称
+    /// - `args`：传递给工具的 JSON 参数
+    /// - `ctx`：工具执行上下文
+    ///
+    /// 如果工具未找到，返回 `ToolError::NotFound`。
     pub async fn execute(
         &self,
         name: &str,
@@ -42,6 +52,7 @@ impl ToolRegistry {
         }
     }
 
+    /// 按名称查找工具定义，未找到返回 `None`。
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
         self.tools.get(name).map(|t| t.definition())
     }

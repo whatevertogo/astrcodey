@@ -1,6 +1,7 @@
-//! Command handler — processes ClientCommand using ServerRuntime.
+//! 命令处理器 — 使用 ServerRuntime 处理客户端命令。
 //!
-//! Transport-agnostic: used by both stdio binary and in-process CLI.
+//! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
+//! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 
 use std::sync::Arc;
 
@@ -23,21 +24,33 @@ use tokio::{
 
 use crate::{agent::Agent, bootstrap::ServerRuntime};
 
-/// Handles commands and emits notifications to a broadcast channel.
+/// 命令处理器，处理客户端命令并通过广播通道发送通知。
+///
+/// 维护当前活跃会话和活跃回合的状态，确保同一时间只有一个回合在运行。
 pub struct CommandHandler {
     runtime: Arc<ServerRuntime>,
+    /// 事件广播发送端，所有客户端通知都通过此通道发送
     event_tx: broadcast::Sender<ClientNotification>,
+    /// 当前活跃的会话 ID
     active_session_id: Option<SessionId>,
+    /// 当前正在执行的回合（如有）
     active_turn: Option<ActiveTurn>,
 }
 
+/// 正在执行的回合信息，持有对应的 tokio 任务句柄。
 struct ActiveTurn {
     session_id: SessionId,
     turn_id: TurnId,
+    /// 后台任务的 JoinHandle，可用于取消（abort）回合
     handle: JoinHandle<()>,
 }
 
 impl CommandHandler {
+    /// 创建新的命令处理器。
+    ///
+    /// # 参数
+    /// - `runtime`: 服务器运行时服务集合
+    /// - `event_tx`: 事件广播发送端
     pub fn new(
         runtime: Arc<ServerRuntime>,
         event_tx: broadcast::Sender<ClientNotification>,
@@ -50,6 +63,10 @@ impl CommandHandler {
         }
     }
 
+    /// 处理一个客户端命令，将其路由到对应的处理方法。
+    ///
+    /// 支持的命令包括：创建会话、提交提示词、列出会话、中止回合、
+    /// 恢复/切换会话、删除会话等。
     pub async fn handle(&mut self, cmd: ClientCommand) -> Result<(), String> {
         self.clear_finished_turn();
 
@@ -157,6 +174,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    /// 创建新会话，分发 SessionStart 扩展事件，并刷新动态工具。
     async fn create_session(&mut self, working_dir: String) {
         let model_id = self.runtime.effective.llm.model_id.clone();
         match self
@@ -203,6 +221,10 @@ impl CommandHandler {
         }
     }
 
+    /// 提交用户提示词，创建回合并在后台启动 Agent 处理。
+    ///
+    /// 如果已有回合在运行则拒绝（返回 40900 错误）。
+    /// 成功提交后，回合在独立的 tokio 任务中异步执行。
     async fn submit_prompt(&mut self, text: String) -> Result<(), String> {
         if self.active_turn.is_some() {
             self.send_error(40900, "A turn is already running");
@@ -254,6 +276,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    /// 中止当前活跃的回合，取消后台任务并记录完成事件。
     async fn abort_active_turn(&mut self) -> Result<(), String> {
         let Some(active_turn) = self.active_turn.take() else {
             self.send_error(40400, "No active turn");
@@ -287,6 +310,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    /// 清理已完成的活跃回合引用，在每次处理新命令前调用。
     fn clear_finished_turn(&mut self) {
         if self
             .active_turn
@@ -297,6 +321,7 @@ impl CommandHandler {
         }
     }
 
+    /// 恢复或切换到指定会话，从磁盘重放事件并构建快照发送给客户端。
     async fn resume_session(&mut self, session_id: SessionId) {
         match self.runtime.session_manager.resume(&session_id).await {
             Ok(session) => {
@@ -318,6 +343,8 @@ impl CommandHandler {
         }
     }
 
+    /// 确保存在活跃会话，如果没有则自动创建一个。
+    /// 使用当前工作目录作为新会话的工作目录。
     async fn ensure_session(&mut self) -> Result<SessionId, String> {
         if let Some(ref sid) = self.active_session_id {
             return Ok(sid.clone());
@@ -340,6 +367,7 @@ impl CommandHandler {
         Ok(sid)
     }
 
+    /// 记录事件到存储并广播给客户端的便捷方法。
     async fn record_and_broadcast(
         &self,
         session_id: &SessionId,
@@ -349,6 +377,7 @@ impl CommandHandler {
         record_and_broadcast(&self.runtime, &self.event_tx, session_id, turn_id, payload).await
     }
 
+    /// 通过广播通道发送错误通知给客户端。
     fn send_error(&self, code: i32, message: &str) {
         let _ = self.event_tx.send(ClientNotification::Error {
             code,
@@ -357,6 +386,10 @@ impl CommandHandler {
     }
 }
 
+/// 在后台 tokio 任务中启动 Agent 回合处理。
+///
+/// 使用 `tokio::select!` 同时等待 Agent 完成和事件流，
+/// 确保事件实时广播给客户端。Agent 完成后发送回合完成事件。
 fn spawn_agent_turn(
     runtime: Arc<ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
@@ -480,6 +513,10 @@ fn spawn_agent_turn(
     })
 }
 
+/// 将事件持久化到存储（如果是持久化事件）并广播给所有订阅者。
+///
+/// 只有 `is_durable()` 返回 true 的事件才会写入磁盘，
+/// 非持久化事件（如流式 delta）仅广播不存储。
 async fn record_and_broadcast(
     runtime: &ServerRuntime,
     event_tx: &broadcast::Sender<ClientNotification>,
@@ -502,6 +539,7 @@ async fn record_and_broadcast(
     Ok(event)
 }
 
+/// 将 LLM 消息转换为传输层 DTO，用于会话快照。
 fn message_to_dto(message: &LlmMessage) -> MessageDto {
     MessageDto {
         role: message.role.as_str().to_string(),
@@ -514,6 +552,7 @@ fn message_to_dto(message: &LlmMessage) -> MessageDto {
     }
 }
 
+/// 将 LLM 内容块转换为纯文本表示，用于客户端展示。
 fn content_to_text(content: &LlmContent) -> String {
     match content {
         LlmContent::Text { text } => text.clone(),
@@ -576,7 +615,7 @@ mod tests {
     impl PromptProvider for EmptyPrompt {
         async fn assemble(&self, _context: PromptContext) -> PromptPlan {
             PromptPlan {
-                system_blocks: vec![],
+                system_prompt: None,
                 prepend_messages: vec![],
                 append_messages: vec![],
                 extra_tools: vec![],

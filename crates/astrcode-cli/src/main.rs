@@ -1,4 +1,6 @@
-//! astrcode CLI — multi-subcommand entry point.
+//! astrcode CLI —— 多子命令入口点。
+//!
+//! 提供 `tui`（交互式终端）、`exec`（无头执行）、`server`（独立服务器）、`version` 四个子命令。
 
 mod exec;
 mod transport;
@@ -6,6 +8,7 @@ mod tui;
 
 use clap::{Parser, Subcommand};
 
+/// CLI 顶层参数结构。
 #[derive(Parser)]
 #[command(name = "astrcode", version, about = "AI coding agent platform")]
 struct Cli {
@@ -13,27 +16,29 @@ struct Cli {
     command: Commands,
 }
 
+/// 支持的子命令枚举。
 #[derive(Subcommand)]
 enum Commands {
-    /// Start interactive terminal UI
+    /// 启动交互式终端 UI
     Tui,
-    /// Execute a single prompt (headless)
+    /// 执行单次提示（无头模式）
     Exec {
-        /// The prompt text
+        /// 提示文本
         prompt: String,
-        /// Output mode: jsonl
+        /// 输出模式：jsonl
         #[arg(long)]
         jsonl: bool,
-        /// Timeout in seconds
+        /// 超时时间（秒）
         #[arg(long, default_value = "300")]
         timeout: u64,
     },
-    /// Start the server in standalone mode
+    /// 以独立模式启动服务器
     Server,
-    /// Show version information
+    /// 显示版本信息
     Version,
 }
 
+/// 程序入口：解析命令行参数并分发到对应子命令处理函数。
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -55,8 +60,8 @@ async fn main() {
             }
         },
         Commands::Server => {
-            // Server binary is astrcode-server, not this one.
-            // This command is a convenience that re-execs the server binary.
+            // 服务器二进制文件是 astrcode-server，不是当前这个。
+            // 此命令仅为便利提示，引导用户使用正确的二进制文件。
             eprintln!(
                 "Use 'astrcode-server' binary directly, or run 'cargo run -p astrcode-server'"
             );

@@ -1,4 +1,7 @@
-//! Test native extension FFI infrastructure without actual libloading.
+//! 测试原生扩展 FFI 基础设施（不使用实际的 libloading）。
+//!
+//! 通过模拟 FFI vtable 和回调，验证事件处理器注册、工具定义注册、
+//! 工具处理器注册、FFI 上下文传递以及阻止效果的返回等行为。
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -9,7 +12,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::ffi::{self, EventCallback, ExtensionApi, FfiCtxOwned, ToolCallback};
 
-/// Test context that returns fixed values.
+/// 测试用的扩展上下文，返回固定值。
 struct TestCtx {
     sid: String,
     wd: String,
@@ -45,6 +48,7 @@ impl ExtensionContext for TestCtx {
     }
 }
 
+/// 测试 FFI vtable 注册事件处理器并验证其被正确存储
 #[test]
 fn ffi_vtable_register_handler_and_invoke() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
@@ -59,9 +63,10 @@ fn ffi_vtable_register_handler_and_invoke() {
         register_tool: test_ffi_register_tool,
         register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
+        register_output_free_handler: test_ffi_register_output_free_handler,
     };
 
-    // Simulate factory call: register a PreToolUse handler
+    // 模拟工厂调用：注册一个 PreToolUse 处理器
     unsafe {
         (api.on)(&api, 4, 0, test_blocking_handler); // PreToolUse, Blocking
     }
@@ -69,10 +74,11 @@ fn ffi_vtable_register_handler_and_invoke() {
     assert_eq!(handlers.lock().unwrap().len(), 1);
     assert_eq!(handlers.lock().unwrap()[0].0, ExtensionEvent::PreToolUse);
 
-    // Cleanup
+    // 清理：释放 user_data
     let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
 }
 
+/// 测试 FFI vtable 注册工具定义并验证其被正确存储
 #[test]
 fn ffi_register_tool_stores_definition() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
@@ -87,6 +93,7 @@ fn ffi_register_tool_stores_definition() {
         register_tool: test_ffi_register_tool,
         register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
+        register_output_free_handler: test_ffi_register_output_free_handler,
     };
 
     let name = b"my_tool";
@@ -111,6 +118,7 @@ fn ffi_register_tool_stores_definition() {
     let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
 }
 
+/// 测试 FFI vtable 注册工具处理器回调并验证其被正确存储
 #[test]
 fn ffi_register_tool_handler_stores_callback() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
@@ -125,6 +133,7 @@ fn ffi_register_tool_handler_stores_callback() {
         register_tool: test_ffi_register_tool,
         register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
+        register_output_free_handler: test_ffi_register_output_free_handler,
     };
 
     let name = b"my_tool";
@@ -138,6 +147,7 @@ fn ffi_register_tool_handler_stores_callback() {
     let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
 }
 
+/// 测试 FFI 上下文正确传递会话信息（session_id、working_dir）
 #[test]
 fn ffi_ctx_passes_session_info() {
     let ctx = TestCtx {
@@ -154,6 +164,7 @@ fn ffi_ctx_passes_session_info() {
     }
 }
 
+/// 测试阻止型处理器正确返回 Block 效果
 #[test]
 fn blocking_handler_effect_is_returned() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
@@ -168,12 +179,14 @@ fn blocking_handler_effect_is_returned() {
         register_tool: test_ffi_register_tool,
         register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
+        register_output_free_handler: test_ffi_register_output_free_handler,
     };
 
     unsafe {
         (api.on)(&api, 4, 0, test_blocking_handler);
     }
 
+    // 收集已注册的回调
     let callbacks: Vec<EventCallback> = handlers
         .lock()
         .unwrap()
@@ -181,6 +194,7 @@ fn blocking_handler_effect_is_returned() {
         .map(|(_, _, cb)| *cb)
         .collect();
 
+    // 调用回调并验证效果
     let mut effect_out: u8 = 0;
     let mut output_ptr: *const u8 = std::ptr::null();
     let mut output_len: u32 = 0;
@@ -200,8 +214,9 @@ fn blocking_handler_effect_is_returned() {
     let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
 }
 
-// ─── Test helpers ──────────────────────────────────────────────────────
+// ─── 测试辅助类型和函数 ──────────────────────────────────────────────
 
+/// 测试用的用户数据，持有对各共享容器的引用
 struct TestUserData<'a> {
     handlers: &'a Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     tools: &'a Mutex<Vec<ToolDefinition>>,
@@ -209,6 +224,7 @@ struct TestUserData<'a> {
     commands: &'a Mutex<Vec<astrcode_core::extension::SlashCommand>>,
 }
 
+/// 构建测试用 UserData
 fn super_ud<'a>(
     h: &'a Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     t: &'a Mutex<Vec<ToolDefinition>>,
@@ -223,6 +239,7 @@ fn super_ud<'a>(
     }
 }
 
+/// 测试用 FFI on 回调：解析判别值并注册事件处理器
 unsafe extern "C" fn test_ffi_on(
     api: *const ExtensionApi,
     event: u8,
@@ -239,6 +256,7 @@ unsafe extern "C" fn test_ffi_on(
     ud.handlers.lock().unwrap().push((event, mode, callback));
 }
 
+/// 测试用 FFI 工具注册回调
 unsafe extern "C" fn test_ffi_register_tool(
     api: *const ExtensionApi,
     name_ptr: *const u8,
@@ -258,6 +276,7 @@ unsafe extern "C" fn test_ffi_register_tool(
     });
 }
 
+/// 测试用 FFI 工具处理器注册回调
 unsafe extern "C" fn test_ffi_register_tool_handler(
     api: *const ExtensionApi,
     name_ptr: *const u8,
@@ -271,6 +290,7 @@ unsafe extern "C" fn test_ffi_register_tool_handler(
         .insert(ffi::read_ffi_str(name_ptr, name_len).to_string(), callback);
 }
 
+/// 测试用 FFI 命令注册回调
 unsafe extern "C" fn test_ffi_register_command(
     api: *const ExtensionApi,
     name_ptr: *const u8,
@@ -289,6 +309,14 @@ unsafe extern "C" fn test_ffi_register_command(
         });
 }
 
+/// 测试用 FFI 输出释放注册回调
+unsafe extern "C" fn test_ffi_register_output_free_handler(
+    _api: *const ExtensionApi,
+    _callback: ffi::OutputFreeCallback,
+) {
+}
+
+/// 测试用阻止型事件处理器：返回 Block 效果和 "blocked" 原因
 unsafe extern "C" fn test_blocking_handler(
     _event: u8,
     _ctx: *const std::ffi::c_void,
@@ -301,6 +329,7 @@ unsafe extern "C" fn test_blocking_handler(
     *output_len = 7;
 }
 
+/// 测试用工具回调：返回成功状态和 "ok" 内容
 unsafe extern "C" fn test_tool_callback(
     _ctx: *const std::ffi::c_void,
     output_ptr: *mut *const u8,

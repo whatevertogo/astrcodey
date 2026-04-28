@@ -1,46 +1,67 @@
-//! JSONL framing: newline-delimited JSON for stdio transport.
+//! JSONL 帧协议模块——基于换行分隔 JSON 的 stdio 传输层。
+//!
+//! 定义 JSON-RPC 2.0 消息的序列化/反序列化格式，
+//! 以及用于 stdio 管道通信的 JSONL（JSON Lines）帧协议。
 
 use serde::{Deserialize, Serialize};
 
-/// Protocol version identifier.
+/// 协议版本号标识符。
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// A framed message on the wire.
+/// 线缆上的 JSON-RPC 2.0 帧消息。
+///
+/// 兼容 JSON-RPC 2.0 规范，支持请求（带 `id` + `method`）、
+/// 响应（带 `id` + `result`/`error`）和通知（无 `id`）三种模式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcMessage {
+    /// JSON-RPC 版本，固定为 `"2.0"`。
     pub jsonrpc: String,
+    /// 请求/响应的唯一标识符（通知类型为 `None`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
+    /// 要调用的方法名（仅请求类型有值）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// 方法调用的参数（仅请求类型有值）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    /// 成功响应的结果（仅响应类型有值）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    /// 错误响应的详情（仅错误响应有值）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
 
+/// JSON-RPC 错误对象。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
+    /// 错误码（遵循 JSON-RPC 2.0 规范的错误码约定）。
     pub code: i32,
+    /// 人类可读的错误描述。
     pub message: String,
+    /// 附加的错误详情数据。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
-/// Serialize a value as a JSONL line (JSON followed by `\n`).
+/// 将值序列化为 JSONL 行（JSON 后跟换行符 `\n`）。
 pub fn to_jsonl_line<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
     let json = serde_json::to_string(value)?;
     Ok(format!("{}\n", json))
 }
 
-/// Parse a JSONL line into a value.
+/// 将 JSONL 行反序列化为指定类型的值。
+///
+/// 会自动去除行首尾的空白字符（包括换行符）。
 pub fn from_jsonl_line<T: for<'a> Deserialize<'a>>(line: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(line.trim())
 }
 
-/// Write an acknowledgment message.
+/// 构造一个成功确认响应消息。
+///
+/// # 参数
+/// - `id`：对应请求的 ID
 pub fn ack_message(id: u64) -> JsonRpcMessage {
     JsonRpcMessage {
         jsonrpc: "2.0".into(),
@@ -52,7 +73,12 @@ pub fn ack_message(id: u64) -> JsonRpcMessage {
     }
 }
 
-/// Write an error message.
+/// 构造一个错误响应消息。
+///
+/// # 参数
+/// - `id`：对应请求的 ID（通知类型无 ID 时传 `None`）
+/// - `code`：错误码
+/// - `message`：错误描述
 pub fn error_message(id: Option<u64>, code: i32, message: &str) -> JsonRpcMessage {
     JsonRpcMessage {
         jsonrpc: "2.0".into(),
@@ -68,7 +94,11 @@ pub fn error_message(id: Option<u64>, code: i32, message: &str) -> JsonRpcMessag
     }
 }
 
-/// Write an event (server notification).
+/// 构造一个服务器事件通知消息（无 ID，属于通知模式）。
+///
+/// # 参数
+/// - `event`：事件名称（作为 `method` 字段）
+/// - `data`：事件数据（作为 `params` 字段）
 pub fn event_message(event: &str, data: &serde_json::Value) -> JsonRpcMessage {
     JsonRpcMessage {
         jsonrpc: "2.0".into(),

@@ -1,50 +1,55 @@
-//! Extension and hook system types.
+//! 扩展与钩子系统类型定义。
 //!
-//! Extensions are the primary extensibility mechanism.
-//! Skills, agent profiles, custom tools, slash commands — all are extensions.
+//! 扩展是 astrcode 的主要扩展机制。技能（Skills）、Agent 配置文件、
+//! 自定义工具、斜杠命令等都是通过扩展来实现的。
+//!
+//! 本模块定义了：
+//! - [`Extension`] trait：扩展的核心接口
+//! - [`ExtensionEvent`]：扩展可订阅的生命周期事件
+//! - [`HookMode`] / [`HookEffect`]：钩子的执行模式和返回结果
+//! - [`ExtensionContext`]：扩展可访问的受限上下文
+//! - [`AgentProfile`]：Agent 协作配置文件
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ModelSelection,
-    prompt::BlockSpec,
-    tool::{CapabilitySpec, ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolResult},
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
 
-/// An extension that hooks into the astrcode lifecycle.
+/// 扩展 trait，定义了挂入 astrcode 生命周期的核心接口。
 ///
-/// Extensions are loaded from `~/.astrcode/extensions/` (global)
-/// and `.astrcode/extensions/` (project-level). They can subscribe to
-/// lifecycle events, register tools, slash commands, and context providers.
+/// 扩展从 `~/.astrcode/extensions/`（全局）和 `.astrcode/extensions/`（项目级）加载。
+/// 它们可以订阅生命周期事件、注册工具、斜杠命令和上下文提供者。
 #[async_trait::async_trait]
 pub trait Extension: Send + Sync {
-    /// Unique extension identifier.
+    /// 返回扩展的唯一标识符。
     fn id(&self) -> &str;
 
-    /// Events this extension subscribes to, with their hook modes.
+    /// 返回此扩展订阅的事件及其钩子模式。
     fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)>;
 
-    /// Handle an event.
+    /// 处理事件。
     ///
-    /// Returns `HookEffect` to allow, block, or modify the action.
+    /// 返回 [`HookEffect`] 以允许、阻止或修改操作。
     async fn on_event(
         &self,
         event: ExtensionEvent,
         ctx: &dyn ExtensionContext,
     ) -> Result<HookEffect, ExtensionError>;
 
-    /// Optional: tools registered by this extension.
+    /// 可选：返回此扩展注册的工具列表。
     fn tools(&self) -> Vec<ToolDefinition> {
         vec![]
     }
 
-    /// Optional: execute one of the tools returned by `tools()`.
+    /// 可选：执行 `tools()` 返回的某个工具。
     ///
-    /// The default keeps metadata-only extensions valid while letting the
-    /// runner adapt executable extension tools into the normal tool pipeline.
-    /// `ctx` carries the per-call session context (session_id, model, available tools).
+    /// 默认实现返回 `NotFound` 错误，保持仅元数据的扩展有效。
+    /// 运行器会将可执行扩展工具适配到正常的工具管道中。
+    /// `ctx` 携带每次调用的会话上下文（session_id、model、可用工具）。
     async fn execute_tool(
         &self,
         tool_name: &str,
@@ -55,284 +60,328 @@ pub trait Extension: Send + Sync {
         Err(ExtensionError::NotFound(tool_name.into()))
     }
 
-    /// Optional: slash commands registered by this extension.
+    /// 可选：返回此扩展注册的斜杠命令列表。
     fn slash_commands(&self) -> Vec<SlashCommand> {
-        vec![]
-    }
-
-    /// Optional: context providers (contributors) registered by this extension.
-    fn context_contributions(&self) -> Vec<BlockSpec> {
-        vec![]
-    }
-
-    /// Optional: capabilities registered by this extension.
-    fn capabilities(&self) -> Vec<CapabilitySpec> {
         vec![]
     }
 }
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
 
-/// Core lifecycle events that extensions can subscribe to.
+/// 扩展可订阅的核心生命周期事件。
 ///
-/// 9 events covering the session/turn/tool/provider lifecycle.
+/// 覆盖会话/轮次/工具/LLM 提供者/prompt 组装的完整生命周期。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionEvent {
-    // Session-level
+    // ── 会话级别 ──
+    /// 会话启动。
     SessionStart,
+    /// 会话关闭。
     SessionShutdown,
 
-    // Turn-level
+    // ── 轮次级别 ──
+    /// 轮次开始。
     TurnStart,
+    /// 轮次结束。
     TurnEnd,
 
-    // Tool-level — primary hook points
+    // ── 工具级别（主要钩子点） ──
+    /// 工具执行前。
     PreToolUse,
+    /// 工具执行后。
     PostToolUse,
 
-    // LLM provider hooks
+    // ── LLM 提供者钩子 ──
+    /// LLM 请求发送前。
     BeforeProviderRequest,
+    /// LLM 响应接收后。
     AfterProviderResponse,
 
-    // User input
+    // ── 用户输入 ──
+    /// 用户提交提示词。
     UserPromptSubmit,
+
+    // ── Prompt 组装 ──
+    /// 构建 system prompt 前收集插件提供的提示词片段。
+    PromptBuild,
 }
 
 // ─── Extension Manifest ──────────────────────────────────────────────────
 
-/// Manifest parsed from an extension's `extension.json`.
+/// 从扩展的 `extension.json` 解析的清单文件。
 ///
-/// Used by the filesystem loader to discover extensions before
-/// loading their native library.
+/// 由文件系统加载器在加载原生库之前用于发现扩展。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
+    /// 扩展唯一标识符。
     pub id: String,
+    /// 扩展显示名称。
     pub name: String,
-    /// Optional extension version for diagnostics/UI display.
+    /// 可选的扩展版本号，用于诊断/UI 展示。
     #[serde(default)]
     pub version: Option<String>,
-    /// Optional human-readable description.
+    /// 可选的人类可读描述。
     #[serde(default)]
     pub description: Option<String>,
-    /// Optional host version hint. This is metadata for now, not a hard gate.
+    /// 可选的宿主版本提示。目前仅作为元数据，不做硬性校验。
     #[serde(default)]
     pub astrcode_version: Option<String>,
-    /// Native library path relative to the extension directory (`.dll` / `.so`).
+    /// 原生库路径（相对于扩展目录，`.dll` / `.so`）。
     pub library: String,
-    /// Events this extension subscribes to.
+    /// 此扩展订阅的事件列表。
     #[serde(default)]
     pub subscriptions: Vec<ManifestSubscription>,
-    /// Static tool definitions.
+    /// 静态工具定义列表。
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
-    /// Static slash command definitions.
+    /// 静态斜杠命令定义列表。
     #[serde(default)]
     pub slash_commands: Vec<SlashCommand>,
 }
 
-/// A subscription entry in the manifest JSON.
+/// 清单 JSON 中的订阅条目。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestSubscription {
+    /// 订阅的事件类型。
     #[serde(rename = "event")]
     pub event: ExtensionEvent,
+    /// 钩子执行模式。
     #[serde(rename = "mode")]
     pub mode: HookMode,
 }
 
 // ─── Hook Input / Output ─────────────────────────────────────────────────
 
-/// Input provided to PreToolUse hooks.
+/// PreToolUse 钩子的输入数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreToolUseInput {
+    /// 即将执行的工具名称。
     pub tool_name: String,
+    /// 工具的输入参数。
     pub tool_input: serde_json::Value,
 }
 
-/// Input provided to PostToolUse hooks.
+/// PostToolUse 钩子的输入数据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostToolUseInput {
+    /// 已执行的工具名称。
     pub tool_name: String,
+    /// 工具的输入参数。
     pub tool_input: serde_json::Value,
+    /// 工具执行结果。
     pub tool_result: ToolResult,
 }
 
 // ─── Hook Mode ───────────────────────────────────────────────────────────
 
-/// Execution mode for a hook subscription.
+/// 钩子订阅的执行模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookMode {
-    /// Hook runs synchronously and can block the action.
-    /// Used for: security review, permission enforcement.
+    /// 同步执行，可以阻止操作。
+    /// 适用于：安全审查、权限校验。
     Blocking,
 
-    /// Hook runs asynchronously (fire-and-forget), cannot block.
-    /// Used for: logging, analytics, notifications.
+    /// 异步执行（即发即弃），不能阻止操作。
+    /// 适用于：日志记录、分析统计、通知。
     NonBlocking,
 
-    /// Hook runs but its result is informational only.
-    /// Used for: style suggestions, optional guidance.
+    /// 执行但结果仅供参考。
+    /// 适用于：风格建议、可选指导。
     Advisory,
 }
 
 // ─── Hook Effect ─────────────────────────────────────────────────────────
 
-/// The result of a hook execution.
+/// 钩子执行的结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEffect {
-    /// Allow the action to proceed normally.
+    /// 允许操作正常继续。
     Allow,
 
-    /// Block the action with a reason.
-    /// Only valid from Blocking hooks.
+    /// 阻止操作并附带原因。仅 Blocking 钩子有效。
     Block { reason: String },
 
-    /// Modify the tool input before execution (PreToolUse).
+    /// 修改工具输入后再执行（仅 PreToolUse）。
     ModifiedInput { tool_input: serde_json::Value },
 
-    /// Modify the tool result content after execution (PostToolUse).
+    /// 修改工具执行后的结果内容（仅 PostToolUse）。
     ModifiedResult { content: String },
 
-    /// Modify the message list before sending to the LLM (BeforeProviderRequest).
+    /// 修改发送给 LLM 的消息列表（仅 BeforeProviderRequest）。
     ModifiedMessages {
         messages: Vec<crate::llm::LlmMessage>,
     },
 
-    /// Modify the LLM output text after streaming (AfterProviderResponse).
+    /// 修改 LLM 流式输出后的文本（仅 AfterProviderResponse）。
     ModifiedOutput { text: String },
+
+    /// 为 prompt 组装提供受控片段（仅 PromptBuild）。
+    PromptContributions(PromptContributions),
+}
+
+/// 插件在 PromptBuild hook 中提供的 prompt 片段。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptContributions {
+    /// 插件系统提示词。宿主会放在 system prompt 最前面，即模型可见工具声明之后。
+    #[serde(default)]
+    pub system_prompts: Vec<String>,
+    /// Skills section 内容。
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Agents section 内容。
+    #[serde(default)]
+    pub agents: Vec<String>,
+}
+
+impl PromptContributions {
+    pub fn merge(&mut self, other: PromptContributions) {
+        self.system_prompts.extend(other.system_prompts);
+        self.skills.extend(other.skills);
+        self.agents.extend(other.agents);
+    }
 }
 
 // ─── Extension Capabilities Summary ──────────────────────────────────────
 
-/// Summary of what an extension provides.
+/// 扩展提供的能力摘要。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionCapabilities {
-    /// Extension ID.
+    /// 扩展 ID。
     pub id: String,
-    /// Events subscribed to with their modes.
+    /// 订阅的事件及其模式。
     pub events: Vec<(ExtensionEvent, HookMode)>,
-    /// Number of tools registered.
+    /// 注册的工具数量。
     pub tool_count: usize,
-    /// Number of slash commands registered.
+    /// 注册的斜杠命令数量。
     pub command_count: usize,
 }
 
 // ─── Slash Command ───────────────────────────────────────────────────────
 
-/// A slash command registered by an extension.
+/// 扩展注册的斜杠命令。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
-    /// Command name (without the leading slash).
+    /// 命令名称（不含前导斜杠 `/`）。
     pub name: String,
-    /// Human-readable description.
+    /// 人类可读的命令描述。
     pub description: String,
-    /// Argument schema (JSON Schema).
+    /// 参数的 JSON Schema 定义。
     pub args_schema: Option<serde_json::Value>,
 }
 
 // ─── Extension Context ───────────────────────────────────────────────────
 
-/// Restricted view of session + services available to extension handlers.
+/// 扩展处理器可访问的受限会话和服务视图。
 ///
-/// Extensions get a limited API surface to prevent them from
-/// destabilizing the core system.
+/// 扩展获得有限的 API 接口，以防止它们破坏核心系统的稳定性。
 #[async_trait::async_trait]
 pub trait ExtensionContext: Send + Sync {
-    /// Get the current session ID.
+    /// 获取当前会话 ID。
     fn session_id(&self) -> &str;
 
-    /// Get the working directory for this session.
+    /// 获取当前会话的工作目录。
     fn working_dir(&self) -> &str;
 
-    /// Get the current model selection.
+    /// 获取当前的模型选择配置。
     fn model_selection(&self) -> ModelSelection;
 
-    /// Read a configuration value by key.
+    /// 按键名读取配置值。
     fn config_value(&self, key: &str) -> Option<String>;
 
-    /// Emit a custom event to the session log.
+    /// 向会话日志发送自定义事件。
     async fn emit_custom_event(&self, name: &str, data: serde_json::Value);
 
-    /// Look up a tool definition by name from the tool registry.
+    /// 从工具注册表中按名称查找工具定义。
     fn find_tool(&self, name: &str) -> Option<ToolDefinition>;
 
-    /// Current PreToolUse payload, if this context is for a tool hook.
+    /// 获取当前 PreToolUse 载荷（仅在工具钩子上下文中可用）。
     fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
         None
     }
 
-    /// Current PostToolUse payload, if this context is for a tool hook.
+    /// 获取当前 PostToolUse 载荷（仅在工具钩子上下文中可用）。
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         None
     }
 
-    /// Register a tool for dynamic injection into the capability router.
+    /// 注册工具以动态注入到能力路由器中。
     ///
-    /// Tools registered via this method are collected after SessionStart
-    /// and applied via `apply_dynamic()`.
+    /// 通过此方法注册的工具会在 SessionStart 后收集，
+    /// 并通过 `apply_dynamic()` 应用。
     fn register_tool(&self, _def: ToolDefinition) {}
 
-    /// Drain all tools registered through `register_tool()`.
+    /// 排空所有通过 `register_tool()` 注册的工具。
     fn drain_registered_tools(&self) -> Vec<ToolDefinition> {
         vec![]
     }
 
-    /// Messages about to be sent to the LLM (for BeforeProviderRequest hooks).
+    /// 获取即将发送给 LLM 的消息列表（用于 BeforeProviderRequest 钩子）。
     fn provider_messages(&self) -> Option<Vec<crate::llm::LlmMessage>> {
         None
     }
 
-    /// Log a warning diagnostic (visible in server logs).
+    /// 记录警告诊断信息（在服务器日志中可见）。
     fn log_warn(&self, msg: &str);
 
-    /// Create a clone of this context suitable for use in fire-and-forget hooks.
+    /// 创建此上下文的快照，适用于即发即弃钩子中使用。
     fn snapshot(&self) -> std::sync::Arc<dyn ExtensionContext>;
 }
 
 // ─── Extension Error ─────────────────────────────────────────────────────
 
-/// Error from extension operations.
+/// 扩展操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
+    /// 找不到指定的扩展或工具。
     #[error("Extension not found: {0}")]
     NotFound(String),
+    /// 钩子执行超时。
     #[error("Hook timed out after {0}ms")]
     Timeout(u64),
-    #[error("Extension error: {0}")]
+    /// 钩子显式阻止了操作——属于正常流程，非崩溃。
+    #[error("blocked by hook: {reason}")]
+    Blocked { reason: String },
+    /// 内部错误（如 panic、无效状态、序列化失败）。
+    #[error("extension error: {0}")]
     Internal(String),
 }
 
 // ─── Extension Tool Outcome ───────────────────────────────────────────────
 
-/// Declarative outcome returned by an extension tool callback.
+/// 扩展工具回调返回的声明式结果。
 ///
-/// Extensions return these instead of calling host primitives directly.
-/// The runner interprets each variant:
-/// - `Text` is a plain result (the current default behavior).
-/// - `RunSession` requests the host to create a child session and run one turn.
+/// 扩展返回这些变体而非直接调用宿主原语，由运行器解释每个变体：
+/// - `Text`：普通文本结果（当前默认行为）
+/// - `RunSession`：请求宿主创建子会话并运行一个轮次
 ///
-/// Sent across the FFI boundary as JSON. ToolCallback return code `2`
-/// signals that `output_ptr/len` carries serialized `ExtensionToolOutcome`.
+/// 通过 FFI 边界以 JSON 传递。工具回调返回码 `2` 表示
+/// `output_ptr/len` 携带的是序列化的 `ExtensionToolOutcome`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExtensionToolOutcome {
-    /// Plain text result — the standard ToolResult path.
+    /// 普通文本结果——标准的 ToolResult 路径。
     Text { content: String, is_error: bool },
-    /// Request the host to create a child session and run a turn.
+    /// 请求宿主创建子会话并运行一个轮次。
     ///
-    /// `parent_session_id` comes from the current `ToolExecutionContext`,
-    /// not from the plugin — the plugin cannot forge parent relationships.
-    /// `system_prompt` is appended to the global system prompt, not a replacement.
-    /// `allowed_tools` empty means inherit the parent session's tools.
-    /// `model_preference` is advisory in v1.
+    /// - `parent_session_id` 来自当前的 `ToolExecutionContext`，而非插件提供——
+    ///   插件无法伪造父子关系。
+    /// - `system_prompt` 追加到全局系统提示词之后，而非替换。
+    /// - `allowed_tools` 为空表示继承父会话的工具集。
+    /// - `model_preference` 在 v1 中仅为建议值。
     RunSession {
+        /// 子会话的显示名称。
         name: String,
+        /// 追加到全局系统提示词之后的指令。
         system_prompt: String,
+        /// 发送给子会话的用户提示词。
         user_prompt: String,
+        /// 允许使用的工具列表（空 = 继承父会话）。
         #[serde(default)]
         allowed_tools: Vec<String>,
+        /// 建议使用的模型（v1 中仅为建议）。
         #[serde(default)]
         model_preference: Option<String>,
     },
@@ -340,23 +389,23 @@ pub enum ExtensionToolOutcome {
 
 // ─── Agent Profile (basic type for collaboration tools) ──────────────────
 
-/// Agent profile — a named agent configuration.
+/// Agent 配置文件——一个命名的 Agent 配置。
 ///
-/// Core only defines the type. Loading and management is done by extensions.
-/// The agent collaboration tools (spawn/send/observe/close) use this type.
+/// 核心层仅定义类型，加载和管理由扩展完成。
+/// Agent 协作工具（spawn/send/observe/close）使用此类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
-    /// Profile identifier.
+    /// 配置文件标识符。
     pub id: String,
-    /// Display name.
+    /// 显示名称。
     pub name: String,
-    /// Description of what this agent does.
+    /// 此 Agent 的功能描述。
     pub description: String,
-    /// Guide/instructions for this agent type.
+    /// 此 Agent 类型的指导指令。
     pub guide: String,
-    /// Tools this agent can use (empty = all available).
+    /// 此 Agent 可使用的工具列表（空 = 所有可用工具）。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    /// Preferred model for this agent type.
+    /// 此 Agent 类型偏好的模型。
     pub model_preference: Option<String>,
 }

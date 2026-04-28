@@ -10,23 +10,34 @@ use astrcode_support::{
 use serde::Deserialize;
 use tokio::process::Command;
 
+/// Shell 命令执行工具，支持流式 stdout/stderr 捕获和超时控制。
+///
+/// 自动检测系统默认 Shell（PowerShell / cmd / bash / wsl），
+/// 以非交互方式执行命令并返回输出和退出码。
 pub struct ShellTool {
+    /// 工具的工作目录，用于解析相对路径
     pub working_dir: PathBuf,
+    /// 默认命令超时时间（秒）
     pub timeout_secs: u64,
 }
 
+/// shell 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ShellArgs {
+    /// 要执行的 shell 命令
     command: String,
+    /// 命令的工作目录（可选，默认为工具的 working_dir）
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// 本次执行的超时时间（秒，最大 600）
     #[serde(default)]
     timeout: Option<u64>,
 }
 
 #[async_trait::async_trait]
 impl Tool for ShellTool {
+    /// 返回 shell 工具的定义，动态显示当前系统 Shell 名称。
     fn definition(&self) -> ToolDefinition {
         let shell = resolve_shell();
         ToolDefinition {
@@ -58,6 +69,10 @@ impl Tool for ShellTool {
         }
     }
 
+    /// 执行 shell 命令：解析参数 → 构建子进程 → 并发读取 stdout/stderr → 等待完成或超时。
+    ///
+    /// 超时后会强制终止子进程并返回 `ToolError::Timeout`。
+    /// 退出码非零时 `is_error` 为 true。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -142,6 +157,13 @@ impl Tool for ShellTool {
     }
 }
 
+/// 根据 Shell 类型构建命令行参数。
+///
+/// 不同 Shell 的调用方式：
+/// - PowerShell: `-NoProfile -Command <cmd>`
+/// - cmd: `/d /s /c <cmd>`
+/// - POSIX: `-lc <cmd>`
+/// - WSL: `bash -lc <cmd>`
 fn command_args(shell: &ShellInfo, command: &str) -> Vec<String> {
     match shell.family {
         ShellFamily::PowerShell => vec![
@@ -160,6 +182,7 @@ fn command_args(shell: &ShellInfo, command: &str) -> Vec<String> {
     }
 }
 
+/// 异步读取流的所有内容到字符串，使用 UTF-8 lossy 解码。
 async fn read_all(stream: impl tokio::io::AsyncRead + Unpin) -> String {
     let mut reader = tokio::io::BufReader::new(stream);
     let mut buf = Vec::new();

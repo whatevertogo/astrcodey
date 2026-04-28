@@ -1,4 +1,8 @@
-//! Agent — the ephemeral turn processor created from session events.
+//! Agent — 临时的回合处理器，由会话事件创建。
+//!
+//! 负责处理一轮完整的对话：组装提示词、调用 LLM、执行工具调用、
+//! 分发扩展钩子事件，并将事件流式传输给客户端。
+//! Agent 是无状态的短暂对象，处理完一个回合后即被丢弃。
 
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
@@ -39,6 +43,17 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// 创建一个新的 Agent 实例。
+    ///
+    /// # 参数
+    /// - `session_id`: 所属会话的唯一标识
+    /// - `working_dir`: 当前工作目录
+    /// - `llm`: LLM 提供者（如 OpenAI）
+    /// - `prompt`: 提示词组装器
+    /// - `capability`: 工具路由器（内置工具 + 扩展工具）
+    /// - `extension_runner`: 扩展运行器，用于分发钩子事件
+    /// - `model_id`: 使用的模型标识
+    /// - `max_tool_result_bytes`: 工具结果的最大字节数，超出会被裁剪
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
@@ -64,11 +79,15 @@ impl Agent {
         }
     }
 
+    /// 设置工具白名单，仅允许调用指定名称的工具。
+    /// 用于子会话等需要限制可用工具的场景。
     pub fn with_tool_allowlist(mut self, allowed_tools: Vec<String>) -> Self {
         self.tool_allowlist = Some(allowed_tools.into_iter().collect());
         self
     }
 
+    /// 设置系统提示词后缀，会追加到提示词组装器生成的系统提示词之后。
+    /// 如果后缀为空白字符串则忽略。
     pub fn with_system_prompt_suffix(mut self, suffix: String) -> Self {
         if !suffix.trim().is_empty() {
             self.system_prompt_suffix = Some(suffix);
@@ -76,6 +95,8 @@ impl Agent {
         self
     }
 
+    /// 检查指定工具名是否在白名单中。
+    /// 如果未设置白名单，则允许所有工具。
     fn tool_is_allowed(&self, name: &str) -> bool {
         self.tool_allowlist
             .as_ref()
@@ -137,6 +158,21 @@ impl Agent {
         let mut messages = history;
         messages.push(LlmMessage::user(user_text));
 
+        let prompt_contributions = self
+            .extension_runner
+            .collect_prompt_contributions(&ext_ctx)
+            .await?;
+        let mut prompt_custom = std::collections::BTreeMap::new();
+        if let Some(system_prompts) = join_prompt_parts(prompt_contributions.system_prompts) {
+            prompt_custom.insert("system_prompts".to_string(), system_prompts);
+        }
+        if let Some(skills) = join_prompt_parts(prompt_contributions.skills) {
+            prompt_custom.insert("skills".to_string(), skills);
+        }
+        if let Some(agents) = join_prompt_parts(prompt_contributions.agents) {
+            prompt_custom.insert("agents".to_string(), agents);
+        }
+
         let prompt_ctx = PromptContext {
             working_dir: self.working_dir.clone(),
             os: std::env::consts::OS.into(),
@@ -147,16 +183,12 @@ impl Agent {
                 .map(|t| t.name.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
-            custom: Default::default(),
+            custom: prompt_custom,
         };
 
         let plan = self.prompt.assemble(prompt_ctx).await;
-        if !plan.system_blocks.is_empty() || self.system_prompt_suffix.is_some() {
-            let mut system_parts: Vec<String> = plan
-                .system_blocks
-                .iter()
-                .map(|b| b.content.clone())
-                .collect();
+        if plan.system_prompt.is_some() || self.system_prompt_suffix.is_some() {
+            let mut system_parts: Vec<String> = plan.system_prompt.into_iter().collect();
             if let Some(suffix) = &self.system_prompt_suffix {
                 system_parts.push(suffix.clone());
             }
@@ -311,10 +343,17 @@ impl Agent {
             }
 
             // --- AfterProviderResponse hook ---
-            let _ = self
+            if let Err(e) = self
                 .extension_runner
                 .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
-                .await;
+                .await
+            {
+                let _ = self
+                    .extension_runner
+                    .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                    .await;
+                return Err(e.into());
+            }
 
             let tool_ctx = ToolExecutionContext {
                 session_id: self.session_id.clone(),
@@ -517,19 +556,27 @@ impl Agent {
     }
 }
 
-/// Output from an agent turn.
+/// Agent 回合的输出结果。
 pub struct AgentTurnOutput {
+    /// 助手回复的文本内容
     pub text: String,
+    /// 结束原因（如 "stop"、"tool_calls"）
     pub finish_reason: String,
+    /// 本回合中所有工具调用的结果
     pub tool_results: Vec<ToolResult>,
 }
 
+/// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 struct PendingToolCall {
+    /// 工具调用的唯一标识
     call_id: String,
+    /// 工具名称
     name: String,
+    /// 工具调用的 JSON 参数（可能跨多个 delta 事件拼接）
     arguments: String,
 }
 
+/// Agent 处理过程中可能出现的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("LLM error: {0}")]
@@ -540,12 +587,15 @@ pub enum AgentError {
     Extension(#[from] astrcode_core::extension::ExtensionError),
 }
 
+/// 将 LLM 错误转换为 Agent 错误。
 impl From<astrcode_core::llm::LlmError> for AgentError {
     fn from(e: astrcode_core::llm::LlmError) -> Self {
         AgentError::Llm(e.to_string())
     }
 }
 
+/// 检查工具名是否匹配白名单，支持 Claude 风格的别名映射。
+/// 例如白名单中有 "Read"，则 "readFile" 也能匹配。
 fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: &str) -> bool {
     allowed.iter().any(|allowed_name| {
         allowed_name == tool_name
@@ -554,6 +604,19 @@ fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: &str) -> bo
     })
 }
 
+fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
+    let text = parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    (!text.is_empty()).then_some(text)
+}
+
+/// 将简短的工具名映射为 Claude 风格的实际工具名。
+/// 例如 "read" → "readFile"，"bash" → "shell"。
 fn claude_tool_alias(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
         "read" => Some("readFile"),
@@ -570,7 +633,7 @@ fn claude_tool_alias(name: &str) -> Option<&'static str> {
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
@@ -644,10 +707,47 @@ mod tests {
     impl PromptProvider for EmptyPrompt {
         async fn assemble(&self, _context: PromptContext) -> PromptPlan {
             PromptPlan {
-                system_blocks: vec![],
+                system_prompt: None,
                 prepend_messages: vec![],
                 append_messages: vec![],
                 extra_tools: vec![],
+            }
+        }
+    }
+
+    struct FixedPrompt;
+
+    #[async_trait::async_trait]
+    impl PromptProvider for FixedPrompt {
+        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
+            PromptPlan::from_system_prompt("test system prompt".to_string())
+        }
+    }
+
+    struct CapturingLlm {
+        messages: Arc<Mutex<Vec<LlmMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CapturingLlm {
+        async fn generate(
+            &self,
+            messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            *self.messages.lock().unwrap() = messages;
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
             }
         }
     }
@@ -802,5 +902,35 @@ mod tests {
 
         assert!(saw_requested);
         assert!(saw_completed_after_requested);
+    }
+
+    #[tokio::test]
+    async fn prompt_provider_system_prompt_is_sent_to_llm() {
+        let captured_messages = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(
+            "session-1".into(),
+            ".".into(),
+            Arc::new(CapturingLlm {
+                messages: Arc::clone(&captured_messages),
+            }),
+            Arc::new(FixedPrompt),
+            Arc::new(CapabilityRouter::new()),
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+            "mock".into(),
+            8192,
+        );
+
+        let output = agent.process_prompt("hello", vec![], None).await.unwrap();
+
+        assert_eq!(output.text, "ok");
+        let messages = captured_messages.lock().unwrap();
+        assert_eq!(
+            messages.first().map(|message| &message.role),
+            Some(&LlmRole::System)
+        );
+        assert!(messages.iter().any(|message| message.role == LlmRole::User));
     }
 }

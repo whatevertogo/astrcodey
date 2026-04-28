@@ -1,121 +1,114 @@
-//! Tool trait and associated types.
+//! 工具 trait 及关联类型。
 //!
-//! Tools are the primary way the agent interacts with the world.
-//! Extensions can register additional tools beyond the built-in set.
+//! 工具是 Agent 与外部世界交互的主要方式。
+//! 扩展可以在内置工具集之外注册额外的工具。
+//!
+//! 本模块定义了：
+//! - [`Tool`] trait：所有工具（内置和扩展注册）的核心接口
+//! - [`ToolDefinition`]：发送给 LLM 的工具函数调用 schema
+//! - [`ToolResult`]：工具执行结果
+//! - [`ToolExecutionContext`]：每次工具调用的上下文
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Definition of a tool, sent to the LLM as part of the function calling schema.
+/// 工具定义，作为函数调用 schema 发送给 LLM。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    /// Unique tool name (e.g., "readFile", "shell").
+    /// 唯一工具名称（如 "readFile"、"shell"）。
     pub name: String,
-    /// Human-readable description of what the tool does.
+    /// 工具功能的人类可读描述。
     pub description: String,
-    /// JSON Schema for the tool's parameters.
+    /// 工具参数的 JSON Schema 定义。
     pub parameters: serde_json::Value,
-    /// Whether this tool is built-in (true) or registered by an extension (false).
+    /// 是否为内置工具（`true`）或扩展注册的工具（`false`）。
     pub is_builtin: bool,
 }
 
-/// Result of a tool execution.
+/// 工具执行结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// The tool call ID this result corresponds to.
+    /// 此结果对应的工具调用 ID。
     pub call_id: String,
-    /// Content output of the tool.
+    /// 工具输出的内容文本。
     pub content: String,
-    /// Whether this result represents an error.
+    /// 此结果是否表示错误。
     pub is_error: bool,
-    /// Optional normalized error message for consumers that need structured error display.
+    /// 可选的规范化错误消息，供需要结构化错误展示的消费者使用。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Optional metadata (e.g., file path, line count).
+    /// 可选的元数据键值对（如文件路径、行数等）。
     pub metadata: BTreeMap<String, serde_json::Value>,
-    /// Tool execution duration in milliseconds, when measured by the caller.
+    /// 工具执行耗时（毫秒），由调用方测量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
 
-/// Error that can occur during tool execution.
+/// 工具执行过程中可能发生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    /// 找不到指定的工具。
     #[error("Tool not found: {0}")]
     NotFound(String),
+    /// 工具参数无效。
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
+    /// 工具执行出错。
     #[error("Execution error: {0}")]
     Execution(String),
+    /// 工具执行被钩子阻止。
     #[error("Tool execution blocked by hook: {0}")]
     Blocked(String),
+    /// 工具执行超时。
     #[error("Timeout after {0}ms")]
     Timeout(u64),
 }
 
-/// Execution mode for a tool.
+/// 工具的执行模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionMode {
-    /// Execute sequentially — one tool at a time.
+    /// 顺序执行——一次只执行一个工具。
     Sequential,
-    /// Execute in parallel with other parallel-mode tools.
+    /// 并行执行——与其他并行模式工具同时执行。
     Parallel,
 }
 
-/// Per-call context passed to every tool execution.
+/// 每次工具调用时传递的上下文。
 ///
-/// Created by the agent at the start of each tool call, this carries
-/// the current session state that tools (especially extension tools) need.
+/// 由 Agent 在每次工具调用开始时创建，携带工具（尤其是扩展工具）
+/// 所需的当前会话状态。
 #[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
+    /// 当前会话 ID。
     pub session_id: String,
+    /// 工作目录路径。
     pub working_dir: String,
+    /// 当前使用的模型标识。
     pub model_id: String,
+    /// 当前可用的工具定义列表。
     pub available_tools: Vec<ToolDefinition>,
 }
 
-/// The `Tool` trait that all tools (built-in and extension-registered) must implement.
+/// `Tool` trait——所有工具（内置和扩展注册）都必须实现此接口。
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// Returns the tool's definition for LLM function calling.
+    /// 返回工具的定义，用于 LLM 函数调用。
     fn definition(&self) -> ToolDefinition;
 
-    /// Returns the tool's execution mode preference.
+    /// 返回工具的执行模式偏好。
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Sequential
     }
 
-    /// Executes the tool with the given arguments and per-call context.
+    /// 使用给定参数和调用上下文执行工具。
     ///
-    /// Built-in tools typically ignore `ctx`. Extension tools use it to
-    /// access session state and, through `ExtensionToolOutcome::RunSession`,
-    /// request child session creation.
+    /// 内置工具通常忽略 `ctx`。扩展工具通过它访问会话状态，
+    /// 并可通过 [`crate::extension::ExtensionToolOutcome::RunSession`]
+    /// 请求创建子会话。
     async fn execute(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError>;
-}
-
-/// Capability specification for tool/skill metadata, used by extensions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilitySpec {
-    /// Unique capability name.
-    pub name: String,
-    /// Kind of capability.
-    pub kind: CapabilityKind,
-    /// Human-readable description.
-    pub description: String,
-}
-
-/// Kind of capability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityKind {
-    Tool,
-    Skill,
-    SlashCommand,
-    ContextProvider,
-    Hook,
 }

@@ -1,4 +1,7 @@
-//! File-system session repository implementing the EventStore trait.
+//! 基于文件系统的会话仓库，实现 EventStore trait。
+//!
+//! 管理按项目组织的会话事件日志，目录结构为：
+//! `~/.astrcode/projects/<project>/sessions/<session>/`
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -12,21 +15,32 @@ use tokio::sync::RwLock;
 
 use crate::{event_log::EventLog, snapshot::SnapshotManager};
 
-/// File-system session repository.
+/// 基于文件系统的会话仓库。
 ///
-/// Manages session event logs organized by project:
+/// 管理按项目组织的会话事件日志，目录结构为：
 /// `~/.astrcode/projects/<project>/sessions/<session>/`
+///
+/// 内存中缓存已打开的会话元数据，避免频繁的磁盘 I/O。
 pub struct FileSystemSessionRepository {
+    /// 已打开的会话元数据缓存，按会话 ID 索引
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionMeta>>>>,
+    /// 会话存储的基础路径
     base_path: PathBuf,
 }
 
+/// 会话的内部元数据，持有事件日志和快照管理器。
 struct SessionMeta {
+    /// 事件日志实例，负责追加式写入和重放
     log: Arc<EventLog>,
+    /// 快照管理器，负责创建和列出恢复点
     snapshot_mgr: SnapshotManager,
 }
 
 impl FileSystemSessionRepository {
+    /// 创建新的文件系统会话仓库。
+    ///
+    /// # 参数
+    /// - `project_hash`: 项目路径的哈希值，用于确定存储目录
     pub fn new(project_hash: ProjectHash) -> Self {
         let base_path = hostpaths::sessions_dir(&project_hash);
         if let Err(e) = std::fs::create_dir_all(&base_path) {
@@ -38,14 +52,21 @@ impl FileSystemSessionRepository {
         }
     }
 
+    /// 获取指定会话的目录路径。
     fn session_dir(&self, id: &SessionId) -> PathBuf {
         self.base_path.join(id)
     }
 
+    /// 获取指定会话的事件日志文件路径。
     fn event_log_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join(format!("session-{}.jsonl", id))
     }
 
+    /// 获取或打开会话元数据。
+    ///
+    /// 如果会话已在内存中则直接返回缓存；否则从磁盘打开事件日志，
+    /// 恢复其内存中的 seq 计数器，并加入缓存。
+    /// 使用双重检查锁定模式避免重复打开。
     async fn get_or_open_meta(
         &self,
         session_id: &SessionId,

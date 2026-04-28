@@ -1,36 +1,39 @@
-//! Shell detection for cross-platform command execution.
+//! Shell 检测，用于跨平台命令执行。
+//!
+//! 根据运行环境自动检测当前 Shell 类型（POSIX、PowerShell、CMD、WSL），
+//! 也支持通过 `ASTRCODE_SHELL` 环境变量手动覆盖。
 
 use std::env;
 
-/// Shell family classification.
+/// Shell 家族分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellFamily {
-    /// POSIX-compatible shells: bash, zsh, sh, etc.
+    /// POSIX 兼容 Shell：bash、zsh、sh 等
     Posix,
-    /// PowerShell (Windows or cross-platform).
+    /// PowerShell（Windows 或跨平台版本）
     PowerShell,
-    /// Windows Command Prompt.
+    /// Windows 命令提示符（cmd.exe）
     Cmd,
-    /// Windows Subsystem for Linux.
+    /// Windows Subsystem for Linux
     Wsl,
 }
 
-/// Resolved shell information.
+/// 解析后的 Shell 信息。
 #[derive(Debug, Clone)]
 pub struct ShellInfo {
-    /// The shell family.
+    /// Shell 家族分类
     pub family: ShellFamily,
-    /// Shell name for display.
+    /// Shell 显示名称
     pub name: String,
-    /// Shell executable path.
+    /// Shell 可执行文件路径
     pub path: String,
 }
 
-/// Resolve the current shell.
+/// 解析当前使用的 Shell。
 ///
-/// Checks ASTRCODE_SHELL env var first, then auto-detects.
+/// 优先检查 `ASTRCODE_SHELL` 环境变量，如果未设置则根据平台自动检测。
 pub fn resolve_shell() -> ShellInfo {
-    // Allow override via environment variable
+    // 允许通过环境变量覆盖
     if let Ok(override_shell) = env::var("ASTRCODE_SHELL") {
         return match override_shell.to_lowercase().as_str() {
             "bash" | "zsh" | "sh" => ShellInfo {
@@ -56,7 +59,7 @@ pub fn resolve_shell() -> ShellInfo {
         };
     }
 
-    // Auto-detect based on platform
+    // 根据平台自动检测
     if cfg!(windows) {
         detect_windows_shell()
     } else {
@@ -64,8 +67,11 @@ pub fn resolve_shell() -> ShellInfo {
     }
 }
 
+/// 在 Windows 平台上检测 Shell 类型。
+///
+/// 检测顺序：MSYS2/MinGW/Git Bash → PowerShell → cmd（默认回退）。
 fn detect_windows_shell() -> ShellInfo {
-    // Check for MSYS2 / MinGW / Git Bash
+    // 检测 MSYS2 / MinGW / Git Bash
     if env::var("MSYSTEM").is_ok() {
         return ShellInfo {
             family: ShellFamily::Posix,
@@ -73,7 +79,7 @@ fn detect_windows_shell() -> ShellInfo {
             path: "bash.exe".into(),
         };
     }
-    // Check for PowerShell
+    // 检测 PowerShell
     if env::var("PSModulePath").is_ok() {
         return ShellInfo {
             family: ShellFamily::PowerShell,
@@ -81,7 +87,7 @@ fn detect_windows_shell() -> ShellInfo {
             path: "powershell.exe".into(),
         };
     }
-    // Fall back to cmd
+    // 回退到 cmd
     ShellInfo {
         family: ShellFamily::Cmd,
         name: "cmd".into(),
@@ -89,6 +95,9 @@ fn detect_windows_shell() -> ShellInfo {
     }
 }
 
+/// 在 POSIX 平台上检测 Shell 类型。
+///
+/// 通过 `SHELL` 环境变量判断具体是 zsh、bash 还是通用 sh。
 fn detect_posix_shell() -> ShellInfo {
     let shell_path = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let name = if shell_path.contains("zsh") {
@@ -121,7 +130,7 @@ mod tests {
     #[test]
     fn test_resolve_shell_default() {
         let shell = resolve_shell();
-        // Should always return something valid
+        // 应始终返回有效的 Shell 信息
         assert!(!shell.name.is_empty());
         assert!(!shell.path.is_empty());
     }

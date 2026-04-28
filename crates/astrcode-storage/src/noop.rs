@@ -1,4 +1,7 @@
-//! NoopEventStore — pure in-memory implementation for testing.
+//! NoopEventStore — 纯内存实现，用于测试。
+//!
+//! 所有操作都在内存中完成，不涉及磁盘 I/O。
+//! 适用于单元测试和集成测试中不需要持久化的场景。
 
 use std::collections::HashMap;
 
@@ -9,12 +12,17 @@ use astrcode_core::{
 };
 use tokio::sync::Mutex;
 
-/// Pure in-memory EventStore. All operations are synchronous, no disk I/O.
+/// 纯内存的 EventStore 实现。所有操作同步完成，无磁盘 I/O。
+///
+/// 使用 `HashMap<SessionId, Vec<Event>>` 存储每个会话的事件列表，
+/// 通过 `Mutex` 保证线程安全。
 pub struct NoopEventStore {
+    /// 会话事件映射，键为会话 ID，值为该会话的事件列表
     sessions: Mutex<HashMap<SessionId, Vec<Event>>>,
 }
 
 impl NoopEventStore {
+    /// 创建新的空内存存储。
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),

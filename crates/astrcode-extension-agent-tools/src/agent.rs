@@ -1,34 +1,45 @@
-//! Agent discovery + parsing — Claude Code compatible Markdown / YAML frontmatter.
+//! Agent 发现与解析 — 兼容 Claude Code 的 Markdown / YAML frontmatter 格式。
 //!
-//! Supports both Claude CSV tools format (`tools: Read, Grep`) and
-//! YAML list format (`tools: ["Read", "Grep"]`).
-//! Scan directories: `~/.astrcode/agents/`, `.astrcode/agents/`,
-//!                    `~/.claude/agents/`,   `.claude/agents/`
+//! 支持两种工具列表格式：
+//! - Claude CSV 工具格式 (`tools: Read, Grep`)
+//! - YAML 列表格式 (`tools: ["Read", "Grep"]`)
+//!
+//! 扫描目录顺序：
+//! - `~/.astrcode/agents/`、`.astrcode/agents/`
+//! - `~/.claude/agents/`、`.claude/agents/`
 
 use std::path::PathBuf;
 
-/// Parsed agent configuration (Claude-compatible).
+/// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
+    /// Agent 唯一标识（由名称标准化生成）
     pub id: String,
+    /// Agent 显示名称
     pub name: String,
-    /// When this agent should be selected.
+    /// 描述何时应选择此 Agent
     pub description: String,
-    /// Optional tool allowlist parsed from Claude-compatible frontmatter.
+    /// 可选的工具白名单，从兼容 Claude 的 frontmatter 中解析
     pub tools: Vec<String>,
-    /// Optional model preference parsed from Claude-compatible frontmatter.
+    /// 可选的模型偏好，从兼容 Claude 的 frontmatter 中解析
     pub model: Option<String>,
-    /// System prompt body (markdown body or systemPrompt/prompt frontmatter).
+    /// 系统提示词正文（markdown 正文或 systemPrompt/prompt frontmatter 字段）
     pub body: String,
 }
 
-// ─── Built-in agents ─────────────────────────────────────────────────────
+// ─── 内置 Agent ─────────────────────────────────────────────────────
 
+/// 内置 Agent 定义
 struct BuiltinAgent {
+    /// 内置路径标识
     path: &'static str,
+    /// Agent markdown 内容
     content: &'static str,
 }
 
+/// 返回所有内置 Agent 配置。
+///
+/// 内置 Agent 包括 explore（探索）、reviewer（审查）和 execute（执行）。
 pub fn builtin_agents() -> Vec<AgentConfig> {
     let builtins: &[BuiltinAgent] = &[
         BuiltinAgent {
@@ -50,15 +61,16 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
         .collect()
 }
 
-// ─── Discovery ───────────────────────────────────────────────────────────
+// ─── 发现 ───────────────────────────────────────────────────────────
 
-/// Discover agents from all sources. Priority (low to high):
-/// 1. Built-in agents
-/// 2. User: `~/.claude/agents/` + `~/.astrcode/agents/`
-/// 3. Project: `.claude/agents/` + `.astrcode/agents/`
+/// 从所有来源发现 Agent。优先级（从低到高）：
+/// 1. 内置 Agent
+/// 2. 用户级: `~/.claude/agents/` + `~/.astrcode/agents/`
+/// 3. 项目级: `.claude/agents/` + `.astrcode/agents/`
 pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
     let mut agents = builtin_agents();
 
+    // 扫描用户主目录下的 Agent
     if let Some(home) = home_dir() {
         for d in &[
             home.join(".claude").join("agents"),
@@ -68,14 +80,17 @@ pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
         }
     }
 
+    // 扫描项目目录及其所有祖先目录下的 Agent（项目级可覆盖用户级）
     if let Some(wd) = working_dir {
         let wd = PathBuf::from(wd);
+        // 收集从根到当前目录的所有祖先路径
         let mut ancestors: Vec<PathBuf> = Vec::new();
         let mut cur = Some(wd.as_path());
         while let Some(d) = cur {
             ancestors.push(d.to_path_buf());
             cur = d.parent();
         }
+        // 反转：从根目录开始扫描，确保更近的目录优先级更高
         ancestors.reverse();
         for a in &ancestors {
             for d in &[
@@ -90,6 +105,12 @@ pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
     agents
 }
 
+/// 将目录中的 Agent 合并到列表中。
+///
+/// # 参数
+/// - `agents`: 现有 Agent 列表
+/// - `dir`: 要扫描的目录
+/// - `override_existing`: 如果为 true，同名 Agent 会覆盖已有条目
 fn merge_dir(agents: &mut Vec<AgentConfig>, dir: &std::path::Path, override_existing: bool) {
     if !dir.exists() {
         return;
@@ -109,12 +130,14 @@ fn merge_dir(agents: &mut Vec<AgentConfig>, dir: &std::path::Path, override_exis
             continue;
         };
         if override_existing {
+            // 移除同 ID 的旧 Agent，实现覆盖
             agents.retain(|a| a.id != agent.id);
         }
         agents.push(agent);
     }
 }
 
+/// 判断文件是否为 Agent 定义文件（支持 .md/.markdown/.yml/.yaml 扩展名）
 fn is_agent_file(path: &std::path::Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
@@ -122,9 +145,13 @@ fn is_agent_file(path: &std::path::Path) -> bool {
     )
 }
 
-// ─── Parsing ─────────────────────────────────────────────────────────────
+// ─── 解析 ─────────────────────────────────────────────────────────────
 
+/// 解析 Agent 配置文件。
+///
+/// Markdown 文件需要包含 YAML frontmatter；YAML 文件直接解析。
 fn parse(path: &str, content: &str) -> Result<AgentConfig, String> {
+    // 统一换行符并移除 BOM
     let text = content.replace("\r\n", "\n").replace('\r', "\n");
     let text = text.trim_start_matches('\u{feff}');
 
@@ -137,6 +164,7 @@ fn parse(path: &str, content: &str) -> Result<AgentConfig, String> {
     }
 }
 
+/// 从 YAML 文本和可选的 Markdown 正文构建 AgentConfig。
 fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<AgentConfig, String> {
     let root: serde_yaml::Value =
         serde_yaml::from_str(yaml_text).map_err(|e| format!("{path}: parse YAML: {e}"))?;
@@ -144,6 +172,7 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         .as_mapping()
         .ok_or_else(|| format!("{path}: expected YAML mapping"))?;
 
+    // 使用文件名作为名称的回退值
     let fallback = PathBuf::from(path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -156,8 +185,10 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         str_val(m, "description").ok_or_else(|| format!("{path}: description is required"))?;
 
     let tools = parse_tools(m);
+    // "inherit" 和空字符串表示继承父级模型设置
     let model = str_val(m, "model").filter(|s| s != "inherit" && !s.is_empty());
 
+    // 系统提示词优先级: markdown 正文 > systemPrompt 字段 > prompt 字段 > 空
     let body = markdown_body
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty())
@@ -175,17 +206,20 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
     })
 }
 
+/// 解析 tools 字段，支持 CSV 字符串和 YAML 列表两种格式。
 fn parse_tools(m: &serde_yaml::Mapping) -> Vec<String> {
     let key = serde_yaml::Value::String("tools".into());
     let Some(v) = m.get(&key) else {
         return Vec::new();
     };
     match v {
+        // CSV 格式: "Read, Grep, Bash"
         serde_yaml::Value::String(s) => s
             .split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect(),
+        // YAML 列表格式: ["Read", "Grep", "Bash"]
         serde_yaml::Value::Sequence(seq) => seq
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
@@ -194,13 +228,17 @@ fn parse_tools(m: &serde_yaml::Mapping) -> Vec<String> {
     }
 }
 
+/// 从 YAML 映射中获取字符串值。
 fn str_val(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
     let v = m.get(serde_yaml::Value::String(key.into()))?;
     v.as_str().map(String::from)
 }
 
-// ─── Frontmatter splitting ───────────────────────────────────────────────
+// ─── Frontmatter 分割 ───────────────────────────────────────────────
 
+/// 将 Markdown 内容分割为 YAML frontmatter 和正文。
+///
+/// frontmatter 以 `---` 开头和结尾，支持 `...` 作为结束标记。
 fn split_frontmatter(content: &str) -> Result<(String, String), ()> {
     let mut lines = content.lines();
     if lines.next() != Some("---") {
@@ -208,6 +246,8 @@ fn split_frontmatter(content: &str) -> Result<(String, String), ()> {
     }
     let rest: Vec<&str> = lines.collect();
     for (i, line) in rest.iter().enumerate() {
+        // 结束标记必须是 `---` 或 `...`，且下一行不能以空格或制表符开头
+        // （避免将内容中的 `---` 误判为结束标记）
         if (*line == "---" || *line == "...")
             && rest
                 .get(i + 1)
@@ -221,6 +261,10 @@ fn split_frontmatter(content: &str) -> Result<(String, String), ()> {
     Err(())
 }
 
+/// 将 Agent 名称标准化为 ID 格式。
+///
+/// 将非字母数字字符替换为 `-`，并转换为小写。
+/// 连续的非字母数字字符合并为一个 `-`。
 fn normalize_id(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_sep = false;
@@ -236,6 +280,7 @@ fn normalize_id(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// 获取用户主目录，兼容 Unix ($HOME) 和 Windows (%USERPROFILE%)。
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -243,7 +288,7 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────
+// ─── 测试 ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

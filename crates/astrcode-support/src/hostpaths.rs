@@ -1,12 +1,16 @@
-//! Host path resolution for astrcode directories.
+//! 宿主路径解析。
 //!
-//! Resolves paths for config, sessions, projects, and runtime data.
+//! 解析 astrcode 各类目录路径，包括配置目录、会话目录、项目目录和运行时数据目录。
+//! 同时提供路径安全检查，防止路径遍历攻击。
 
 use std::path::{Path, PathBuf};
 
-/// Resolve the user's home directory.
+/// 解析用户主目录。
 ///
-/// Checks in order: ASTRCODE_TEST_HOME, ASTRCODE_HOME_DIR, dirs::home_dir().
+/// 按以下优先级查找：
+/// 1. `ASTRCODE_TEST_HOME` 环境变量（用于测试）
+/// 2. `ASTRCODE_HOME_DIR` 环境变量（用户自定义主目录）
+/// 3. `dirs::home_dir()`（系统默认主目录）
 pub fn resolve_home_dir() -> PathBuf {
     if let Ok(test_home) = std::env::var("ASTRCODE_TEST_HOME") {
         if !test_home.is_empty() {
@@ -21,51 +25,58 @@ pub fn resolve_home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Get the astrcode base directory: `~/.astrcode/`.
+/// 获取 astrcode 基础目录：`~/.astrcode/`。
 pub fn astrcode_dir() -> PathBuf {
     resolve_home_dir().join(".astrcode")
 }
 
-/// Get the projects directory: `~/.astrcode/projects/`.
+/// 获取项目总目录：`~/.astrcode/projects/`。
 pub fn projects_dir() -> PathBuf {
     astrcode_dir().join("projects")
 }
 
-/// Get the project-specific directory: `~/.astrcode/projects/<project_hash>/`.
+/// 获取特定项目的目录：`~/.astrcode/projects/<project_hash>/`。
 pub fn project_dir(project_hash: &str) -> PathBuf {
     projects_dir().join(project_hash)
 }
 
-/// Get the sessions directory for a project: `~/.astrcode/projects/<hash>/sessions/`.
+/// 获取某项目下的会话目录：`~/.astrcode/projects/<hash>/sessions/`。
 pub fn sessions_dir(project_hash: &str) -> PathBuf {
     project_dir(project_hash).join("sessions")
 }
 
-/// Get the runtime directory: `~/.astrcode/runtime/`.
+/// 获取运行时目录：`~/.astrcode/runtime/`。
 pub fn runtime_dir() -> PathBuf {
     astrcode_dir().join("runtime")
 }
 
-/// Get the global extensions directory: `~/.astrcode/extensions/`.
+/// 获取全局扩展目录：`~/.astrcode/extensions/`。
 pub fn extensions_dir() -> PathBuf {
     astrcode_dir().join("extensions")
 }
 
-/// Get the project-level extensions directory: `<workspace>/.astrcode/extensions/`.
+/// 获取测试专用目录。
+///
+/// 该目录位于系统临时目录下，调用方负责在测试前后清理。
+pub fn test_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join("astrcode-tests").join(name)
+}
+
+/// 获取项目级扩展目录：`<workspace>/.astrcode/extensions/`。
 pub fn project_extensions_dir(workspace: &str) -> PathBuf {
     PathBuf::from(workspace)
         .join(".astrcode")
         .join("extensions")
 }
 
-/// Ensure a directory exists, creating parents as needed.
+/// 确保目录存在，如不存在则递归创建（包含父目录）。
 pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)
 }
 
-/// Resolve a path that may be relative against a working directory.
+/// 将可能是相对路径的 `raw` 相对于 `cwd` 解析为绝对路径。
 ///
-/// If `raw` is absolute, returns it unchanged. Otherwise joins it with `cwd`.
+/// 如果 `raw` 已经是绝对路径，则原样返回；否则将其与 `cwd` 拼接。
 pub fn resolve_path(cwd: &Path, raw: &Path) -> PathBuf {
     if raw.is_absolute() {
         raw.to_path_buf()
@@ -75,15 +86,22 @@ pub fn resolve_path(cwd: &Path, raw: &Path) -> PathBuf {
 }
 
 /// 检查解析后的路径是否位于 `base` 目录内，防止路径遍历攻击。
+///
+/// 优先使用 `canonicalize` 获取真实路径进行比较；如果路径尚不存在，
+/// 则回退到最近存在的祖先目录进行规范化比较。
 pub fn is_path_within(resolved: &Path, base: &Path) -> bool {
+    // 先尝试规范化 base 目录
     let Some(base) = base.canonicalize().ok() else {
+        // base 不存在时，回退到纯路径规范化比较
         return normalize_path(resolved).starts_with(normalize_path(base));
     };
 
+    // 再尝试规范化目标路径
     if let Ok(resolved) = resolved.canonicalize() {
         return resolved.starts_with(base);
     }
 
+    // 目标路径不存在时，查找最近存在的祖先目录进行比较
     let Some(existing_parent) = nearest_existing_ancestor(resolved) else {
         return false;
     };
@@ -93,6 +111,7 @@ pub fn is_path_within(resolved: &Path, base: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 从给定路径向上查找最近存在的祖先目录。
 fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
     let mut current = Some(path);
     while let Some(path) = current {
@@ -104,6 +123,9 @@ fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
     None
 }
 
+/// 规范化路径，消除 `.` 和 `..` 组件。
+///
+/// 纯字符串级别的路径简化，不访问文件系统。
 fn normalize_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

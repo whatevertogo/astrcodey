@@ -1,18 +1,18 @@
-//! Configuration system for astrcode.
+//! astrcode 配置系统。
 //!
-//! # Architecture
+//! # 架构
 //!
-//! All config knowledge lives in this module:
-//! - `raw.rs` — types from disk (all fields optional)
-//! - `effective.rs` — resolved types (all fields concrete)
-//! - `resolve.rs` — `Config::into_effective()` + `resolve_api_key()` + `merge_overlay()`
-//! - `defaults.rs` — all default constants
+//! 所有配置知识都集中在此模块中：
+//! - `raw.rs`——从磁盘读取的类型（所有字段可选）
+//! - `effective.rs`——已解析的类型（所有字段为具体值）
+//! - `resolve.rs`——`Config::into_effective()` + `resolve_api_key()` + `merge_overlay()`
+//! - `defaults.rs`——所有默认常量
 //!
-//! Adding a new config field touches 3 files in this one directory:
-//! `raw.rs` (add Option field) → `effective.rs` (add concrete field)
-//! → `resolve.rs` (add mapping line).
+//! 添加新配置字段只需修改此目录下的 3 个文件：
+//! `raw.rs`（添加 Option 字段）→ `effective.rs`（添加具体字段）
+//! → `resolve.rs`（添加映射行）。
 //!
-//! # Usage
+//! # 使用示例
 //!
 //! ```ignore
 //! let raw: Config = serde_json::from_str(&json)?;
@@ -31,36 +31,36 @@ pub mod effective;
 pub mod raw;
 pub mod resolve;
 
-// Re-export commonly used types at the config module level
+// 在 config 模块级别重新导出常用类型
 pub use effective::*;
 pub use raw::*;
 pub use resolve::{ResolveError, merge_overlay, resolve_api_key};
 
-// ─── ConfigStore trait (IO abstraction) ──────────────────────────────────
+// ─── ConfigStore trait（IO 抽象）──────────────────────────────────────────
 
-/// Trait for configuration persistence.
+/// 配置持久化 trait。
 ///
-/// Implementations (e.g., FileConfigStore) handle the IO layer.
-/// ConfigService in the server crate uses this to load raw config,
-/// then calls `Config::into_effective()` for resolution.
+/// 实现类（如 FileConfigStore）负责处理 IO 层。
+/// 服务器 crate 中的 ConfigService 使用此 trait 加载原始配置，
+/// 然后调用 `Config::into_effective()` 进行解析。
 #[async_trait::async_trait]
 pub trait ConfigStore: Send + Sync {
-    /// Load the full configuration.
+    /// 加载完整配置。
     async fn load(&self) -> Result<Config, ConfigStoreError>;
 
-    /// Save configuration (atomic write).
+    /// 保存配置（原子写入）。
     async fn save(&self, config: &Config) -> Result<(), ConfigStoreError>;
 
-    /// Return the config file path.
+    /// 返回配置文件路径。
     fn path(&self) -> std::path::PathBuf;
 
-    /// Load a project overlay config.
+    /// 加载项目级覆盖配置。
     async fn load_overlay(
         &self,
         working_dir: &str,
     ) -> Result<Option<ConfigOverlay>, ConfigStoreError>;
 
-    /// Save a project overlay config.
+    /// 保存项目级覆盖配置。
     async fn save_overlay(
         &self,
         working_dir: &str,
@@ -68,15 +68,19 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), ConfigStoreError>;
 }
 
-/// Error from configuration operations.
+/// 配置操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigStoreError {
+    /// IO 错误。
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// 序列化/反序列化错误。
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// 配置内容无效。
     #[error("Invalid config: {0}")]
     Invalid(String),
+    /// 缺少必需字段。
     #[error("Missing required field: {0}")]
     MissingField(String),
 }

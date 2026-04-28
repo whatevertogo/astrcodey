@@ -1,0 +1,43 @@
+{
+  "id": "astrcode-task-tools",
+  "name": "Task Tools",
+  "version": "0.1.0",
+  "description": "Task tracking tools",
+  "astrcode_version": "0.1.0",
+  "library": "astrcode_extension_task_tools.dll",
+  "subscriptions": [],
+  "tools": [
+    {
+      "name": "taskCreate",
+      "description": "Create a tracked task in the task list",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "subject": { "type": "string", "description": "Brief task title" },
+          "description": { "type": "string", "description": "What needs to be done" },
+          "blocks": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this task blocks" }
+        },
+        "required": ["subject", "description"]
+      }
+    },
+    {
+      "name": "taskList",
+      "description": "List all tracked tasks with their statuses",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "taskUpdate",
+      "description": "Update task status or properties",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Task ID" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+          "subject": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["id"]
+      }
+    }
+  ]
+}
