@@ -35,13 +35,13 @@ The pipeline SHALL be observable via events emitted at each stage.
 - **WHEN** user submits "read main.rs" and LLM responds with a readFile tool call
 - **THEN** LLM response is streamed to completion
 - **THEN** the readFile tool call is parsed
-- **THEN** BeforeToolCall hooks fire → tool executes → AfterToolCall hooks fire
+- **THEN** PreToolUse hooks fire → tool executes → PostToolUse hooks fire
 - **THEN** tool result is appended to session
 - **THEN** LLM is called again with the tool result in context
 - **THEN** final response is streamed and turn completes
 
 ### Requirement: Tool execution orchestration
-Agent loop SHALL orchestrate tool execution: parse tool calls from LLM response, fire BeforeToolCall hooks, execute tool, fire AfterToolCall hooks, append result.
+Agent loop SHALL orchestrate tool execution: parse tool calls from LLM response, fire PreToolUse hooks, execute tool, fire PostToolUse hooks, append result.
 Blocking hooks SHALL be able to prevent tool execution.
 Sequential tools SHALL execute one at a time; parallel tools SHALL execute concurrently.
 
@@ -53,7 +53,7 @@ Sequential tools SHALL execute one at a time; parallel tools SHALL execute concu
 
 #### Scenario: Blocking hook prevents tool
 - **WHEN** LLM requests shell "rm -rf /"
-- **THEN** BeforeToolCall Blocking hook returns Block
+- **THEN** PreToolUse Blocking hook returns Block
 - **THEN** tool is not executed
 - **THEN** LLM receives error: "Tool execution blocked: Dangerous command"
 

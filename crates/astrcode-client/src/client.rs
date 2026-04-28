@@ -24,10 +24,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     }
 
     async fn send(&self, cmd: &ClientCommand) -> Result<ClientNotification, ClientError> {
-        self.transport
-            .execute(cmd)
-            .await
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        Ok(self.transport.execute(cmd).await?)
     }
 
     /// Create a new session.
@@ -88,20 +85,14 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     /// Subscribe to the server's event stream BEFORE sending commands.
     /// This ensures no events are missed.
     pub async fn subscribe_events(&self) -> Result<ConversationStream, ClientError> {
-        let rx = self
-            .transport
-            .subscribe()
-            .await
-            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let rx = self.transport.subscribe().await?;
         Ok(ConversationStream::new(rx))
     }
 
     /// Send a command without waiting for response (use with subscribe_events).
     pub async fn send_command(&self, cmd: &ClientCommand) -> Result<(), ClientError> {
-        self.transport
-            .send(cmd)
-            .await
-            .map_err(|e| ClientError::Transport(e.to_string()))
+        self.transport.send(cmd).await?;
+        Ok(())
     }
 
     /// Send a command and get the raw server event response.

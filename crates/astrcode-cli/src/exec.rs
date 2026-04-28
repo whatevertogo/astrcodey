@@ -6,7 +6,7 @@ use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 
 use crate::transport::InProcessTransport;
 
-pub async fn run(prompt: &str, jsonl: bool, _timeout_secs: u64) -> Result<(), String> {
+pub async fn run(prompt: &str, jsonl: bool, timeout_secs: u64) -> Result<(), String> {
     let client = AstrcodeClient::new(InProcessTransport::start());
 
     let _sid = client
@@ -27,8 +27,18 @@ pub async fn run(prompt: &str, jsonl: bool, _timeout_secs: u64) -> Result<(), St
         .await
         .map_err(|e| format!("Cannot submit: {e}"))?;
 
+    let deadline = (timeout_secs > 0)
+        .then(|| tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs));
+
     loop {
-        match stream.recv().await {
+        let recv_result = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, stream.recv())
+                .await
+                .map_err(|_| format!("exec timed out after {timeout_secs}s"))?
+        } else {
+            stream.recv().await
+        };
+        match recv_result {
             Ok(astrcode_client::stream::StreamItem::Event(event)) => match event {
                 ClientNotification::Event(core_event) => match core_event.payload {
                     EventPayload::AssistantTextDelta { delta, .. } => {

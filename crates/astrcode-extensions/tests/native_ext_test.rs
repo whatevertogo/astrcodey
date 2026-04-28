@@ -1,13 +1,13 @@
 //! Test native extension FFI infrastructure without actual libloading.
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 use astrcode_core::{
     config::ModelSelection,
     extension::{ExtensionContext, ExtensionEvent, HookMode},
     tool::ToolDefinition,
 };
-use astrcode_extensions::ffi::{self, EventCallback, ExtensionApi, FfiCtxOwned};
+use astrcode_extensions::ffi::{self, EventCallback, ExtensionApi, FfiCtxOwned, ToolCallback};
 
 /// Test context that returns fixed values.
 struct TestCtx {
@@ -49,13 +49,15 @@ impl ExtensionContext for TestCtx {
 fn ffi_vtable_register_handler_and_invoke() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
     let tools: Mutex<Vec<ToolDefinition>> = Mutex::new(Vec::new());
+    let tool_handlers: Mutex<HashMap<String, ToolCallback>> = Mutex::new(HashMap::new());
     let commands = Mutex::new(Vec::new());
 
-    let ud = Box::new(super_ud(&handlers, &tools, &commands));
+    let ud = Box::new(super_ud(&handlers, &tools, &tool_handlers, &commands));
     let api = ExtensionApi {
         user_data: Box::into_raw(ud) as *mut std::ffi::c_void,
         on: test_ffi_on,
         register_tool: test_ffi_register_tool,
+        register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
     };
 
@@ -75,13 +77,15 @@ fn ffi_vtable_register_handler_and_invoke() {
 fn ffi_register_tool_stores_definition() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
     let tools: Mutex<Vec<ToolDefinition>> = Mutex::new(Vec::new());
+    let tool_handlers: Mutex<HashMap<String, ToolCallback>> = Mutex::new(HashMap::new());
     let commands = Mutex::new(Vec::new());
 
-    let ud = Box::new(super_ud(&handlers, &tools, &commands));
+    let ud = Box::new(super_ud(&handlers, &tools, &tool_handlers, &commands));
     let api = ExtensionApi {
         user_data: Box::into_raw(ud) as *mut std::ffi::c_void,
         on: test_ffi_on,
         register_tool: test_ffi_register_tool,
+        register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
     };
 
@@ -108,6 +112,33 @@ fn ffi_register_tool_stores_definition() {
 }
 
 #[test]
+fn ffi_register_tool_handler_stores_callback() {
+    let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
+    let tools: Mutex<Vec<ToolDefinition>> = Mutex::new(Vec::new());
+    let tool_handlers: Mutex<HashMap<String, ToolCallback>> = Mutex::new(HashMap::new());
+    let commands = Mutex::new(Vec::new());
+
+    let ud = Box::new(super_ud(&handlers, &tools, &tool_handlers, &commands));
+    let api = ExtensionApi {
+        user_data: Box::into_raw(ud) as *mut std::ffi::c_void,
+        on: test_ffi_on,
+        register_tool: test_ffi_register_tool,
+        register_tool_handler: test_ffi_register_tool_handler,
+        register_command: test_ffi_register_command,
+    };
+
+    let name = b"my_tool";
+
+    unsafe {
+        (api.register_tool_handler)(&api, name.as_ptr(), name.len() as u32, test_tool_callback);
+    }
+
+    assert!(tool_handlers.lock().unwrap().contains_key("my_tool"));
+
+    let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
+}
+
+#[test]
 fn ffi_ctx_passes_session_info() {
     let ctx = TestCtx {
         sid: "s1".into(),
@@ -127,13 +158,15 @@ fn ffi_ctx_passes_session_info() {
 fn blocking_handler_effect_is_returned() {
     let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> = Mutex::new(Vec::new());
     let tools: Mutex<Vec<ToolDefinition>> = Mutex::new(Vec::new());
+    let tool_handlers: Mutex<HashMap<String, ToolCallback>> = Mutex::new(HashMap::new());
     let commands = Mutex::new(Vec::new());
 
-    let ud = Box::new(super_ud(&handlers, &tools, &commands));
+    let ud = Box::new(super_ud(&handlers, &tools, &tool_handlers, &commands));
     let api = ExtensionApi {
         user_data: Box::into_raw(ud) as *mut std::ffi::c_void,
         on: test_ffi_on,
         register_tool: test_ffi_register_tool,
+        register_tool_handler: test_ffi_register_tool_handler,
         register_command: test_ffi_register_command,
     };
 
@@ -149,22 +182,20 @@ fn blocking_handler_effect_is_returned() {
         .collect();
 
     let mut effect_out: u8 = 0;
-    let mut reason_ptr: *const u8 = std::ptr::null();
-    let mut reason_len: u32 = 0;
+    let mut output_ptr: *const u8 = std::ptr::null();
+    let mut output_len: u32 = 0;
     unsafe {
         (callbacks[0])(
             4,
             std::ptr::null(),
             &mut effect_out,
-            &mut reason_ptr,
-            &mut reason_len,
+            &mut output_ptr,
+            &mut output_len,
         );
     }
     assert_eq!(effect_out, 1); // Block
-    unsafe {
-        let reason = ffi::read_ffi_str(reason_ptr, reason_len);
-        assert_eq!(reason, "blocked");
-    }
+    let reason = unsafe { ffi::read_ffi_str(output_ptr, output_len) };
+    assert_eq!(reason, "blocked");
 
     let _ = unsafe { Box::from_raw(api.user_data as *mut TestUserData) };
 }
@@ -174,17 +205,20 @@ fn blocking_handler_effect_is_returned() {
 struct TestUserData<'a> {
     handlers: &'a Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     tools: &'a Mutex<Vec<ToolDefinition>>,
+    tool_handlers: &'a Mutex<HashMap<String, ToolCallback>>,
     commands: &'a Mutex<Vec<astrcode_core::extension::SlashCommand>>,
 }
 
 fn super_ud<'a>(
     h: &'a Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     t: &'a Mutex<Vec<ToolDefinition>>,
+    th: &'a Mutex<HashMap<String, ToolCallback>>,
     c: &'a Mutex<Vec<astrcode_core::extension::SlashCommand>>,
 ) -> TestUserData<'a> {
     TestUserData {
         handlers: h,
         tools: t,
+        tool_handlers: th,
         commands: c,
     }
 }
@@ -224,6 +258,19 @@ unsafe extern "C" fn test_ffi_register_tool(
     });
 }
 
+unsafe extern "C" fn test_ffi_register_tool_handler(
+    api: *const ExtensionApi,
+    name_ptr: *const u8,
+    name_len: u32,
+    callback: ToolCallback,
+) {
+    let ud = &*((*api).user_data as *const TestUserData);
+    ud.tool_handlers
+        .lock()
+        .unwrap()
+        .insert(ffi::read_ffi_str(name_ptr, name_len).to_string(), callback);
+}
+
 unsafe extern "C" fn test_ffi_register_command(
     api: *const ExtensionApi,
     name_ptr: *const u8,
@@ -246,10 +293,22 @@ unsafe extern "C" fn test_blocking_handler(
     _event: u8,
     _ctx: *const std::ffi::c_void,
     effect_out: *mut u8,
-    reason_out: *mut *const u8,
-    reason_len_out: *mut u32,
+    output_ptr: *mut *const u8,
+    output_len: *mut u32,
 ) {
     *effect_out = 1;
-    *reason_out = b"blocked".as_ptr();
-    *reason_len_out = 7;
+    *output_ptr = b"blocked".as_ptr();
+    *output_len = 7;
+}
+
+unsafe extern "C" fn test_tool_callback(
+    _ctx: *const std::ffi::c_void,
+    output_ptr: *mut *const u8,
+    output_len: *mut u32,
+    _error_ptr: *mut *const u8,
+    _error_len: *mut u32,
+) -> u8 {
+    *output_ptr = b"ok".as_ptr();
+    *output_len = 2;
+    0
 }

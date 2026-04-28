@@ -33,19 +33,13 @@ async fn main() {
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();
     tokio::spawn(async move {
-        loop {
-            match event_rx.recv().await {
-                Ok(event) => {
-                    let line =
-                        astrcode_protocol::framing::to_jsonl_line(&event).unwrap_or_default();
-                    use std::io::Write;
-                    let stdout = std::io::stdout();
-                    let mut handle = stdout.lock();
-                    let _ = handle.write_all(line.as_bytes());
-                    let _ = handle.flush();
-                },
-                Err(_) => break,
-            }
+        while let Ok(event) = event_rx.recv().await {
+            let line = astrcode_protocol::framing::to_jsonl_line(&event).unwrap_or_default();
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            let _ = handle.write_all(line.as_bytes());
+            let _ = handle.flush();
         }
     });
 

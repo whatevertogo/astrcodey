@@ -25,6 +25,7 @@ impl ConversationStream {
 
 /// Items received from the conversation stream.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum StreamItem {
     Event(ClientNotification),
     /// Client fell behind; `n` events were skipped.

@@ -18,7 +18,7 @@ impl PruneState {
     /// Truncates at a valid UTF-8 character boundary.
     pub fn prune_result(&self, result: &mut ToolResult) {
         if result.content.len() > self.max_tool_result_bytes {
-            let cutoff = floor_char_boundary(&result.content, self.max_tool_result_bytes);
+            let cutoff = crate::floor_char_boundary(&result.content, self.max_tool_result_bytes);
             result.content = format!(
                 "{}... [{} bytes truncated]",
                 &result.content[..cutoff],
@@ -26,15 +26,4 @@ impl PruneState {
             );
         }
     }
-}
-
-fn floor_char_boundary(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
-    }
-    let mut bound = max;
-    while bound > 0 && !s.is_char_boundary(bound) {
-        bound -= 1;
-    }
-    bound
 }

@@ -115,11 +115,10 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
                 submit_current_input(state, client).await?;
             }
         },
-        KeyCode::Tab => {
-            if state.show_slash_palette {
-                accept_slash_selection(state, client).await?;
-            }
+        KeyCode::Tab if state.show_slash_palette => {
+            accept_slash_selection(state, client).await?;
         },
+        KeyCode::Tab => {},
         KeyCode::Backspace => state.backspace(),
         KeyCode::Delete => state.delete(),
         KeyCode::Left => state.move_left(),
@@ -326,7 +325,7 @@ impl Drop for TerminalSession {
 }
 
 fn io_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, error.to_string())
+    io::Error::other(error.to_string())
 }
 
 fn short_id(session_id: &str) -> &str {

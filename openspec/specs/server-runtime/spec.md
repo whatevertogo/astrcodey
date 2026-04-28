@@ -34,7 +34,7 @@ Server SHALL broadcast all produced events to connected frontends.
 - **THEN** prompt composer assembles the full prompt context
 - **THEN** LLM is called with the assembled prompt
 - **THEN** LLM response stream is emitted as MessageDelta events
-- **THEN** if LLM requests tool calls, each tool goes through BeforeToolCall → execute → AfterToolCall
+- **THEN** if LLM requests tool calls, each tool goes through PreToolUse → execute → PostToolUse
 - **THEN** tool results are emitted as ToolCallStart/ToolCallDelta/ToolCallEnd events
 
 ### Requirement: Server handles multiple transports

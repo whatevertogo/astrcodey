@@ -1,8 +1,8 @@
 //! Session snapshot management for fast recovery.
 
-use astrcode_core::storage::StorageError;
-use astrcode_core::types::Cursor;
 use std::path::PathBuf;
+
+use astrcode_core::{storage::StorageError, types::Cursor};
 
 pub struct SnapshotManager {
     dir: PathBuf,

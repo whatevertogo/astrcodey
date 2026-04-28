@@ -55,13 +55,23 @@ impl CapabilityRouter {
         &self,
         name: &str,
         args: serde_json::Value,
+        ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        if let Some(tool) = self.dynamic.read().await.get(name) {
-            return tool.execute(args).await;
+        let dynamic_tool = { self.dynamic.read().await.get(name).cloned() };
+        if let Some(tool) = dynamic_tool {
+            return tool.execute(args, ctx).await;
         }
-        if let Some(tool) = self.stable.read().await.get(name) {
-            return tool.execute(args).await;
+
+        let stable_tool = { self.stable.read().await.get(name).cloned() };
+        if let Some(tool) = stable_tool {
+            return tool.execute(args, ctx).await;
         }
         Err(ToolError::NotFound(name.into()))
+    }
+}
+
+impl Default for CapabilityRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -74,6 +74,50 @@ pub fn resolve_path(cwd: &Path, raw: &Path) -> PathBuf {
     }
 }
 
+/// 检查解析后的路径是否位于 `base` 目录内，防止路径遍历攻击。
+pub fn is_path_within(resolved: &Path, base: &Path) -> bool {
+    let Some(base) = base.canonicalize().ok() else {
+        return normalize_path(resolved).starts_with(normalize_path(base));
+    };
+
+    if let Ok(resolved) = resolved.canonicalize() {
+        return resolved.starts_with(base);
+    }
+
+    let Some(existing_parent) = nearest_existing_ancestor(resolved) else {
+        return false;
+    };
+    existing_parent
+        .canonicalize()
+        .map(|parent| parent.starts_with(base))
+        .unwrap_or(false)
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut current = Some(path);
+    while let Some(path) = current {
+        if path.exists() {
+            return Some(path);
+        }
+        current = path.parent();
+    }
+    None
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            },
+            std::path::Component::CurDir => {},
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

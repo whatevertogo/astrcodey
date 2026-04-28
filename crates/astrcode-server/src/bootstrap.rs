@@ -11,11 +11,15 @@ use astrcode_core::{
     llm::{LlmClientConfig, LlmProvider},
     prompt::PromptProvider,
 };
-use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
+use astrcode_extensions::{
+    loader::ExtensionLoader,
+    runner::ExtensionRunner,
+    runtime::{SessionSpawner, SpawnRequest, SpawnResult},
+};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_tools::registry::ToolRegistry;
 
-use crate::{capability::CapabilityRouter, session::SessionManager};
+use crate::{agent::Agent, capability::CapabilityRouter, session::SessionManager};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -39,18 +43,10 @@ pub struct ServerRuntime {
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
 /// Bootstrap options for testability.
+#[derive(Default)]
 pub struct BootstrapOptions {
     pub config_path: Option<std::path::PathBuf>,
     pub working_dir: Option<std::path::PathBuf>,
-}
-
-impl Default for BootstrapOptions {
-    fn default() -> Self {
-        Self {
-            config_path: None,
-            working_dir: None,
-        }
-    }
 }
 
 pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
@@ -127,18 +123,31 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let session_manager = Arc::new(SessionManager::new(store));
 
     // 6. Extension runner — load from disk then bind core services
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
-    let wd_str = opts
-        .working_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
-    let load_result = ExtensionLoader::load_all(wd_str.as_deref()).await;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let load_result = ExtensionLoader::load_all(Some(&cwd_str)).await;
+    let extension_runner = Arc::new(ExtensionRunner::new(
+        Duration::from_secs(30),
+        load_result.runtime,
+    ));
     for ext in load_result.extensions {
         extension_runner.register(ext).await;
     }
     for err in &load_result.errors {
         tracing::warn!("Extension load error: {err}");
     }
+    let extension_tools = extension_runner.collect_tool_adapters(&cwd_str).await;
+    if !extension_tools.is_empty() {
+        capability.apply_dynamic(extension_tools).await;
+    }
+
+    // Bind session spawn capability so extensions can request RunSession outcomes.
+    extension_runner.bind(Arc::new(ServerSessionSpawner {
+        session_manager: Arc::clone(&session_manager),
+        llm: Arc::clone(&llm_provider),
+        capability: Arc::clone(&capability),
+        prompt: Arc::clone(&prompt_provider),
+        extension_runner: Arc::clone(&extension_runner),
+    }));
 
     // 7. Context window management
     let context_settings = ContextWindowSettings::default();
@@ -170,4 +179,70 @@ pub enum BootstrapError {
     Config(#[from] astrcode_core::config::ConfigStoreError),
     #[error("Resolve: {0}")]
     Resolve(#[from] astrcode_core::config::ResolveError),
+}
+
+// ─── ServerSessionSpawner ─────────────────────────────────────────────────
+
+/// Implements `SessionSpawner` so the extension runner can spawn child sessions
+/// when extensions return `ExtensionToolOutcome::RunSession`.
+struct ServerSessionSpawner {
+    session_manager: Arc<SessionManager>,
+    llm: Arc<dyn LlmProvider>,
+    capability: Arc<CapabilityRouter>,
+    prompt: Arc<dyn PromptProvider>,
+    extension_runner: Arc<ExtensionRunner>,
+}
+
+#[async_trait::async_trait]
+impl SessionSpawner for ServerSessionSpawner {
+    async fn spawn(
+        &self,
+        parent_session_id: &str,
+        request: SpawnRequest,
+    ) -> Result<SpawnResult, String> {
+        let model_id = request
+            .model_preference
+            .clone()
+            .unwrap_or_else(|| "default".into());
+
+        let create_event = self
+            .session_manager
+            .create(
+                &request.working_dir,
+                &model_id,
+                2048,
+                Some(parent_session_id),
+            )
+            .await
+            .map_err(|e| format!("create child session: {e}"))?;
+
+        let child_sid = create_event.session_id.to_string();
+
+        let agent = Agent::new(
+            child_sid.clone(),
+            request.working_dir,
+            Arc::clone(&self.llm),
+            Arc::clone(&self.prompt),
+            Arc::clone(&self.capability),
+            Arc::clone(&self.extension_runner),
+            model_id,
+            8192,
+        )
+        .with_system_prompt_suffix(request.system_prompt)
+        .with_tool_allowlist(request.allowed_tools);
+
+        match agent
+            .process_prompt(&request.user_prompt, Vec::new(), None)
+            .await
+        {
+            Ok(output) => Ok(SpawnResult {
+                content: output.text,
+                child_session_id: child_sid,
+            }),
+            Err(e) => Ok(SpawnResult {
+                content: format!("child agent error: {e}"),
+                child_session_id: child_sid,
+            }),
+        }
+    }
 }

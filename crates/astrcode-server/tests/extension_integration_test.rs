@@ -8,11 +8,14 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         PreToolUseInput,
     },
+    tool::{ToolDefinition, ToolResult},
 };
 use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ToolHookOutcome},
+    runtime::ExtensionRuntime,
 };
+use astrcode_server::capability::CapabilityRouter;
 
 /// A test extension that blocks shell commands containing "rm -rf".
 struct SecurityExtension;
@@ -84,6 +87,65 @@ impl Extension for AlwaysBlockExtension {
     }
 }
 
+struct EchoToolExtension;
+
+#[async_trait::async_trait]
+impl Extension for EchoToolExtension {
+    fn id(&self) -> &str {
+        "test-echo-tool"
+    }
+
+    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+        vec![]
+    }
+
+    async fn on_event(
+        &self,
+        _event: ExtensionEvent,
+        _ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        Ok(HookEffect::Allow)
+    }
+
+    fn tools(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "extensionEcho".into(),
+            description: "echo from extension".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            }),
+            is_builtin: false,
+        }]
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        working_dir: &str,
+        _ctx: &astrcode_core::tool::ToolExecutionContext,
+    ) -> Result<ToolResult, ExtensionError> {
+        if tool_name != "extensionEcho" {
+            return Err(ExtensionError::NotFound(tool_name.into()));
+        }
+        let text = arguments
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        Ok(ToolResult {
+            call_id: String::new(),
+            content: format!("{working_dir}:{text}"),
+            is_error: false,
+            error: None,
+            metadata: Default::default(),
+            duration_ms: None,
+        })
+    }
+}
+
 /// Checks that the block outcome carries the expected reason.
 fn assert_blocked(outcome: &ToolHookOutcome, expected_reason: &str) {
     match outcome {
@@ -120,7 +182,7 @@ fn context_with_pre_tool_input(command: &str) -> ServerExtensionContext {
 
 #[tokio::test]
 async fn extension_registration_and_count() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     assert_eq!(runner.count().await, 0);
 
     runner.register(Arc::new(SecurityExtension)).await;
@@ -128,8 +190,38 @@ async fn extension_registration_and_count() {
 }
 
 #[tokio::test]
+async fn extension_tools_are_adapted_into_capability_router() {
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    runner.register(Arc::new(EchoToolExtension)).await;
+
+    let capability = CapabilityRouter::new();
+    let tools = runner.collect_tool_adapters("/workspace").await;
+    capability.apply_dynamic(tools).await;
+
+    let definitions = capability.list_definitions().await;
+    assert!(definitions.iter().any(|def| def.name == "extensionEcho"));
+
+    let ctx = astrcode_core::tool::ToolExecutionContext {
+        session_id: "test".into(),
+        working_dir: String::new(),
+        model_id: String::new(),
+        available_tools: vec![],
+    };
+    let result = capability
+        .execute(
+            "extensionEcho",
+            serde_json::json!({ "text": "hello" }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.content, "/workspace:hello");
+    assert!(!result.is_error);
+}
+
+#[tokio::test]
 async fn blocking_extension_returns_block_outcome() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner.register(Arc::new(AlwaysBlockExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");
@@ -143,7 +235,7 @@ async fn blocking_extension_returns_block_outcome() {
 
 #[tokio::test]
 async fn allow_extension_returns_allow_outcome() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner.register(Arc::new(SecurityExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");
@@ -157,7 +249,7 @@ async fn allow_extension_returns_allow_outcome() {
 
 #[tokio::test]
 async fn pre_tool_use_extension_can_inspect_tool_payload() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner.register(Arc::new(SecurityExtension)).await;
 
     let ctx = context_with_pre_tool_input("rm -rf /");
@@ -171,7 +263,7 @@ async fn pre_tool_use_extension_can_inspect_tool_payload() {
 
 #[tokio::test]
 async fn extension_context_snapshot_works_for_nonblocking() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
 
     // A fire-and-forget extension
     struct FireAndForgetExt;
@@ -220,7 +312,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
 
 #[tokio::test]
 async fn dispatch_with_no_registered_extensions_is_noop() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     let ctx = ServerExtensionContext::new(
         "empty".into(),
         "/tmp".into(),
@@ -245,7 +337,7 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
 
 #[tokio::test]
 async fn extension_subscribes_only_to_matching_events() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner.register(Arc::new(AlwaysBlockExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");

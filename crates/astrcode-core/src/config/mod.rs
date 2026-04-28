@@ -34,7 +34,7 @@ pub mod resolve;
 // Re-export commonly used types at the config module level
 pub use effective::*;
 pub use raw::*;
-pub use resolve::{merge_overlay, resolve_api_key, ResolveError};
+pub use resolve::{ResolveError, merge_overlay, resolve_api_key};
 
 // ─── ConfigStore trait (IO abstraction) ──────────────────────────────────
 

@@ -1,50 +1,54 @@
 //! Tool registry for managing built-in and extension-registered tools.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::tool::{Tool, ToolDefinition, ToolError, ToolResult};
+use astrcode_core::tool::{Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult};
 
 /// Registry of available tools (built-in + extension-registered).
+///
+/// 使用 HashMap 按工具名索引，O(1) 查找替代 Vec 的 O(n) 线性扫描。
 pub struct ToolRegistry {
-    tools: Vec<Arc<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.push(tool);
+        let name = tool.definition().name.clone();
+        if self.tools.contains_key(&name) {
+            tracing::warn!("Tool '{}' already registered, overwriting", name);
+        }
+        self.tools.insert(name, tool);
     }
 
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|t| t.definition()).collect()
+        self.tools.values().map(|t| t.definition()).collect()
     }
 
     pub async fn execute(
         &self,
         name: &str,
         args: serde_json::Value,
+        ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        for tool in &self.tools {
-            if tool.definition().name == name {
-                return tool.execute(args).await;
-            }
+        match self.tools.get(name) {
+            Some(tool) => tool.execute(args, ctx).await,
+            None => Err(ToolError::NotFound(name.into())),
         }
-        Err(ToolError::NotFound(name.into()))
     }
 
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
-        self.tools
-            .iter()
-            .map(|tool| tool.definition())
-            .find(|definition| definition.name == name)
+        self.tools.get(name).map(|t| t.definition())
     }
 
     /// Drain all registered tools into a Vec (consumes the registry).
     pub fn into_tools(self) -> Vec<std::sync::Arc<dyn Tool>> {
-        self.tools
+        self.tools.into_values().collect()
     }
 }
 

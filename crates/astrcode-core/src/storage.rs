@@ -17,6 +17,7 @@ pub trait EventStore: Send + Sync {
         session_id: &SessionId,
         working_dir: &str,
         model_id: &str,
+        parent_session_id: Option<&str>,
     ) -> Result<Event, StorageError>;
 
     /// Append an event to the session's event log.

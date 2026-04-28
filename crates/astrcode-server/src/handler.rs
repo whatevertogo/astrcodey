@@ -63,20 +63,45 @@ impl CommandHandler {
             },
 
             ClientCommand::ListSessions => {
-                let sessions = self
+                let sids = self
                     .runtime
                     .session_manager
                     .list()
                     .await
                     .unwrap_or_default();
-                let items: Vec<_> = sessions
+                let active = self.runtime.session_manager.active().await;
+                let items: Vec<_> = sids
                     .into_iter()
-                    .map(|sid| SessionListItem {
-                        session_id: sid,
-                        created_at: String::new(),
-                        last_active_at: String::new(),
-                        working_dir: String::new(),
-                        parent_session_id: None,
+                    .map(|sid| {
+                        // 尝试从内存中获取已加载 session 的真实状态
+                        if let Some(session) = active.get(&sid) {
+                            // try_read 避免在 list 操作中长时间持锁
+                            if let Ok(st) = session.state.try_read() {
+                                SessionListItem {
+                                    session_id: sid,
+                                    created_at: st.created_at.clone(),
+                                    last_active_at: String::new(),
+                                    working_dir: st.working_dir.clone(),
+                                    parent_session_id: None,
+                                }
+                            } else {
+                                SessionListItem {
+                                    session_id: sid,
+                                    created_at: String::new(),
+                                    last_active_at: String::new(),
+                                    working_dir: String::new(),
+                                    parent_session_id: None,
+                                }
+                            }
+                        } else {
+                            SessionListItem {
+                                session_id: sid,
+                                created_at: String::new(),
+                                last_active_at: String::new(),
+                                working_dir: String::new(),
+                                parent_session_id: None,
+                            }
+                        }
                     })
                     .collect();
                 let _ = self
@@ -137,7 +162,7 @@ impl CommandHandler {
         match self
             .runtime
             .session_manager
-            .create(&working_dir, &model_id, 2048)
+            .create(&working_dir, &model_id, 2048, None)
             .await
         {
             Ok(event) => {
@@ -160,6 +185,18 @@ impl CommandHandler {
                     self.send_error(-32603, &e.to_string());
                     return;
                 }
+
+                // Refresh dynamic tools — extensions may have registered new
+                // tools during SessionStart (e.g. agent-tools scanning agents/ dir).
+                let tools = self
+                    .runtime
+                    .extension_runner
+                    .collect_tool_adapters(&working_dir)
+                    .await;
+                if !tools.is_empty() {
+                    self.runtime.capability.apply_dynamic(tools).await;
+                }
+
                 let _ = self.event_tx.send(ClientNotification::Event(event));
             },
             Err(e) => self.send_error(-32603, &e.to_string()),
@@ -174,29 +211,6 @@ impl CommandHandler {
 
         let sid = self.ensure_session().await?;
 
-        // Dispatch UserPromptSubmit hook
-        {
-            let ext_ctx = ServerExtensionContext::new(
-                sid.clone(),
-                std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| ".".into()),
-                ModelSelection {
-                    profile_name: String::new(),
-                    model: self.runtime.effective.llm.model_id.clone(),
-                    provider_kind: String::new(),
-                },
-            );
-            if let Err(e) = self
-                .runtime
-                .extension_runner
-                .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
-                .await
-            {
-                self.send_error(-32603, &e.to_string());
-                return Ok(());
-            }
-        }
         let session = self
             .runtime
             .session_manager
@@ -316,7 +330,7 @@ impl CommandHandler {
         let event = self
             .runtime
             .session_manager
-            .create(&wd, &model_id, 2048)
+            .create(&wd, &model_id, 2048, None)
             .await
             .map_err(|e| format!("create session: {e}"))?;
 
@@ -602,6 +616,7 @@ mod tests {
             capability: Arc::new(CapabilityRouter::new()),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
                 Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
             )),
             effective: EffectiveConfig {
                 llm: LlmSettings {

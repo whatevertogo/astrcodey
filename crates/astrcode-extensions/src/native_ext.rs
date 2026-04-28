@@ -7,17 +7,26 @@
 //! This struct implements the `Extension` trait, delegating `on_event()`
 //! to the FFI callbacks registered during the factory call.
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
+        Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
+        HookEffect, HookMode,
     },
     prompt::BlockSpec,
-    tool::{CapabilitySpec, ToolDefinition},
+    tool::{CapabilitySpec, ToolDefinition, ToolResult},
 };
 
-use crate::ffi::{self, EventCallback, ExtensionApi, FfiCtxOwned};
+use crate::ffi::{self, EventCallback, ExtensionApi, FfiCtxOwned, ToolCallback};
+
+fn read_output(ptr: *const u8, len: u32) -> String {
+    if ptr.is_null() || len == 0 {
+        String::new()
+    } else {
+        unsafe { ffi::read_ffi_str(ptr, len) }.to_string()
+    }
+}
 
 /// A loaded native extension.
 ///
@@ -31,6 +40,8 @@ pub struct NativeExtension {
     handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     /// Tools registered through `api.register_tool()`.
     tools: Mutex<Vec<ToolDefinition>>,
+    /// Executable handlers registered through `api.register_tool_handler()`.
+    tool_handlers: Mutex<HashMap<String, ToolCallback>>,
     /// Slash commands registered through `api.register_command()`.
     commands: Mutex<Vec<astrcode_core::extension::SlashCommand>>,
 }
@@ -51,12 +62,14 @@ impl NativeExtension {
         let handlers: Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>> =
             Mutex::new(Vec::new());
         let tools: Mutex<Vec<ToolDefinition>> = Mutex::new(Vec::new());
+        let tool_handlers: Mutex<HashMap<String, ToolCallback>> = Mutex::new(HashMap::new());
         let commands: Mutex<Vec<astrcode_core::extension::SlashCommand>> = Mutex::new(Vec::new());
 
         // Prepare user_data that FFI callbacks will access via api.user_data.
         let user_data = Box::new(FfiUserData {
             handlers: &handlers,
             tools: &tools,
+            tool_handlers: &tool_handlers,
             commands: &commands,
         });
 
@@ -64,6 +77,7 @@ impl NativeExtension {
             user_data: Box::into_raw(user_data) as *mut std::ffi::c_void,
             on: ffi_on,
             register_tool: ffi_register_tool,
+            register_tool_handler: ffi_register_tool_handler,
             register_command: ffi_register_command,
         };
 
@@ -86,6 +100,7 @@ impl NativeExtension {
             _library: library,
             handlers,
             tools,
+            tool_handlers,
             commands,
         })
     }
@@ -122,31 +137,40 @@ impl Extension for NativeExtension {
         drop(handlers);
 
         for callback in &callbacks {
-            let mut effect_out: u8 = 0; // Allow
-            let mut block_reason_ptr: *const u8 = std::ptr::null();
-            let mut block_reason_len: u32 = 0;
+            let mut effect_out: u8 = 0;
+            let mut output_ptr: *const u8 = std::ptr::null();
+            let mut output_len: u32 = 0;
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                 (callback)(
                     event_disc,
                     ffi_ctx.as_ptr(),
                     &mut effect_out,
-                    &mut block_reason_ptr,
-                    &mut block_reason_len,
+                    &mut output_ptr,
+                    &mut output_len,
                 )
             }));
 
             match result {
                 Ok(_) => match effect_out {
-                    0 => {}, // Allow
+                    0 => {},
                     1 => {
-                        let reason = if !block_reason_ptr.is_null() && block_reason_len > 0 {
-                            unsafe { ffi::read_ffi_str(block_reason_ptr, block_reason_len) }
-                                .to_string()
-                        } else {
-                            String::new()
-                        };
+                        let reason = read_output(output_ptr, output_len);
                         return Ok(HookEffect::Block { reason });
+                    },
+                    2 => {
+                        let content = read_output(output_ptr, output_len);
+                        return Ok(HookEffect::ModifiedResult { content });
+                    },
+                    3 => {
+                        let content = read_output(output_ptr, output_len);
+                        let tool_input = serde_json::from_str(&content).map_err(|e| {
+                            ExtensionError::Internal(format!(
+                                "extension {} returned invalid ModifiedInput JSON: {e}",
+                                self.id
+                            ))
+                        })?;
+                        return Ok(HookEffect::ModifiedInput { tool_input });
                     },
                     _ => {},
                 },
@@ -164,6 +188,89 @@ impl Extension for NativeExtension {
 
     fn tools(&self) -> Vec<ToolDefinition> {
         self.tools.lock().unwrap().clone()
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        working_dir: &str,
+        ctx: &astrcode_core::tool::ToolExecutionContext,
+    ) -> Result<ToolResult, ExtensionError> {
+        let callback = self
+            .tool_handlers
+            .lock()
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?
+            .get(tool_name)
+            .copied();
+        let Some(callback) = callback else {
+            return Err(ExtensionError::NotFound(tool_name.into()));
+        };
+
+        let ffi_ctx = FfiCtxOwned::from_tool_execution(working_dir, tool_name, &arguments, ctx);
+        let mut output_ptr: *const u8 = std::ptr::null();
+        let mut output_len: u32 = 0;
+        let mut error_ptr: *const u8 = std::ptr::null();
+        let mut error_len: u32 = 0;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            (callback)(
+                ffi_ctx.as_ptr(),
+                &mut output_ptr,
+                &mut output_len,
+                &mut error_ptr,
+                &mut error_len,
+            )
+        }));
+
+        let status = match result {
+            Ok(status) => status,
+            Err(_) => {
+                return Err(ExtensionError::Internal(format!(
+                    "extension {} tool handler panicked for {tool_name}",
+                    self.id
+                )));
+            },
+        };
+
+        let outcome = unsafe {
+            ffi::parse_tool_outcome(status, output_ptr, output_len, error_ptr, error_len)
+        }
+        .map_err(|e| {
+            ExtensionError::Internal(format!(
+                "extension {} tool handler invalid result: {e}",
+                self.id
+            ))
+        })?;
+
+        match outcome {
+            ExtensionToolOutcome::Text { content, is_error } => Ok(ToolResult {
+                call_id: String::new(),
+                content: content.clone(),
+                is_error,
+                error: if is_error { Some(content) } else { None },
+                metadata: Default::default(),
+                duration_ms: None,
+            }),
+            ext_outcome @ ExtensionToolOutcome::RunSession { .. } => {
+                let outcome_json = serde_json::to_value(&ext_outcome).map_err(|e| {
+                    ExtensionError::Internal(format!(
+                        "extension {} serializing outcome: {e}",
+                        self.id
+                    ))
+                })?;
+                let mut metadata = std::collections::BTreeMap::new();
+                metadata.insert("extension_tool_outcome".into(), outcome_json);
+                Ok(ToolResult {
+                    call_id: String::new(),
+                    content: String::new(),
+                    is_error: false,
+                    error: None,
+                    metadata,
+                    duration_ms: None,
+                })
+            },
+        }
     }
 
     fn slash_commands(&self) -> Vec<astrcode_core::extension::SlashCommand> {
@@ -185,6 +292,7 @@ impl Extension for NativeExtension {
 struct FfiUserData<'a> {
     handlers: &'a Mutex<Vec<(ExtensionEvent, HookMode, EventCallback)>>,
     tools: &'a Mutex<Vec<ToolDefinition>>,
+    tool_handlers: &'a Mutex<HashMap<String, ToolCallback>>,
     commands: &'a Mutex<Vec<astrcode_core::extension::SlashCommand>>,
 }
 
@@ -236,6 +344,18 @@ unsafe extern "C" fn ffi_register_tool(
         parameters: params,
         is_builtin: false,
     });
+}
+
+unsafe extern "C" fn ffi_register_tool_handler(
+    api: *const ExtensionApi,
+    name_ptr: *const u8,
+    name_len: u32,
+    callback: ToolCallback,
+) {
+    let name = ffi::read_ffi_str(name_ptr, name_len).to_string();
+    if let Ok(mut handlers) = user_data!(api).tool_handlers.lock() {
+        handlers.insert(name, callback);
+    }
 }
 
 unsafe extern "C" fn ffi_register_command(

@@ -22,6 +22,12 @@ impl NoopEventStore {
     }
 }
 
+impl Default for NoopEventStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl EventStore for NoopEventStore {
     async fn create_session(
@@ -29,6 +35,7 @@ impl EventStore for NoopEventStore {
         session_id: &SessionId,
         working_dir: &str,
         model_id: &str,
+        parent_session_id: Option<&str>,
     ) -> Result<Event, StorageError> {
         let mut event = Event::new(
             session_id.clone(),
@@ -36,6 +43,7 @@ impl EventStore for NoopEventStore {
             EventPayload::SessionStarted {
                 working_dir: working_dir.into(),
                 model_id: model_id.into(),
+                parent_session_id: parent_session_id.map(|s| s.to_string()),
             },
         );
         event.seq = Some(0);

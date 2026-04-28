@@ -42,7 +42,7 @@ User (TUI/Exec) → ClientCommand (JSON-RPC/stdio)
 - 状态完全由 Session 事件定义
 
 ### Extension（扩展）
-- 订阅 12 个生命周期事件，注册工具/命令/上下文提供者
+- 订阅 9 个当前生命周期事件，注册工具定义、工具执行 handler、命令和上下文提供者
 - 3 种 HookMode：Blocking（可阻断）、NonBlocking（异步）、Advisory（参考）
 - Skills、Agent Profiles、自定义行为全部由扩展实现
 

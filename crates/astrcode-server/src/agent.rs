@@ -1,6 +1,6 @@
 //! Agent — the ephemeral turn processor created from session events.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use astrcode_context::pruning::PruneState;
 use astrcode_core::{
@@ -9,7 +9,7 @@ use astrcode_core::{
     extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     prompt::{PromptContext, PromptProvider},
-    tool::ToolResult,
+    tool::{ToolExecutionContext, ToolResult},
     types::*,
 };
 use astrcode_extensions::{
@@ -34,9 +34,12 @@ pub struct Agent {
     capability: Arc<CapabilityRouter>,
     extension_runner: Arc<ExtensionRunner>,
     pruner: PruneState,
+    tool_allowlist: Option<HashSet<String>>,
+    system_prompt_suffix: Option<String>,
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: SessionId,
         working_dir: String,
@@ -56,7 +59,27 @@ impl Agent {
             capability,
             extension_runner,
             pruner: PruneState::new(max_tool_result_bytes),
+            tool_allowlist: None,
+            system_prompt_suffix: None,
         }
+    }
+
+    pub fn with_tool_allowlist(mut self, allowed_tools: Vec<String>) -> Self {
+        self.tool_allowlist = Some(allowed_tools.into_iter().collect());
+        self
+    }
+
+    pub fn with_system_prompt_suffix(mut self, suffix: String) -> Self {
+        if !suffix.trim().is_empty() {
+            self.system_prompt_suffix = Some(suffix);
+        }
+        self
+    }
+
+    fn tool_is_allowed(&self, name: &str) -> bool {
+        self.tool_allowlist
+            .as_ref()
+            .is_none_or(|allowed| tool_name_matches_allowlist(allowed, name))
     }
 
     /// Build extension context for the current turn.
@@ -82,15 +105,37 @@ impl Agent {
         history: Vec<LlmMessage>,
         event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     ) -> Result<AgentTurnOutput, AgentError> {
-        let ext_ctx = self.build_ext_ctx();
+        // Build context with tool definitions filled for extension visibility
+        let mut ext_ctx = self.build_ext_ctx();
+        let mut tools = self.capability.list_definitions().await;
+        if let Some(allowed) = &self.tool_allowlist {
+            tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
+        }
+        let tool_map: std::collections::HashMap<_, _> =
+            tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        ext_ctx.set_tools(tool_map);
+
+        // Dispatch TurnStart
         self.extension_runner
             .dispatch(ExtensionEvent::TurnStart, &ext_ctx)
             .await?;
 
+        // Dispatch UserPromptSubmit before building messages.
+        // If a Blocking hook rejects the prompt, fire TurnEnd before returning.
+        if let Err(e) = self
+            .extension_runner
+            .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
+            .await
+        {
+            let _ = self
+                .extension_runner
+                .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                .await;
+            return Err(e.into());
+        }
+
         let mut messages = history;
         messages.push(LlmMessage::user(user_text));
-
-        let tools = self.capability.list_definitions().await;
 
         let prompt_ctx = PromptContext {
             working_dir: self.working_dir.clone(),
@@ -106,13 +151,16 @@ impl Agent {
         };
 
         let plan = self.prompt.assemble(prompt_ctx).await;
-        if !plan.system_blocks.is_empty() {
-            let system_text: String = plan
+        if !plan.system_blocks.is_empty() || self.system_prompt_suffix.is_some() {
+            let mut system_parts: Vec<String> = plan
                 .system_blocks
                 .iter()
                 .map(|b| b.content.clone())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+                .collect();
+            if let Some(suffix) = &self.system_prompt_suffix {
+                system_parts.push(suffix.clone());
+            }
+            let system_text = system_parts.join("\n\n");
             // Replace existing system message if present, otherwise insert at front
             if let Some(pos) = messages.iter().position(|m| m.role == LlmRole::System) {
                 messages[pos] = LlmMessage::system(system_text);
@@ -147,7 +195,25 @@ impl Agent {
                     ProviderHookOutcome::Allow => {},
                 }
             }
-            let mut rx = self.llm.generate(send_messages, tools.clone()).await?;
+            let mut rx = match self.llm.generate(send_messages, tools.clone()).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    // LLM 调用级别失败（网络/认证等），需要通知客户端，
+                    // 否则外部消费者无法感知此错误（流中错误通过 LlmEvent::Error 已有处理）
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(EventPayload::ErrorOccurred {
+                            code: -32603,
+                            message: e.to_string(),
+                            recoverable: false,
+                        });
+                    }
+                    let _ = self
+                        .extension_runner
+                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                        .await;
+                    return Err(e.into());
+                },
+            };
             let message_id = new_message_id();
             let mut message_started = false;
             let mut current_text = String::new();
@@ -250,6 +316,13 @@ impl Agent {
                 .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
                 .await;
 
+            let tool_ctx = ToolExecutionContext {
+                session_id: self.session_id.clone(),
+                working_dir: self.working_dir.clone(),
+                model_id: self.model_id.clone(),
+                available_tools: tools.clone(),
+            };
+
             for tc in &tool_calls {
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
@@ -260,6 +333,49 @@ impl Agent {
                         );
                         serde_json::json!({})
                     });
+
+                if !self.tool_is_allowed(&tc.name) {
+                    let blocked_result = ToolResult {
+                        call_id: tc.call_id.clone(),
+                        content: format!("Tool '{}' is not available to this agent", tc.name),
+                        is_error: true,
+                        error: Some(format!("tool '{}' is not allowed", tc.name)),
+                        metadata: Default::default(),
+                        duration_ms: None,
+                    };
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(EventPayload::ToolCallRequested {
+                            call_id: tc.call_id.clone(),
+                            tool_name: tc.name.clone(),
+                            arguments: args.clone(),
+                        });
+                        let _ = tx.send(EventPayload::ToolCallCompleted {
+                            call_id: tc.call_id.clone(),
+                            tool_name: tc.name.clone(),
+                            result: blocked_result.clone(),
+                        });
+                    }
+                    messages.push(LlmMessage {
+                        role: LlmRole::Assistant,
+                        content: vec![LlmContent::ToolCall {
+                            call_id: tc.call_id.clone(),
+                            name: tc.name.clone(),
+                            arguments: args,
+                        }],
+                        name: None,
+                    });
+                    messages.push(LlmMessage {
+                        role: LlmRole::Tool,
+                        content: vec![LlmContent::ToolResult {
+                            tool_call_id: tc.call_id.clone(),
+                            content: blocked_result.content.clone(),
+                            is_error: true,
+                        }],
+                        name: Some(tc.name.clone()),
+                    });
+                    all_tool_results.push(blocked_result);
+                    continue;
+                }
 
                 let mut pre_ctx = self.build_ext_ctx();
                 pre_ctx.set_pre_tool_use_input(PreToolUseInput {
@@ -326,7 +442,11 @@ impl Agent {
 
                 let execution_input = tool_args.clone();
                 let started_at = Instant::now();
-                let mut result = match self.capability.execute(&tc.name, tool_args).await {
+                let mut result = match self
+                    .capability
+                    .execute(&tc.name, tool_args, &tool_ctx)
+                    .await
+                {
                     Ok(mut result) => {
                         result.call_id = tc.call_id.clone();
                         result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -426,6 +546,26 @@ impl From<astrcode_core::llm::LlmError> for AgentError {
     }
 }
 
+fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: &str) -> bool {
+    allowed.iter().any(|allowed_name| {
+        allowed_name == tool_name
+            || claude_tool_alias(allowed_name)
+                .is_some_and(|alias| alias.eq_ignore_ascii_case(tool_name))
+    })
+}
+
+fn claude_tool_alias(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "read" => Some("readFile"),
+        "write" => Some("writeFile"),
+        "edit" | "multiedit" => Some("editFile"),
+        "grep" => Some("grep"),
+        "glob" => Some("findFiles"),
+        "bash" => Some("shell"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -446,6 +586,20 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    #[test]
+    fn claude_tool_aliases_match_local_tool_names() {
+        let allowed = HashSet::from([
+            String::from("Read"),
+            String::from("Grep"),
+            String::from("Bash"),
+        ]);
+
+        assert!(tool_name_matches_allowlist(&allowed, "readFile"));
+        assert!(tool_name_matches_allowlist(&allowed, "grep"));
+        assert!(tool_name_matches_allowlist(&allowed, "shell"));
+        assert!(!tool_name_matches_allowlist(&allowed, "writeFile"));
+    }
 
     struct BlockingPreToolExtension;
 
@@ -517,7 +671,11 @@ mod tests {
             ExecutionMode::Sequential
         }
 
-        async fn execute(&self, _arguments: serde_json::Value) -> Result<ToolResult, ToolError> {
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolExecutionContext,
+        ) -> Result<ToolResult, ToolError> {
             self.executed.store(true, Ordering::SeqCst);
             Ok(ToolResult {
                 call_id: String::new(),
@@ -596,7 +754,10 @@ mod tests {
             }))
             .await;
 
-        let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+        let extension_runner = Arc::new(ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        ));
         extension_runner
             .register(Arc::new(BlockingPreToolExtension))
             .await;

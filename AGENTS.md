@@ -25,23 +25,6 @@ PROJECT_ARCHITECTURE.md 描述了 astrcode 的目标架构和设计原则。
 
 不要为内部函数调用创建 DTO。
 
-## DTO 命名
-
-名字必须体现边界用途：
-
-- `CreateSessionRequest`
-- `CreateSessionResponse`
-- `SessionEventPayload`
-- `CapabilityDescriptor`
-
-不要为同一个概念同时创建多个近义结构，例如：
-
-- `SessionDto`
-- `SessionView`
-- `SessionData`
-- `SessionInfo`
-- `SessionModel`
-
 新增结构前，先检查现有 request / response / payload 是否已经拥有这个契约。
 
 ## 映射规则

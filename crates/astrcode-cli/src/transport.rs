@@ -36,7 +36,10 @@ impl InProcessTransport {
 
             let mut handler = CommandHandler::new(runtime, tx);
             while let Some(cmd) = cmd_rx.recv().await {
-                if let Err(_e) = handler.handle(cmd).await {}
+                if let Err(e) = handler.handle(cmd).await {
+                    // handler 内部已将错误事件广播给客户端，此处只做日志记录
+                    tracing::error!("Command handler error: {e}");
+                }
             }
         });
 

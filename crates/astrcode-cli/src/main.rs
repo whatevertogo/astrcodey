@@ -43,7 +43,7 @@ async fn main() {
             if let Err(e) = tui::run().await {
                 eprintln!("TUI error: {}", e);
             }
-        }
+        },
         Commands::Exec {
             prompt,
             jsonl,
@@ -53,17 +53,17 @@ async fn main() {
                 eprintln!("Exec error: {}", e);
                 std::process::exit(1);
             }
-        }
+        },
         Commands::Server => {
             // Server binary is astrcode-server, not this one.
             // This command is a convenience that re-execs the server binary.
             eprintln!(
                 "Use 'astrcode-server' binary directly, or run 'cargo run -p astrcode-server'"
             );
-        }
+        },
         Commands::Version => {
             println!("astrcode v{}", env!("CARGO_PKG_VERSION"));
             println!("protocol version: 1");
-        }
+        },
     }
 }

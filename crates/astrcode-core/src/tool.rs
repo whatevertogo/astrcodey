@@ -63,6 +63,18 @@ pub enum ExecutionMode {
     Parallel,
 }
 
+/// Per-call context passed to every tool execution.
+///
+/// Created by the agent at the start of each tool call, this carries
+/// the current session state that tools (especially extension tools) need.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    pub session_id: String,
+    pub working_dir: String,
+    pub model_id: String,
+    pub available_tools: Vec<ToolDefinition>,
+}
+
 /// The `Tool` trait that all tools (built-in and extension-registered) must implement.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
@@ -74,8 +86,16 @@ pub trait Tool: Send + Sync {
         ExecutionMode::Sequential
     }
 
-    /// Executes the tool with the given arguments.
-    async fn execute(&self, arguments: serde_json::Value) -> Result<ToolResult, ToolError>;
+    /// Executes the tool with the given arguments and per-call context.
+    ///
+    /// Built-in tools typically ignore `ctx`. Extension tools use it to
+    /// access session state and, through `ExtensionToolOutcome::RunSession`,
+    /// request child session creation.
+    async fn execute(
+        &self,
+        arguments: serde_json::Value,
+        ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError>;
 }
 
 /// Capability specification for tool/skill metadata, used by extensions.

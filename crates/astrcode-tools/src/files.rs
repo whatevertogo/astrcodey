@@ -16,7 +16,7 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -87,10 +87,21 @@ impl Tool for ReadFileTool {
         ExecutionMode::Parallel
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid readFile args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
+        // 拒绝工作目录外的路径，防止 LLM 构造 ../ 等路径遍历读取敏感文件
+        if !is_path_within(&path, &self.working_dir) {
+            return Err(ToolError::Blocked(format!(
+                "path escapes working directory: {}",
+                path.display()
+            )));
+        }
         if !path.exists() {
             return Ok(not_found(&path));
         }
@@ -186,10 +197,20 @@ impl Tool for WriteFileTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: WriteFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid writeFile args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
+        if !is_path_within(&path, &self.working_dir) {
+            return Err(ToolError::Blocked(format!(
+                "path escapes working directory: {}",
+                path.display()
+            )));
+        }
         if args.create_dirs {
             let Some(parent) = path.parent() else {
                 return Err(ToolError::Execution("path has no parent directory".into()));
@@ -277,12 +298,22 @@ impl Tool for EditFileTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: EditFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid editFile args: {e}")))?;
         let old_str = clean_quotes(&args.old_str);
         let new_str = clean_quotes(&args.new_str);
         let path = resolve_path(&self.working_dir, &args.path);
+        if !is_path_within(&path, &self.working_dir) {
+            return Err(ToolError::Blocked(format!(
+                "path escapes working directory: {}",
+                path.display()
+            )));
+        }
         if old_str.is_empty() {
             return Err(ToolError::InvalidArguments("oldStr cannot be empty".into()));
         }
@@ -411,7 +442,11 @@ impl Tool for ApplyPatchTool {
             }),
         }
     }
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid apply_patch args: {e}")))?;
         if args.patch.trim().is_empty() {
@@ -640,6 +675,15 @@ fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
         "updated"
     };
     let target_path = resolve_path(working_dir, Path::new(&target_path_str));
+
+    // applyPatch 同样需要路径遍历防护：diff 中的路径可能包含 ../ 逃逸
+    if !is_path_within(&target_path, working_dir) {
+        return failed_file_change(
+            change_type,
+            &target_path_str,
+            format!("path escapes working directory: {}", target_path.display()),
+        );
+    }
 
     if is_unc_path(&target_path) {
         return failed_file_change(
@@ -1062,7 +1106,11 @@ impl Tool for FindFilesTool {
         ExecutionMode::Parallel
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: FindFilesArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid findFiles args: {e}")))?;
         let root = args
@@ -1243,7 +1291,11 @@ impl Tool for GrepTool {
         ExecutionMode::Parallel
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: GrepArgs = serde_json::from_value(normalize_grep_args(args))
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
         let pattern = if args.literal {
@@ -1660,6 +1712,15 @@ fn clean_quotes(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn empty_ctx() -> ToolExecutionContext {
+        ToolExecutionContext {
+            session_id: String::new(),
+            working_dir: String::new(),
+            model_id: String::new(),
+            available_tools: vec![],
+        }
+    }
+
     struct TestDir {
         path: PathBuf,
     }
@@ -1760,7 +1821,7 @@ mod tests {
                      println!(\"hello\");\n+}\n";
 
         let result = tool
-            .execute(serde_json::json!({ "patch": patch }))
+            .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
             .await
             .expect("apply_patch should execute");
 
@@ -1780,7 +1841,7 @@ mod tests {
                      new();\n}\n";
 
         let result = tool
-            .execute(serde_json::json!({ "patch": patch }))
+            .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
             .await
             .expect("apply_patch should execute");
 
@@ -1802,7 +1863,7 @@ mod tests {
                      old();\n+    new();\n}\n";
 
         let result = tool
-            .execute(serde_json::json!({ "patch": patch }))
+            .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
             .await
             .expect("apply_patch should execute");
 
@@ -1822,7 +1883,7 @@ mod tests {
         let patch = "--- a/old.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-line one\n-line two\n";
 
         let result = tool
-            .execute(serde_json::json!({ "patch": patch }))
+            .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
             .await
             .expect("apply_patch should execute");
 
@@ -1840,13 +1901,16 @@ mod tests {
         };
 
         let result = tool
-            .execute(serde_json::json!({
-                "pattern": "target",
-                "output_mode": "content",
-                "-i": "true",
-                "-B": "1",
-                "head_limit": "1"
-            }))
+            .execute(
+                serde_json::json!({
+                    "pattern": "target",
+                    "output_mode": "content",
+                    "-i": "true",
+                    "-B": "1",
+                    "head_limit": "1"
+                }),
+                &empty_ctx(),
+            )
             .await
             .expect("grep should execute");
 

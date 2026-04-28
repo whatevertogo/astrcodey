@@ -1,8 +1,9 @@
 //! Append-only JSONL event log for session persistence.
 
 use std::{
-    io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    fs::File,
+    io::{BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     sync::Mutex,
 };
 
@@ -12,8 +13,11 @@ use astrcode_core::{event::Event, storage::StorageError};
 ///
 /// Each session has one event log file. Events are written as newline-delimited
 /// flat JSON objects and never modified. Storage assigns `seq` at append time.
+///
+/// 内部持有 BufWriter<File> 避免每次 append 都重开文件，大幅减少系统调用开销。
 pub struct EventLog {
     path: PathBuf,
+    writer: Mutex<BufWriter<File>>,
     next_seq: Mutex<u64>,
 }
 
@@ -26,12 +30,16 @@ impl EventLog {
         let mut event = initial_event;
         event.seq = Some(0);
 
-        let mut file = std::fs::File::create(&path)?;
+        let file = File::create(&path)?;
+        let mut writer = BufWriter::new(file);
         let line = serde_json::to_string(&event)?;
-        writeln!(file, "{}", line)?;
+        writeln!(writer, "{}", line)?;
+        // 初始事件立即刷盘，保证 create 返回后数据已持久化
+        writer.flush()?;
         Ok((
             Self {
                 path,
+                writer: Mutex::new(writer),
                 next_seq: Mutex::new(1),
             },
             event,
@@ -47,8 +55,14 @@ impl EventLog {
             )));
         }
         let next_seq = count_lines(&path)? as u64;
+        // 以 append 模式打开文件，持有句柄供后续写入
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         Ok(Self {
             path,
+            writer: Mutex::new(BufWriter::new(file)),
             next_seq: Mutex::new(next_seq),
         })
     }
@@ -62,19 +76,20 @@ impl EventLog {
         let seq = *next_seq;
         event.seq = Some(seq);
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
         let line = serde_json::to_string(&event)?;
-        writeln!(file, "{}", line)?;
+        writeln!(writer, "{}", line)?;
+        writer.flush()?;
         *next_seq += 1;
         Ok(event)
     }
 
     /// Replay all events from the beginning.
     pub async fn replay_all(&self) -> Result<Vec<Event>, StorageError> {
-        let file = std::fs::File::open(&self.path)?;
+        let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         let mut events = Vec::new();
         for line in reader.lines() {
@@ -103,21 +118,21 @@ impl EventLog {
     }
 }
 
-fn count_lines(path: &PathBuf) -> Result<usize, StorageError> {
-    let file = std::fs::File::open(path)?;
+fn count_lines(path: &Path) -> Result<usize, StorageError> {
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
     Ok(reader.lines().count())
 }
 
 /// Streaming iterator over event log lines.
 pub struct EventLogIterator {
-    reader: BufReader<std::fs::File>,
+    reader: BufReader<File>,
     line_number: usize,
 }
 
 impl EventLogIterator {
     pub fn new(path: &PathBuf) -> Result<Self, StorageError> {
-        let file = std::fs::File::open(path)?;
+        let file = File::open(path)?;
         Ok(Self {
             reader: BufReader::new(file),
             line_number: 0,
@@ -143,7 +158,7 @@ impl Iterator for EventLogIterator {
                         Ok(event) => return Some(Ok((self.line_number, event))),
                         Err(e) => return Some(Err(StorageError::Serialization(e))),
                     }
-                }
+                },
                 Err(e) => return Some(Err(StorageError::Io(e))),
             }
         }
@@ -185,17 +200,20 @@ impl BatchAppender {
             .next_seq
             .lock()
             .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
+        let mut writer = self
+            .log
+            .writer
+            .lock()
+            .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
         let mut seq = *next_seq;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log.path())?;
         for event in &mut self.buffer {
             event.seq = Some(seq);
             seq += 1;
             let line = serde_json::to_string(event)?;
-            writeln!(file, "{}", line)?;
+            writeln!(writer, "{}", line)?;
         }
+        writer.flush()?;
+        // 先刷盘成功再更新 seq 和清空 buffer，避免部分写入后 seq 已前进导致事件丢失
         *next_seq = seq;
         self.buffer.clear();
         Ok(count)
@@ -220,6 +238,7 @@ mod tests {
             EventPayload::SessionStarted {
                 working_dir: "/tmp".into(),
                 model_id: "test-model".into(),
+                parent_session_id: None,
             },
         )
     }

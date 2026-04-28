@@ -1,6 +1,6 @@
 //! OpenAI-compatible LLM provider implementation.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Mutex};
 
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
@@ -13,7 +13,8 @@ pub struct OpenAiProvider {
     api_mode: OpenAiApiMode,
     model_id: String,
     model_limits_val: ModelLimits,
-    _cache_tracker: CacheTracker,
+    /// 跟踪 system prompt 和 tool schema 的缓存状态，用于设置 cache_control 断点
+    cache_tracker: Mutex<CacheTracker>,
     client: reqwest::Client,
 }
 
@@ -41,7 +42,7 @@ impl OpenAiProvider {
             api_mode,
             model_id,
             model_limits_val,
-            _cache_tracker: CacheTracker::new(),
+            cache_tracker: Mutex::new(CacheTracker::new()),
             client,
         }
     }
@@ -327,15 +328,72 @@ impl LlmProvider for OpenAiProvider {
         tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let body = self.build_request_body(&messages, &tools);
+
+        // 检测 system prompt 和 tool schema 是否与上次请求相同，
+        // 相同则标记 cache_control 断点让 API 提供商复用已缓存的 prompt，降低成本和延迟
+        let system_cache_hit = {
+            let system_text: String = messages
+                .iter()
+                .filter(|m| matches!(m.role, LlmRole::System))
+                .flat_map(|m| m.content.iter())
+                .filter_map(|c| match c {
+                    LlmContent::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut tracker = self.cache_tracker.lock().unwrap_or_else(|e| e.into_inner());
+            tracker.check_system_cache(&system_text)
+        };
+        let tools_cache_hit = {
+            let tools_json = serde_json::to_string(&tools).unwrap_or_default();
+            let mut tracker = self.cache_tracker.lock().unwrap_or_else(|e| e.into_inner());
+            tracker.check_tool_cache(&tools_json)
+        };
+
+        let mut body = self.build_request_body(&messages, &tools);
+
+        // 缓存命中时在 system message 末尾和 tools 列表末尾插入 ephemeral 断点，
+        // 指示 API 提供商这些前缀可以复用已缓存的 prompt 前缀
+        if matches!(system_cache_hit, crate::cache::CacheStatus::Hit) {
+            if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                // 在最后一个 system message 的 content 后追加 cache_control
+                for msg in msgs.iter_mut().rev() {
+                    let role = msg.get("role").and_then(|r| r.as_str());
+                    if role == Some("system") {
+                        if let Some(content) = msg.get_mut("content") {
+                            *content = serde_json::json!([
+                                { "type": "text", "text": content },
+                                { "type": "text", "text": "", "cache_control": { "type": "ephemeral" } }
+                            ]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if matches!(tools_cache_hit, crate::cache::CacheStatus::Hit) {
+            if let Some(tools_arr) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+                if let Some(last_tool) = tools_arr.last_mut() {
+                    last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                }
+            }
+        }
+
         let endpoint = self.endpoint();
         let api_key = self.config.api_key.clone();
         let client = self.client.clone();
         let api_mode = self.api_mode;
+        // 从配置读取重试参数，而非硬编码 default 值
+        let retry = RetryPolicy {
+            max_retries: self.config.max_retries,
+            base_delay_ms: self.config.retry_base_delay_ms,
+        };
 
         tokio::spawn(async move {
             let result =
-                Self::stream_request(client, endpoint, api_key, body, api_mode, tx.clone()).await;
+                Self::stream_request(client, endpoint, api_key, body, api_mode, retry, tx.clone())
+                    .await;
             if let Err(e) = result {
                 let _ = tx.send(LlmEvent::Error {
                     message: e.to_string(),
@@ -358,9 +416,9 @@ impl OpenAiProvider {
         api_key: String,
         body: serde_json::Value,
         api_mode: OpenAiApiMode,
+        retry: RetryPolicy,
         tx: mpsc::UnboundedSender<LlmEvent>,
     ) -> Result<(), LlmError> {
-        let retry = RetryPolicy::default();
         let mut attempt = 0;
 
         loop {
@@ -380,6 +438,13 @@ impl OpenAiProvider {
 
             if retry.should_retry(attempt, status.as_u16()) {
                 let delay = retry.delay(attempt);
+                tracing::warn!(
+                    "LLM request failed with {}, retrying (attempt {}/{}) after {}ms",
+                    status,
+                    attempt,
+                    retry.max_retries,
+                    delay.as_millis()
+                );
                 tokio::time::sleep(delay).await;
                 continue;
             }
@@ -428,6 +493,11 @@ impl OpenAiProvider {
                         }
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                             accumulator.ingest_chat_completion(&event, tx);
+                        } else {
+                            tracing::warn!(
+                                "Failed to parse SSE data as JSON: {} bytes",
+                                data.len()
+                            );
                         }
                     }
                 },
@@ -439,6 +509,11 @@ impl OpenAiProvider {
                         if let Some(data) = line.strip_prefix("data: ") {
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                                 accumulator.ingest_responses(&event, tx);
+                            } else {
+                                tracing::warn!(
+                                    "Failed to parse Responses SSE data as JSON: {} bytes",
+                                    data.len()
+                                );
                             }
                         }
                     }

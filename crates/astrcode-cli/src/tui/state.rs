@@ -275,6 +275,7 @@ impl TuiState {
             EventPayload::SessionStarted {
                 working_dir,
                 model_id,
+                ..
             } => {
                 self.active_session_id = Some(event.session_id.clone());
                 self.working_dir = working_dir.clone();

@@ -25,7 +25,11 @@ impl Tool for ToolSearchTool {
         ExecutionMode::Parallel
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let pattern = args["pattern"].as_str().unwrap_or("").to_lowercase();
         let defs = self.tool_defs.read().await;
         let matches: Vec<String> = defs
@@ -67,7 +71,11 @@ impl Tool for SkillTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let skill_id = args["skill_id"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments("missing 'skill_id'".into()))?;

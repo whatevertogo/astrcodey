@@ -3,8 +3,10 @@
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio};
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::resolve_path;
-use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
+use astrcode_support::{
+    hostpaths::resolve_path,
+    shell::{ShellFamily, ShellInfo, resolve_shell},
+};
 use serde::Deserialize;
 use tokio::process::Command;
 
@@ -56,7 +58,11 @@ impl Tool for ShellTool {
         }
     }
 
-    async fn execute(&self, args: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: ShellArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid shell args: {e}")))?;
         if args.command.trim().is_empty() {

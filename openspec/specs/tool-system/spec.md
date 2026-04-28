@@ -24,13 +24,13 @@ After execution completes, a `ToolCallEnd` event SHALL be emitted with the final
 - **THEN** ToolCallEnd contains the exit code and final output
 
 ### Requirement: Extension hooks for tool execution
-BeforeToolCall and AfterToolCall extension hooks SHALL fire for every tool execution.
+PreToolUse and PostToolUse extension hooks SHALL fire for every tool execution.
 Blocking hooks SHALL be able to prevent tool execution.
-AfterToolCall hooks SHALL be able to modify tool results.
+PostToolUse hooks SHALL be able to modify tool results.
 
 #### Scenario: Hook blocks dangerous file write
 - **WHEN** agent calls writeFile with path="/etc/passwd"
-- **THEN** a BeforeToolCall hook returns Block { reason: "System file modification denied" }
+- **THEN** a PreToolUse hook returns Block { reason: "System file modification denied" }
 - **THEN** the writeFile tool is not called
 - **THEN** the LLM receives a tool error: "Blocked: System file modification denied"
 

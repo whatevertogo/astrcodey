@@ -40,6 +40,21 @@ pub trait Extension: Send + Sync {
         vec![]
     }
 
+    /// Optional: execute one of the tools returned by `tools()`.
+    ///
+    /// The default keeps metadata-only extensions valid while letting the
+    /// runner adapt executable extension tools into the normal tool pipeline.
+    /// `ctx` carries the per-call session context (session_id, model, available tools).
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        _arguments: serde_json::Value,
+        _working_dir: &str,
+        _ctx: &crate::tool::ToolExecutionContext,
+    ) -> Result<ToolResult, ExtensionError> {
+        Err(ExtensionError::NotFound(tool_name.into()))
+    }
+
     /// Optional: slash commands registered by this extension.
     fn slash_commands(&self) -> Vec<SlashCommand> {
         vec![]
@@ -94,6 +109,15 @@ pub enum ExtensionEvent {
 pub struct ExtensionManifest {
     pub id: String,
     pub name: String,
+    /// Optional extension version for diagnostics/UI display.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Optional human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Optional host version hint. This is metadata for now, not a hard gate.
+    #[serde(default)]
+    pub astrcode_version: Option<String>,
     /// Native library path relative to the extension directory (`.dll` / `.so`).
     pub library: String,
     /// Events this extension subscribes to.
@@ -278,6 +302,40 @@ pub enum ExtensionError {
     Timeout(u64),
     #[error("Extension error: {0}")]
     Internal(String),
+}
+
+// ─── Extension Tool Outcome ───────────────────────────────────────────────
+
+/// Declarative outcome returned by an extension tool callback.
+///
+/// Extensions return these instead of calling host primitives directly.
+/// The runner interprets each variant:
+/// - `Text` is a plain result (the current default behavior).
+/// - `RunSession` requests the host to create a child session and run one turn.
+///
+/// Sent across the FFI boundary as JSON. ToolCallback return code `2`
+/// signals that `output_ptr/len` carries serialized `ExtensionToolOutcome`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtensionToolOutcome {
+    /// Plain text result — the standard ToolResult path.
+    Text { content: String, is_error: bool },
+    /// Request the host to create a child session and run a turn.
+    ///
+    /// `parent_session_id` comes from the current `ToolExecutionContext`,
+    /// not from the plugin — the plugin cannot forge parent relationships.
+    /// `system_prompt` is appended to the global system prompt, not a replacement.
+    /// `allowed_tools` empty means inherit the parent session's tools.
+    /// `model_preference` is advisory in v1.
+    RunSession {
+        name: String,
+        system_prompt: String,
+        user_prompt: String,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        model_preference: Option<String>,
+    },
 }
 
 // ─── Agent Profile (basic type for collaboration tools) ──────────────────

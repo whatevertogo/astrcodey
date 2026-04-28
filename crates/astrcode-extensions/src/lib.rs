@@ -9,5 +9,5 @@ pub mod events;
 pub mod ffi;
 pub mod loader;
 pub mod native_ext;
-pub mod runtime;
 pub mod runner;
+pub mod runtime;

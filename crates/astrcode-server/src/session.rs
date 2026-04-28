@@ -31,6 +31,8 @@ pub struct SessionState {
     pub model_id: String,
     pub phase: Phase,
     pub pending_tool_calls: HashSet<ToolCallId>,
+    /// ISO 8601 格式的创建时间，由 SessionStarted 事件填充
+    pub created_at: String,
 }
 
 impl SessionState {
@@ -41,6 +43,7 @@ impl SessionState {
             model_id,
             phase: Phase::Idle,
             pending_tool_calls: HashSet::new(),
+            created_at: String::new(),
         }
     }
 }
@@ -71,13 +74,22 @@ impl EventReducer {
             EventPayload::SessionStarted {
                 working_dir,
                 model_id,
+                ..
             } => {
                 state.working_dir = working_dir.clone();
                 state.model_id = model_id.clone();
                 state.phase = Phase::Idle;
+                // 使用事件的 seq 来判断是否是首次 SessionStarted，
+                // 首次（seq=0）时记录创建时间
+                if state.created_at.is_empty() {
+                    state.created_at = chrono::Utc::now().to_rfc3339();
+                }
             },
             EventPayload::SessionDeleted => {
                 state.phase = Phase::Idle;
+                // 清理完整状态，避免已删除 session 的残留数据被误用
+                state.messages.clear();
+                state.pending_tool_calls.clear();
             },
             EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
                 state.phase = Phase::Thinking;
@@ -193,11 +205,12 @@ impl SessionManager {
         working_dir: &str,
         model_id: &str,
         capacity: usize,
+        parent_session_id: Option<&str>,
     ) -> Result<Event, SessionError> {
         let sid = new_session_id();
         let event = self
             .store
-            .create_session(&sid, working_dir, model_id)
+            .create_session(&sid, working_dir, model_id, parent_session_id)
             .await?;
 
         let session = Arc::new(Session::new(
@@ -249,6 +262,13 @@ impl SessionManager {
     /// List all sessions (from disk).
     pub async fn list(&self) -> Result<Vec<SessionId>, SessionError> {
         Ok(self.store.list_sessions().await?)
+    }
+
+    /// 获取当前活跃 session 映射的读引用，用于 ListSessions 等需要批量查询的场景
+    pub async fn active(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, HashMap<SessionId, Arc<Session>>> {
+        self.active.read().await
     }
 
     /// Delete session from memory and disk.

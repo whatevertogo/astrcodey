@@ -24,3 +24,9 @@ impl TokenUsageTracker {
         self.reported_output_tokens = output;
     }
 }
+
+impl Default for TokenUsageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}

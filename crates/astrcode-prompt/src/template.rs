@@ -1,5 +1,7 @@
 //! Template engine with `{{variable}}` syntax and 4-tier resolution.
 
+use std::cmp::Reverse;
+
 use astrcode_core::prompt::PromptContext;
 
 /// A simple `{{variable}}` template engine.
@@ -27,7 +29,7 @@ impl PromptTemplate {
         }
 
         // Sort by key length descending to prevent prefix collisions
-        replacements.sort_by(|(a, _), (b, _)| b.len().cmp(&a.len()));
+        replacements.sort_by_key(|(key, _)| Reverse(key.len()));
 
         for (key, value) in replacements {
             result = result.replace(&key, value);

@@ -14,3 +14,4 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 glob = "0.3"
 regex = "1"
+tracing = { workspace = true }

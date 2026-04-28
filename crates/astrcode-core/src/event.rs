@@ -36,6 +36,9 @@ pub enum EventPayload {
     SessionStarted {
         working_dir: String,
         model_id: String,
+        /// Parent session ID for child sessions. None for root sessions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_session_id: Option<String>,
     },
     SessionDeleted,
 

@@ -95,15 +95,14 @@ impl ExtensionLoader {
             std::fs::read(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
         let manifest: astrcode_core::extension::ExtensionManifest =
             serde_json::from_slice(&manifest_bytes).map_err(|e| format!("parse manifest: {e}"))?;
-
-        if std::env::var("ASTRCODE_ENABLE_NATIVE_EXTENSIONS").as_deref() != Ok("1") {
-            return Err("native extension loading is disabled; set \
-                        ASTRCODE_ENABLE_NATIVE_EXTENSIONS=1 to opt in"
-                .into());
+        Self::validate_manifest(&manifest)?;
+        if !native_extensions_enabled() {
+            return Err(
+                "native extensions are disabled; set ASTRCODE_ENABLE_NATIVE_EXTENSIONS=1 to load"
+                    .into(),
+            );
         }
 
-        // Load native library. This is intentionally opt-in because native
-        // libraries execute host code in-process.
         let lib_path = ext_dir.join(&manifest.library);
         let ext = unsafe {
             NativeExtension::load(&lib_path, manifest.id.clone())
@@ -111,4 +110,25 @@ impl ExtensionLoader {
         };
         Ok(Arc::new(ext))
     }
+
+    fn validate_manifest(
+        manifest: &astrcode_core::extension::ExtensionManifest,
+    ) -> Result<(), String> {
+        if manifest.id.trim().is_empty() {
+            return Err("manifest id is required".into());
+        }
+        if manifest.name.trim().is_empty() {
+            return Err(format!("manifest {} name is required", manifest.id));
+        }
+        if manifest.library.trim().is_empty() {
+            return Err(format!("manifest {} library is required", manifest.id));
+        }
+        Ok(())
+    }
+}
+
+fn native_extensions_enabled() -> bool {
+    std::env::var("ASTRCODE_ENABLE_NATIVE_EXTENSIONS")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }

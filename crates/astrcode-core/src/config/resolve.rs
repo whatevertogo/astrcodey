@@ -1,7 +1,6 @@
 //! Resolution: raw Config → EffectiveConfig. Pure functions, no IO.
 
-use crate::config::effective::*;
-use crate::config::raw::*;
+use crate::config::{effective::*, raw::*};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {

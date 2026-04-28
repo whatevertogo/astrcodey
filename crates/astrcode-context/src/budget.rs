@@ -39,21 +39,8 @@ impl ToolResultBudget {
         if content.len() <= self.preview_limit {
             content.to_string()
         } else {
-            // Find a valid UTF-8 char boundary ≤ preview_limit
-            let cutoff = floor_char_boundary(content, self.preview_limit);
+            let cutoff = crate::floor_char_boundary(content, self.preview_limit);
             format!("{}... (truncated)", &content[..cutoff])
         }
     }
-}
-
-/// Find the nearest valid UTF-8 character boundary ≤ `max`.
-fn floor_char_boundary(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
-    }
-    let mut bound = max;
-    while bound > 0 && !s.is_char_boundary(bound) {
-        bound -= 1;
-    }
-    bound
 }

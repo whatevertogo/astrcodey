@@ -83,7 +83,12 @@ impl LlmMessage {
         }
     }
 
-    pub fn tool(name: impl Into<String>, tool_call_id: impl Into<String>, content: impl Into<String>, is_error: bool) -> Self {
+    pub fn tool(
+        name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
         Self {
             role: LlmRole::Tool,
             content: vec![LlmContent::ToolResult {

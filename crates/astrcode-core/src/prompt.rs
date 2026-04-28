@@ -1,7 +1,8 @@
 //! Prompt composition traits and types.
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 /// A named, typed block of prompt content with metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]

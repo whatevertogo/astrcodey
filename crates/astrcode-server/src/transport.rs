@@ -46,12 +46,7 @@ impl StdioTransport {
     /// Create a channel pair: the sender for stdin reader, and the transport.
     pub fn new_channel() -> (mpsc::UnboundedSender<ClientCommand>, Self) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (
-            tx,
-            Self {
-                rx,
-            },
-        )
+        (tx, Self { rx })
     }
 
     /// Spawn a background task that reads JSON-RPC lines from stdin.

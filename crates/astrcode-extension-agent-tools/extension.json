@@ -1,0 +1,68 @@
+{
+  "id": "astrcode-agent-tools",
+  "name": "Agent Tools",
+  "version": "0.1.0",
+  "description": "Subagent delegation and task management tools",
+  "astrcode_version": "0.1.0",
+  "library": "astrcode_extension_agent_tools.dll",
+  "subscriptions": [
+    { "event": "session_start", "mode": "blocking" }
+  ],
+  "tools": [
+    {
+      "name": "agent",
+      "description": "Spawn a subagent to handle a delegated task. Call agentList first when choosing subagent_type. mode=single for one task, mode=chain for sequential steps with {previous} placeholder.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string", "description": "Short 3-5 word description of what this agent will do" },
+          "prompt": { "type": "string", "description": "Task for the subagent" },
+          "subagent_type": { "type": "string", "description": "Agent name from agents/ directory" },
+          "mode": { "type": "string", "enum": ["single", "chain"], "default": "single" },
+          "chain": {
+            "type": "array",
+            "items": { "type": "object", "properties": { "agent": { "type": "string" }, "task": { "type": "string" } } }
+          }
+        },
+        "required": ["prompt", "description"]
+      }
+    },
+    {
+      "name": "agentList",
+      "description": "List available subagents with descriptions, declared tools, and model preferences.",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "taskCreate",
+      "description": "Create a tracked task in the task list",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "subject": { "type": "string", "description": "Brief task title" },
+          "description": { "type": "string", "description": "What needs to be done" },
+          "blocks": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this task blocks" }
+        },
+        "required": ["subject", "description"]
+      }
+    },
+    {
+      "name": "taskList",
+      "description": "List all tracked tasks with their statuses",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "taskUpdate",
+      "description": "Update task status or properties",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "Task ID" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+          "subject": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["id"]
+      }
+    }
+  ]
+}

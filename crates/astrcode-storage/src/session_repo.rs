@@ -78,6 +78,7 @@ impl EventStore for FileSystemSessionRepository {
         session_id: &SessionId,
         working_dir: &str,
         model_id: &str,
+        parent_session_id: Option<&str>,
     ) -> Result<Event, StorageError> {
         validate_session_id(session_id).map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
@@ -90,6 +91,7 @@ impl EventStore for FileSystemSessionRepository {
             EventPayload::SessionStarted {
                 working_dir: working_dir.into(),
                 model_id: model_id.into(),
+                parent_session_id: parent_session_id.map(|s| s.to_string()),
             },
         );
 
