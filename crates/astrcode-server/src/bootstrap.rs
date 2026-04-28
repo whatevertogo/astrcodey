@@ -11,8 +11,10 @@ use astrcode_context::{
 };
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig},
+    event::{Event, EventPayload, ToolOutputStream},
     llm::{LlmClientConfig, LlmProvider},
     prompt::PromptProvider,
+    types::{new_message_id, new_turn_id},
 };
 use astrcode_extensions::{
     loader::ExtensionLoader,
@@ -21,6 +23,7 @@ use astrcode_extensions::{
 };
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_tools::registry::ToolRegistry;
+use tokio::sync::mpsc;
 
 use crate::{agent::Agent, capability::CapabilityRouter, session::SessionManager};
 
@@ -227,10 +230,21 @@ impl SessionSpawner for ServerSessionSpawner {
         parent_session_id: &str,
         request: SpawnRequest,
     ) -> Result<SpawnResult, String> {
-        let model_id = request
-            .model_preference
-            .clone()
-            .unwrap_or_else(|| "default".into());
+        let parent_progress = ParentToolProgress::from_request(&request);
+        let child_name = request.name.clone();
+        let user_prompt = request.user_prompt.clone();
+        let model_id = match request.model_preference.clone() {
+            Some(model) => model,
+            None => {
+                let parent_session = self
+                    .session_manager
+                    .get(&parent_session_id.to_string())
+                    .await
+                    .ok_or_else(|| format!("parent session {parent_session_id} not found"))?;
+                let parent_model_id = parent_session.state.read().await.model_id.clone();
+                parent_model_id
+            },
+        };
 
         let create_event = self
             .session_manager
@@ -244,10 +258,36 @@ impl SessionSpawner for ServerSessionSpawner {
             .map_err(|e| format!("create child session: {e}"))?;
 
         let child_sid = create_event.session_id.to_string();
+        let child_turn_id = new_turn_id();
+
+        append_child_payload(
+            self.session_manager.as_ref(),
+            &child_sid,
+            &child_turn_id,
+            EventPayload::TurnStarted,
+        )
+        .await?;
+        append_child_payload(
+            self.session_manager.as_ref(),
+            &child_sid,
+            &child_turn_id,
+            EventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: user_prompt.clone(),
+            },
+        )
+        .await?;
+
+        if let Some(progress) = &parent_progress {
+            progress.send(
+                ToolOutputStream::Stdout,
+                format!("child agent '{child_name}' started: {child_sid} using {model_id}\n"),
+            );
+        }
 
         let agent = Agent::new(
             child_sid.clone(),
-            request.working_dir,
+            request.working_dir.clone(),
             Arc::clone(&self.llm),
             Arc::clone(&self.prompt),
             Arc::clone(&self.capability),
@@ -258,18 +298,226 @@ impl SessionSpawner for ServerSessionSpawner {
         .with_system_prompt_suffix(request.system_prompt)
         .with_tool_allowlist(request.allowed_tools);
 
-        match agent
-            .process_prompt(&request.user_prompt, Vec::new(), None)
-            .await
-        {
-            Ok(output) => Ok(SpawnResult {
-                content: output.text,
-                child_session_id: child_sid,
-            }),
+        let (child_event_tx, mut child_event_rx) = mpsc::unbounded_channel();
+        let agent_future = agent.process_prompt(&user_prompt, Vec::new(), Some(child_event_tx));
+        tokio::pin!(agent_future);
+
+        let mut emitted_error = false;
+        let mut events_closed = false;
+        let output = loop {
+            tokio::select! {
+                result = &mut agent_future => break result,
+                payload = child_event_rx.recv(), if !events_closed => {
+                    match payload {
+                        Some(payload) => {
+                            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                                emitted_error = true;
+                            }
+                            append_child_payload(
+                                self.session_manager.as_ref(),
+                                &child_sid,
+                                &child_turn_id,
+                                payload.clone(),
+                            )
+                            .await?;
+                            forward_child_progress(parent_progress.as_ref(), &payload);
+                        },
+                        None => {
+                            events_closed = true;
+                        },
+                    }
+                },
+            }
+        };
+
+        while let Some(payload) = child_event_rx.recv().await {
+            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                emitted_error = true;
+            }
+            append_child_payload(
+                self.session_manager.as_ref(),
+                &child_sid,
+                &child_turn_id,
+                payload.clone(),
+            )
+            .await?;
+            forward_child_progress(parent_progress.as_ref(), &payload);
+        }
+
+        match output {
+            Ok(output) => {
+                append_child_payload(
+                    self.session_manager.as_ref(),
+                    &child_sid,
+                    &child_turn_id,
+                    EventPayload::TurnCompleted {
+                        finish_reason: output.finish_reason.clone(),
+                    },
+                )
+                .await?;
+                if let Some(progress) = &parent_progress {
+                    progress.send(
+                        ToolOutputStream::Stdout,
+                        format!("child turn completed: {}\n", output.finish_reason),
+                    );
+                }
+                Ok(SpawnResult {
+                    content: output.text,
+                    child_session_id: child_sid,
+                })
+            },
             Err(e) => Ok(SpawnResult {
-                content: format!("child agent error: {e}"),
+                content: {
+                    if !emitted_error {
+                        append_child_payload(
+                            self.session_manager.as_ref(),
+                            &child_sid,
+                            &child_turn_id,
+                            EventPayload::ErrorOccurred {
+                                code: -32603,
+                                message: e.to_string(),
+                                recoverable: false,
+                            },
+                        )
+                        .await?;
+                    }
+                    append_child_payload(
+                        self.session_manager.as_ref(),
+                        &child_sid,
+                        &child_turn_id,
+                        EventPayload::TurnCompleted {
+                            finish_reason: "error".into(),
+                        },
+                    )
+                    .await?;
+                    if let Some(progress) = &parent_progress {
+                        progress.send(
+                            ToolOutputStream::Stderr,
+                            format!("child agent error: {e}\n"),
+                        );
+                    }
+                    format!("child agent error: {e}")
+                },
                 child_session_id: child_sid,
             }),
         }
     }
+}
+
+struct ParentToolProgress {
+    call_id: String,
+    tx: mpsc::UnboundedSender<EventPayload>,
+}
+
+impl ParentToolProgress {
+    fn from_request(request: &SpawnRequest) -> Option<Self> {
+        Some(Self {
+            call_id: request.parent_tool_call_id.clone()?,
+            tx: request.parent_event_tx.clone()?,
+        })
+    }
+
+    fn send(&self, stream: ToolOutputStream, delta: impl Into<String>) {
+        let delta = delta.into();
+        if delta.is_empty() {
+            return;
+        }
+        let _ = self.tx.send(EventPayload::ToolOutputDelta {
+            call_id: self.call_id.clone(),
+            stream,
+            delta,
+        });
+    }
+}
+
+async fn append_child_payload(
+    session_manager: &SessionManager,
+    child_sid: &str,
+    child_turn_id: &str,
+    payload: EventPayload,
+) -> Result<(), String> {
+    if payload.is_durable() {
+        session_manager
+            .append_event(Event::new(
+                child_sid.to_string(),
+                Some(child_turn_id.to_string()),
+                payload,
+            ))
+            .await
+            .map_err(|e| format!("append child event: {e}"))?;
+    }
+    Ok(())
+}
+
+fn forward_child_progress(progress: Option<&ParentToolProgress>, payload: &EventPayload) {
+    let Some(progress) = progress else {
+        return;
+    };
+    if let Some((stream, delta)) = child_progress_delta(payload) {
+        progress.send(stream, delta);
+    }
+}
+
+fn child_progress_delta(payload: &EventPayload) -> Option<(ToolOutputStream, String)> {
+    match payload {
+        EventPayload::AssistantMessageStarted { .. } => {
+            Some((ToolOutputStream::Stdout, "child assistant started\n".into()))
+        },
+        EventPayload::AssistantMessageCompleted { text, .. } => {
+            let summary = one_line_summary(text);
+            if summary.is_empty() {
+                None
+            } else {
+                Some((
+                    ToolOutputStream::Stdout,
+                    format!("child assistant completed: {summary}\n"),
+                ))
+            }
+        },
+        EventPayload::ToolCallStarted { tool_name, .. } => Some((
+            ToolOutputStream::Stdout,
+            format!("child tool started: {tool_name}\n"),
+        )),
+        EventPayload::ToolOutputDelta { stream, delta, .. } => {
+            Some((*stream, format!("child tool output: {delta}")))
+        },
+        EventPayload::ToolCallCompleted {
+            tool_name, result, ..
+        } => {
+            let stream = if result.is_error {
+                ToolOutputStream::Stderr
+            } else {
+                ToolOutputStream::Stdout
+            };
+            let detail = one_line_summary(result.error.as_deref().unwrap_or(&result.content));
+            let suffix = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            };
+            Some((
+                stream,
+                format!("child tool completed: {tool_name}{suffix}\n"),
+            ))
+        },
+        EventPayload::ErrorOccurred { message, .. } => Some((
+            ToolOutputStream::Stderr,
+            format!("child error: {message}\n"),
+        )),
+        EventPayload::TurnCompleted { finish_reason } => Some((
+            ToolOutputStream::Stdout,
+            format!("child turn completed: {finish_reason}\n"),
+        )),
+        _ => None,
+    }
+}
+
+fn one_line_summary(text: &str) -> String {
+    let mut summary = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 160;
+    if summary.chars().count() > MAX_CHARS {
+        summary = summary.chars().take(MAX_CHARS - 1).collect();
+        summary.push('…');
+    }
+    summary
 }

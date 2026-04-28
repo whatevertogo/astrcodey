@@ -12,6 +12,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use crate::event::EventPayload;
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +91,10 @@ pub struct ToolExecutionContext {
     pub model_id: String,
     /// 当前可用的工具定义列表。
     pub available_tools: Vec<ToolDefinition>,
+    /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
+    pub tool_call_id: Option<String>,
+    /// 当前回合事件发送器，用于工具发出非持久化进度事件。
+    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
 }
 
 /// `Tool` trait——所有工具（内置和扩展注册）都必须实现此接口。

@@ -53,6 +53,8 @@ pub enum Focus {
 pub struct TuiState {
     /// 消息记录列表
     pub messages: Vec<Message>,
+    /// 消息记录区距离底部的滚动行数
+    pub transcript_scroll: usize,
     /// 是否正在流式接收助手回复
     pub is_streaming: bool,
     /// 输入框当前文本内容
@@ -94,6 +96,7 @@ impl TuiState {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
+            transcript_scroll: 0,
             is_streaming: false,
             input: String::new(),
             input_cursor: 0,
@@ -285,6 +288,26 @@ impl TuiState {
         self.mark_dirty();
     }
 
+    /// 向上滚动消息记录区。
+    pub fn scroll_transcript_up(&mut self, lines: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_add(lines);
+        self.mark_dirty();
+    }
+
+    /// 向下滚动消息记录区。
+    pub fn scroll_transcript_down(&mut self, lines: usize) {
+        self.transcript_scroll = self.transcript_scroll.saturating_sub(lines);
+        self.mark_dirty();
+    }
+
+    /// 回到底部，跟随最新消息。
+    pub fn scroll_transcript_to_bottom(&mut self) {
+        if self.transcript_scroll != 0 {
+            self.transcript_scroll = 0;
+            self.mark_dirty();
+        }
+    }
+
     /// 将服务器通知应用到 TUI 状态。
     ///
     /// 根据通知类型更新会话信息、消息列表、状态栏等。
@@ -299,6 +322,7 @@ impl TuiState {
                 self.active_session_id = Some(session_id.clone());
                 self.working_dir = snapshot.working_dir.clone();
                 self.messages.clear();
+                self.transcript_scroll = 0;
                 for message in &snapshot.messages {
                     let role = match message.role.as_str() {
                         "user" => MessageRole::User,
@@ -561,6 +585,7 @@ impl TuiState {
 
     /// 推入一条用户消息到消息记录。
     pub fn push_user(&mut self, text: &str) {
+        self.scroll_transcript_to_bottom();
         self.push_message(MessageRole::User, "You".into(), text.into(), false, None);
     }
 
@@ -641,12 +666,12 @@ impl TuiState {
 
 /// 判断工具是否应在消息记录中显示。
 ///
-/// shell、editFile、applyPatch 等工具的输出对用户有直接价值，需要显示；
+/// shell、agent、editFile、applyPatch 等工具的输出对用户有直接价值，需要显示；
 /// 其他工具（如搜索类）仅更新状态栏，避免刷屏。
 fn should_print_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "shell" | "editFile" | "apply_patch" | "applyPatch"
+        "shell" | "agent" | "editFile" | "apply_patch" | "applyPatch"
     )
 }
 
@@ -742,5 +767,27 @@ mod tests {
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, MessageRole::Error);
         assert_eq!(state.messages[0].content, "glob failed");
+    }
+
+    #[test]
+    fn input_history_recalls_prompts_and_commands() {
+        let mut state = TuiState::new();
+
+        state.remember_input("first prompt");
+        state.remember_input("/sessions");
+
+        state.history_previous();
+        assert_eq!(state.input, "/sessions");
+        assert_eq!(state.focus, Focus::SlashPalette);
+
+        state.history_previous();
+        assert_eq!(state.input, "first prompt");
+        assert_eq!(state.focus, Focus::Input);
+
+        state.history_next();
+        assert_eq!(state.input, "/sessions");
+
+        state.history_next();
+        assert!(state.input.is_empty());
     }
 }

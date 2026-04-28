@@ -13,6 +13,8 @@ pub enum Action {
     Tick,
     /// 键盘按键事件
     Key(KeyEvent),
+    /// 消息记录区滚动行数，正数向上、负数向下
+    ScrollTranscript(i16),
 }
 
 /// 将 crossterm 键盘事件映射为 Action。

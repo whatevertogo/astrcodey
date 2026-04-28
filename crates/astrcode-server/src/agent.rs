@@ -250,6 +250,9 @@ impl Agent {
             let mut message_started = false;
             let mut current_text = String::new();
             let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+            // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
+            // 避免消息在工具执行前就被标记为已完成。
+            let mut completed_text: Option<String> = None;
 
             while let Some(event) = rx.recv().await {
                 match event {
@@ -302,19 +305,22 @@ impl Agent {
                     },
                     LlmEvent::Done { finish_reason } => {
                         if !current_text.is_empty() {
-                            if let Some(tx) = &event_tx {
-                                if message_started {
-                                    let _ = tx.send(EventPayload::AssistantMessageCompleted {
-                                        message_id: message_id.clone(),
-                                        text: current_text.clone(),
-                                    });
-                                }
-                            }
-                            messages.push(LlmMessage::assistant(&current_text));
-                            final_text.push_str(&current_text);
+                            let text = std::mem::take(&mut current_text);
+                            messages.push(LlmMessage::assistant(&text));
+                            final_text.push_str(&text);
+                            completed_text = Some(text);
                         }
 
                         if tool_calls.is_empty() {
+                            // 无工具调用：消息在此处完成并直接返回
+                            if let (Some(text), true) = (completed_text.take(), message_started) {
+                                if let Some(tx) = &event_tx {
+                                    let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                                        message_id: message_id.clone(),
+                                        text,
+                                    });
+                                }
+                            }
                             self.extension_runner
                                 .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
                                 .await?;
@@ -354,13 +360,6 @@ impl Agent {
                     .await;
                 return Err(e.into());
             }
-
-            let tool_ctx = ToolExecutionContext {
-                session_id: self.session_id.clone(),
-                working_dir: self.working_dir.clone(),
-                model_id: self.model_id.clone(),
-                available_tools: tools.clone(),
-            };
 
             for tc in &tool_calls {
                 let args: serde_json::Value =
@@ -481,6 +480,14 @@ impl Agent {
 
                 let execution_input = tool_args.clone();
                 let started_at = Instant::now();
+                let tool_ctx = ToolExecutionContext {
+                    session_id: self.session_id.clone(),
+                    working_dir: self.working_dir.clone(),
+                    model_id: self.model_id.clone(),
+                    available_tools: tools.clone(),
+                    tool_call_id: Some(tc.call_id.clone()),
+                    event_tx: event_tx.clone(),
+                };
                 let mut result = match self
                     .capability
                     .execute(&tc.name, tool_args, &tool_ctx)
@@ -551,6 +558,19 @@ impl Agent {
                     name: Some(tc.name.clone()),
                 });
                 all_tool_results.push(result);
+            }
+
+            // 工具调用全部执行完毕后才发送消息完成事件，
+            // 保证 completed 事件在所有 tool_call 事件之后。
+            if let Some(text) = completed_text.take() {
+                if message_started {
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                            message_id: message_id.clone(),
+                            text,
+                        });
+                    }
+                }
             }
         }
     }

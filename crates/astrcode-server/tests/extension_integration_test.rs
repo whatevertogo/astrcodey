@@ -264,6 +264,8 @@ async fn duplicate_dynamic_tools_keep_first_registration() {
         working_dir: String::new(),
         model_id: String::new(),
         available_tools: vec![],
+        tool_call_id: None,
+        event_tx: None,
     };
     let result = capability
         .execute("sharedTool", serde_json::json!({}), &ctx)
@@ -299,6 +301,8 @@ async fn extension_tools_are_adapted_into_capability_router() {
         working_dir: String::new(),
         model_id: String::new(),
         available_tools: vec![],
+        tool_call_id: None,
+        event_tx: None,
     };
     let result = capability
         .execute(

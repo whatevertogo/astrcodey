@@ -19,7 +19,10 @@ use std::{
 use astrcode_client::{client::AstrcodeClient, stream::StreamItem};
 use astrcode_protocol::commands::ClientCommand;
 use crossterm::{
-    event::{self, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -99,6 +102,13 @@ async fn handle_action(
         },
         Action::Tick => state.mark_dirty(),
         Action::Key(event) => handle_key(event, state, client).await?,
+        Action::ScrollTranscript(delta) => {
+            if delta > 0 {
+                state.scroll_transcript_up(delta as usize);
+            } else {
+                state.scroll_transcript_down(delta.unsigned_abs() as usize);
+            }
+        },
     }
     Ok(())
 }
@@ -146,6 +156,8 @@ async fn handle_key(event: KeyEvent, state: &mut TuiState, client: &Arc<Client>)
         KeyCode::Right => state.move_right(),
         KeyCode::Home => state.move_home(),
         KeyCode::End => state.move_end(),
+        KeyCode::PageUp => state.scroll_transcript_up(12),
+        KeyCode::PageDown => state.scroll_transcript_down(12),
         // Up/Down：在斜杠面板中导航，否则浏览历史输入
         KeyCode::Up => {
             if state.show_slash_palette {
@@ -218,7 +230,8 @@ async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io:
 
     // 尝试解析为斜杠命令
     if let Some(command) = slash::parse(&input) {
-        state.take_input();
+        let input = state.take_input();
+        state.remember_input(&input);
         execute_slash_command(command, state, client).await?;
         return Ok(());
     }
@@ -319,6 +332,18 @@ fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
                             break;
                         }
                     },
+                    Ok(event::Event::Mouse(mouse)) => {
+                        let action = match mouse.kind {
+                            MouseEventKind::ScrollUp => Some(Action::ScrollTranscript(3)),
+                            MouseEventKind::ScrollDown => Some(Action::ScrollTranscript(-3)),
+                            _ => None,
+                        };
+                        if let Some(action) = action {
+                            if action_tx.send(action).is_err() {
+                                break;
+                            }
+                        }
+                    },
                     Ok(_) => {},
                     Err(_) => {
                         let _ = action_tx.send(Action::Quit);
@@ -347,7 +372,7 @@ impl TerminalSession {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         terminal.clear()?;
@@ -366,7 +391,11 @@ impl Drop for TerminalSession {
     /// 退出时恢复终端状态：显示光标、离开备用屏幕、关闭 raw 模式。
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }

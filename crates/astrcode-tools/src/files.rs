@@ -1907,6 +1907,8 @@ mod tests {
             working_dir: String::new(),
             model_id: String::new(),
             available_tools: vec![],
+            tool_call_id: None,
+            event_tx: None,
         }
     }
 

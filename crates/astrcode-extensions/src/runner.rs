@@ -400,6 +400,8 @@ impl Tool for ExtensionTool {
                     working_dir: _ctx.working_dir.clone(),
                     allowed_tools: effective_tools,
                     model_preference,
+                    parent_tool_call_id: _ctx.tool_call_id.clone(),
+                    parent_event_tx: _ctx.event_tx.clone(),
                 };
 
                 match self.runtime.spawn(&_ctx.session_id, request).await {

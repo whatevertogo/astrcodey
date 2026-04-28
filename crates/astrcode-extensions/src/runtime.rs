@@ -6,7 +6,8 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use astrcode_core::tool::ToolDefinition;
+use astrcode_core::{event::EventPayload, tool::ToolDefinition};
+use tokio::sync::mpsc;
 
 /// 通用的会话创建原语。由服务器实现，由 runner 持有，扩展不可见。
 #[async_trait::async_trait]
@@ -41,6 +42,10 @@ pub struct SpawnRequest {
     pub allowed_tools: Vec<String>,
     /// 模型偏好（可选）
     pub model_preference: Option<String>,
+    /// 父 agent 工具调用 ID，用于把子 agent 进度归属到父级工具调用。
+    pub parent_tool_call_id: Option<String>,
+    /// 父 agent 的事件发送器，仅用于发送非持久化进度事件。
+    pub parent_event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
 }
 
 /// 子会话执行结果。

@@ -66,8 +66,8 @@ fn render_transcript(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme:
         .border_style(theme.border);
     let inner = block.inner(area);
     let lines = build_transcript_lines(state, inner.width, theme);
-    // 裁剪到可视区域，始终显示最新的消息（底部对齐）
-    let visible = clip_to_bottom(lines, inner.height as usize);
+    // 裁剪到可视区域；默认显示最新消息，用户滚动后保留距离底部的偏移
+    let visible = clip_to_window(lines, inner.height as usize, state.transcript_scroll);
     let paragraph = Paragraph::new(Text::from(visible)).block(block);
     frame.render_widget(paragraph, area);
 }
@@ -158,7 +158,8 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
         format!("  ·  sessions: {}", state.available_sessions.len())
     };
     let line = format!(
-        "{}  ·  session: {}{}  ·  Enter send  ·  Shift+Enter newline  ·  Esc stop  ·  /quit exit",
+        "{}  ·  session: {}{}  ·  wheel/pg scroll  ·  Enter send  ·  Shift+Enter newline  ·  Esc \
+         stop  ·  /quit exit",
         model, session, sessions
     );
     frame.render_widget(
@@ -311,12 +312,20 @@ fn visual_lines(text: &str, width: usize) -> Vec<String> {
     layout_visual_text(text, width, None).lines
 }
 
-/// 裁剪行列表到底部指定高度，实现底部对齐的滚动效果。
-fn clip_to_bottom(lines: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
+/// 按距离底部的偏移裁剪行列表。
+fn clip_to_window(
+    lines: Vec<Line<'static>>,
+    height: usize,
+    scroll_from_bottom: usize,
+) -> Vec<Line<'static>> {
     if height == 0 || lines.len() <= height {
         return lines;
     }
-    lines[lines.len() - height..].to_vec()
+    let max_scroll = lines.len().saturating_sub(height);
+    let scroll = scroll_from_bottom.min(max_scroll);
+    let end = lines.len().saturating_sub(scroll);
+    let start = end.saturating_sub(height);
+    lines[start..end].to_vec()
 }
 
 /// 计算居中弹窗的矩形区域。
@@ -470,5 +479,20 @@ mod tests {
         state.input = "你好世界".into();
 
         assert_eq!(composer_height(&state, 8), 4);
+    }
+
+    #[test]
+    fn transcript_clip_scrolls_from_bottom() {
+        let lines = ["one", "two", "three", "four"]
+            .into_iter()
+            .map(Line::from)
+            .collect::<Vec<_>>();
+
+        let visible = clip_to_window(lines, 2, 1)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(visible, vec!["two", "three"]);
     }
 }
