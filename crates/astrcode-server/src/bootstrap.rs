@@ -1,31 +1,28 @@
 //! 服务器引导模块 — 从配置组装所有服务。
 //!
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
-//! 工具路由器、会话管理器、扩展运行器和上下文窗口管理。
+//! 会话管理器、扩展运行器和上下文窗口管理。
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_ai::openai::OpenAiProvider;
 use astrcode_context::{
     budget::ToolResultBudget, file_access::FileAccessTracker, settings::ContextWindowSettings,
 };
 use astrcode_core::{
-    config::{ConfigStore, EffectiveConfig},
-    event::{Event, EventPayload, ToolOutputStream},
+    config::{ConfigStore, EffectiveConfig, ModelSelection},
+    extension::ExtensionError,
     llm::{LlmClientConfig, LlmProvider},
     prompt::PromptProvider,
-    types::{new_message_id, new_turn_id},
+    tool::ToolDefinition,
 };
 use astrcode_extensions::{
-    loader::ExtensionLoader,
-    runner::ExtensionRunner,
-    runtime::{SessionSpawner, SpawnRequest, SpawnResult},
+    context::ServerExtensionContext, loader::ExtensionLoader, runner::ExtensionRunner,
 };
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_tools::registry::ToolRegistry;
-use tokio::sync::mpsc;
 
-use crate::{agent::Agent, capability::CapabilityRouter, session::SessionManager};
+use crate::{session::SessionManager, session_spawner::ServerSessionSpawner};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -40,8 +37,6 @@ pub struct ServerRuntime {
     pub llm_provider: Arc<dyn LlmProvider>,
     /// 提示词组装器，负责构建发送给 LLM 的系统提示词
     pub prompt_provider: Arc<dyn PromptProvider>,
-    /// 工具路由器，管理内置工具和扩展工具的注册与调用
-    pub capability: Arc<CapabilityRouter>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
     /// 已解析的最终配置（只读快照）
@@ -72,16 +67,25 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 
 /// 使用指定选项引导服务器运行时。
 ///
-/// 按顺序完成以下步骤：
+/// 这个函数只负责“把长期共享服务装起来”，不会为某个会话创建工具表。
+/// 工具表现在是 session 级快照，由 [`build_tool_registry_snapshot`] 在
+/// 创建/恢复 session 时按对应 working_dir 单独构建。
+///
+/// 启动顺序：
 /// 1. 加载并解析配置
 /// 2. 构建 LLM 提供者
 /// 3. 构建提示词组装器
-/// 4. 注册内置工具到工具路由器
+/// 4. 确定启动工作目录
 /// 5. 初始化会话管理器和存储后端
-/// 6. 加载扩展并绑定核心服务
-/// 7. 初始化上下文窗口管理
+/// 6. 加载扩展并创建扩展运行器
+/// 7. 绑定扩展创建子会话的宿主能力
+/// 8. 初始化上下文窗口管理
+/// 9. 返回共享运行时容器
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
-    // 1. Load + resolve config
+    // 1. 读取配置并解析成 EffectiveConfig。
+    //
+    // `config_path` 只在测试或嵌入式启动时传入；正常运行使用默认配置路径。
+    // `into_effective()` 会把默认值、用户配置和环境变量等合并成最终只读配置。
     let config_store = if let Some(ref path) = opts.config_path {
         FileConfigStore::new(path.clone())
     } else {
@@ -90,7 +94,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let config = config_store.load().await?;
     let effective = config.into_effective()?;
 
-    // 2. Build LLM provider
+    // 2. 构建 LLM provider。
+    //
+    // 这里把 EffectiveConfig 中的 LLM 参数转换成底层 OpenAI 兼容客户端配置。
+    // 后续所有主会话和子会话都会共享这个 provider。
     let llm_config = LlmClientConfig {
         base_url: effective.llm.base_url.clone(),
         api_key: effective.llm.api_key.clone(),
@@ -108,34 +115,42 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Some(effective.llm.context_limit),
     ));
 
-    // 3. Build prompt provider
+    // 3. 构建 prompt provider。
+    //
+    // PromptComposer 只负责组装系统提示词和上下文消息，不持有会话状态。
     let prompt_provider: Arc<dyn PromptProvider> =
         Arc::new(astrcode_prompt::composer::PromptComposer::new());
 
-    // 4. Build capability router with stable built-in tools
+    // 4. 确定当前项目工作目录。
+    //
+    // 这个目录只用于启动期项目识别、扩展加载和默认隐式会话。
+    // 显式创建 session 时，工具快照会使用 session 自己的 working_dir。
     let cwd = opts
         .working_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let mut tool_registry = ToolRegistry::new();
-    tool_registry.register_builtins(cwd.clone(), effective.llm.read_timeout_secs);
 
-    let capability = Arc::new(CapabilityRouter::new());
-    for tool in tool_registry.into_tools() {
-        capability.register_stable(tool).await;
-    }
-
-    // 5. Session manager with storage backend
+    // 5. 构建 session manager 和事件存储。
+    //
+    // 测试启动使用内存空存储，避免污染真实会话目录；
+    // 正常启动按项目路径 hash 选择文件系统会话仓库。
     let project_hash = astrcode_core::types::project_hash_from_path(&cwd);
     let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
-        // Test path → use memory-only store
         Arc::new(astrcode_storage::noop::NoopEventStore::new())
     } else {
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new(project_hash))
     };
     let session_manager = Arc::new(SessionManager::new(store));
 
-    // 6. Extension runner — load from disk then bind core services
+    // 6. 加载扩展并创建 extension runner。
+    //
+    // 加载顺序：
+    // - 先从磁盘加载项目/用户扩展；
+    // - 再注册内置 agent/task 扩展；
+    // - 最后注册磁盘扩展。
+    //
+    // 扩展工具不会在这里写入全局工具表；这里只保存扩展列表。
+    // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
     let cwd_str = cwd.to_string_lossy().to_string();
     let load_result = ExtensionLoader::load_all(Some(&cwd_str)).await;
     let extension_runner = Arc::new(ExtensionRunner::new(
@@ -154,21 +169,24 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     for err in &load_result.errors {
         tracing::warn!("Extension load error: {err}");
     }
-    let extension_tools = extension_runner.collect_tool_adapters(&cwd_str).await;
-    if !extension_tools.is_empty() {
-        capability.apply_dynamic(extension_tools).await;
-    }
 
-    // Bind session spawn capability so extensions can request RunSession outcomes.
+    // 7. 给扩展运行时绑定“创建子会话”的宿主能力。
+    //
+    // 扩展本身不能直接拿到 SessionManager；当扩展工具返回 RunSession 声明式结果时，
+    // ExtensionRuntime 会回调这个 ServerSessionSpawner，让服务器创建子 session。
+    // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
     extension_runner.bind(Arc::new(ServerSessionSpawner {
         session_manager: Arc::clone(&session_manager),
         llm: Arc::clone(&llm_provider),
-        capability: Arc::clone(&capability),
         prompt: Arc::clone(&prompt_provider),
         extension_runner: Arc::clone(&extension_runner),
+        read_timeout_secs: effective.llm.read_timeout_secs,
     }));
 
-    // 7. Context window management
+    // 8. 初始化上下文窗口相关的共享状态。
+    //
+    // 这些对象用于控制工具结果裁剪、文件访问追踪和上下文恢复预算。
+    // 它们是跨会话共享的服务，但内部会按具体 Agent 回合使用。
     let context_settings = ContextWindowSettings::default();
     let tool_result_budget = Arc::new(ToolResultBudget::new(
         context_settings.summary_reserve_tokens * 3, // aggregate
@@ -179,17 +197,99 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         context_settings.max_tracked_files,
     )));
 
+    // 9. 返回运行时容器。
+    //
+    // ServerRuntime 保存的是“共享基础设施”：session、LLM、prompt、扩展、
+    // 配置和上下文预算。注意这里故意没有 tool_registry：
+    // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
     Ok(ServerRuntime {
         session_manager,
         llm_provider,
         prompt_provider,
-        capability,
         extension_runner,
         effective,
         context_settings,
         tool_result_budget,
         file_access_tracker,
     })
+}
+
+/// 构建一个工作目录绑定的工具表快照。
+///
+/// 每次新建/恢复 session 时调用一次；工具执行期间只读取这份快照，
+/// 不再维护运行中的动态工具层。
+pub(crate) async fn build_tool_registry_snapshot(
+    extension_runner: &ExtensionRunner,
+    working_dir: &str,
+    timeout_secs: u64,
+) -> Arc<ToolRegistry> {
+    let mut tool_registry = ToolRegistry::new();
+    tool_registry.register_builtins(PathBuf::from(working_dir), timeout_secs);
+
+    let extension_tools = extension_runner.collect_tool_adapters(working_dir).await;
+    // Preserve the old precedence: extension tools override built-ins, and
+    // earlier extensions win when duplicate extension tool names exist.
+    for tool in extension_tools.into_iter().rev() {
+        tool_registry.register(tool);
+    }
+
+    Arc::new(tool_registry)
+}
+
+/// 构建一个会话绑定的插件提示快照。
+///
+/// `PromptBuild` 扩展钩子在这里执行一次，结果写入 `PromptContext.custom`。
+/// 后续同一 session 的每个回合都复用这份快照；创建新 session 或恢复 session
+/// 时会重新刷新。
+pub(crate) async fn build_prompt_custom_snapshot(
+    extension_runner: &ExtensionRunner,
+    session_id: &str,
+    working_dir: &str,
+    model_id: &str,
+    tools: &[ToolDefinition],
+) -> Result<BTreeMap<String, String>, ExtensionError> {
+    let mut ext_ctx = ServerExtensionContext::new(
+        session_id.to_string(),
+        working_dir.to_string(),
+        ModelSelection {
+            profile_name: String::new(),
+            model: model_id.to_string(),
+            provider_kind: String::new(),
+        },
+    );
+    ext_ctx.set_tools(
+        tools
+            .iter()
+            .map(|tool| (tool.name.clone(), tool.clone()))
+            .collect(),
+    );
+
+    let prompt_contributions = extension_runner
+        .collect_prompt_contributions(&ext_ctx)
+        .await?;
+    let mut prompt_custom = BTreeMap::new();
+    if let Some(system_prompts) = join_prompt_parts(prompt_contributions.system_prompts) {
+        prompt_custom.insert("system_prompts".to_string(), system_prompts);
+    }
+    if let Some(skills) = join_prompt_parts(prompt_contributions.skills) {
+        prompt_custom.insert("skills".to_string(), skills);
+    }
+    if let Some(agents) = join_prompt_parts(prompt_contributions.agents) {
+        prompt_custom.insert("agents".to_string(), agents);
+    }
+
+    Ok(prompt_custom)
+}
+
+fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
+    let text = parts
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    (!text.is_empty()).then_some(text)
 }
 
 /// 引导过程中可能出现的错误。
@@ -199,325 +299,4 @@ pub enum BootstrapError {
     Config(#[from] astrcode_core::config::ConfigStoreError),
     #[error("Resolve: {0}")]
     Resolve(#[from] astrcode_core::config::ResolveError),
-}
-
-// ─── ServerSessionSpawner ─────────────────────────────────────────────────
-
-/// 服务器端的会话派生器，实现 `SessionSpawner` trait。
-///
-/// 当扩展返回 `ExtensionToolOutcome::RunSession` 时，
-/// 扩展运行器通过此派生器创建子会话并运行 Agent 回合。
-struct ServerSessionSpawner {
-    session_manager: Arc<SessionManager>,
-    llm: Arc<dyn LlmProvider>,
-    capability: Arc<CapabilityRouter>,
-    prompt: Arc<dyn PromptProvider>,
-    extension_runner: Arc<ExtensionRunner>,
-}
-
-#[async_trait::async_trait]
-impl SessionSpawner for ServerSessionSpawner {
-    /// 派生一个子会话，创建 Agent 并执行用户提示词。
-    ///
-    /// # 参数
-    /// - `parent_session_id`: 父会话 ID
-    /// - `request`: 派生请求，包含工作目录、提示词、工具白名单等
-    ///
-    /// # 返回
-    /// 子会话的执行结果，包含输出文本和子会话 ID。
-    async fn spawn(
-        &self,
-        parent_session_id: &str,
-        request: SpawnRequest,
-    ) -> Result<SpawnResult, String> {
-        let parent_progress = ParentToolProgress::from_request(&request);
-        let child_name = request.name.clone();
-        let user_prompt = request.user_prompt.clone();
-        let model_id = match request.model_preference.clone() {
-            Some(model) => model,
-            None => {
-                let parent_session = self
-                    .session_manager
-                    .get(&parent_session_id.to_string())
-                    .await
-                    .ok_or_else(|| format!("parent session {parent_session_id} not found"))?;
-                let parent_model_id = parent_session.state.read().await.model_id.clone();
-                parent_model_id
-            },
-        };
-
-        let create_event = self
-            .session_manager
-            .create(
-                &request.working_dir,
-                &model_id,
-                2048,
-                Some(parent_session_id),
-            )
-            .await
-            .map_err(|e| format!("create child session: {e}"))?;
-
-        let child_sid = create_event.session_id.to_string();
-        let child_turn_id = new_turn_id();
-
-        append_child_payload(
-            self.session_manager.as_ref(),
-            &child_sid,
-            &child_turn_id,
-            EventPayload::TurnStarted,
-        )
-        .await?;
-        append_child_payload(
-            self.session_manager.as_ref(),
-            &child_sid,
-            &child_turn_id,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: user_prompt.clone(),
-            },
-        )
-        .await?;
-
-        if let Some(progress) = &parent_progress {
-            progress.send(
-                ToolOutputStream::Stdout,
-                format!("child agent '{child_name}' started: {child_sid} using {model_id}\n"),
-            );
-        }
-
-        let agent = Agent::new(
-            child_sid.clone(),
-            request.working_dir.clone(),
-            Arc::clone(&self.llm),
-            Arc::clone(&self.prompt),
-            Arc::clone(&self.capability),
-            Arc::clone(&self.extension_runner),
-            model_id,
-            8192,
-        )
-        .with_system_prompt_suffix(request.system_prompt)
-        .with_tool_allowlist(request.allowed_tools);
-
-        let (child_event_tx, mut child_event_rx) = mpsc::unbounded_channel();
-        let agent_future = agent.process_prompt(&user_prompt, Vec::new(), Some(child_event_tx));
-        tokio::pin!(agent_future);
-
-        let mut emitted_error = false;
-        let mut events_closed = false;
-        let output = loop {
-            tokio::select! {
-                result = &mut agent_future => break result,
-                payload = child_event_rx.recv(), if !events_closed => {
-                    match payload {
-                        Some(payload) => {
-                            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-                                emitted_error = true;
-                            }
-                            append_child_payload(
-                                self.session_manager.as_ref(),
-                                &child_sid,
-                                &child_turn_id,
-                                payload.clone(),
-                            )
-                            .await?;
-                            forward_child_progress(parent_progress.as_ref(), &payload);
-                        },
-                        None => {
-                            events_closed = true;
-                        },
-                    }
-                },
-            }
-        };
-
-        while let Some(payload) = child_event_rx.recv().await {
-            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-                emitted_error = true;
-            }
-            append_child_payload(
-                self.session_manager.as_ref(),
-                &child_sid,
-                &child_turn_id,
-                payload.clone(),
-            )
-            .await?;
-            forward_child_progress(parent_progress.as_ref(), &payload);
-        }
-
-        match output {
-            Ok(output) => {
-                append_child_payload(
-                    self.session_manager.as_ref(),
-                    &child_sid,
-                    &child_turn_id,
-                    EventPayload::TurnCompleted {
-                        finish_reason: output.finish_reason.clone(),
-                    },
-                )
-                .await?;
-                if let Some(progress) = &parent_progress {
-                    progress.send(
-                        ToolOutputStream::Stdout,
-                        format!("child turn completed: {}\n", output.finish_reason),
-                    );
-                }
-                Ok(SpawnResult {
-                    content: output.text,
-                    child_session_id: child_sid,
-                })
-            },
-            Err(e) => Ok(SpawnResult {
-                content: {
-                    if !emitted_error {
-                        append_child_payload(
-                            self.session_manager.as_ref(),
-                            &child_sid,
-                            &child_turn_id,
-                            EventPayload::ErrorOccurred {
-                                code: -32603,
-                                message: e.to_string(),
-                                recoverable: false,
-                            },
-                        )
-                        .await?;
-                    }
-                    append_child_payload(
-                        self.session_manager.as_ref(),
-                        &child_sid,
-                        &child_turn_id,
-                        EventPayload::TurnCompleted {
-                            finish_reason: "error".into(),
-                        },
-                    )
-                    .await?;
-                    if let Some(progress) = &parent_progress {
-                        progress.send(
-                            ToolOutputStream::Stderr,
-                            format!("child agent error: {e}\n"),
-                        );
-                    }
-                    format!("child agent error: {e}")
-                },
-                child_session_id: child_sid,
-            }),
-        }
-    }
-}
-
-struct ParentToolProgress {
-    call_id: String,
-    tx: mpsc::UnboundedSender<EventPayload>,
-}
-
-impl ParentToolProgress {
-    fn from_request(request: &SpawnRequest) -> Option<Self> {
-        Some(Self {
-            call_id: request.parent_tool_call_id.clone()?,
-            tx: request.parent_event_tx.clone()?,
-        })
-    }
-
-    fn send(&self, stream: ToolOutputStream, delta: impl Into<String>) {
-        let delta = delta.into();
-        if delta.is_empty() {
-            return;
-        }
-        let _ = self.tx.send(EventPayload::ToolOutputDelta {
-            call_id: self.call_id.clone(),
-            stream,
-            delta,
-        });
-    }
-}
-
-async fn append_child_payload(
-    session_manager: &SessionManager,
-    child_sid: &str,
-    child_turn_id: &str,
-    payload: EventPayload,
-) -> Result<(), String> {
-    if payload.is_durable() {
-        session_manager
-            .append_event(Event::new(
-                child_sid.to_string(),
-                Some(child_turn_id.to_string()),
-                payload,
-            ))
-            .await
-            .map_err(|e| format!("append child event: {e}"))?;
-    }
-    Ok(())
-}
-
-fn forward_child_progress(progress: Option<&ParentToolProgress>, payload: &EventPayload) {
-    let Some(progress) = progress else {
-        return;
-    };
-    if let Some((stream, delta)) = child_progress_delta(payload) {
-        progress.send(stream, delta);
-    }
-}
-
-fn child_progress_delta(payload: &EventPayload) -> Option<(ToolOutputStream, String)> {
-    match payload {
-        EventPayload::AssistantMessageStarted { .. } => {
-            Some((ToolOutputStream::Stdout, "child assistant started\n".into()))
-        },
-        EventPayload::AssistantMessageCompleted { text, .. } => {
-            let summary = one_line_summary(text);
-            if summary.is_empty() {
-                None
-            } else {
-                Some((
-                    ToolOutputStream::Stdout,
-                    format!("child assistant completed: {summary}\n"),
-                ))
-            }
-        },
-        EventPayload::ToolCallStarted { tool_name, .. } => Some((
-            ToolOutputStream::Stdout,
-            format!("child tool started: {tool_name}\n"),
-        )),
-        EventPayload::ToolOutputDelta { stream, delta, .. } => {
-            Some((*stream, format!("child tool output: {delta}")))
-        },
-        EventPayload::ToolCallCompleted {
-            tool_name, result, ..
-        } => {
-            let stream = if result.is_error {
-                ToolOutputStream::Stderr
-            } else {
-                ToolOutputStream::Stdout
-            };
-            let detail = one_line_summary(result.error.as_deref().unwrap_or(&result.content));
-            let suffix = if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            };
-            Some((
-                stream,
-                format!("child tool completed: {tool_name}{suffix}\n"),
-            ))
-        },
-        EventPayload::ErrorOccurred { message, .. } => Some((
-            ToolOutputStream::Stderr,
-            format!("child error: {message}\n"),
-        )),
-        EventPayload::TurnCompleted { finish_reason } => Some((
-            ToolOutputStream::Stdout,
-            format!("child turn completed: {finish_reason}\n"),
-        )),
-        _ => None,
-    }
-}
-
-fn one_line_summary(text: &str) -> String {
-    let mut summary = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX_CHARS: usize = 160;
-    if summary.chars().count() > MAX_CHARS {
-        summary = summary.chars().take(MAX_CHARS - 1).collect();
-        summary.push('…');
-    }
-    summary
 }

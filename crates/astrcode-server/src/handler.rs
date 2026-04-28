@@ -3,7 +3,10 @@
 //! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use astrcode_core::{
     config::ModelSelection,
@@ -17,12 +20,24 @@ use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, MessageDto, SessionListItem, SessionSnapshot},
 };
-use tokio::{
-    sync::{broadcast, mpsc},
-    task::JoinHandle,
+use astrcode_tools::registry::ToolRegistry;
+use tokio::{sync::broadcast, task::JoinHandle};
+
+use crate::{
+    agent::Agent,
+    agent_turn::drive_agent,
+    bootstrap::{ServerRuntime, build_prompt_custom_snapshot, build_tool_registry_snapshot},
 };
 
-use crate::{agent::Agent, bootstrap::ServerRuntime};
+struct AgentTurnInput {
+    sid: SessionId,
+    turn_id: TurnId,
+    working_dir: String,
+    tool_registry: Arc<ToolRegistry>,
+    prompt_custom: BTreeMap<String, String>,
+    history: Vec<LlmMessage>,
+    text: String,
+}
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
 ///
@@ -33,6 +48,10 @@ pub struct CommandHandler {
     event_tx: broadcast::Sender<ClientNotification>,
     /// 当前活跃的会话 ID
     active_session_id: Option<SessionId>,
+    /// 每个会话在创建/恢复时固定下来的工具表快照。
+    session_tool_registries: HashMap<SessionId, Arc<ToolRegistry>>,
+    /// 每个会话在创建/恢复时固定下来的插件提示快照。
+    session_prompt_custom: HashMap<SessionId, BTreeMap<String, String>>,
     /// 当前正在执行的回合（如有）
     active_turn: Option<ActiveTurn>,
 }
@@ -59,6 +78,8 @@ impl CommandHandler {
             runtime,
             event_tx,
             active_session_id: None,
+            session_tool_registries: HashMap::new(),
+            session_prompt_custom: HashMap::new(),
             active_turn: None,
         }
     }
@@ -159,6 +180,8 @@ impl CommandHandler {
                 }
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
+                        self.session_tool_registries.remove(&session_id);
+                        self.session_prompt_custom.remove(&session_id);
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
                         }
@@ -174,7 +197,7 @@ impl CommandHandler {
         Ok(())
     }
 
-    /// 创建新会话，分发 SessionStart 扩展事件，并刷新动态工具。
+    /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具快照。
     async fn create_session(&mut self, working_dir: String) {
         let model_id = self.runtime.effective.llm.model_id.clone();
         match self
@@ -204,15 +227,12 @@ impl CommandHandler {
                     return;
                 }
 
-                // Refresh dynamic tools — extensions may have registered new
-                // tools during SessionStart (e.g. agent-tools scanning agents/ dir).
-                let tools = self
-                    .runtime
-                    .extension_runner
-                    .collect_tool_adapters(&working_dir)
-                    .await;
-                if !tools.is_empty() {
-                    self.runtime.capability.apply_dynamic(tools).await;
+                if let Err(e) = self
+                    .refresh_session_snapshots(&event.session_id, &working_dir)
+                    .await
+                {
+                    self.send_error(-32603, &e);
+                    return;
                 }
 
                 let _ = self.event_tx.send(ClientNotification::Event(event));
@@ -243,6 +263,8 @@ impl CommandHandler {
         let state = session.state.read().await.clone();
         let history = state.messages;
         let working_dir = state.working_dir;
+        let (tool_registry, prompt_custom) =
+            self.ensure_session_snapshots(&sid, &working_dir).await?;
         let turn_id = new_turn_id();
 
         self.record_and_broadcast(&sid, Some(&turn_id), EventPayload::TurnStarted)
@@ -259,15 +281,15 @@ impl CommandHandler {
         self.record_and_broadcast(&sid, Some(&turn_id), EventPayload::AgentRunStarted)
             .await?;
 
-        let handle = spawn_agent_turn(
-            self.runtime.clone(),
-            self.event_tx.clone(),
-            sid.clone(),
-            turn_id.clone(),
+        let handle = self.spawn_agent_turn(AgentTurnInput {
+            sid: sid.clone(),
+            turn_id: turn_id.clone(),
             working_dir,
+            tool_registry,
+            prompt_custom,
             history,
             text,
-        );
+        });
         self.active_turn = Some(ActiveTurn {
             session_id: sid,
             turn_id,
@@ -326,14 +348,24 @@ impl CommandHandler {
         match self.runtime.session_manager.resume(&session_id).await {
             Ok(session) => {
                 let state = session.state.read().await;
-                self.active_session_id = Some(session_id.clone());
+                let working_dir = state.working_dir.clone();
                 let snapshot = SessionSnapshot {
                     session_id: session_id.clone(),
                     cursor: String::new(),
                     messages: state.messages.iter().map(message_to_dto).collect(),
                     model_id: state.model_id.clone(),
-                    working_dir: state.working_dir.clone(),
+                    working_dir: working_dir.clone(),
                 };
+                drop(state);
+
+                if let Err(e) = self
+                    .refresh_session_snapshots(&session_id, &working_dir)
+                    .await
+                {
+                    self.send_error(-32603, &e);
+                    return;
+                }
+                self.active_session_id = Some(session_id.clone());
                 let _ = self.event_tx.send(ClientNotification::SessionResumed {
                     session_id,
                     snapshot,
@@ -362,9 +394,183 @@ impl CommandHandler {
             .map_err(|e| format!("create session: {e}"))?;
 
         let sid = event.session_id.clone();
+        self.refresh_session_snapshots(&sid, &wd).await?;
         self.active_session_id = Some(sid.clone());
         let _ = self.event_tx.send(ClientNotification::Event(event));
         Ok(sid)
+    }
+
+    async fn ensure_session_snapshots(
+        &mut self,
+        session_id: &SessionId,
+        working_dir: &str,
+    ) -> Result<(Arc<ToolRegistry>, BTreeMap<String, String>), String> {
+        if let (Some(tool_registry), Some(prompt_custom)) = (
+            self.session_tool_registries.get(session_id),
+            self.session_prompt_custom.get(session_id),
+        ) {
+            return Ok((Arc::clone(tool_registry), prompt_custom.clone()));
+        }
+
+        let tool_registry = self
+            .refresh_session_snapshots(session_id, working_dir)
+            .await?;
+        let prompt_custom = self
+            .session_prompt_custom
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok((tool_registry, prompt_custom))
+    }
+
+    async fn refresh_session_snapshots(
+        &mut self,
+        session_id: &SessionId,
+        working_dir: &str,
+    ) -> Result<Arc<ToolRegistry>, String> {
+        let tool_registry = self.build_tool_registry_for(working_dir).await;
+        let prompt_custom = self
+            .build_prompt_custom_for(session_id, working_dir, &tool_registry)
+            .await?;
+        self.session_tool_registries
+            .insert(session_id.clone(), Arc::clone(&tool_registry));
+        self.session_prompt_custom
+            .insert(session_id.clone(), prompt_custom);
+        Ok(tool_registry)
+    }
+
+    async fn build_tool_registry_for(&self, working_dir: &str) -> Arc<ToolRegistry> {
+        build_tool_registry_snapshot(
+            &self.runtime.extension_runner,
+            working_dir,
+            self.runtime.effective.llm.read_timeout_secs,
+        )
+        .await
+    }
+
+    async fn build_prompt_custom_for(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        tool_registry: &ToolRegistry,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let tools = tool_registry.list_definitions();
+        build_prompt_custom_snapshot(
+            &self.runtime.extension_runner,
+            session_id,
+            working_dir,
+            &self.runtime.effective.llm.model_id,
+            &tools,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    /// 在后台 tokio 任务中启动 Agent 回合处理。
+    ///
+    /// 使用 `tokio::select!` 同时等待 Agent 完成和事件流，
+    /// 确保事件实时广播给客户端。Agent 完成后发送回合完成事件。
+    fn spawn_agent_turn(&self, input: AgentTurnInput) -> JoinHandle<()> {
+        let runtime = self.runtime.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let AgentTurnInput {
+                sid,
+                turn_id,
+                working_dir,
+                tool_registry,
+                prompt_custom,
+                history,
+                text,
+            } = input;
+
+            let agent = Agent::new(
+                sid.clone(),
+                working_dir,
+                runtime.llm_provider.clone(),
+                runtime.prompt_provider.clone(),
+                tool_registry,
+                runtime.extension_runner.clone(),
+                runtime.effective.llm.model_id.clone(),
+                runtime.context_settings.summary_reserve_tokens * 3,
+            )
+            .with_prompt_custom(prompt_custom);
+
+            let (output, emitted_error) = drive_agent(&agent, &text, history, |payload| {
+                let runtime = runtime.clone();
+                let event_tx = event_tx.clone();
+                let sid = sid.clone();
+                let turn_id = turn_id.clone();
+                async move {
+                    let _ =
+                        record_and_broadcast(&runtime, &event_tx, &sid, Some(&turn_id), payload)
+                            .await;
+                }
+            })
+            .await;
+
+            match output {
+                Ok(output) => {
+                    let _ = record_and_broadcast(
+                        &runtime,
+                        &event_tx,
+                        &sid,
+                        Some(&turn_id),
+                        EventPayload::TurnCompleted {
+                            finish_reason: output.finish_reason.clone(),
+                        },
+                    )
+                    .await;
+                    let _ = record_and_broadcast(
+                        &runtime,
+                        &event_tx,
+                        &sid,
+                        Some(&turn_id),
+                        EventPayload::AgentRunCompleted {
+                            reason: output.finish_reason,
+                        },
+                    )
+                    .await;
+                },
+                Err(e) => {
+                    if !emitted_error {
+                        let _ = record_and_broadcast(
+                            &runtime,
+                            &event_tx,
+                            &sid,
+                            Some(&turn_id),
+                            EventPayload::ErrorOccurred {
+                                code: -32603,
+                                message: e.to_string(),
+                                recoverable: false,
+                            },
+                        )
+                        .await;
+                    }
+                    let _ = record_and_broadcast(
+                        &runtime,
+                        &event_tx,
+                        &sid,
+                        Some(&turn_id),
+                        EventPayload::TurnCompleted {
+                            finish_reason: "error".into(),
+                        },
+                    )
+                    .await;
+                    let _ = record_and_broadcast(
+                        &runtime,
+                        &event_tx,
+                        &sid,
+                        Some(&turn_id),
+                        EventPayload::AgentRunCompleted {
+                            reason: "error".into(),
+                        },
+                    )
+                    .await;
+                },
+            }
+        })
     }
 
     /// 记录事件到存储并广播给客户端的便捷方法。
@@ -384,133 +590,6 @@ impl CommandHandler {
             message: message.into(),
         });
     }
-}
-
-/// 在后台 tokio 任务中启动 Agent 回合处理。
-///
-/// 使用 `tokio::select!` 同时等待 Agent 完成和事件流，
-/// 确保事件实时广播给客户端。Agent 完成后发送回合完成事件。
-fn spawn_agent_turn(
-    runtime: Arc<ServerRuntime>,
-    event_tx: broadcast::Sender<ClientNotification>,
-    sid: SessionId,
-    turn_id: TurnId,
-    working_dir: String,
-    history: Vec<LlmMessage>,
-    text: String,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let agent = Agent::new(
-            sid.clone(),
-            working_dir,
-            runtime.llm_provider.clone(),
-            runtime.prompt_provider.clone(),
-            runtime.capability.clone(),
-            runtime.extension_runner.clone(),
-            runtime.effective.llm.model_id.clone(),
-            runtime.context_settings.summary_reserve_tokens * 3,
-        );
-
-        let (agent_event_tx, mut agent_event_rx) = mpsc::unbounded_channel();
-        let agent_future = agent.process_prompt(&text, history, Some(agent_event_tx));
-        tokio::pin!(agent_future);
-
-        let mut emitted_error = false;
-        let mut events_closed = false;
-        let output = loop {
-            tokio::select! {
-                result = &mut agent_future => break result,
-                payload = agent_event_rx.recv(), if !events_closed => {
-                    match payload {
-                        Some(payload) => {
-                            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-                                emitted_error = true;
-                            }
-                            let _ = record_and_broadcast(
-                                &runtime,
-                                &event_tx,
-                                &sid,
-                                Some(&turn_id),
-                                payload,
-                            )
-                            .await;
-                        },
-                        None => {
-                            events_closed = true;
-                        },
-                    }
-                },
-            }
-        };
-
-        while let Some(payload) = agent_event_rx.recv().await {
-            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-                emitted_error = true;
-            }
-            let _ = record_and_broadcast(&runtime, &event_tx, &sid, Some(&turn_id), payload).await;
-        }
-
-        match output {
-            Ok(output) => {
-                let _ = record_and_broadcast(
-                    &runtime,
-                    &event_tx,
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::TurnCompleted {
-                        finish_reason: output.finish_reason.clone(),
-                    },
-                )
-                .await;
-                let _ = record_and_broadcast(
-                    &runtime,
-                    &event_tx,
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::AgentRunCompleted {
-                        reason: output.finish_reason,
-                    },
-                )
-                .await;
-            },
-            Err(e) => {
-                if !emitted_error {
-                    let _ = record_and_broadcast(
-                        &runtime,
-                        &event_tx,
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: e.to_string(),
-                            recoverable: false,
-                        },
-                    )
-                    .await;
-                }
-                let _ = record_and_broadcast(
-                    &runtime,
-                    &event_tx,
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::TurnCompleted {
-                        finish_reason: "error".into(),
-                    },
-                )
-                .await;
-                let _ = record_and_broadcast(
-                    &runtime,
-                    &event_tx,
-                    &sid,
-                    Some(&turn_id),
-                    EventPayload::AgentRunCompleted {
-                        reason: "error".into(),
-                    },
-                )
-                .await;
-            },
-        }
-    })
 }
 
 /// 将事件持久化到存储（如果是持久化事件）并广播给所有订阅者。
@@ -580,7 +659,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::{capability::CapabilityRouter, session::SessionManager};
+    use crate::session::SessionManager;
 
     struct MockLlm;
 
@@ -652,7 +731,6 @@ mod tests {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
             llm_provider,
             prompt_provider: Arc::new(EmptyPrompt),
-            capability: Arc::new(CapabilityRouter::new()),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),

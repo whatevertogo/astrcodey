@@ -42,10 +42,10 @@ pub struct SpawnRequest {
     pub allowed_tools: Vec<String>,
     /// 模型偏好（可选）
     pub model_preference: Option<String>,
-    /// 父 agent 工具调用 ID，用于把子 agent 进度归属到父级工具调用。
-    pub parent_tool_call_id: Option<String>,
-    /// 父 agent 的事件发送器，仅用于发送非持久化进度事件。
-    pub parent_event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    /// 触发此次派生的工具调用 ID，用于进度事件归属。
+    pub tool_call_id: Option<String>,
+    /// 父 agent 的事件发送器，子 agent 的进度事件由此通道转发。
+    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
 }
 
 /// 子会话执行结果。

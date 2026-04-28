@@ -14,7 +14,6 @@ impl PromptComposer {
     pub async fn assemble_impl(&self, context: &PromptContext) -> PromptPlan {
         let mut parts = SystemPromptParts::default();
 
-        contributors::add_plugin_system(&mut parts, context);
         contributors::add_identity(&mut parts);
         contributors::add_environment(&mut parts, context);
         contributors::add_user_rules(&mut parts, context);
@@ -22,6 +21,7 @@ impl PromptComposer {
         contributors::add_skills(&mut parts, context);
         contributors::add_agents(&mut parts, context);
         contributors::add_few_shot(&mut parts);
+        contributors::add_plugin_system(&mut parts, context);
         contributors::add_response_style(&mut parts);
 
         PromptPlan::from_system_prompt(parts.render_system_prompt())

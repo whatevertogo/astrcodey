@@ -1,13 +1,14 @@
-//! Codex 风格渲染层：上方为消息记录视图，下方为聚焦的输入编辑器。
+//! Claude Code 风格渲染层：上方为紧凑消息记录，下方为聚焦的输入编辑器。
 //!
 //! 负责将 TUI 状态转换为 ratatui 组件并绘制到终端帧上。
 //! 包含消息记录、状态栏、输入编辑器、底部信息栏和斜杠命令面板的渲染逻辑，
 //! 以及基于 Unicode 显示宽度的文本换行计算。
 
+use astrcode_core::render::{RenderSpec, RenderTone};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -15,9 +16,11 @@ use unicode_width::UnicodeWidthChar;
 
 use super::{
     slash,
-    state::{Focus, MessageRole, TuiState},
+    state::{Focus, Message, MessageRole, TuiState},
     theme::Theme,
 };
+
+const MAX_RAW_ANSI_CHARS: usize = 4000;
 
 /// 主渲染入口：将 TUI 状态绘制到终端帧上。
 ///
@@ -42,7 +45,7 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>, theme: &Theme) {
             Constraint::Min(1),
             Constraint::Length(status_height),
             Constraint::Length(composer_height),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
 
@@ -61,14 +64,10 @@ pub fn render(state: &TuiState, frame: &mut Frame<'_>, theme: &Theme) {
 
 /// 渲染消息记录区域：显示用户、助手、工具等消息的滚动视图。
 fn render_transcript(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(theme.border);
-    let inner = block.inner(area);
-    let lines = build_transcript_lines(state, inner.width, theme);
+    let lines = build_transcript_lines(state, area.width, theme);
     // 裁剪到可视区域；默认显示最新消息，用户滚动后保留距离底部的偏移
-    let visible = clip_to_window(lines, inner.height as usize, state.transcript_scroll);
-    let paragraph = Paragraph::new(Text::from(visible)).block(block);
+    let visible = clip_to_window(lines, area.height as usize, state.transcript_scroll);
+    let paragraph = Paragraph::new(Text::from(visible));
     frame.render_widget(paragraph, area);
 }
 
@@ -90,17 +89,16 @@ fn render_status(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// 渲染输入编辑器：带边框的文本输入区域，支持光标定位和占位提示。
+/// 渲染输入编辑器：Claude Code 风格上下线输入区域，支持光标定位和占位提示。
 fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let active = state.focus == Focus::Input || state.focus == Focus::SlashPalette;
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(if active {
             theme.border_active
         } else {
             theme.border
-        })
-        .title(" Composer ");
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -152,18 +150,25 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
     } else {
         format!("model: {}", state.model_name)
     };
-    let sessions = if state.available_sessions.is_empty() {
-        String::new()
+    let cwd = if state.working_dir.is_empty() {
+        "cwd: pending"
     } else {
-        format!("  ·  sessions: {}", state.available_sessions.len())
+        state.working_dir.as_str()
     };
-    let line = format!(
-        "{}  ·  session: {}{}  ·  wheel/pg scroll  ·  Enter send  ·  Shift+Enter newline  ·  Esc \
-         stop  ·  /quit exit",
-        model, session, sessions
-    );
+    let line = format!("{model} · {cwd} · session {session}");
+    let hints = if state.available_sessions.is_empty() {
+        "  › Enter send · Shift+Enter newline · wheel/pg scroll · Esc stop · /quit exit".into()
+    } else {
+        format!(
+            "  › Enter send · Shift+Enter newline · sessions {} · wheel/pg scroll · /quit exit",
+            state.available_sessions.len()
+        )
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(line, theme.footer))),
+        Paragraph::new(Text::from(vec![
+            Line::from(Span::styled(format!("  {line}"), theme.footer)),
+            Line::from(Span::styled(hints, theme.footer)),
+        ])),
         area,
     );
 }
@@ -217,16 +222,18 @@ fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, the
 /// 最多显示最近 120 条消息，每条消息包含角色标签和正文内容。
 /// 正文按可视宽度自动换行，流式消息末尾显示 "streaming…" 指示。
 fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let content_width = width.saturating_sub(2).max(1) as usize;
+    let content_width = width.max(1) as usize;
     let mut lines = Vec::new();
 
     // 无消息时显示欢迎提示
     if state.messages.is_empty() {
         return vec![
-            Line::from(Span::styled("Astrcode", theme.assistant_label)),
+            Line::from(vec![
+                Span::styled("✻ ", theme.assistant_label),
+                Span::styled("Astrcode", theme.assistant_label),
+            ]),
             Line::from(Span::styled(
-                "  Start typing below. This view now stays fully inside the TUI instead of \
-                 spilling into terminal scrollback.",
+                "  Welcome back. Type below to inspect, edit, or explain.",
                 theme.dim,
             )),
         ];
@@ -238,9 +245,6 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
             lines.push(Line::default());
         }
 
-        let label_style = message_label_style(&message.role, theme);
-        lines.push(Line::from(Span::styled(message.label.clone(), label_style)));
-
         // 错误消息使用错误样式
         let body_style = if message.role == MessageRole::Error {
             theme.body.patch(theme.error_label)
@@ -248,26 +252,81 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
             theme.body
         };
 
-        let wrapped = visual_lines(&message.content, content_width);
-        if wrapped.is_empty() {
-            // 空内容显示省略号
-            lines.push(Line::from(vec![
-                Span::styled("  ", theme.dim),
-                Span::styled("…", theme.dim),
-            ]));
-        } else {
-            for line in wrapped {
+        match message.role {
+            MessageRole::User => push_message_body_lines(
+                &mut lines,
+                message,
+                "› ",
+                "  ",
+                theme.user_label,
+                body_style,
+                content_width,
+                theme,
+            ),
+            MessageRole::Assistant => push_message_body_lines(
+                &mut lines,
+                message,
+                "● ",
+                "  ",
+                theme.assistant_label,
+                body_style,
+                content_width,
+                theme,
+            ),
+            MessageRole::Tool => {
                 lines.push(Line::from(vec![
-                    Span::styled("  ", theme.dim),
-                    Span::styled(line, body_style),
+                    Span::styled("⏺ ", theme.tool_label),
+                    Span::styled(message.label.clone(), theme.tool_label),
                 ]));
-            }
+                push_message_body_lines(
+                    &mut lines,
+                    message,
+                    "  ⎿ ",
+                    "    ",
+                    theme.dim,
+                    body_style,
+                    content_width,
+                    theme,
+                );
+            },
+            MessageRole::System => {
+                lines.push(Line::from(vec![
+                    Span::styled("• ", theme.system_label),
+                    Span::styled(message.label.clone(), theme.system_label),
+                ]));
+                push_message_body_lines(
+                    &mut lines,
+                    message,
+                    "  ",
+                    "  ",
+                    theme.dim,
+                    body_style,
+                    content_width,
+                    theme,
+                );
+            },
+            MessageRole::Error => {
+                lines.push(Line::from(vec![
+                    Span::styled("✖ ", theme.error_label),
+                    Span::styled(message.label.clone(), theme.error_label),
+                ]));
+                push_message_body_lines(
+                    &mut lines,
+                    message,
+                    "  ⎿ ",
+                    "    ",
+                    theme.dim,
+                    body_style,
+                    content_width,
+                    theme,
+                );
+            },
         }
 
         // 流式输出中的消息末尾显示指示
         if message.is_streaming {
             lines.push(Line::from(vec![
-                Span::styled("  ", theme.dim),
+                Span::styled("  ⎿ ", theme.dim),
                 Span::styled("streaming…", theme.dim),
             ]));
         }
@@ -276,15 +335,383 @@ fn build_transcript_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Li
     lines
 }
 
-/// 根据消息角色返回对应的标签样式。
-fn message_label_style(role: &MessageRole, theme: &Theme) -> Style {
-    match role {
-        MessageRole::User => theme.user_label,
-        MessageRole::Assistant => theme.assistant_label,
-        MessageRole::Tool => theme.tool_label,
-        MessageRole::System => theme.system_label,
-        MessageRole::Error => theme.error_label,
+fn push_message_body_lines(
+    lines: &mut Vec<Line<'static>>,
+    message: &Message,
+    first_prefix: &str,
+    next_prefix: &str,
+    prefix_style: Style,
+    body_style: Style,
+    content_width: usize,
+    theme: &Theme,
+) {
+    if let Some(spec) = message.body.render_spec() {
+        let rendered = render_spec_to_lines_with_prefix(
+            spec,
+            content_width,
+            theme,
+            first_prefix,
+            prefix_style,
+        );
+        if rendered.is_empty() {
+            push_prefixed_text_lines(
+                lines,
+                message.body.plain_text(),
+                first_prefix,
+                next_prefix,
+                prefix_style,
+                body_style,
+                content_width,
+                theme,
+            );
+        } else {
+            lines.extend(rendered);
+        }
+    } else {
+        push_prefixed_text_lines(
+            lines,
+            message.body.plain_text(),
+            first_prefix,
+            next_prefix,
+            prefix_style,
+            body_style,
+            content_width,
+            theme,
+        );
     }
+}
+
+fn push_prefixed_text_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    first_prefix: &str,
+    next_prefix: &str,
+    prefix_style: Style,
+    body_style: Style,
+    content_width: usize,
+    theme: &Theme,
+) {
+    let prefix_width = string_display_width(first_prefix).max(string_display_width(next_prefix));
+    let wrapped = visual_lines(text, content_width.saturating_sub(prefix_width).max(1));
+    if wrapped.is_empty() {
+        // 空内容显示省略号
+        lines.push(Line::from(vec![
+            Span::styled(first_prefix.to_string(), prefix_style),
+            Span::styled("…", theme.dim),
+        ]));
+    } else {
+        for (idx, line) in wrapped.into_iter().enumerate() {
+            let prefix = if idx == 0 { first_prefix } else { next_prefix };
+            lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), prefix_style),
+                Span::styled(line, body_style),
+            ]));
+        }
+    }
+}
+
+fn render_spec_to_lines_with_prefix(
+    spec: &RenderSpec,
+    width: usize,
+    theme: &Theme,
+    prefix: &str,
+    prefix_style: Style,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    render_spec_node(spec, width.max(1), theme, prefix, prefix_style, &mut lines);
+    lines
+}
+
+fn render_spec_node(
+    spec: &RenderSpec,
+    width: usize,
+    theme: &Theme,
+    prefix: &str,
+    prefix_style: Style,
+    lines: &mut Vec<Line<'static>>,
+) {
+    match spec {
+        RenderSpec::Text { text, tone } | RenderSpec::Markdown { text, tone } => {
+            push_wrapped_render_lines(
+                lines,
+                prefix,
+                prefix_style,
+                text,
+                tone_style(tone, theme),
+                width,
+                theme,
+            );
+        },
+        RenderSpec::Box {
+            title,
+            tone,
+            children,
+        } => {
+            if let Some(title) = title {
+                push_wrapped_render_lines(
+                    lines,
+                    prefix,
+                    prefix_style,
+                    &format!("• {title}"),
+                    tone_style(tone, theme),
+                    width,
+                    theme,
+                );
+            }
+            let child_prefix = format!("{prefix}  ⎿ ");
+            for child in children {
+                render_spec_node(child, width, theme, &child_prefix, prefix_style, lines);
+            }
+            if title.is_none() && children.is_empty() {
+                push_wrapped_render_lines(
+                    lines,
+                    prefix,
+                    prefix_style,
+                    "…",
+                    theme.dim,
+                    width,
+                    theme,
+                );
+            }
+        },
+        RenderSpec::List {
+            ordered,
+            items,
+            tone,
+        } => {
+            for (idx, item) in items.iter().enumerate() {
+                let marker = if *ordered {
+                    format!("{}.", idx + 1)
+                } else {
+                    "•".into()
+                };
+                let item_prefix = format!("{prefix}{marker} ");
+                render_spec_node_with_default_tone(
+                    item,
+                    width,
+                    theme,
+                    &item_prefix,
+                    prefix_style,
+                    lines,
+                    tone,
+                );
+            }
+        },
+        RenderSpec::KeyValue { entries, tone } => {
+            for entry in entries {
+                let style = if entry.tone == RenderTone::Default {
+                    tone_style(tone, theme)
+                } else {
+                    tone_style(&entry.tone, theme)
+                };
+                push_wrapped_render_lines(
+                    lines,
+                    prefix,
+                    prefix_style,
+                    &format!("{}: {}", entry.key, entry.value),
+                    style,
+                    width,
+                    theme,
+                );
+            }
+        },
+        RenderSpec::Progress {
+            label,
+            status,
+            value,
+            tone,
+        } => {
+            let mut text = format!("• {label}");
+            if let Some(status) = status {
+                text.push_str(" · ");
+                text.push_str(status);
+            }
+            if let Some(value) = value {
+                text.push_str(&format!(" · {:.0}%", value.clamp(0.0, 1.0) * 100.0));
+            }
+            push_wrapped_render_lines(
+                lines,
+                prefix,
+                prefix_style,
+                &text,
+                tone_style(tone, theme),
+                width,
+                theme,
+            );
+        },
+        RenderSpec::Diff { text, tone } => {
+            for line in text.lines() {
+                let style = match line.chars().next() {
+                    Some('+') => tone_style(&RenderTone::Success, theme),
+                    Some('-') => tone_style(&RenderTone::Error, theme),
+                    _ => tone_style(tone, theme),
+                };
+                push_wrapped_render_lines(lines, prefix, prefix_style, line, style, width, theme);
+            }
+        },
+        RenderSpec::Code {
+            language,
+            text,
+            tone,
+        } => {
+            if let Some(language) = language {
+                push_wrapped_render_lines(
+                    lines,
+                    prefix,
+                    prefix_style,
+                    &format!("```{language}"),
+                    theme.dim,
+                    width,
+                    theme,
+                );
+            }
+            for line in text.lines() {
+                push_wrapped_render_lines(
+                    lines,
+                    prefix,
+                    prefix_style,
+                    line,
+                    tone_style(tone, theme),
+                    width,
+                    theme,
+                );
+            }
+        },
+        RenderSpec::ImageRef { uri, alt, tone } => {
+            push_wrapped_render_lines(
+                lines,
+                prefix,
+                prefix_style,
+                &format!("[image: {}]", alt.as_deref().unwrap_or(uri)),
+                tone_style(tone, theme),
+                width,
+                theme,
+            );
+        },
+        RenderSpec::RawAnsiLimited { text, tone } => {
+            let safe = strip_ansi_limited(text);
+            push_wrapped_render_lines(
+                lines,
+                prefix,
+                prefix_style,
+                &safe,
+                tone_style(tone, theme),
+                width,
+                theme,
+            );
+        },
+    }
+}
+
+fn render_spec_node_with_default_tone(
+    spec: &RenderSpec,
+    width: usize,
+    theme: &Theme,
+    prefix: &str,
+    prefix_style: Style,
+    lines: &mut Vec<Line<'static>>,
+    fallback_tone: &RenderTone,
+) {
+    if matches!(
+        spec,
+        RenderSpec::Text {
+            tone: RenderTone::Default,
+            ..
+        }
+    ) {
+        let RenderSpec::Text { text, .. } = spec else {
+            return;
+        };
+        push_wrapped_render_lines(
+            lines,
+            prefix,
+            prefix_style,
+            text,
+            tone_style(fallback_tone, theme),
+            width,
+            theme,
+        );
+        return;
+    }
+    render_spec_node(spec, width, theme, prefix, prefix_style, lines);
+}
+
+fn push_wrapped_render_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    prefix_style: Style,
+    text: &str,
+    style: Style,
+    width: usize,
+    theme: &Theme,
+) {
+    let prefix_width = string_display_width(prefix);
+    let wrapped = visual_lines(text, width.saturating_sub(prefix_width).max(1));
+    if wrapped.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), prefix_style),
+            Span::styled("…", theme.dim),
+        ]));
+        return;
+    }
+    for line in wrapped {
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), prefix_style),
+            Span::styled(line, style),
+        ]));
+    }
+}
+
+fn tone_style(tone: &RenderTone, theme: &Theme) -> Style {
+    match tone {
+        RenderTone::Default => theme.body,
+        RenderTone::Muted => theme.dim,
+        RenderTone::Accent => theme.assistant_label,
+        RenderTone::Success => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        RenderTone::Warning => theme.tool_label,
+        RenderTone::Error => theme.error_label,
+    }
+}
+
+fn strip_ansi_limited(text: &str) -> String {
+    let mut output = String::new();
+    let mut visible_chars = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if visible_chars >= MAX_RAW_ANSI_CHARS {
+            output.push('…');
+            break;
+        }
+        if ch == '\u{1b}' {
+            if chars.next() == Some('[') {
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ch == '\u{9b}' {
+            while let Some(next) = chars.next() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '\n' || ch == '\t' || !ch.is_control() {
+            output.push(ch);
+            visible_chars += 1;
+        }
+    }
+    output
+}
+
+fn string_display_width(text: &str) -> usize {
+    text.chars().map(display_width).sum()
 }
 
 /// 计算输入编辑器的文本行和光标位置。
@@ -345,7 +772,7 @@ fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
 
 /// 根据输入内容计算编辑器所需高度（行数 + 边框），最大 8 行。
 fn composer_height(state: &TuiState, width: u16) -> u16 {
-    let content_width = width.saturating_sub(4).max(1) as usize;
+    let content_width = width.saturating_sub(2).max(1) as usize;
     let lines = visual_lines(&state.input, content_width).len().max(1) as u16;
     (lines + 2).min(8)
 }
@@ -454,6 +881,8 @@ fn display_width(ch: char) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::render::{RenderKeyValue, RenderTone};
+
     use super::*;
     use crate::tui::state::TuiState;
 
@@ -494,5 +923,35 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(visible, vec!["two", "three"]);
+    }
+
+    #[test]
+    fn render_spec_box_uses_claude_tree_lines() {
+        let theme = Theme::detect();
+        let spec = RenderSpec::Box {
+            title: Some("Search".into()),
+            tone: RenderTone::Accent,
+            children: vec![RenderSpec::KeyValue {
+                entries: vec![RenderKeyValue {
+                    key: "matches".into(),
+                    value: "3".into(),
+                    tone: RenderTone::Success,
+                }],
+                tone: RenderTone::Default,
+            }],
+        };
+
+        let lines = render_spec_to_lines_with_prefix(&spec, 80, &theme, "  ", theme.dim)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| line.contains("• Search")));
+        assert!(lines.iter().any(|line| line.contains("⎿ matches: 3")));
+    }
+
+    #[test]
+    fn raw_ansi_limited_strips_escape_sequences() {
+        assert_eq!(strip_ansi_limited("\u{1b}[31mred\u{1b}[0m"), "red");
     }
 }

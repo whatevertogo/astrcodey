@@ -3,7 +3,13 @@
 //! 维护消息列表、输入框内容与光标、会话信息、斜杠命令面板状态等，
 //! 并提供将服务器事件（ClientNotification）应用到 UI 状态的方法。
 
-use astrcode_core::event::{Event, EventPayload};
+use std::collections::BTreeMap;
+
+use astrcode_core::{
+    event::{Event, EventPayload},
+    render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
+    tool::ToolResult,
+};
 use astrcode_protocol::events::ClientNotification;
 
 /// 消息角色枚举，用于区分不同来源的消息并应用对应样式。
@@ -21,6 +27,64 @@ pub enum MessageRole {
     Error,
 }
 
+/// 消息正文，始终保留纯文本视图，可选携带结构化渲染描述。
+#[derive(Debug, Clone)]
+pub struct MessageBody {
+    plain: String,
+    render: Option<RenderSpec>,
+}
+
+impl MessageBody {
+    fn text(text: String) -> Self {
+        Self {
+            plain: text,
+            render: None,
+        }
+    }
+
+    /// 取得纯文本视图，用于兼容旧路径、搜索和回退显示。
+    pub fn plain_text(&self) -> &str {
+        &self.plain
+    }
+
+    /// 取得结构化渲染视图，由 TUI 皮肤决定具体展示方式。
+    pub fn render_spec(&self) -> Option<&RenderSpec> {
+        self.render.as_ref()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.plain.is_empty()
+    }
+
+    fn contains_text(&self, text: &str) -> bool {
+        self.plain.contains(text)
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.plain = text;
+        self.render = None;
+    }
+
+    fn append_text(&mut self, text: &str) {
+        self.plain.push_str(text);
+    }
+
+    fn push_newline_if_needed(&mut self) {
+        if !self.plain.ends_with('\n') {
+            self.plain.push('\n');
+        }
+    }
+
+    fn set_render(&mut self, spec: RenderSpec, fallback: String) {
+        self.plain = if fallback.is_empty() {
+            spec.plain_text_fallback()
+        } else {
+            fallback
+        };
+        self.render = Some(spec);
+    }
+}
+
 /// 单条消息，包含角色标签、正文内容和流式状态。
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -29,7 +93,7 @@ pub struct Message {
     /// 显示标签（如 "You"、"Astrcode"、"Tool"）
     pub label: String,
     /// 消息正文内容
-    pub content: String,
+    pub body: MessageBody,
     /// 是否正在流式接收中
     pub is_streaming: bool,
     /// 消息唯一标识，用于流式更新时定位已有消息
@@ -413,13 +477,13 @@ impl TuiState {
             },
             EventPayload::AssistantTextDelta { message_id, delta } => {
                 if let Some(message) = self.find_message_mut(message_id) {
-                    message.content.push_str(delta);
+                    message.body.append_text(delta);
                     self.mark_dirty();
                 }
             },
             EventPayload::AssistantMessageCompleted { message_id, text } => {
                 if let Some(message) = self.find_message_mut(message_id) {
-                    message.content = text.clone();
+                    message.body.set_text(text.clone());
                     message.is_streaming = false;
                     self.mark_dirty();
                 } else {
@@ -446,7 +510,7 @@ impl TuiState {
                 }
                 self.push_message(
                     MessageRole::Tool,
-                    format!("Tool · {}", tool_name),
+                    tool_message_label(tool_name, None),
                     tool_name.clone(),
                     true,
                     Some(call_id.clone()),
@@ -454,10 +518,8 @@ impl TuiState {
             },
             EventPayload::ToolCallArgumentsDelta { call_id, delta } => {
                 if let Some(message) = self.find_message_mut(call_id) {
-                    if !message.content.ends_with('\n') {
-                        message.content.push('\n');
-                    }
-                    message.content.push_str(delta);
+                    message.body.push_newline_if_needed();
+                    message.body.append_text(delta);
                     self.mark_dirty();
                 }
             },
@@ -471,19 +533,15 @@ impl TuiState {
                     self.mark_dirty();
                     return;
                 }
-                let args = serde_json::to_string(arguments).unwrap_or_default();
-                let body = if args.is_empty() || args == "{}" {
-                    tool_name.clone()
-                } else {
-                    format!("{tool_name}\n{args}")
-                };
+                let body = tool_request_body(tool_name, arguments);
                 if let Some(message) = self.find_message_mut(call_id) {
-                    message.content = body;
+                    message.label = tool_message_label(tool_name, Some(arguments));
+                    message.body.set_text(body);
                     self.mark_dirty();
                 } else {
                     self.push_message(
                         MessageRole::Tool,
-                        format!("Tool · {}", tool_name),
+                        tool_message_label(tool_name, Some(arguments)),
                         body,
                         true,
                         Some(call_id.clone()),
@@ -492,10 +550,10 @@ impl TuiState {
             },
             EventPayload::ToolOutputDelta { call_id, delta, .. } => {
                 if let Some(message) = self.find_message_mut(call_id) {
-                    if !message.content.is_empty() {
-                        message.content.push('\n');
+                    if !message.body.is_empty() {
+                        message.body.append_text("\n");
                     }
-                    message.content.push_str(delta);
+                    message.body.append_text(delta);
                     self.mark_dirty();
                 }
             },
@@ -504,20 +562,26 @@ impl TuiState {
                 tool_name,
                 result,
             } => {
+                let render_spec = ui_render_from_metadata(&result.metadata);
                 // 隐藏工具的成功结果仅更新状态栏
-                if !should_print_tool(tool_name) && !result.is_error {
+                if !should_print_tool(tool_name) && !result.is_error && render_spec.is_none() {
                     self.status = format!("{} completed", tool_name);
                     self.mark_dirty();
                     return;
                 }
 
                 if let Some(message) = self.find_message_mut(call_id) {
-                    // 追加工具输出（去重）
-                    if !result.content.is_empty() && !message.content.contains(&result.content) {
-                        if !message.content.is_empty() {
-                            message.content.push('\n');
+                    if let Some(spec) = render_spec {
+                        let spec = completed_tool_render_spec(tool_name, spec, result);
+                        message.body.set_render(spec, result.content.clone());
+                    } else if !result.content.is_empty()
+                        && !message.body.contains_text(&result.content)
+                    {
+                        // 追加工具输出（去重）
+                        if !message.body.is_empty() {
+                            message.body.append_text("\n");
                         }
-                        message.content.push_str(&result.content);
+                        message.body.append_text(&result.content);
                     }
                     if result.is_error {
                         message.role = MessageRole::Error;
@@ -537,6 +601,26 @@ impl TuiState {
                         false,
                         Some(call_id.clone()),
                     );
+                } else if let Some(spec) = render_spec {
+                    let spec = completed_tool_render_spec(tool_name, spec, result);
+                    self.push_message(
+                        if result.is_error {
+                            MessageRole::Error
+                        } else {
+                            MessageRole::Tool
+                        },
+                        if result.is_error {
+                            "Tool Error".into()
+                        } else {
+                            tool_message_label(tool_name, None)
+                        },
+                        result.content.clone(),
+                        false,
+                        Some(call_id.clone()),
+                    );
+                    if let Some(message) = self.find_message_mut(call_id) {
+                        message.body.set_render(spec, result.content.clone());
+                    }
                 }
             },
             EventPayload::CompactionStarted => {
@@ -554,10 +638,10 @@ impl TuiState {
                 ..
             } => {
                 if let Some(message) = self.find_message_mut("compaction") {
-                    message.content = format!(
+                    message.body.set_text(format!(
                         "Compaction finished: {} -> {} tokens",
                         pre_tokens, post_tokens
-                    );
+                    ));
                     message.is_streaming = false;
                 }
                 self.status = "Ready".into();
@@ -615,7 +699,7 @@ impl TuiState {
         self.messages.push(Message {
             role,
             label,
-            content,
+            body: MessageBody::text(content),
             is_streaming,
             key,
         });
@@ -663,7 +747,6 @@ impl TuiState {
     }
 }
 
-
 /// 判断工具是否应在消息记录中显示。
 ///
 /// shell、agent、editFile、applyPatch 等工具的输出对用户有直接价值，需要显示；
@@ -675,12 +758,131 @@ fn should_print_tool(tool_name: &str) -> bool {
     )
 }
 
+fn tool_message_label(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
+    if tool_name == "agent" {
+        if let Some(description) = arguments
+            .and_then(|value| value["description"].as_str())
+            .filter(|description| !description.trim().is_empty())
+        {
+            return format!("Task({description})");
+        }
+        return "Task".into();
+    }
+
+    format!("Tool · {tool_name}")
+}
+
+fn tool_request_body(tool_name: &str, arguments: &serde_json::Value) -> String {
+    if tool_name == "agent" {
+        let mut lines = Vec::new();
+        if let Some(subagent_type) = arguments["subagent_type"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(format!("subagent: {subagent_type}"));
+        }
+        if let Some(prompt) = arguments["prompt"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(format!("prompt: {}", compact_inline(prompt, 180)));
+        }
+        return if lines.is_empty() {
+            "agent".into()
+        } else {
+            lines.join("\n")
+        };
+    }
+
+    let args = serde_json::to_string(arguments).unwrap_or_default();
+    if args.is_empty() || args == "{}" {
+        tool_name.into()
+    } else {
+        format!("{tool_name}\n{args}")
+    }
+}
+
+fn compact_inline(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let mut preview = compact.chars().take(max_chars).collect::<String>();
+    preview.push('…');
+    preview
+}
+
+fn completed_tool_render_spec(
+    tool_name: &str,
+    spec: RenderSpec,
+    result: &ToolResult,
+) -> RenderSpec {
+    if tool_name == "agent" {
+        agent_done_render_spec(spec, result)
+    } else {
+        spec
+    }
+}
+
+fn agent_done_render_spec(spec: RenderSpec, result: &ToolResult) -> RenderSpec {
+    let mut children = match spec {
+        RenderSpec::Box { children, .. } => children,
+        spec => vec![spec],
+    };
+
+    if let Some(child_session_id) = result
+        .metadata
+        .get("child_session_id")
+        .and_then(|value| value.as_str())
+    {
+        children.push(RenderSpec::KeyValue {
+            entries: vec![RenderKeyValue {
+                key: "session".into(),
+                value: child_session_id.into(),
+                tone: RenderTone::Muted,
+            }],
+            tone: RenderTone::Default,
+        });
+    }
+
+    if !result.content.trim().is_empty() {
+        children.push(RenderSpec::Markdown {
+            text: result.content.clone(),
+            tone: if result.is_error {
+                RenderTone::Error
+            } else {
+                RenderTone::Default
+            },
+        });
+    }
+
+    RenderSpec::Box {
+        title: Some(if result.is_error {
+            "Failed".into()
+        } else {
+            "Done".into()
+        }),
+        tone: if result.is_error {
+            RenderTone::Error
+        } else {
+            RenderTone::Success
+        },
+        children,
+    }
+}
+
+fn ui_render_from_metadata(metadata: &BTreeMap<String, serde_json::Value>) -> Option<RenderSpec> {
+    metadata
+        .get(UI_RENDER_METADATA_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use astrcode_core::{
         event::{Event, EventPayload},
+        render::{RenderKeyValue, RenderTone},
         tool::ToolResult,
     };
 
@@ -698,6 +900,22 @@ mod tests {
             is_error,
             error: None,
             metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    fn tool_result_with_render(content: &str, spec: RenderSpec) -> ToolResult {
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            UI_RENDER_METADATA_KEY.into(),
+            serde_json::to_value(spec).unwrap(),
+        );
+        ToolResult {
+            call_id: "call-1".into(),
+            content: content.into(),
+            is_error: false,
+            error: None,
+            metadata,
             duration_ms: None,
         }
     }
@@ -748,7 +966,12 @@ mod tests {
 
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, MessageRole::Tool);
-        assert!(state.messages[0].content.contains("command output"));
+        assert!(
+            state.messages[0]
+                .body
+                .plain_text()
+                .contains("command output")
+        );
     }
 
     #[test]
@@ -766,7 +989,36 @@ mod tests {
 
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, MessageRole::Error);
-        assert_eq!(state.messages[0].content, "glob failed");
+        assert_eq!(state.messages[0].body.plain_text(), "glob failed");
+    }
+
+    #[test]
+    fn hidden_tool_with_ui_render_enters_transcript() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-1".into(),
+                tool_name: "grep".into(),
+                result: tool_result_with_render(
+                    "search complete",
+                    RenderSpec::KeyValue {
+                        entries: vec![RenderKeyValue {
+                            key: "matches".into(),
+                            value: "3".into(),
+                            tone: RenderTone::Success,
+                        }],
+                        tone: RenderTone::Default,
+                    },
+                ),
+            },
+        );
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, MessageRole::Tool);
+        assert!(state.messages[0].body.render_spec().is_some());
+        assert_eq!(state.messages[0].body.plain_text(), "search complete");
     }
 
     #[test]

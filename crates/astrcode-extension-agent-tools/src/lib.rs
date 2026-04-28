@@ -7,15 +7,15 @@ mod agent;
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use agent::AgentConfig;
 use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
         HookEffect, HookMode, PromptContributions,
     },
+    render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ToolDefinition, ToolResult},
 };
-
-use agent::AgentConfig;
 
 // ─── 内置扩展入口 ─────────────────────────────────────────────────────
 
@@ -69,11 +69,14 @@ impl Extension for AgentToolsExtension {
         }
 
         let agents = agent::discover_agents(Some(working_dir));
-        let outcome = build_agent_outcome(&arguments, &agents).map_err(ExtensionError::Internal)?;
-        let outcome_json = serde_json::to_value(&outcome)
+        let run = build_agent_run(&arguments, &agents).map_err(ExtensionError::Internal)?;
+        let outcome_json = serde_json::to_value(&run.outcome)
             .map_err(|e| ExtensionError::Internal(format!("serialize agent outcome: {e}")))?;
+        let render_json = serde_json::to_value(run.render)
+            .map_err(|e| ExtensionError::Internal(format!("serialize agent render: {e}")))?;
         let mut metadata = BTreeMap::new();
         metadata.insert("extension_tool_outcome".into(), outcome_json);
+        metadata.insert(UI_RENDER_METADATA_KEY.into(), render_json);
         Ok(ToolResult {
             call_id: String::new(),
             content: String::new(),
@@ -87,11 +90,13 @@ impl Extension for AgentToolsExtension {
 
 // ─── 工具实现 ────────────────────────────────────────────────────────
 
-/// 解析输入 + 可用 Agent 列表，返回声明式 RunSession 结果。
-fn build_agent_outcome(
-    input: &serde_json::Value,
-    agents: &[AgentConfig],
-) -> Result<ExtensionToolOutcome, String> {
+struct AgentRun {
+    outcome: ExtensionToolOutcome,
+    render: RenderSpec,
+}
+
+/// 解析输入 + 可用 Agent 列表，返回声明式 RunSession 结果和 UI 渲染提示。
+fn build_agent_run(input: &serde_json::Value, agents: &[AgentConfig]) -> Result<AgentRun, String> {
     let prompt = input["prompt"].as_str().ok_or("prompt required")?;
     let agent_name = input["subagent_type"].as_str().unwrap_or("");
     let mode = input["mode"].as_str().unwrap_or("single");
@@ -116,15 +121,81 @@ fn build_agent_outcome(
                     })?
             };
 
-            Ok(ExtensionToolOutcome::RunSession {
-                name: agent.name.clone(),
-                system_prompt: agent.body.clone(),
-                user_prompt: prompt.to_string(),
-                allowed_tools: agent.tools.clone(),
-                model_preference: agent.model.clone(),
+            Ok(AgentRun {
+                render: agent_run_render_spec(input, agent, prompt),
+                outcome: ExtensionToolOutcome::RunSession {
+                    name: agent.name.clone(),
+                    system_prompt: agent.body.clone(),
+                    user_prompt: prompt.to_string(),
+                    allowed_tools: agent.tools.clone(),
+                    model_preference: agent.model.clone(),
+                },
             })
         },
     }
+}
+
+fn agent_run_render_spec(
+    input: &serde_json::Value,
+    agent: &AgentConfig,
+    prompt: &str,
+) -> RenderSpec {
+    let description = input["description"]
+        .as_str()
+        .unwrap_or(agent.description.as_str());
+    let tools = if agent.tools.is_empty() {
+        "inherit/default".into()
+    } else {
+        agent.tools.join(", ")
+    };
+    let model = agent.model.as_deref().unwrap_or("inherit/default");
+
+    RenderSpec::Box {
+        title: None,
+        tone: RenderTone::Default,
+        children: vec![
+            RenderSpec::KeyValue {
+                entries: vec![
+                    RenderKeyValue {
+                        key: "task".into(),
+                        value: description.into(),
+                        tone: RenderTone::Accent,
+                    },
+                    RenderKeyValue {
+                        key: "agent".into(),
+                        value: agent.name.clone(),
+                        tone: RenderTone::Accent,
+                    },
+                    RenderKeyValue {
+                        key: "model".into(),
+                        value: model.into(),
+                        tone: RenderTone::Muted,
+                    },
+                    RenderKeyValue {
+                        key: "tools".into(),
+                        value: tools,
+                        tone: RenderTone::Muted,
+                    },
+                ],
+                tone: RenderTone::Default,
+            },
+            RenderSpec::Text {
+                text: format!("prompt: {}", compact_inline(prompt, 180)),
+                tone: RenderTone::Muted,
+            },
+        ],
+    }
+}
+
+fn compact_inline(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let mut preview = compact.chars().take(max_chars).collect::<String>();
+    preview.push('…');
+    preview
 }
 
 const AGENT_TOOL_DESCRIPTION: &str =

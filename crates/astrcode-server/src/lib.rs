@@ -4,8 +4,10 @@
 //! config service, and multi-session concurrency.
 
 pub mod agent;
+mod agent_turn;
+pub(crate) mod agent_types;
 pub mod bootstrap;
-pub mod capability;
 pub mod handler;
 pub mod session;
+pub(crate) mod session_spawner;
 pub mod transport;

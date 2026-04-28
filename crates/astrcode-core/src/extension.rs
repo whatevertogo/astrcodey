@@ -307,10 +307,9 @@ pub trait ExtensionContext: Send + Sync {
         None
     }
 
-    /// 注册工具以动态注入到能力路由器中。
+    /// 注册工具以注入到当前工具快照中。
     ///
-    /// 通过此方法注册的工具会在 SessionStart 后收集，
-    /// 并通过 `apply_dynamic()` 应用。
+    /// 通过此方法注册的工具会由宿主收集，并在构建工具快照时应用。
     fn register_tool(&self, _def: ToolDefinition) {}
 
     /// 排空所有通过 `register_tool()` 注册的工具。

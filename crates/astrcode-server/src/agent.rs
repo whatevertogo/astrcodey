@@ -4,7 +4,10 @@
 //! 分发扩展钩子事件，并将事件流式传输给客户端。
 //! Agent 是无状态的短暂对象，处理完一个回合后即被丢弃。
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use astrcode_context::pruning::PruneState;
 use astrcode_core::{
@@ -13,7 +16,7 @@ use astrcode_core::{
     extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     prompt::{PromptContext, PromptProvider},
-    tool::{ToolExecutionContext, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolResult},
     types::*,
 };
 use astrcode_extensions::{
@@ -21,24 +24,38 @@ use astrcode_extensions::{
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
 };
 use astrcode_support::shell::resolve_shell;
-use tokio::sync::mpsc;
+use astrcode_tools::registry::ToolRegistry;
+use tokio::{sync::mpsc, task::JoinSet};
 
-use crate::capability::CapabilityRouter;
+/// 并行执行工具调用时的最大并发数。
+const MAX_PARALLEL_TOOL_CALLS: usize = 4;
 
 /// Agent — a transient turn processor.
 ///
 /// Created from a session projection, processes one turn, emits event payloads,
 /// and is discarded. Session identity and persistence stay in the handler.
 pub struct Agent {
+    /// 所属会话的唯一标识。
     session_id: SessionId,
+    /// 当前工作目录，用于工具执行时的相对路径解析。
     working_dir: String,
+    /// 当前使用的模型标识（如 "gpt-4o"）。
     model_id: String,
+    /// LLM 提供者，负责与语言模型通信。
     llm: Arc<dyn LlmProvider>,
+    /// 提示词组装器，负责生成系统提示词和上下文。
     prompt: Arc<dyn PromptProvider>,
-    capability: Arc<CapabilityRouter>,
+    /// 工具注册表，包含当前会话可用的所有工具定义。
+    tool_registry: Arc<ToolRegistry>,
+    /// 扩展运行器，用于分发 PreToolUse / PostToolUse 等钩子事件。
     extension_runner: Arc<ExtensionRunner>,
+    /// 工具结果裁剪状态，用于在超出字节限制时截断工具输出。
     pruner: PruneState,
+    /// 当前会话的 prompt 自定义变量快照，由 PromptBuild 钩子在会话初始化时生成。
+    prompt_custom: BTreeMap<String, String>,
+    /// 工具白名单。设置后仅允许调用列表中的工具，用于子会话等受限场景。
     tool_allowlist: Option<HashSet<String>>,
+    /// 追加到系统提示词末尾的额外内容。
     system_prompt_suffix: Option<String>,
 }
 
@@ -50,7 +67,7 @@ impl Agent {
     /// - `working_dir`: 当前工作目录
     /// - `llm`: LLM 提供者（如 OpenAI）
     /// - `prompt`: 提示词组装器
-    /// - `capability`: 工具路由器（内置工具 + 扩展工具）
+    /// - `tool_registry`: 当前会话快照中的工具注册表
     /// - `extension_runner`: 扩展运行器，用于分发钩子事件
     /// - `model_id`: 使用的模型标识
     /// - `max_tool_result_bytes`: 工具结果的最大字节数，超出会被裁剪
@@ -60,7 +77,7 @@ impl Agent {
         working_dir: String,
         llm: Arc<dyn LlmProvider>,
         prompt: Arc<dyn PromptProvider>,
-        capability: Arc<CapabilityRouter>,
+        tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
         model_id: String,
         max_tool_result_bytes: usize,
@@ -71,12 +88,22 @@ impl Agent {
             model_id,
             llm,
             prompt,
-            capability,
+            tool_registry,
             extension_runner,
             pruner: PruneState::new(max_tool_result_bytes),
+            prompt_custom: BTreeMap::new(),
             tool_allowlist: None,
             system_prompt_suffix: None,
         }
+    }
+
+    /// 设置当前会话的 prompt 自定义变量快照。
+    ///
+    /// 这些变量来自 `PromptBuild` 扩展钩子，在会话创建/恢复时刷新一次；
+    /// Agent 回合内只读取快照，避免每轮重新收集插件提示导致上下文漂移。
+    pub fn with_prompt_custom(mut self, custom: BTreeMap<String, String>) -> Self {
+        self.prompt_custom = custom;
+        self
     }
 
     /// 设置工具白名单，仅允许调用指定名称的工具。
@@ -103,7 +130,7 @@ impl Agent {
             .is_none_or(|allowed| tool_name_matches_allowlist(allowed, name))
     }
 
-    /// Build extension context for the current turn.
+    /// 构建当前回合的扩展上下文，包含会话 ID、工作目录和模型信息。
     fn build_ext_ctx(&self) -> ServerExtensionContext {
         ServerExtensionContext::new(
             self.session_id.clone(),
@@ -116,19 +143,322 @@ impl Agent {
         )
     }
 
-    /// Process a user prompt through the full agent loop.
+    /// 预处理工具调用列表。
     ///
-    /// When `event_tx` is Some, real-time event payloads are streamed. The
-    /// handler wraps them with session/turn metadata and decides durability.
+    /// 对每个待执行的工具调用依次执行：
+    /// 1. 解析 JSON 参数（解析失败时使用空对象并记录警告）。
+    /// 2. 检查工具白名单，不在白名单中的工具直接标记为 `Blocked`。
+    /// 3. 分发 `PreToolUse` 扩展钩子，允许扩展修改输入或阻止执行。
+    /// 4. 根据工具注册表确定执行模式（并行 / 串行）。
+    async fn prepare_tool_calls(
+        &self,
+        tool_calls: &[PendingToolCall],
+        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+    ) -> Result<Vec<PreparedToolCall>, AgentError> {
+        let mut prepared = Vec::with_capacity(tool_calls.len());
+
+        for (index, tc) in tool_calls.iter().enumerate() {
+            let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
+                tracing::warn!(
+                    tool = %tc.name,
+                    error = %e,
+                    "Malformed tool call arguments, using empty object"
+                );
+                serde_json::json!({})
+            });
+
+            if !self.tool_is_allowed(&tc.name) {
+                let blocked_result = ToolResult {
+                    call_id: tc.call_id.clone(),
+                    content: format!("Tool '{}' is not available to this agent", tc.name),
+                    is_error: true,
+                    error: Some(format!("tool '{}' is not allowed", tc.name)),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                };
+                send_tool_requested(event_tx, tc, &args);
+                prepared.push(PreparedToolCall {
+                    index,
+                    call_id: tc.call_id.clone(),
+                    name: tc.name.clone(),
+                    tool_input: args,
+                    mode: ExecutionMode::Sequential,
+                    outcome: PreparedToolOutcome::Blocked(blocked_result),
+                });
+                continue;
+            }
+
+            let mut pre_ctx = self.build_ext_ctx();
+            pre_ctx.set_pre_tool_use_input(PreToolUseInput {
+                tool_name: tc.name.clone(),
+                tool_input: args.clone(),
+            });
+
+            let pre_hook_outcome = self
+                .extension_runner
+                .dispatch_tool_hook(ExtensionEvent::PreToolUse, &pre_ctx)
+                .await?;
+
+            let tool_input = match &pre_hook_outcome {
+                ToolHookOutcome::ModifiedInput { tool_input } => tool_input.clone(),
+                _ => args.clone(),
+            };
+
+            send_tool_requested(event_tx, tc, &tool_input);
+
+            let outcome = if let ToolHookOutcome::Blocked { reason } = pre_hook_outcome {
+                PreparedToolOutcome::Blocked(ToolResult {
+                    call_id: tc.call_id.clone(),
+                    content: format!("Tool execution blocked by hook: {reason}"),
+                    is_error: true,
+                    error: Some(reason),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                })
+            } else {
+                PreparedToolOutcome::Ready
+            };
+
+            let mode = match &outcome {
+                PreparedToolOutcome::Ready => self.tool_registry.execution_mode(&tc.name),
+                PreparedToolOutcome::Blocked(_) => ExecutionMode::Sequential,
+            };
+
+            prepared.push(PreparedToolCall {
+                index,
+                call_id: tc.call_id.clone(),
+                name: tc.name.clone(),
+                tool_input,
+                mode,
+                outcome,
+            });
+        }
+
+        Ok(prepared)
+    }
+
+    /// 执行已预处理的工具调用。
+    ///
+    /// 按顺序遍历预处理结果，根据执行模式决定调度方式：
+    /// - **Blocked**：直接使用预处理阶段的阻止结果，并刷新并行批次。
+    /// - **Parallel**：加入并行批次，由 `flush_parallel_batch` 统一调度。
+    /// - **Sequential**：先刷新并行批次，再单独执行当前调用。
+    ///
+    /// 最终返回按索引排序的工具结果映射。
+    async fn execute_prepared_tool_calls(
+        &self,
+        prepared: &[PreparedToolCall],
+        tools: &[ToolDefinition],
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    ) -> Result<BTreeMap<usize, ToolResult>, AgentError> {
+        let mut results = BTreeMap::new();
+        let mut parallel_batch = Vec::new();
+
+        for call in prepared {
+            match &call.outcome {
+                PreparedToolOutcome::Blocked(result) => {
+                    self.flush_parallel_batch(
+                        &mut parallel_batch,
+                        tools,
+                        event_tx.clone(),
+                        &mut results,
+                    )
+                    .await?;
+                    results.insert(call.index, result.clone());
+                },
+                PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => {
+                    parallel_batch.push(call.to_executable());
+                },
+                PreparedToolOutcome::Ready => {
+                    self.flush_parallel_batch(
+                        &mut parallel_batch,
+                        tools,
+                        event_tx.clone(),
+                        &mut results,
+                    )
+                    .await?;
+                    let (index, result) = execute_tool_call(
+                        Arc::clone(&self.tool_registry),
+                        self.session_id.clone(),
+                        self.working_dir.clone(),
+                        self.model_id.clone(),
+                        tools.to_vec(),
+                        event_tx.clone(),
+                        call.to_executable(),
+                    )
+                    .await;
+                    results.insert(index, result);
+                },
+            }
+        }
+
+        self.flush_parallel_batch(&mut parallel_batch, tools, event_tx, &mut results)
+            .await?;
+
+        Ok(results)
+    }
+
+    /// 刷新并行工具调用批次。
+    ///
+    /// 使用 `JoinSet` 同时启动最多 `MAX_PARALLEL_TOOL_CALLS` 个工具调用任务，
+    /// 每当一个任务完成后立即补充下一个待执行调用，保持并发水位不变。
+    /// 所有结果按索引写入 `results` 映射。
+    async fn flush_parallel_batch(
+        &self,
+        batch: &mut Vec<ExecutableToolCall>,
+        tools: &[ToolDefinition],
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        results: &mut BTreeMap<usize, ToolResult>,
+    ) -> Result<(), AgentError> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let mut pending = std::mem::take(batch).into_iter();
+        let mut join_set = JoinSet::new();
+
+        for _ in 0..MAX_PARALLEL_TOOL_CALLS {
+            let Some(call) = pending.next() else { break };
+            self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
+        }
+
+        while let Some(joined) = join_set.join_next().await {
+            let (index, result) =
+                joined.map_err(|err| AgentError::Llm(format!("tool task failed: {err}")))?;
+            results.insert(index, result);
+
+            if let Some(call) = pending.next() {
+                self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 将单个工具调用封装为异步任务并加入 `JoinSet`。
+    ///
+    /// 克隆必要的上下文（工具注册表、会话 ID、工作目录等），
+    /// 使任务可以在独立线程中安全执行。
+    fn spawn_tool_call(
+        &self,
+        join_set: &mut JoinSet<(usize, ToolResult)>,
+        call: ExecutableToolCall,
+        tools: &[ToolDefinition],
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    ) {
+        let tool_registry = Arc::clone(&self.tool_registry);
+        let session_id = self.session_id.clone();
+        let working_dir = self.working_dir.clone();
+        let model_id = self.model_id.clone();
+        let tools = tools.to_vec();
+
+        join_set.spawn(async move {
+            execute_tool_call(
+                tool_registry,
+                session_id,
+                working_dir,
+                model_id,
+                tools,
+                event_tx,
+                call,
+            )
+            .await
+        });
+    }
+
+    /// 提交工具执行结果。
+    ///
+    /// 对每个已执行的工具调用依次处理：
+    /// 1. 对非阻止结果进行裁剪（超出字节限制时截断）。
+    /// 2. 分发 `PostToolUse` 扩展钩子，允许扩展修改结果内容或阻止。
+    /// 3. 通过 `event_tx` 发送 `ToolCallCompleted` 事件通知客户端。
+    /// 4. 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
+    async fn commit_tool_results(
+        &self,
+        prepared: &[PreparedToolCall],
+        mut results: BTreeMap<usize, ToolResult>,
+        messages: &mut Vec<LlmMessage>,
+        all_tool_results: &mut Vec<ToolResult>,
+        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+    ) -> Result<(), AgentError> {
+        for call in prepared {
+            let mut result = results
+                .remove(&call.index)
+                .unwrap_or_else(|| missing_tool_result(call));
+
+            if matches!(&call.outcome, PreparedToolOutcome::Ready) {
+                self.pruner.prune_result(&mut result);
+                if result.is_error && result.error.is_none() {
+                    result.error = Some(result.content.clone());
+                }
+
+                let mut post_ctx = self.build_ext_ctx();
+                post_ctx.set_post_tool_use_input(PostToolUseInput {
+                    tool_name: call.name.clone(),
+                    tool_input: call.tool_input.clone(),
+                    tool_result: result.clone(),
+                });
+
+                match self
+                    .extension_runner
+                    .dispatch_tool_hook(ExtensionEvent::PostToolUse, &post_ctx)
+                    .await?
+                {
+                    ToolHookOutcome::ModifiedResult { content } => {
+                        result.content = content;
+                        if result.is_error {
+                            result.error = Some(result.content.clone());
+                        }
+                    },
+                    ToolHookOutcome::Blocked { reason } => {
+                        result.content = format!("Tool result blocked by hook: {reason}");
+                        result.is_error = true;
+                        result.error = Some(reason);
+                    },
+                    ToolHookOutcome::Allow | ToolHookOutcome::ModifiedInput { .. } => {},
+                }
+            }
+
+            if let Some(tx) = event_tx {
+                let _ = tx.send(EventPayload::ToolCallCompleted {
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
+                    result: result.clone(),
+                });
+            }
+            messages.push(LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: call.call_id.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                }],
+                name: Some(call.name.clone()),
+            });
+            all_tool_results.push(result);
+        }
+
+        Ok(())
+    }
+
+    /// 处理用户输入的完整 Agent 循环。
+    ///
+    /// 整体流程：
+    /// 1. 分发 `TurnStart` 和 `UserPromptSubmit` 扩展事件。
+    /// 2. 读取会话级插件提示快照，组装系统提示词。
+    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM）， 直到 LLM 不再请求工具调用为止。
+    ///
+    /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
+    /// 由 handler 层包装会话/回合元数据后决定持久化策略。
     pub async fn process_prompt(
         &self,
         user_text: &str,
         history: Vec<LlmMessage>,
         event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     ) -> Result<AgentTurnOutput, AgentError> {
-        // Build context with tool definitions filled for extension visibility
+        // 构建扩展上下文，填充工具定义供扩展钩子查询
         let mut ext_ctx = self.build_ext_ctx();
-        let mut tools = self.capability.list_definitions().await;
+        let mut tools = self.tool_registry.list_definitions();
         if let Some(allowed) = &self.tool_allowlist {
             tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
         }
@@ -136,13 +466,13 @@ impl Agent {
             tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
         ext_ctx.set_tools(tool_map);
 
-        // Dispatch TurnStart
+        // 分发 TurnStart 事件，通知扩展新回合开始
         self.extension_runner
             .dispatch(ExtensionEvent::TurnStart, &ext_ctx)
             .await?;
 
-        // Dispatch UserPromptSubmit before building messages.
-        // If a Blocking hook rejects the prompt, fire TurnEnd before returning.
+        // 分发 UserPromptSubmit 事件。
+        // 如果扩展通过 Blocking 钩子拒绝了提示词，先触发 TurnEnd 再返回错误。
         if let Err(e) = self
             .extension_runner
             .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
@@ -155,24 +485,11 @@ impl Agent {
             return Err(e.into());
         }
 
+        // 将用户消息追加到历史记录，作为本轮对话的起点
         let mut messages = history;
         messages.push(LlmMessage::user(user_text));
 
-        let prompt_contributions = self
-            .extension_runner
-            .collect_prompt_contributions(&ext_ctx)
-            .await?;
-        let mut prompt_custom = std::collections::BTreeMap::new();
-        if let Some(system_prompts) = join_prompt_parts(prompt_contributions.system_prompts) {
-            prompt_custom.insert("system_prompts".to_string(), system_prompts);
-        }
-        if let Some(skills) = join_prompt_parts(prompt_contributions.skills) {
-            prompt_custom.insert("skills".to_string(), skills);
-        }
-        if let Some(agents) = join_prompt_parts(prompt_contributions.agents) {
-            prompt_custom.insert("agents".to_string(), agents);
-        }
-
+        // 构建提示词上下文，包含运行环境信息和会话级插件提示快照。
         let prompt_ctx = PromptContext {
             working_dir: self.working_dir.clone(),
             os: std::env::consts::OS.into(),
@@ -183,9 +500,10 @@ impl Agent {
                 .map(|t| t.name.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
-            custom: prompt_custom,
+            custom: self.prompt_custom.clone(),
         };
 
+        // 通过提示词组装器生成最终方案，并将系统提示词（含后缀）插入消息列表头部
         let plan = self.prompt.assemble(prompt_ctx).await;
         if plan.system_prompt.is_some() || self.system_prompt_suffix.is_some() {
             let mut system_parts: Vec<String> = plan.system_prompt.into_iter().collect();
@@ -193,7 +511,7 @@ impl Agent {
                 system_parts.push(suffix.clone());
             }
             let system_text = system_parts.join("\n\n");
-            // Replace existing system message if present, otherwise insert at front
+            // 若消息列表中已有系统消息则替换，否则插入到最前面
             if let Some(pos) = messages.iter().position(|m| m.role == LlmRole::System) {
                 messages[pos] = LlmMessage::system(system_text);
             } else {
@@ -201,11 +519,14 @@ impl Agent {
             }
         }
 
+        // 累积本轮 Agent 的最终文本输出和所有工具执行结果
         let mut final_text = String::new();
         let mut all_tool_results: Vec<ToolResult> = Vec::new();
 
+        // ── Agent 主循环 ──
+        // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
         loop {
-            // --- BeforeProviderRequest hook ---
+            // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
             let mut send_messages = messages.clone();
             {
                 let mut ext_ctx = self.build_ext_ctx();
@@ -246,14 +567,16 @@ impl Agent {
                     return Err(e.into());
                 },
             };
-            let message_id = new_message_id();
-            let mut message_started = false;
-            let mut current_text = String::new();
-            let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+            // 每轮 LLM 调用的局部状态
+            let message_id = new_message_id(); // 本轮消息的唯一 ID
+            let mut message_started = false; // 是否已发送 AssistantMessageStarted
+            let mut current_text = String::new(); // 本轮累积的文本增量
+            let mut tool_calls: Vec<PendingToolCall> = Vec::new(); // LLM 请求的工具调用
             // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
             // 避免消息在工具执行前就被标记为已完成。
             let mut completed_text: Option<String> = None;
 
+            // 消费 LLM 事件流，处理文本增量和工具调用增量
             while let Some(event) = rx.recv().await {
                 match event {
                     LlmEvent::ContentDelta { delta } => {
@@ -348,7 +671,7 @@ impl Agent {
                 }
             }
 
-            // --- AfterProviderResponse hook ---
+            // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
             if let Err(e) = self
                 .extension_runner
                 .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
@@ -361,204 +684,24 @@ impl Agent {
                 return Err(e.into());
             }
 
-            for tc in &tool_calls {
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            tool = %tc.name,
-                            error = %e,
-                            "Malformed tool call arguments, using empty object"
-                        );
-                        serde_json::json!({})
-                    });
-
-                if !self.tool_is_allowed(&tc.name) {
-                    let blocked_result = ToolResult {
-                        call_id: tc.call_id.clone(),
-                        content: format!("Tool '{}' is not available to this agent", tc.name),
-                        is_error: true,
-                        error: Some(format!("tool '{}' is not allowed", tc.name)),
-                        metadata: Default::default(),
-                        duration_ms: None,
-                    };
-                    if let Some(tx) = &event_tx {
-                        let _ = tx.send(EventPayload::ToolCallRequested {
-                            call_id: tc.call_id.clone(),
-                            tool_name: tc.name.clone(),
-                            arguments: args.clone(),
-                        });
-                        let _ = tx.send(EventPayload::ToolCallCompleted {
-                            call_id: tc.call_id.clone(),
-                            tool_name: tc.name.clone(),
-                            result: blocked_result.clone(),
-                        });
-                    }
-                    messages.push(LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: vec![LlmContent::ToolCall {
-                            call_id: tc.call_id.clone(),
-                            name: tc.name.clone(),
-                            arguments: args,
-                        }],
-                        name: None,
-                    });
-                    messages.push(LlmMessage {
-                        role: LlmRole::Tool,
-                        content: vec![LlmContent::ToolResult {
-                            tool_call_id: tc.call_id.clone(),
-                            content: blocked_result.content.clone(),
-                            is_error: true,
-                        }],
-                        name: Some(tc.name.clone()),
-                    });
-                    all_tool_results.push(blocked_result);
-                    continue;
-                }
-
-                let mut pre_ctx = self.build_ext_ctx();
-                pre_ctx.set_pre_tool_use_input(PreToolUseInput {
-                    tool_name: tc.name.clone(),
-                    tool_input: args.clone(),
-                });
-
-                let pre_hook_outcome = self
-                    .extension_runner
-                    .dispatch_tool_hook(ExtensionEvent::PreToolUse, &pre_ctx)
-                    .await?;
-
-                let tool_args = match &pre_hook_outcome {
-                    ToolHookOutcome::ModifiedInput { tool_input } => tool_input.clone(),
-                    _ => args.clone(),
-                };
-
-                if let Some(tx) = &event_tx {
-                    let _ = tx.send(EventPayload::ToolCallRequested {
-                        call_id: tc.call_id.clone(),
-                        tool_name: tc.name.clone(),
-                        arguments: tool_args.clone(),
-                    });
-                }
-
-                messages.push(LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: vec![LlmContent::ToolCall {
-                        call_id: tc.call_id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tool_args.clone(),
-                    }],
-                    name: None,
-                });
-
-                if let ToolHookOutcome::Blocked { reason } = pre_hook_outcome {
-                    let blocked_result = ToolResult {
-                        call_id: tc.call_id.clone(),
-                        content: format!("Tool execution blocked by hook: {reason}"),
-                        is_error: true,
-                        error: Some(reason),
-                        metadata: Default::default(),
-                        duration_ms: None,
-                    };
-                    if let Some(tx) = &event_tx {
-                        let _ = tx.send(EventPayload::ToolCallCompleted {
-                            call_id: tc.call_id.clone(),
-                            tool_name: tc.name.clone(),
-                            result: blocked_result.clone(),
-                        });
-                    }
-                    messages.push(LlmMessage {
-                        role: LlmRole::Tool,
-                        content: vec![LlmContent::ToolResult {
-                            tool_call_id: tc.call_id.clone(),
-                            content: blocked_result.content.clone(),
-                            is_error: true,
-                        }],
-                        name: Some(tc.name.clone()),
-                    });
-                    all_tool_results.push(blocked_result);
-                    continue;
-                }
-
-                let execution_input = tool_args.clone();
-                let started_at = Instant::now();
-                let tool_ctx = ToolExecutionContext {
-                    session_id: self.session_id.clone(),
-                    working_dir: self.working_dir.clone(),
-                    model_id: self.model_id.clone(),
-                    available_tools: tools.clone(),
-                    tool_call_id: Some(tc.call_id.clone()),
-                    event_tx: event_tx.clone(),
-                };
-                let mut result = match self
-                    .capability
-                    .execute(&tc.name, tool_args, &tool_ctx)
-                    .await
-                {
-                    Ok(mut result) => {
-                        result.call_id = tc.call_id.clone();
-                        result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
-                        self.pruner.prune_result(&mut result);
-                        if result.is_error && result.error.is_none() {
-                            result.error = Some(result.content.clone());
-                        }
-                        result
-                    },
-                    Err(e) => {
-                        let err_msg = format!("Error: {}", e);
-                        ToolResult {
-                            call_id: tc.call_id.clone(),
-                            content: err_msg.clone(),
-                            is_error: true,
-                            error: Some(err_msg.clone()),
-                            metadata: Default::default(),
-                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
-                        }
-                    },
-                };
-
-                let mut post_ctx = self.build_ext_ctx();
-                post_ctx.set_post_tool_use_input(PostToolUseInput {
-                    tool_name: tc.name.clone(),
-                    tool_input: execution_input,
-                    tool_result: result.clone(),
-                });
-
-                match self
-                    .extension_runner
-                    .dispatch_tool_hook(ExtensionEvent::PostToolUse, &post_ctx)
-                    .await?
-                {
-                    ToolHookOutcome::ModifiedResult { content } => {
-                        result.content = content;
-                        if result.is_error {
-                            result.error = Some(result.content.clone());
-                        }
-                    },
-                    ToolHookOutcome::Blocked { reason } => {
-                        result.content = format!("Tool result blocked by hook: {reason}");
-                        result.is_error = true;
-                        result.error = Some(reason);
-                    },
-                    ToolHookOutcome::Allow | ToolHookOutcome::ModifiedInput { .. } => {},
-                }
-
-                if let Some(tx) = &event_tx {
-                    let _ = tx.send(EventPayload::ToolCallCompleted {
-                        call_id: tc.call_id.clone(),
-                        tool_name: tc.name.clone(),
-                        result: result.clone(),
-                    });
-                }
-                messages.push(LlmMessage {
-                    role: LlmRole::Tool,
-                    content: vec![LlmContent::ToolResult {
-                        tool_call_id: tc.call_id.clone(),
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    }],
-                    name: Some(tc.name.clone()),
-                });
-                all_tool_results.push(result);
-            }
+            // ── 工具调用执行管线 ──
+            // 1. 预处理：白名单检查 + PreToolUse 钩子
+            let prepared_tool_calls = self.prepare_tool_calls(&tool_calls, &event_tx).await?;
+            // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
+            messages.push(assistant_tool_call_message(&prepared_tool_calls));
+            // 2. 执行：按并行/串行模式调度工具
+            let tool_results = self
+                .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
+                .await?;
+            // 3. 提交：裁剪结果 + PostToolUse 钩子 + 追加到对话历史
+            self.commit_tool_results(
+                &prepared_tool_calls,
+                tool_results,
+                &mut messages,
+                &mut all_tool_results,
+                &event_tx,
+            )
+            .await?;
 
             // 工具调用全部执行完毕后才发送消息完成事件，
             // 保证 completed 事件在所有 tool_call 事件之后。
@@ -576,381 +719,17 @@ impl Agent {
     }
 }
 
-/// Agent 回合的输出结果。
-pub struct AgentTurnOutput {
-    /// 助手回复的文本内容
-    pub text: String,
-    /// 结束原因（如 "stop"、"tool_calls"）
-    pub finish_reason: String,
-    /// 本回合中所有工具调用的结果
-    pub tool_results: Vec<ToolResult>,
-}
+// ─── Agent 类型重导出 ──────────────────────────────────────────────────────
+// 具体类型定义在 agent_types.rs 中，此处仅做重导出以保持模块边界清晰。
+pub use crate::agent_types::AgentTurnOutput;
+pub(crate) use crate::agent_types::{
+    AgentError, ExecutableToolCall, PendingToolCall, PreparedToolCall, PreparedToolOutcome,
+    assistant_tool_call_message, execute_tool_call, missing_tool_result, send_tool_requested,
+    tool_name_matches_allowlist,
+};
 
-/// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
-struct PendingToolCall {
-    /// 工具调用的唯一标识
-    call_id: String,
-    /// 工具名称
-    name: String,
-    /// 工具调用的 JSON 参数（可能跨多个 delta 事件拼接）
-    arguments: String,
-}
-
-/// Agent 处理过程中可能出现的错误类型。
-#[derive(Debug, thiserror::Error)]
-pub enum AgentError {
-    #[error("LLM error: {0}")]
-    Llm(String),
-    #[error("Tool error: {0}")]
-    Tool(#[from] astrcode_core::tool::ToolError),
-    #[error("Extension error: {0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
-}
-
-/// 将 LLM 错误转换为 Agent 错误。
-impl From<astrcode_core::llm::LlmError> for AgentError {
-    fn from(e: astrcode_core::llm::LlmError) -> Self {
-        AgentError::Llm(e.to_string())
-    }
-}
-
-/// 检查工具名是否匹配白名单，支持 Claude 风格的别名映射。
-/// 例如白名单中有 "Read"，则 "readFile" 也能匹配。
-fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: &str) -> bool {
-    allowed.iter().any(|allowed_name| {
-        allowed_name == tool_name
-            || claude_tool_alias(allowed_name)
-                .is_some_and(|alias| alias.eq_ignore_ascii_case(tool_name))
-    })
-}
-
-fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
-    let text = parts
-        .into_iter()
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    (!text.is_empty()).then_some(text)
-}
-
-/// 将简短的工具名映射为 Claude 风格的实际工具名。
-/// 例如 "read" → "readFile"，"bash" → "shell"。
-fn claude_tool_alias(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "read" => Some("readFile"),
-        "write" => Some("writeFile"),
-        "edit" | "multiedit" => Some("editFile"),
-        "grep" => Some("grep"),
-        "glob" => Some("findFiles"),
-        "bash" => Some("shell"),
-        _ => None,
-    }
-}
+// ─── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use std::{
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
-
-    use astrcode_core::{
-        extension::{Extension, ExtensionContext, ExtensionError, HookEffect, HookMode},
-        llm::{LlmError, ModelLimits},
-        prompt::{PromptPlan, PromptProvider},
-        tool::{ExecutionMode, Tool, ToolDefinition, ToolError},
-    };
-    use astrcode_extensions::runner::ExtensionRunner;
-    use tokio::sync::mpsc;
-
-    use super::*;
-
-    #[test]
-    fn claude_tool_aliases_match_local_tool_names() {
-        let allowed = HashSet::from([
-            String::from("Read"),
-            String::from("Grep"),
-            String::from("Bash"),
-        ]);
-
-        assert!(tool_name_matches_allowlist(&allowed, "readFile"));
-        assert!(tool_name_matches_allowlist(&allowed, "grep"));
-        assert!(tool_name_matches_allowlist(&allowed, "shell"));
-        assert!(!tool_name_matches_allowlist(&allowed, "writeFile"));
-    }
-
-    struct BlockingPreToolExtension;
-
-    #[async_trait::async_trait]
-    impl Extension for BlockingPreToolExtension {
-        fn id(&self) -> &str {
-            "blocking-pre-tool"
-        }
-
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-            vec![(ExtensionEvent::PreToolUse, HookMode::Blocking)]
-        }
-
-        async fn on_event(
-            &self,
-            event: ExtensionEvent,
-            ctx: &dyn ExtensionContext,
-        ) -> Result<HookEffect, ExtensionError> {
-            if event == ExtensionEvent::PreToolUse {
-                let input = ctx
-                    .pre_tool_use_input()
-                    .expect("PreToolUse should include tool payload");
-                if input.tool_name == "shell"
-                    && input
-                        .tool_input
-                        .get("command")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|command| command.contains("rm -rf"))
-                {
-                    return Ok(HookEffect::Block {
-                        reason: "dangerous command".into(),
-                    });
-                }
-            }
-            Ok(HookEffect::Allow)
-        }
-    }
-
-    struct EmptyPrompt;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for EmptyPrompt {
-        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
-            PromptPlan {
-                system_prompt: None,
-                prepend_messages: vec![],
-                append_messages: vec![],
-                extra_tools: vec![],
-            }
-        }
-    }
-
-    struct FixedPrompt;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for FixedPrompt {
-        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
-            PromptPlan::from_system_prompt("test system prompt".to_string())
-        }
-    }
-
-    struct CapturingLlm {
-        messages: Arc<Mutex<Vec<LlmMessage>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for CapturingLlm {
-        async fn generate(
-            &self,
-            messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
-        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-            *self.messages.lock().unwrap() = messages;
-            let (tx, rx) = mpsc::unbounded_channel();
-            let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
-            let _ = tx.send(LlmEvent::Done {
-                finish_reason: "stop".into(),
-            });
-            Ok(rx)
-        }
-
-        fn model_limits(&self) -> ModelLimits {
-            ModelLimits {
-                max_input_tokens: 1024,
-                max_output_tokens: 1024,
-            }
-        }
-    }
-
-    struct PanicIfExecutedTool {
-        executed: Arc<AtomicBool>,
-    }
-
-    #[async_trait::async_trait]
-    impl Tool for PanicIfExecutedTool {
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: "shell".into(),
-                description: "test shell".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                is_builtin: true,
-            }
-        }
-
-        fn execution_mode(&self) -> ExecutionMode {
-            ExecutionMode::Sequential
-        }
-
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &ToolExecutionContext,
-        ) -> Result<ToolResult, ToolError> {
-            self.executed.store(true, Ordering::SeqCst);
-            Ok(ToolResult {
-                call_id: String::new(),
-                content: "should not run".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: None,
-            })
-        }
-    }
-
-    struct ToolThenFinalLlm {
-        call_count: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for ToolThenFinalLlm {
-        async fn generate(
-            &self,
-            messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
-        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-            let call = self.call_count.fetch_add(1, Ordering::SeqCst);
-            let (tx, rx) = mpsc::unbounded_channel();
-            if call == 0 {
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "call-1".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "rm -rf /"}).to_string(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
-                });
-            } else {
-                assert!(
-                    messages
-                        .iter()
-                        .any(|message| message.content.iter().any(|content| {
-                            matches!(
-                                content,
-                                LlmContent::ToolResult {
-                                    content,
-                                    is_error: true,
-                                    ..
-                                } if content.contains("Tool execution blocked by hook")
-                            )
-                        })),
-                    "blocked tool result should be sent back to the LLM"
-                );
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "handled".into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
-            }
-            Ok(rx)
-        }
-
-        fn model_limits(&self) -> ModelLimits {
-            ModelLimits {
-                max_input_tokens: 1024,
-                max_output_tokens: 1024,
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order() {
-        let capability = Arc::new(CapabilityRouter::new());
-        let executed = Arc::new(AtomicBool::new(false));
-        capability
-            .register_stable(Arc::new(PanicIfExecutedTool {
-                executed: Arc::clone(&executed),
-            }))
-            .await;
-
-        let extension_runner = Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        ));
-        extension_runner
-            .register(Arc::new(BlockingPreToolExtension))
-            .await;
-
-        let agent = Agent::new(
-            "session-1".into(),
-            ".".into(),
-            Arc::new(ToolThenFinalLlm {
-                call_count: AtomicUsize::new(0),
-            }),
-            Arc::new(EmptyPrompt),
-            capability,
-            extension_runner,
-            "mock".into(),
-            8192,
-        );
-
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let output = agent
-            .process_prompt("run dangerous command", vec![], Some(event_tx))
-            .await
-            .unwrap();
-
-        assert_eq!(output.finish_reason, "stop");
-        assert!(!executed.load(Ordering::SeqCst));
-
-        let mut saw_requested = false;
-        let mut saw_completed_after_requested = false;
-        while let Ok(payload) = event_rx.try_recv() {
-            match payload {
-                EventPayload::ToolCallRequested { .. } => {
-                    saw_requested = true;
-                },
-                EventPayload::ToolCallCompleted { result, .. } => {
-                    assert!(result.is_error);
-                    assert!(result.content.contains("Tool execution blocked by hook"));
-                    saw_completed_after_requested = saw_requested;
-                },
-                _ => {},
-            }
-        }
-
-        assert!(saw_requested);
-        assert!(saw_completed_after_requested);
-    }
-
-    #[tokio::test]
-    async fn prompt_provider_system_prompt_is_sent_to_llm() {
-        let captured_messages = Arc::new(Mutex::new(Vec::new()));
-        let agent = Agent::new(
-            "session-1".into(),
-            ".".into(),
-            Arc::new(CapturingLlm {
-                messages: Arc::clone(&captured_messages),
-            }),
-            Arc::new(FixedPrompt),
-            Arc::new(CapabilityRouter::new()),
-            Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-            )),
-            "mock".into(),
-            8192,
-        );
-
-        let output = agent.process_prompt("hello", vec![], None).await.unwrap();
-
-        assert_eq!(output.text, "ok");
-        let messages = captured_messages.lock().unwrap();
-        assert_eq!(
-            messages.first().map(|message| &message.role),
-            Some(&LlmRole::System)
-        );
-        assert!(messages.iter().any(|message| message.role == LlmRole::User));
-    }
-}
+#[path = "agent_tests.rs"]
+mod tests;

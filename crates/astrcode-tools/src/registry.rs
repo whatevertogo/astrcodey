@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::tool::{Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult};
+use astrcode_core::tool::{
+    ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult,
+};
 
 /// Registry of available tools (built-in + extension-registered).
 ///
@@ -52,6 +54,14 @@ impl ToolRegistry {
         }
     }
 
+    /// 返回指定工具的执行模式，未找到时保守地按顺序执行处理。
+    pub fn execution_mode(&self, name: &str) -> ExecutionMode {
+        self.tools
+            .get(name)
+            .map(|tool| tool.execution_mode())
+            .unwrap_or(ExecutionMode::Sequential)
+    }
+
     /// 按名称查找工具定义，未找到返回 `None`。
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
         self.tools.get(name).map(|t| t.definition())
@@ -94,7 +104,6 @@ impl ToolRegistry {
             timeout_secs,
         }));
 
-        // TODO: Agent tools (spawn/send/observe/close) — re-enable when wired
         // TODO: Plan/mode tools (taskWrite/enterPlanMode/exitPlanMode/upsertSessionPlan) —
         // re-enable when wired
     }

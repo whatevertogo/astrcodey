@@ -5,7 +5,6 @@
 //!
 //! ## 事实源
 //!
-//! 搜索索引由组合根从 `CapabilityRouter` 快照注入，
 //! `tool_search` 不直接依赖 kernel，不创建平行注册表。
 
 use std::sync::{Arc, RwLock};

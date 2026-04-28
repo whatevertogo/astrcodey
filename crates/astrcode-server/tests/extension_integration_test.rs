@@ -15,7 +15,7 @@ use astrcode_extensions::{
     runner::{ExtensionRunner, ToolHookOutcome},
     runtime::ExtensionRuntime,
 };
-use astrcode_server::capability::CapabilityRouter;
+use astrcode_tools::registry::ToolRegistry;
 
 /// A test extension that blocks shell commands containing "rm -rf".
 struct SecurityExtension;
@@ -238,7 +238,7 @@ fn context_with_pre_tool_input(command: &str) -> ServerExtensionContext {
 }
 
 #[tokio::test]
-async fn duplicate_dynamic_tools_keep_first_registration() {
+async fn duplicate_extension_tools_keep_first_registration() {
     let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner
         .register(Arc::new(FixedToolExtension {
@@ -255,9 +255,11 @@ async fn duplicate_dynamic_tools_keep_first_registration() {
         }))
         .await;
 
-    let capability = CapabilityRouter::new();
     let tools = runner.collect_tool_adapters("/workspace").await;
-    capability.apply_dynamic(tools).await;
+    let mut tool_registry = ToolRegistry::new();
+    for tool in tools.into_iter().rev() {
+        tool_registry.register(tool);
+    }
 
     let ctx = astrcode_core::tool::ToolExecutionContext {
         session_id: "test".into(),
@@ -267,7 +269,7 @@ async fn duplicate_dynamic_tools_keep_first_registration() {
         tool_call_id: None,
         event_tx: None,
     };
-    let result = capability
+    let result = tool_registry
         .execute("sharedTool", serde_json::json!({}), &ctx)
         .await
         .unwrap();
@@ -285,15 +287,17 @@ async fn extension_registration_and_count() {
 }
 
 #[tokio::test]
-async fn extension_tools_are_adapted_into_capability_router() {
+async fn extension_tools_are_adapted_into_tool_registry() {
     let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
     runner.register(Arc::new(EchoToolExtension)).await;
 
-    let capability = CapabilityRouter::new();
     let tools = runner.collect_tool_adapters("/workspace").await;
-    capability.apply_dynamic(tools).await;
+    let mut tool_registry = ToolRegistry::new();
+    for tool in tools.into_iter().rev() {
+        tool_registry.register(tool);
+    }
 
-    let definitions = capability.list_definitions().await;
+    let definitions = tool_registry.list_definitions();
     assert!(definitions.iter().any(|def| def.name == "extensionEcho"));
 
     let ctx = astrcode_core::tool::ToolExecutionContext {
@@ -304,7 +308,7 @@ async fn extension_tools_are_adapted_into_capability_router() {
         tool_call_id: None,
         event_tx: None,
     };
-    let result = capability
+    let result = tool_registry
         .execute(
             "extensionEcho",
             serde_json::json!({ "text": "hello" }),

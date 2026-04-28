@@ -10,6 +10,7 @@
 //! - [`extension`]：扩展与钩子系统类型
 //! - [`llm`]：LLM 提供者抽象与消息类型
 //! - [`prompt`]：提示词组合 trait 和类型
+//! - [`render`]：结构化 UI 渲染协议
 //! - [`storage`]：会话存储 trait
 //! - [`tool`]：工具 trait 及关联类型
 //! - [`types`]：核心共享标识符和数据类型
@@ -19,6 +20,7 @@ pub mod event;
 pub mod extension;
 pub mod llm;
 pub mod prompt;
+pub mod render;
 pub mod storage;
 pub mod tool;
 pub mod types;
@@ -29,6 +31,7 @@ pub use event::*;
 pub use extension::*;
 pub use llm::*;
 pub use prompt::*;
+pub use render::*;
 pub use storage::*;
 pub use tool::*;
 pub use types::*;
