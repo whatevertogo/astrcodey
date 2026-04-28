@@ -175,9 +175,7 @@ mod tests {
     use super::*;
 
     fn test_store(name: &str) -> TaskStore {
-        let root = std::env::temp_dir()
-            .join("astrcode-task-tests")
-            .join(name);
+        let root = std::env::temp_dir().join("astrcode-task-tests").join(name);
         let _ = std::fs::remove_dir_all(&root);
         TaskStore::new(root)
     }

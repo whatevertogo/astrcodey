@@ -86,7 +86,11 @@ impl Extension for TaskToolsExtension {
 
 // ─── 工具实现 ────────────────────────────────────────────────────────
 
-fn handle_task_create(input_json: &str, session_id: &str, working_dir: &str) -> Result<String, String> {
+fn handle_task_create(
+    input_json: &str,
+    session_id: &str,
+    working_dir: &str,
+) -> Result<String, String> {
     let input: serde_json::Value =
         serde_json::from_str(input_json).map_err(|e| format!("parse: {e}"))?;
     let subject = input["subject"].as_str().ok_or("subject required")?;
@@ -127,7 +131,11 @@ fn handle_task_list(session_id: &str, working_dir: &str) -> Result<String, Strin
     Ok(lines.join("\n"))
 }
 
-fn handle_task_update(input_json: &str, session_id: &str, working_dir: &str) -> Result<String, String> {
+fn handle_task_update(
+    input_json: &str,
+    session_id: &str,
+    working_dir: &str,
+) -> Result<String, String> {
     let input: serde_json::Value =
         serde_json::from_str(input_json).map_err(|e| format!("parse: {e}"))?;
     let id = input["id"].as_str().ok_or("id required")?;

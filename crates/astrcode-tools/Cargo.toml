@@ -12,6 +12,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+base64 = "0.22"
 glob = "0.3"
+globset = "0.4"
+ignore = "0.4"
 regex = "1"
 tracing = { workspace = true }
