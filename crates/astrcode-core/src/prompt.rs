@@ -142,9 +142,15 @@ pub struct PromptContext {
     pub shell: String,
     /// 当前日期字符串。
     pub date: String,
-    /// 可用工具名称列表（逗号分隔）。
-    pub available_tools: String,
-    /// 组装器可选读取的自定义变量。
+    /// Skills section 内容。
+    pub skills: Option<String>,
+    /// Agents section 内容。
+    pub agents: Option<String>,
+    /// User rules 内容。
+    pub user_rules: Option<String>,
+    /// Plugin system prompt 内容。
+    pub plugin_system_prompts: Option<String>,
+    /// 模板变量替换与扩展注入的自定义键值对。
     pub custom: BTreeMap<String, String>,
 }
 

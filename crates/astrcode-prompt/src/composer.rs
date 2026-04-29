@@ -43,8 +43,6 @@ impl PromptProvider for PromptComposer {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     fn context() -> PromptContext {
@@ -53,8 +51,11 @@ mod tests {
             os: "windows".to_string(),
             shell: "powershell".to_string(),
             date: "2026-04-28".to_string(),
-            available_tools: "readFile, editFile".to_string(),
-            custom: BTreeMap::new(),
+            skills: None,
+            agents: None,
+            user_rules: None,
+            plugin_system_prompts: None,
+            custom: std::collections::BTreeMap::new(),
         }
     }
 

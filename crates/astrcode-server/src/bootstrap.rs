@@ -258,16 +258,20 @@ pub(crate) async fn build_system_prompt_snapshot(
         append_custom_section(&mut custom, "system_prompts", extra);
     }
 
+    let plugin_system_prompts = custom.remove("system_prompts");
+    let skills = custom.remove("skills");
+    let agents = custom.remove("agents");
+    let user_rules = custom.remove("user_rules");
+
     let prompt_ctx = PromptContext {
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        available_tools: tools
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<Vec<_>>()
-            .join(", "),
+        skills,
+        agents,
+        user_rules,
+        plugin_system_prompts,
         custom,
     };
 
@@ -375,9 +379,7 @@ mod tests {
         async fn assemble(&self, context: PromptContext) -> PromptPlan {
             PromptPlan::from_system_prompt(
                 context
-                    .custom
-                    .get("system_prompts")
-                    .cloned()
+                    .plugin_system_prompts
                     .unwrap_or_default(),
             )
         }

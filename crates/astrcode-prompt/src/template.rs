@@ -15,7 +15,7 @@ pub struct PromptTemplate;
 impl PromptTemplate {
     /// 使用上下文中的变量渲染模板字符串。
     ///
-    /// 内置变量包括 `os`、`date`、`shell`、`working_dir`、`available_tools`，
+    /// 内置变量包括 `os`、`date`、`shell`、`working_dir`，
     /// 同时支持通过 `context.custom` 注入的自定义变量。
     ///
     /// 变量替换按 key 长度降序执行，防止 `{{os_type}}` 被 `{{os}}` 提前匹配。
@@ -28,7 +28,6 @@ impl PromptTemplate {
             ("{{date}}".into(), &context.date),
             ("{{shell}}".into(), &context.shell),
             ("{{working_dir}}".into(), &context.working_dir),
-            ("{{available_tools}}".into(), &context.available_tools),
         ];
 
         // 追加自定义变量，格式为 `{{key}}`。

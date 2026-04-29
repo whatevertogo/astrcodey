@@ -85,10 +85,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 // ─── Fixed section fillers ──────────────────────────────────────────────
 
 pub fn add_plugin_system(parts: &mut SystemPromptParts, ctx: &PromptContext) {
-    // `custom` 故意是通用的：提示程序集使用命名文本
-    // 不依赖扩展的部分。服务器决定哪些来源
-    // 填充这个键。
-    if let Some(system_prompts) = ctx.custom.get("system_prompts") {
+    if let Some(ref system_prompts) = ctx.plugin_system_prompts {
         parts.push(PromptSection::PluginSystem, system_prompts.clone());
     }
 }
@@ -97,14 +94,14 @@ pub fn add_environment(parts: &mut SystemPromptParts, ctx: &PromptContext) {
     parts.push(
         PromptSection::Environment,
         format!(
-            "工作目录：{}\n操作系统：{}\nShell：{}\n日期：{}\n可用工具：{}",
-            ctx.working_dir, ctx.os, ctx.shell, ctx.date, ctx.available_tools
+            "工作目录：{}\n操作系统：{}\nShell：{}\n日期：{}",
+            ctx.working_dir, ctx.os, ctx.shell, ctx.date
         ),
     );
 }
 
 pub fn add_user_rules(parts: &mut SystemPromptParts, ctx: &PromptContext) {
-    if let Some(rules) = ctx.custom.get("user_rules") {
+    if let Some(ref rules) = ctx.user_rules {
         parts.push(PromptSection::UserRules, rules.clone());
     }
 }
@@ -134,13 +131,13 @@ pub fn add_project_rules(parts: &mut SystemPromptParts, ctx: &PromptContext) {
 }
 
 pub fn add_skills(parts: &mut SystemPromptParts, ctx: &PromptContext) {
-    if let Some(skills) = ctx.custom.get("skills") {
+    if let Some(ref skills) = ctx.skills {
         parts.push(PromptSection::Skills, skills.clone());
     }
 }
 
 pub fn add_agents(parts: &mut SystemPromptParts, ctx: &PromptContext) {
-    if let Some(agents) = ctx.custom.get("agents") {
+    if let Some(ref agents) = ctx.agents {
         parts.push(PromptSection::Agents, agents.clone());
     }
 }
