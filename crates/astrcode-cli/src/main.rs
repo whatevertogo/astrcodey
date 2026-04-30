@@ -41,6 +41,7 @@ enum Commands {
 /// 程序入口：解析命令行参数并分发到对应子命令处理函数。
 #[tokio::main]
 async fn main() {
+    let _guard = astrcode_log::init();
     let cli = Cli::parse();
 
     match cli.command {

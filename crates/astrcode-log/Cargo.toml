@@ -1,0 +1,12 @@
+[package]
+name = "astrcode-log"
+version = "0.1.0"
+edition = "2021"
+description = "Logging for astrcode: file rotation, stderr output, env-filter support"
+
+[dependencies]
+astrcode-support = { path = "../astrcode-support" }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+chrono = { workspace = true }

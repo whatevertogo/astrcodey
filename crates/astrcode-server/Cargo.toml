@@ -27,5 +27,5 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
+astrcode-log = { path = "../astrcode-log" }
 notify = "7"

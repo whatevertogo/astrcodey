@@ -153,6 +153,8 @@ pub struct TuiState {
     pub dirty: bool,
     /// 是否应退出 TUI
     pub should_quit: bool,
+    /// 待写入 scrollback 的消息队列（已完成的消息，非流式）
+    pub scrollback_queue: Vec<Message>,
 }
 
 impl TuiState {
@@ -178,6 +180,7 @@ impl TuiState {
             working_dir: String::new(),
             dirty: true,
             should_quit: false,
+            scrollback_queue: Vec::new(),
         }
     }
 
@@ -488,6 +491,8 @@ impl TuiState {
                 if let Some(message) = self.find_message_mut(message_id) {
                     message.body.set_text(text.clone());
                     message.is_streaming = false;
+                    let completed = message.clone();
+                    self.scrollback_queue.push(completed);
                     self.mark_dirty();
                 } else {
                     // 未找到已有消息（可能错过了 Started 事件），直接创建
@@ -591,6 +596,8 @@ impl TuiState {
                         message.label = "Tool Error".into();
                     }
                     message.is_streaming = false;
+                    let completed = message.clone();
+                    self.scrollback_queue.push(completed);
                     self.mark_dirty();
                 } else if result.is_error {
                     // 工具错误但无已有消息记录，创建错误消息
@@ -699,13 +706,19 @@ impl TuiState {
         is_streaming: bool,
         key: Option<String>,
     ) {
-        self.messages.push(Message {
+        let msg = Message {
             role,
             label,
             body: MessageBody::text(content),
             is_streaming,
             key,
-        });
+        };
+        self.messages.push(msg);
+        if !is_streaming {
+            if let Some(last) = self.messages.last() {
+                self.scrollback_queue.push(last.clone());
+            }
+        }
         self.mark_dirty();
     }
 

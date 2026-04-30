@@ -55,6 +55,11 @@ pub fn extensions_dir() -> PathBuf {
     astrcode_dir().join("extensions")
 }
 
+/// 获取日志目录：`~/.astrcode/logs/`。
+pub fn logs_dir() -> PathBuf {
+    astrcode_dir().join("logs")
+}
+
 /// 获取测试专用目录。
 ///
 /// 该目录位于系统临时目录下，调用方负责在测试前后清理。

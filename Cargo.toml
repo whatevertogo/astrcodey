@@ -14,6 +14,7 @@ members = [
     "crates/astrcode-protocol",
     "crates/astrcode-client",
     "crates/astrcode-cli",
+    "crates/astrcode-log",
     "crates/astrcode-extension-agent-tools",
     "crates/astrcode-extension-task-tools",
 ]

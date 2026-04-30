@@ -3,7 +3,7 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口管理。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_ai::openai::OpenAiProvider;
 use astrcode_context::{
@@ -13,7 +13,7 @@ use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
     extension::ExtensionError,
     llm::{LlmClientConfig, LlmProvider},
-    prompt::{PromptContext, PromptProvider},
+    prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
     tool::ToolDefinition,
 };
 use astrcode_extensions::{
@@ -250,49 +250,6 @@ pub(crate) async fn build_system_prompt_snapshot(
     tools: &[ToolDefinition],
     extra_system_prompt: Option<&str>,
 ) -> Result<(String, String), ExtensionError> {
-    let mut custom =
-        collect_prompt_custom_sections(extension_runner, session_id, working_dir, model_id, tools)
-            .await?;
-
-    if let Some(extra) = non_empty(extra_system_prompt.unwrap_or_default()) {
-        append_custom_section(&mut custom, "system_prompts", extra);
-    }
-
-    let plugin_system_prompts = custom.remove("system_prompts");
-    let skills = custom.remove("skills");
-    let agents = custom.remove("agents");
-    let user_rules = custom.remove("user_rules");
-
-    let prompt_ctx = PromptContext {
-        working_dir: working_dir.to_string(),
-        os: std::env::consts::OS.into(),
-        shell: resolve_shell().name,
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-        skills,
-        agents,
-        user_rules,
-        plugin_system_prompts,
-        custom,
-    };
-
-    let plan = prompt_provider.assemble(prompt_ctx).await;
-    let system_prompt = plan.system_prompt.unwrap_or_default();
-    let fingerprint = prompt_fingerprint(&system_prompt);
-    Ok((system_prompt, fingerprint))
-}
-
-/// 构建一次 prompt composer 可消费的插件提示 section。
-///
-/// 这里是 extensions 与 prompt 系统之间的桥接层：插件返回结构化的
-/// `PromptContributions`，server 将其映射成 prompt crate 能消费的通用
-/// `custom` section 文本。prompt crate 不直接知道这些文本来自插件。
-async fn collect_prompt_custom_sections(
-    extension_runner: &ExtensionRunner,
-    session_id: &str,
-    working_dir: &str,
-    model_id: &str,
-    tools: &[ToolDefinition],
-) -> Result<BTreeMap<String, String>, ExtensionError> {
     let mut ext_ctx = ServerExtensionContext::new(
         session_id.to_string(),
         working_dir.to_string(),
@@ -309,45 +266,68 @@ async fn collect_prompt_custom_sections(
             .collect(),
     );
 
-    let prompt_contributions = extension_runner
+    let contributions = extension_runner
         .collect_prompt_contributions(&ext_ctx)
         .await?;
-    let mut custom_sections = BTreeMap::new();
-    // 这些 key 是 server 到 prompt composer 的内部约定，不属于 extension API。
-    if let Some(system_prompts) = join_prompt_parts(prompt_contributions.system_prompts) {
-        custom_sections.insert("system_prompts".to_string(), system_prompts);
+
+    let mut extension_blocks = Vec::new();
+    for sp in contributions.system_prompts {
+        extension_blocks.push(ExtensionPromptBlock {
+            section: ExtensionSection::PlatformInstructions,
+            content: sp,
+        });
     }
-    if let Some(skills) = join_prompt_parts(prompt_contributions.skills) {
-        custom_sections.insert("skills".to_string(), skills);
+    for s in contributions.skills {
+        extension_blocks.push(ExtensionPromptBlock {
+            section: ExtensionSection::Skills,
+            content: s,
+        });
     }
-    if let Some(agents) = join_prompt_parts(prompt_contributions.agents) {
-        custom_sections.insert("agents".to_string(), agents);
+    for a in contributions.agents {
+        extension_blocks.push(ExtensionPromptBlock {
+            section: ExtensionSection::Agents,
+            content: a,
+        });
+    }
+    if let Some(extra) = non_empty(extra_system_prompt.unwrap_or_default()) {
+        extension_blocks.push(ExtensionPromptBlock {
+            section: ExtensionSection::PlatformInstructions,
+            content: extra,
+        });
     }
 
-    Ok(custom_sections)
-}
+    let identity = astrcode_prompt::pipeline::load_identity_md(
+        &astrcode_prompt::pipeline::user_identity_md_path(),
+    );
+    let project_rules =
+        astrcode_prompt::pipeline::load_project_rules(std::path::Path::new(working_dir));
 
-fn append_custom_section(custom: &mut BTreeMap<String, String>, key: &str, value: String) {
-    custom
-        .entry(key.to_string())
-        .and_modify(|existing| {
-            if !existing.trim().is_empty() {
-                existing.push_str("\n\n");
-            }
-            existing.push_str(&value);
+    let tool_summaries: Vec<_> = tools
+        .iter()
+        .map(|t| astrcode_core::prompt::ToolSummary {
+            name: t.name.clone(),
+            description: t.description.clone(),
         })
-        .or_insert(value);
-}
+        .collect();
 
-fn join_prompt_parts(parts: Vec<String>) -> Option<String> {
-    let text = parts
-        .into_iter()
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let input = SystemPromptInput {
+        working_dir: working_dir.to_string(),
+        os: std::env::consts::OS.into(),
+        shell: resolve_shell().name,
+        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        identity,
+        user_rules: None,
+        project_rules,
+        extension_blocks,
+        extra_instructions: None,
+        tools: tool_summaries,
+        template_vars: std::collections::BTreeMap::new(),
+    };
 
-    (!text.is_empty()).then_some(text)
+    let plan = prompt_provider.assemble(input).await;
+    let system_prompt = plan.system_prompt.unwrap_or_default();
+    let fingerprint = prompt_fingerprint(&system_prompt);
+    Ok((system_prompt, fingerprint))
 }
 
 fn non_empty(text: &str) -> Option<String> {
@@ -368,7 +348,7 @@ fn prompt_fingerprint(text: &str) -> String {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use astrcode_core::prompt::{PromptContext, PromptPlan};
+    use astrcode_core::prompt::{PromptPlan, SystemPromptInput};
 
     use super::*;
 
@@ -376,12 +356,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PromptProvider for EchoSystemPrompts {
-        async fn assemble(&self, context: PromptContext) -> PromptPlan {
-            PromptPlan::from_system_prompt(
-                context
-                    .plugin_system_prompts
-                    .unwrap_or_default(),
-            )
+        async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
+            let content = input
+                .extension_blocks
+                .iter()
+                .filter(|b| b.section == ExtensionSection::PlatformInstructions)
+                .map(|b| b.content.as_str())
+                .next()
+                .unwrap_or_default();
+            PromptPlan::from_system_prompt(content.to_string())
         }
     }
 

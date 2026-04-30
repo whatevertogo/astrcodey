@@ -19,9 +19,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["scrolling-regions"] }
 crossterm = "0.28"
 unicode-width = "0.2"
+astrcode-log = { path = "../astrcode-log" }
 tracing = { workspace = true }
 
 [dev-dependencies]

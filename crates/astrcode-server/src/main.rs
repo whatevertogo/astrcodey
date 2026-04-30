@@ -17,9 +17,7 @@ use astrcode_server::{
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
+    let _guard = astrcode_log::init();
     tracing::info!("astrcode-server starting");
 
     let runtime = match astrcode_server::bootstrap::bootstrap().await {

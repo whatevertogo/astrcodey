@@ -682,7 +682,7 @@ mod tests {
         config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
         event::EventPayload,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptContext, PromptPlan, PromptProvider},
+        prompt::{PromptPlan, PromptProvider, SystemPromptInput},
         tool::ToolDefinition,
     };
     use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -723,13 +723,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PromptProvider for EmptyPrompt {
-        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
-            PromptPlan {
-                system_prompt: None,
-                prepend_messages: vec![],
-                append_messages: vec![],
-                extra_tools: vec![],
-            }
+        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
+            PromptPlan::from_system_prompt(String::new())
         }
     }
 
@@ -740,7 +735,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl PromptProvider for CountingPrompt {
-        async fn assemble(&self, _context: PromptContext) -> PromptPlan {
+        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
             self.calls.fetch_add(1, Ordering::SeqCst);
             PromptPlan::from_system_prompt(self.text.to_string())
         }
