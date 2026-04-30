@@ -355,18 +355,6 @@ impl TuiState {
         self.mark_dirty();
     }
 
-    /// 向上滚动消息记录区。
-    pub fn scroll_transcript_up(&mut self, lines: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(lines);
-        self.mark_dirty();
-    }
-
-    /// 向下滚动消息记录区。
-    pub fn scroll_transcript_down(&mut self, lines: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(lines);
-        self.mark_dirty();
-    }
-
     /// 回到底部，跟随最新消息。
     pub fn scroll_transcript_to_bottom(&mut self) {
         if self.transcript_scroll != 0 {

@@ -39,6 +39,12 @@ pub struct LlmSettings {
     pub max_retries: u32,
     /// 重试的指数退避基础延迟（毫秒）。
     pub retry_base_delay_ms: u64,
+    /// 采样温度（0.0-2.0），None 使用 API 默认值。
+    pub temperature: Option<f32>,
+    /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
+    pub supports_prompt_cache_key: bool,
+    /// 可选的 OpenAI prompt cache retention。
+    pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
 }
 
 // TODO: RuntimeSettings——当压缩/工具并发等功能接入时添加。

@@ -14,7 +14,7 @@ use astrcode_core::{
         HookEffect, HookMode, PromptContributions,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolOrigin, ToolResult},
 };
 
 // ─── 内置扩展入口 ─────────────────────────────────────────────────────
@@ -213,7 +213,7 @@ fn agent_tool_definition() -> ToolDefinition {
                 "properties": {},
             })
         }),
-        is_builtin: false,
+        origin: ToolOrigin::Bundled,
     }
 }
 

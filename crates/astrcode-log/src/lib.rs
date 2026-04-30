@@ -15,7 +15,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use astrcode_log::{init, init_with, LogOptions};
+//! use astrcode_log::{LogOptions, init, init_with};
 //!
 //! // Default settings (info on stderr, debug to file).
 //! let _guard = init();
@@ -30,10 +30,7 @@
 use std::path::PathBuf;
 
 use tracing_subscriber::{
-    filter::EnvFilter,
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    Layer, Registry,
+    Layer, Registry, filter::EnvFilter, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
 /// Default log directory: `~/.astrcode/logs/`.
@@ -83,8 +80,7 @@ pub fn init() -> tracing_appender::non_blocking::WorkerGuard {
 ///
 /// See [`init()`] for lifetime and panic caveats.
 pub fn init_with(opts: LogOptions) -> tracing_appender::non_blocking::WorkerGuard {
-    let stderr_filter = std::env::var("ASTRCODE_LOG")
-        .unwrap_or_else(|_| opts.stderr_filter);
+    let stderr_filter = std::env::var("ASTRCODE_LOG").unwrap_or(opts.stderr_filter);
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
@@ -99,8 +95,7 @@ pub fn init_with(opts: LogOptions) -> tracing_appender::non_blocking::WorkerGuar
         std::fs::create_dir_all(&opts.log_dir)
             .expect("failed to create log directory; check ~/.astrcode permissions");
 
-        let file_filter = std::env::var("ASTRCODE_LOG_FILE")
-            .unwrap_or_else(|_| opts.file_filter);
+        let file_filter = std::env::var("ASTRCODE_LOG_FILE").unwrap_or(opts.file_filter);
 
         let file_appender = tracing_appender::rolling::daily(&opts.log_dir, "astrcode");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);

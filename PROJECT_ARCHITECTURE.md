@@ -273,6 +273,10 @@ Prompt cache 被拆成四层：
 工具系统只内置少量核心工具，覆盖文件访问、编辑、搜索、shell 执行、计划管理和 agent 协作。
 自定义工具与内置工具走同一条执行路径。
 
+这里的边界是 tool-first，而不是 plugin-first：tool 是运行时基础能力，
+extension、SDK、MCP 或内置模块都只是 tool source。所有来源最终都应进入
+session 级工具注册表，并经过同一套 hook、事件、结果裁剪与持久化流程。
+
 也就是说，每个 tool call 都会经过同样的架构链路：
 
 - 类型化 tool definition
@@ -353,4 +357,3 @@ v2 架构明确不把以下内容纳入当前核心范围：
 - extension-first 会提高灵活性，但要求更清晰的优先级规则与故障隔离
 - stdio-first 会限制初期接入面，但能显著简化协议和进程模型
 - 极简核心降低耦合，但也把更多责任转移到扩展契约和 crate 边界设计上
-

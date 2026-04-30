@@ -1,43 +1,25 @@
 //! OpenAI 兼容的 LLM 提供商实现。
 //!
-//! 支持 Chat Completions 和 Responses 两种 API 模式，提供 SSE 流式响应解析、
-//! UTF-8 多字节边界安全解码、工具调用累积以及 prompt 缓存断点注入。
+//! 支持 Chat Completions API 模式（兼容 DeepSeek / OpenAI 等）。
+//! 提供 SSE 流式响应解析、工具调用累积及 OpenAI 提示词缓存键注入。
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::collections::BTreeMap;
 
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
-use crate::{cache::CacheTracker, retry::RetryPolicy};
+use crate::retry::RetryPolicy;
 
-/// OpenAI 兼容的 LLM 提供商。
-///
-/// 封装了与 OpenAI 兼容 API 的通信逻辑，支持 Chat Completions 和 Responses 两种模式，
-/// 内置缓存追踪、重试策略和流式响应解析。
 pub struct OpenAiProvider {
-    /// LLM 客户端配置（API 密钥、超时、重试参数等）
     config: LlmClientConfig,
-    /// API 模式：Chat Completions 或 Responses
     api_mode: OpenAiApiMode,
-    /// 模型标识符
     model_id: String,
-    /// 模型令牌限制
     model_limits_val: ModelLimits,
-    /// 跟踪 system prompt 和 tool schema 的缓存状态，用于设置 cache_control 断点
-    cache_tracker: Mutex<CacheTracker>,
-    /// HTTP 客户端
     client: reqwest::Client,
 }
 
 impl OpenAiProvider {
-    /// 创建新的 OpenAI 提供商实例。
-    ///
-    /// # 参数
-    /// - `config`: LLM 客户端配置
-    /// - `api_mode`: API 模式（Chat Completions 或 Responses）
-    /// - `model_id`: 模型标识符
-    /// - `max_tokens`: 最大输出令牌数（默认 8192）
-    /// - `context_limit`: 上下文窗口大小限制（默认 65536）
+    /// 为一个已解析的模型配置创建可复用提供者。
     pub fn new(
         config: LlmClientConfig,
         api_mode: OpenAiApiMode,
@@ -51,22 +33,19 @@ impl OpenAiProvider {
             .build()
             .expect("Failed to create HTTP client");
 
-        let model_limits_val = ModelLimits {
-            max_input_tokens: context_limit.unwrap_or(65536),
-            max_output_tokens: max_tokens.unwrap_or(8192) as usize,
-        };
-
         Self {
             config,
             api_mode,
             model_id,
-            model_limits_val,
-            cache_tracker: Mutex::new(CacheTracker::new()),
+            model_limits_val: ModelLimits {
+                max_input_tokens: context_limit.unwrap_or(65536),
+                max_output_tokens: max_tokens.unwrap_or(8192) as usize,
+            },
             client,
         }
     }
 
-    /// 根据 API 模式构建请求端点 URL。
+    /// 根据当前协议形态解析实际请求端点。
     fn endpoint(&self) -> String {
         match self.api_mode {
             OpenAiApiMode::ChatCompletions => {
@@ -81,7 +60,10 @@ impl OpenAiProvider {
         }
     }
 
-    /// 根据 API 模式构建请求体。
+    /// 构建最终请求体。
+    ///
+    /// Chat Completions 和 Responses 的消息 / 工具结构不兼容，
+    /// 所以这里只做分发，具体序列化保持在各自函数里。
     fn build_request_body(
         &self,
         messages: &[LlmMessage],
@@ -93,10 +75,8 @@ impl OpenAiProvider {
         }
     }
 
-    /// 构建 Chat Completions API 的请求体。
-    ///
-    /// 将消息和工具定义转换为 OpenAI Chat Completions 格式的 JSON，
-    /// 启用流式响应并请求 usage 统计信息。
+    // ─── Chat Completions ─────────────────────────────────────────────────
+
     fn build_chat_request_body(
         &self,
         messages: &[LlmMessage],
@@ -105,7 +85,139 @@ impl OpenAiProvider {
         let messages_json: Vec<serde_json::Value> =
             messages.iter().map(chat_message_to_json).collect();
 
-        let tools_json: Vec<serde_json::Value> = tools
+        let mut body = serde_json::json!({
+            "model": self.model_id,
+            "messages": messages_json,
+            "max_tokens": self.model_limits_val.max_output_tokens,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = tools_to_json(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+        if let Some(t) = self.config.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        self.apply_prompt_cache_fields(&mut body, messages, tools);
+
+        body
+    }
+
+    // ─── Responses ────────────────────────────────────────────────────
+
+    fn build_responses_request_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let instructions = messages
+            .iter()
+            .filter(|m| matches!(m.role, LlmRole::System))
+            .flat_map(|m| m.content.iter())
+            .filter_map(|c| match c {
+                LlmContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let input: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| !matches!(m.role, LlmRole::System))
+            .flat_map(responses_input_items)
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": self.model_id,
+            "instructions": instructions,
+            "input": input,
+            "max_output_tokens": self.model_limits_val.max_output_tokens,
+            "stream": true,
+        });
+
+        if !tools.is_empty() {
+            body["tools"] = responses_tools_json(tools);
+        }
+        if let Some(t) = self.config.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        self.apply_prompt_cache_fields(&mut body, messages, tools);
+
+        body
+    }
+
+    fn apply_prompt_cache_fields(
+        &self,
+        body: &mut serde_json::Value,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) {
+        // 只有明确声明支持的 OpenAI 配置才发送提示词缓存字段；
+        // DeepSeek 等 OpenAI 兼容提供者不一定接受这些扩展字段。
+        if !self.config.supports_prompt_cache_key {
+            return;
+        }
+
+        body["prompt_cache_key"] = serde_json::json!(self.prompt_cache_key(messages, tools));
+        if let Some(retention) = self.config.prompt_cache_retention {
+            body["prompt_cache_retention"] = serde_json::json!(retention.as_wire_value());
+        }
+    }
+
+    fn prompt_cache_key(&self, messages: &[LlmMessage], tools: &[ToolDefinition]) -> String {
+        // 缓存键只包含稳定前缀相关内容：模型、系统提示词、工具结构。
+        // 用户消息和历史上下文不参与，避免每轮对话都打散同一个静态前缀缓存。
+        let system_text = system_text(messages);
+        let tools_json = match self.api_mode {
+            OpenAiApiMode::ChatCompletions => tools_to_json(tools),
+            OpenAiApiMode::Responses => responses_tools_json(tools),
+        };
+        let tools_text = serde_json::to_string(&tools_json).unwrap_or_default();
+        format!(
+            "astrcode-{}",
+            stable_hash_hex(&[
+                self.model_id.as_str(),
+                system_text.as_str(),
+                tools_text.as_str()
+            ])
+        )
+    }
+}
+
+fn system_text(messages: &[LlmMessage]) -> String {
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, LlmRole::System))
+        .flat_map(|m| m.content.iter())
+        .filter_map(|c| match c {
+            LlmContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn stable_hash_hex(parts: &[&str]) -> String {
+    // FNV-1a：不引入额外依赖，只需要跨进程稳定，不需要密码学安全。
+    let mut hash = 0xcbf29ce484222325u64;
+    for part in parts {
+        for byte in part.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+// ─── 工具序列化 ────────────────────────────────────────────────────────
+
+fn tools_to_json(tools: &[ToolDefinition]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tools
             .iter()
             .map(|t| {
                 serde_json::json!({
@@ -117,44 +229,13 @@ impl OpenAiProvider {
                     }
                 })
             })
-            .collect();
+            .collect(),
+    )
+}
 
-        serde_json::json!({
-            "model": self.model_id,
-            "messages": messages_json,
-            "tools": tools_json,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-        })
-    }
-
-    /// 构建 Responses API 的请求体。
-    ///
-    /// 将消息拆分为 `instructions`（system prompt）和 `input`（非 system 消息），
-    /// 工具定义使用 Responses API 的扁平格式。
-    fn build_responses_request_body(
-        &self,
-        messages: &[LlmMessage],
-        tools: &[ToolDefinition],
-    ) -> serde_json::Value {
-        // 提取所有 system 消息的文本内容作为 instructions
-        let instructions = messages
-            .iter()
-            .filter(|message| matches!(message.role, LlmRole::System))
-            .flat_map(|message| message.content.iter())
-            .filter_map(|content| match content {
-                LlmContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        // 非 system 消息作为 input
-        let input: Vec<serde_json::Value> = messages
-            .iter()
-            .filter(|message| !matches!(message.role, LlmRole::System))
-            .flat_map(responses_input_items)
-            .collect();
-        let tools_json: Vec<serde_json::Value> = tools
+fn responses_tools_json(tools: &[ToolDefinition]) -> serde_json::Value {
+    serde_json::Value::Array(
+        tools
             .iter()
             .map(|t| {
                 serde_json::json!({
@@ -165,44 +246,26 @@ impl OpenAiProvider {
                     "strict": false,
                 })
             })
-            .collect();
-
-        serde_json::json!({
-            "model": self.model_id,
-            "instructions": instructions,
-            "input": input,
-            "tools": tools_json,
-            "stream": true,
-        })
-    }
+            .collect(),
+    )
 }
 
-/// 将 LLM 消息转换为 Chat Completions API 格式的 JSON。
-///
-/// 处理三种情况：
-/// - Tool 角色：提取 tool_call_id 和内容
-/// - Assistant 且包含 ToolCall：序列化 tool_calls 数组
-/// - 其他（System/User/Assistant 纯文本）：标准角色 + 内容格式
+// ─── 消息序列化 ────────────────────────────────────────────────────────
+
 fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
     match message.role {
         LlmRole::Tool => {
+            // Chat Completions 要求工具结果作为独立消息发送，
+            // 并通过原始 tool_call_id 关联到上一条 assistant 工具调用。
             let Some(LlmContent::ToolResult {
                 tool_call_id,
                 content,
                 ..
             }) = message.content.first()
             else {
-                return serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": "",
-                    "content": ""
-                });
+                return serde_json::json!({"role": "tool", "tool_call_id": "", "content": ""});
             };
-            serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": content
-            })
+            serde_json::json!({"role": "tool", "tool_call_id": tool_call_id, "content": content})
         },
         LlmRole::Assistant
             if message
@@ -210,7 +273,8 @@ fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. })) =>
         {
-            // Assistant 消息包含工具调用时，序列化为 tool_calls 数组格式
+            // assistant 的工具调用要和文本内容分开序列化。
+            // 后续 agent 追加工具结果时，会用同一组 call_id / arguments 还原关联。
             let tool_calls: Vec<serde_json::Value> = message
                 .content
                 .iter()
@@ -230,40 +294,44 @@ fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                     _ => None,
                 })
                 .collect();
+            // 有 tool_calls 时 content 设为空字符串而不是 null，
+            // DeepSeek 等不认 null content 的 assistant 消息
             serde_json::json!({
                 "role": "assistant",
-                "content": serde_json::Value::Null,
+                "content": "",
                 "tool_calls": tool_calls
             })
         },
         _ => {
-            serde_json::json!({
-                "role": match message.role {
-                    LlmRole::System => "system",
-                    LlmRole::User => "user",
-                    LlmRole::Assistant => "assistant",
-                    LlmRole::Tool => "tool",
-                },
+            let role = match message.role {
+                LlmRole::System => "system",
+                LlmRole::User => "user",
+                LlmRole::Assistant => "assistant",
+                LlmRole::Tool => "tool",
+            };
+            let mut obj = serde_json::json!({
+                "role": role,
                 "content": chat_content_to_json(&message.content),
-                "name": message.name,
-            })
+            });
+            // name 只对 tool 消息有意义，其他角色不发送
+            if matches!(message.role, LlmRole::Tool) {
+                if let Some(ref name) = message.name {
+                    obj["name"] = serde_json::json!(name);
+                }
+            }
+            obj
         },
     }
 }
 
-/// 将 LLM 内容列表转换为 Chat Completions API 的 content 字段格式。
-///
-/// 如果内容中包含图片，则使用多部分数组格式（text + image_url）；
-/// 否则合并为纯文本字符串。
 fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
     let has_image = content
         .iter()
-        .any(|part| matches!(part, LlmContent::Image { .. }));
+        .any(|p| matches!(p, LlmContent::Image { .. }));
     if !has_image {
-        // 纯文本内容：合并为单个字符串
         let text = content
             .iter()
-            .filter_map(|part| match part {
+            .filter_map(|p| match p {
                 LlmContent::Text { text } => Some(text.as_str()),
                 _ => None,
             })
@@ -271,12 +339,10 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
             .join("");
         return serde_json::json!(text);
     }
-
-    // 包含图片时使用多部分内容数组格式
     serde_json::Value::Array(
         content
             .iter()
-            .filter_map(|part| match part {
+            .filter_map(|p| match p {
                 LlmContent::Text { text } => {
                     Some(serde_json::json!({"type": "text", "text": text}))
                 },
@@ -290,12 +356,8 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
     )
 }
 
-/// 将 LLM 消息转换为 Responses API 的 input item 格式。
-///
-/// Responses API 使用不同的消息结构：
-/// - User → `{role: "user", content: [...]}`
-/// - Assistant → 分离为 assistant 消息 + function_call 项
-/// - Tool → `function_call_output` 项
+// ─── Responses 输入项 ─────────────────────────────────────────────────
+
 fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
     match message.role {
         LlmRole::User => vec![serde_json::json!({
@@ -303,19 +365,13 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
             "content": responses_message_content(&message.content, true)
         })],
         LlmRole::Assistant => {
+            // Responses 把 assistant 文本和 function_call 表示为同级输入项，
+            // 不能像 Chat Completions 那样塞进一个 assistant 消息的 tool_calls 字段。
             let mut items = Vec::new();
-            // 先添加文本内容部分
             let text_content = responses_message_content(&message.content, false);
-            if text_content
-                .as_array()
-                .is_some_and(|content| !content.is_empty())
-            {
-                items.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": text_content
-                }));
+            if text_content.as_array().is_some_and(|c| !c.is_empty()) {
+                items.push(serde_json::json!({"role": "assistant", "content": text_content}));
             }
-            // 再添加工具调用部分
             for content in &message.content {
                 if let LlmContent::ToolCall {
                     call_id,
@@ -336,16 +392,20 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
         LlmRole::Tool => message
             .content
             .iter()
-            .filter_map(|content| match content {
+            .filter_map(|c| match c {
                 LlmContent::ToolResult {
                     tool_call_id,
                     content,
                     ..
-                } => Some(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": tool_call_id,
-                    "output": content
-                })),
+                } => {
+                    // function_call_output 通过 call_id 续接前面的 function_call，
+                    // 因此这里必须保持扁平输入项，不能再包一层 role 消息。
+                    Some(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": content
+                    }))
+                },
                 _ => None,
             })
             .collect(),
@@ -353,15 +413,11 @@ fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
     }
 }
 
-/// 将 LLM 内容列表转换为 Responses API 的 content 格式。
-///
-/// Responses API 使用 `input_text`/`output_text`/`input_image` 类型标识，
-/// 通过 `input` 参数区分是用户输入还是助手输出。
 fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json::Value {
     serde_json::Value::Array(
         content
             .iter()
-            .filter_map(|part| match part {
+            .filter_map(|p| match p {
                 LlmContent::Text { text } => {
                     let kind = if input { "input_text" } else { "output_text" };
                     Some(serde_json::json!({"type": kind, "text": text}))
@@ -376,88 +432,27 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
     )
 }
 
+// ─── LlmProvider 实现 ─────────────────────────────────────────────────
+
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
-    /// 发送消息到 LLM 并返回流式事件接收器。
-    ///
-    /// 自动检测 system prompt 和 tool schema 的缓存状态，在缓存命中时
-    /// 注入 `cache_control` 断点以复用已缓存的 prompt 前缀，降低成本和延迟。
-    ///
-    /// # 参数
-    /// - `messages`: 对话消息列表
-    /// - `tools`: 可用工具定义列表
-    ///
-    /// # 返回
-    /// 流式事件的 `UnboundedReceiver`，调用者通过它接收 `LlmEvent`。
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
-
-        // 检测 system prompt 和 tool schema 是否与上次请求相同，
-        // 相同则标记 cache_control 断点让 API 提供商复用已缓存的 prompt，降低成本和延迟
-        let system_cache_hit = {
-            let system_text: String = messages
-                .iter()
-                .filter(|m| matches!(m.role, LlmRole::System))
-                .flat_map(|m| m.content.iter())
-                .filter_map(|c| match c {
-                    LlmContent::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let mut tracker = self.cache_tracker.lock().unwrap_or_else(|e| e.into_inner());
-            tracker.check_system_cache(&system_text)
-        };
-        let tools_cache_hit = {
-            let tools_json = serde_json::to_string(&tools).unwrap_or_default();
-            let mut tracker = self.cache_tracker.lock().unwrap_or_else(|e| e.into_inner());
-            tracker.check_tool_cache(&tools_json)
-        };
-
-        let mut body = self.build_request_body(&messages, &tools);
-
-        // 缓存命中时在 system message 末尾和 tools 列表末尾插入 ephemeral 断点，
-        // 指示 API 提供商这些前缀可以复用已缓存的 prompt 前缀
-        if matches!(system_cache_hit, crate::cache::CacheStatus::Hit) {
-            if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                // 在最后一个 system message 的 content 后追加 cache_control
-                for msg in msgs.iter_mut().rev() {
-                    let role = msg.get("role").and_then(|r| r.as_str());
-                    if role == Some("system") {
-                        if let Some(content) = msg.get_mut("content") {
-                            *content = serde_json::json!([
-                                { "type": "text", "text": content },
-                                { "type": "text", "text": "", "cache_control": { "type": "ephemeral" } }
-                            ]);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        if matches!(tools_cache_hit, crate::cache::CacheStatus::Hit) {
-            if let Some(tools_arr) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
-                if let Some(last_tool) = tools_arr.last_mut() {
-                    last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
-                }
-            }
-        }
+        let body = self.build_request_body(&messages, &tools);
 
         let endpoint = self.endpoint();
         let api_key = self.config.api_key.clone();
         let client = self.client.clone();
         let api_mode = self.api_mode;
-        // 从配置读取重试参数，而非硬编码 default 值
         let retry = RetryPolicy {
             max_retries: self.config.max_retries,
             base_delay_ms: self.config.retry_base_delay_ms,
         };
 
-        // 在后台任务中执行流式请求，避免阻塞调用者
         tokio::spawn(async move {
             let result =
                 Self::stream_request(client, endpoint, api_key, body, api_mode, retry, tx.clone())
@@ -472,26 +467,14 @@ impl LlmProvider for OpenAiProvider {
         Ok(rx)
     }
 
-    /// 返回当前模型的令牌限制。
     fn model_limits(&self) -> ModelLimits {
         self.model_limits_val.clone()
     }
 }
 
+// ─── HTTP 流与 SSE 解析 ────────────────────────────────────────────────
+
 impl OpenAiProvider {
-    /// 带重试的流式 HTTP 请求。
-    ///
-    /// 向 LLM API 发送 POST 请求，在遇到可重试错误时按指数退避策略重试。
-    /// 成功响应后交给 `parse_stream` 解析 SSE 事件流。
-    ///
-    /// # 参数
-    /// - `client`: HTTP 客户端
-    /// - `endpoint`: API 端点 URL
-    /// - `api_key`: API 密钥
-    /// - `body`: 请求体 JSON
-    /// - `api_mode`: API 模式
-    /// - `retry`: 重试策略
-    /// - `tx`: 事件发送通道
     async fn stream_request(
         client: reqwest::Client,
         endpoint: String,
@@ -518,7 +501,6 @@ impl OpenAiProvider {
                 return Self::parse_stream(response, api_mode, &tx).await;
             }
 
-            // 判断是否应该重试
             if retry.should_retry(attempt, status.as_u16()) {
                 let delay = retry.delay(attempt);
                 tracing::warn!(
@@ -532,7 +514,6 @@ impl OpenAiProvider {
                 continue;
             }
 
-            // 不可重试的错误，直接返回
             let text = response.text().await.unwrap_or_default();
             if status.as_u16() >= 500 {
                 return Err(LlmError::ServerError {
@@ -547,12 +528,6 @@ impl OpenAiProvider {
         }
     }
 
-    /// 解析 SSE 流式响应。
-    ///
-    /// 从 HTTP 响应中逐块读取字节，经过 UTF-8 解码后按行解析 SSE 事件，
-    /// 使用 `LlmAccumulator` 将增量数据累积为完整的 `LlmEvent` 发送给调用者。
-    ///
-    /// 如果流结束时未收到显式的完成标记，会自动发送 `Done` 事件。
     async fn parse_stream(
         response: reqwest::Response,
         api_mode: OpenAiApiMode,
@@ -561,6 +536,7 @@ impl OpenAiProvider {
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
         let mut decoder = Utf8StreamDecoder::new();
+        // 解析器对外只发标准化 LlmEvent；不同 API 的流式细节都收敛在累积器内。
         let mut accumulator = LlmAccumulator::new();
 
         while let Some(chunk) = stream.next().await {
@@ -573,12 +549,14 @@ impl OpenAiProvider {
                         if line.is_empty() || !line.starts_with("data: ") {
                             continue;
                         }
-                        let data = &line[6..]; // 去掉 "data: " 前缀
+                        let data = &line[6..];
                         if data == "[DONE]" {
-                            accumulator.done_sent = true;
-                            let _ = tx.send(LlmEvent::Done {
-                                finish_reason: "stop".into(),
-                            });
+                            if !accumulator.done_sent() {
+                                accumulator.done_sent = true;
+                                let _ = tx.send(LlmEvent::Done {
+                                    finish_reason: "stop".into(),
+                                });
+                            }
                             return Ok(());
                         }
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
@@ -601,7 +579,7 @@ impl OpenAiProvider {
                                 accumulator.ingest_responses(&event, tx);
                             } else {
                                 tracing::warn!(
-                                    "Failed to parse Responses SSE data as JSON: {} bytes",
+                                    "Failed to parse Responses SSE data: {} bytes",
                                     data.len()
                                 );
                             }
@@ -610,7 +588,6 @@ impl OpenAiProvider {
                 },
             }
         }
-        // 如果流结束但未收到显式的完成标记，自动发送 Done 事件
         if !accumulator.done_sent() {
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
@@ -620,27 +597,261 @@ impl OpenAiProvider {
     }
 }
 
-/// 流式 UTF-8 解码器，处理跨块的多字节字符边界分割。
-///
-/// SSE 流的数据块可能在 UTF-8 多字节字符的中间被截断，
-/// 此解码器将不完整的尾部字节暂存到缓冲区，等待下一个块到达后继续解码。
+// ─── SSE 累积器 ───────────────────────────────────────────────────────
+
+pub struct LlmAccumulator {
+    text: String,
+    // Chat Completions 在真正 id 到达前，只能先用数组下标追踪进行中的工具调用。
+    tool_calls: BTreeMap<u64, ToolCallPartial>,
+    // Responses 先流出 function_call 输出项，再用 item_id 继续发送参数增量。
+    response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
+    done_sent: bool,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallPartial {
+    id: Option<String>,
+    name: Option<String>,
+    started: bool,
+}
+
+#[derive(Debug, Default)]
+struct ResponseToolCallPartial {
+    call_id: Option<String>,
+    name: Option<String>,
+    started: bool,
+    arguments_delta_seen: bool,
+}
+
+impl LlmAccumulator {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+            tool_calls: BTreeMap::new(),
+            response_tool_items: BTreeMap::new(),
+            done_sent: false,
+        }
+    }
+
+    pub fn done_sent(&self) -> bool {
+        self.done_sent
+    }
+
+    pub fn ingest_chat_completion(
+        &mut self,
+        event: &serde_json::Value,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+    ) {
+        trace_prompt_cache_usage(event);
+        if let Some(choices) = event["choices"].as_array() {
+            for choice in choices {
+                if let Some(delta) = choice.get("delta") {
+                    if let Some(content) = delta["content"].as_str() {
+                        self.text.push_str(content);
+                        let _ = tx.send(LlmEvent::ContentDelta {
+                            delta: content.to_string(),
+                        });
+                    }
+                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
+                        for tc in tool_calls {
+                            let idx = tc["index"].as_u64().unwrap_or(0);
+                            let partial = self.tool_calls.entry(idx).or_default();
+                            if let Some(id) = tc["id"].as_str() {
+                                partial.id = Some(id.to_string());
+                            }
+                            if let Some(func) = tc.get("function") {
+                                if let Some(name) = func["name"].as_str() {
+                                    partial.name = Some(name.to_string());
+                                }
+                                // 只有拿到工具名后才发 ToolCallStart；
+                                // 某些兼容 API 会晚一点才给出真正的 call id。
+                                if !partial.started {
+                                    if let Some(name) = &partial.name {
+                                        let call_id =
+                                            partial.id.clone().unwrap_or_else(|| idx.to_string());
+                                        partial.started = true;
+                                        let _ = tx.send(LlmEvent::ToolCallStart {
+                                            call_id,
+                                            name: name.clone(),
+                                            arguments: String::new(),
+                                        });
+                                    }
+                                }
+                                if let Some(args) = func["arguments"].as_str() {
+                                    let call_id =
+                                        partial.id.clone().unwrap_or_else(|| idx.to_string());
+                                    let _ = tx.send(LlmEvent::ToolCallDelta {
+                                        call_id,
+                                        delta: args.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(finish) = choice["finish_reason"].as_str() {
+                    if !self.done_sent {
+                        self.done_sent = true;
+                        let _ = tx.send(LlmEvent::Done {
+                            finish_reason: finish.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn ingest_responses(
+        &mut self,
+        event: &serde_json::Value,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+    ) {
+        trace_prompt_cache_usage(event);
+        let Some(event_type) = event["event"].as_str() else {
+            return;
+        };
+        match event_type {
+            "response.output_text.delta" => {
+                if let Some(delta) = event["delta"].as_str() {
+                    let _ = tx.send(LlmEvent::ContentDelta {
+                        delta: delta.to_string(),
+                    });
+                }
+            },
+            "response.output_item.added" => {
+                let Some(item) = event["item"].as_object() else {
+                    return;
+                };
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+                    return;
+                }
+                let item_id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| event["item_id"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&item_id)
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let partial = self.response_tool_items.entry(item_id).or_default();
+                partial.call_id = Some(call_id.clone());
+                partial.name = Some(name.clone());
+                partial.started = true;
+                let _ = tx.send(LlmEvent::ToolCallStart {
+                    call_id,
+                    name,
+                    arguments: String::new(),
+                });
+            },
+            "response.function_call_arguments.delta" => {
+                let item_id = event["item_id"].as_str().unwrap_or_default();
+                let call_id = self
+                    .response_tool_items
+                    .get(item_id)
+                    .and_then(|p| p.call_id.clone())
+                    .unwrap_or_else(|| item_id.to_string());
+                if let Some(delta) = event["delta"].as_str() {
+                    self.response_tool_items
+                        .entry(item_id.to_string())
+                        .or_default()
+                        .arguments_delta_seen = true;
+                    let _ = tx.send(LlmEvent::ToolCallDelta {
+                        call_id,
+                        delta: delta.to_string(),
+                    });
+                }
+            },
+            "response.function_call_arguments.done" => {
+                let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
+                let partial = self.response_tool_items.entry(item_id.clone()).or_default();
+                if let Some(name) = event["name"].as_str() {
+                    partial.name = Some(name.to_string());
+                }
+                let call_id = partial.call_id.clone().unwrap_or(item_id);
+                // 有些 Responses 流会跳过前置 output_item.added，
+                // 直接给最终 arguments；此时补发一次 ToolCallStart。
+                if !partial.started {
+                    partial.started = true;
+                    let _ = tx.send(LlmEvent::ToolCallStart {
+                        call_id: call_id.clone(),
+                        name: partial.name.clone().unwrap_or_default(),
+                        arguments: String::new(),
+                    });
+                }
+                if !partial.arguments_delta_seen {
+                    if let Some(arguments) = event["arguments"].as_str() {
+                        let _ = tx.send(LlmEvent::ToolCallDelta {
+                            call_id,
+                            delta: arguments.to_string(),
+                        });
+                    }
+                }
+            },
+            "response.completed" if !self.done_sent => {
+                self.done_sent = true;
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                });
+            },
+            _ => {},
+        }
+    }
+}
+
+fn trace_prompt_cache_usage(event: &serde_json::Value) {
+    // 用量统计在不同 API 下位置和字段名不同；这里只做尽力记录，
+    // 不把 provider 特有字段提升成公开事件。
+    let usage = event
+        .get("usage")
+        .or_else(|| event.pointer("/response/usage"));
+    let Some(usage) = usage else {
+        return;
+    };
+
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|v| v.as_u64());
+    let cached_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
+        .and_then(|v| v.as_u64());
+
+    if prompt_tokens.is_some() || cached_tokens.is_some() {
+        tracing::debug!(
+            ?prompt_tokens,
+            ?cached_tokens,
+            "LLM prompt cache usage reported"
+        );
+    }
+}
+
+impl Default for LlmAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─── UTF-8 解码器 ─────────────────────────────────────────────────────
+
 pub struct Utf8StreamDecoder {
-    /// 暂存不完整的尾部字节
     buffer: Vec<u8>,
 }
 
 impl Utf8StreamDecoder {
-    /// 创建新的 UTF-8 流解码器。
     pub fn new() -> Self {
         Self { buffer: Vec::new() }
     }
 
-    /// 解码一个字节块，返回已完成的 UTF-8 字符串。
-    ///
-    /// 将新字节追加到内部缓冲区后尝试整体解码为 UTF-8：
-    /// - 成功：清空缓冲区并返回完整字符串
-    /// - 部分成功：返回已有效的部分，保留剩余字节等待下次解码
-    /// - 完全无效：当缓冲区超过 4096 字节时丢弃，防止无限增长
+    /// 解码分块字节流，避免把多字节 UTF-8 字符切坏。
     pub fn decode(&mut self, bytes: &[u8]) -> String {
         self.buffer.extend_from_slice(bytes);
         match std::str::from_utf8(&self.buffer) {
@@ -652,14 +863,12 @@ impl Utf8StreamDecoder {
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
                 if valid_up_to > 0 {
-                    // 部分有效：返回已解码的前缀，保留剩余字节
                     let result = std::str::from_utf8(&self.buffer[..valid_up_to])
                         .unwrap()
                         .to_string();
                     self.buffer = self.buffer[valid_up_to..].to_vec();
                     result
                 } else {
-                    // 所有字节都是无效 UTF-8 — 丢弃以防止缓冲区无限增长
                     if self.buffer.len() > 4096 {
                         tracing::warn!(
                             "Discarding {} bytes of invalid UTF-8 in SSE stream",
@@ -680,243 +889,209 @@ impl Default for Utf8StreamDecoder {
     }
 }
 
-/// SSE 增量数据累积器，将流式增量合并为连贯的输出。
-///
-/// 维护文本内容、工具调用的中间状态，在收到完整的增量数据后
-/// 通过事件通道发送 `LlmEvent` 给调用者。
-pub struct LlmAccumulator {
-    /// 累积的文本内容
-    text: String,
-    /// Chat Completions 模式下的工具调用中间状态（按索引组织）
-    tool_calls: BTreeMap<u64, ToolCallPartial>,
-    /// Responses 模式下的工具调用中间状态（按 item_id 组织）
-    response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
-    /// 是否已发送 Done 事件
-    done_sent: bool,
-}
+#[cfg(test)]
+mod tests {
+    use astrcode_core::tool::ToolOrigin;
 
-/// Chat Completions 模式下工具调用的中间状态。
-///
-/// 由于工具调用的 id、name 和 arguments 可能分多个 delta 到达，
-/// 需要暂存已收到的部分信息。
-#[derive(Debug, Default)]
-struct ToolCallPartial {
-    /// 工具调用的唯一标识
-    id: Option<String>,
-    /// 工具名称
-    name: Option<String>,
-    /// 是否已发送 ToolCallStart 事件
-    started: bool,
-}
+    use super::*;
 
-/// Responses 模式下工具调用的中间状态。
-#[derive(Debug, Default)]
-struct ResponseToolCallPartial {
-    /// 工具调用的唯一标识
-    call_id: Option<String>,
-    /// 工具名称
-    name: Option<String>,
-    /// 是否已发送 ToolCallStart 事件
-    started: bool,
-}
+    fn drain_events(rx: &mut mpsc::UnboundedReceiver<LlmEvent>) -> Vec<LlmEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 
-impl LlmAccumulator {
-    /// 创建新的累积器。
-    pub fn new() -> Self {
-        Self {
-            text: String::new(),
-            tool_calls: BTreeMap::new(),
-            response_tool_items: BTreeMap::new(),
-            done_sent: false,
+    fn provider(api_mode: OpenAiApiMode, supports_cache_key: bool) -> OpenAiProvider {
+        let config = LlmClientConfig {
+            base_url: "https://api.test/v1".into(),
+            api_key: "sk-test".into(),
+            supports_prompt_cache_key: supports_cache_key,
+            prompt_cache_retention: if supports_cache_key {
+                Some(PromptCacheRetention::TwentyFourHours)
+            } else {
+                None
+            },
+            ..LlmClientConfig::default()
+        };
+        OpenAiProvider::new(config, api_mode, "gpt-test".into(), Some(1024), Some(8192))
+    }
+
+    fn sample_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "readFile".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+            origin: ToolOrigin::Builtin,
         }
     }
 
-    /// 是否已为此流发送过 Done 事件。
-    pub fn done_sent(&self) -> bool {
-        self.done_sent
+    #[test]
+    fn chat_request_includes_prompt_cache_key_when_supported() {
+        let provider = provider(OpenAiApiMode::ChatCompletions, true);
+        let messages = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("hello"),
+        ];
+        let tools = vec![sample_tool()];
+
+        let body = provider.build_request_body(&messages, &tools);
+
+        assert!(
+            body["prompt_cache_key"]
+                .as_str()
+                .is_some_and(|key| key.starts_with("astrcode-"))
+        );
+        assert_eq!(body["prompt_cache_retention"], "24h");
     }
 
-    /// 处理 Chat Completions API 的 SSE 事件。
-    ///
-    /// 解析 `choices` 数组中的 `delta`，提取文本增量和工具调用增量，
-    /// 并在适当时机发送 `ContentDelta`、`ToolCallStart`、`ToolCallDelta` 和 `Done` 事件。
-    pub fn ingest_chat_completion(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        if let Some(choices) = event["choices"].as_array() {
-            for choice in choices {
-                if let Some(delta) = choice.get("delta") {
-                    // 文本内容增量
-                    if let Some(content) = delta["content"].as_str() {
-                        self.text.push_str(content);
-                        let _ = tx.send(LlmEvent::ContentDelta {
-                            delta: content.to_string(),
-                        });
-                    }
-                    // 工具调用增量
-                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
-                        for tc in tool_calls {
-                            let idx = tc["index"].as_u64().unwrap_or(0);
-                            let partial = self.tool_calls.entry(idx).or_default();
-                            // 收到工具调用 ID
-                            if let Some(id) = tc["id"].as_str() {
-                                partial.id = Some(id.to_string());
-                            }
-                            if let Some(func) = tc.get("function") {
-                                // 收到工具名称
-                                if let Some(name) = func["name"].as_str() {
-                                    partial.name = Some(name.to_string());
-                                }
-                                // Chat Completions 的后续 tool result 必须使用真实 call id；
-                                // 若提供商没有给 id，则退回 index，保证同一轮内仍可串起来。
-                                if !partial.started {
-                                    if let Some(name) = &partial.name {
-                                        let call_id =
-                                            partial.id.clone().unwrap_or_else(|| idx.to_string());
-                                        partial.started = true;
-                                        let _ = tx.send(LlmEvent::ToolCallStart {
-                                            call_id,
-                                            name: name.clone(),
-                                            arguments: String::new(),
-                                        });
-                                    }
-                                }
-                                // 收到参数增量
-                                if let Some(args) = func["arguments"].as_str() {
-                                    let call_id =
-                                        partial.id.clone().unwrap_or_else(|| idx.to_string());
-                                    let _ = tx.send(LlmEvent::ToolCallDelta {
-                                        call_id,
-                                        delta: args.to_string(),
-                                    });
-                                }
-                            }
-                        }
-                    }
+    #[test]
+    fn responses_request_includes_prompt_cache_key_when_supported() {
+        let provider = provider(OpenAiApiMode::Responses, true);
+        let messages = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("hello"),
+        ];
+
+        let body = provider.build_request_body(&messages, &[sample_tool()]);
+
+        assert!(body["prompt_cache_key"].as_str().is_some());
+        assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn request_omits_prompt_cache_fields_when_unsupported() {
+        let provider = provider(OpenAiApiMode::ChatCompletions, false);
+        let messages = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("hello"),
+        ];
+
+        let body = provider.build_request_body(&messages, &[]);
+
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn prompt_cache_key_ignores_non_system_messages() {
+        let provider = provider(OpenAiApiMode::Responses, true);
+        let tools = vec![sample_tool()];
+        let first = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("hello"),
+        ];
+        let second = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("different user prompt"),
+            LlmMessage::assistant("different assistant history"),
+        ];
+
+        let first_body = provider.build_request_body(&first, &tools);
+        let second_body = provider.build_request_body(&second, &tools);
+
+        assert_eq!(
+            first_body["prompt_cache_key"],
+            second_body["prompt_cache_key"]
+        );
+    }
+
+    #[test]
+    fn responses_done_arguments_are_not_replayed_after_deltas() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut accumulator = LlmAccumulator::new();
+
+        accumulator.ingest_responses(
+            &serde_json::json!({
+                "event": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "item_1",
+                    "call_id": "call_1",
+                    "name": "readFile"
                 }
-                // 收到完成原因
-                if let Some(finish) = choice["finish_reason"].as_str() {
-                    if !self.done_sent {
-                        self.done_sent = true;
-                        let _ = tx.send(LlmEvent::Done {
-                            finish_reason: finish.to_string(),
-                        });
-                    }
-                }
-            }
-        }
+            }),
+            &tx,
+        );
+        accumulator.ingest_responses(
+            &serde_json::json!({
+                "event": "response.function_call_arguments.delta",
+                "item_id": "item_1",
+                "delta": "{\"path\""
+            }),
+            &tx,
+        );
+        accumulator.ingest_responses(
+            &serde_json::json!({
+                "event": "response.function_call_arguments.done",
+                "item_id": "item_1",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            }),
+            &tx,
+        );
+
+        let deltas: Vec<String> = drain_events(&mut rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                LlmEvent::ToolCallDelta { delta, .. } => Some(delta),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(deltas, vec!["{\"path\""]);
     }
 
-    /// 处理 Responses API 的 SSE 事件。
-    ///
-    /// 解析 Responses API 特有的事件类型（如 `response.output_text.delta`、
-    /// `response.output_item.added` 等），提取文本增量和工具调用信息。
-    pub fn ingest_responses(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        if let Some(event_type) = event["event"].as_str() {
-            match event_type {
-                // 文本增量输出
-                "response.output_text.delta" => {
-                    if let Some(delta) = event["delta"].as_str() {
-                        let _ = tx.send(LlmEvent::ContentDelta {
-                            delta: delta.to_string(),
-                        });
-                    }
-                },
-                // 新的输出项添加（可能是工具调用）
-                "response.output_item.added" => {
-                    let Some(item) = event["item"].as_object() else {
-                        return;
-                    };
-                    // 仅处理 function_call 类型的输出项
-                    if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
-                        return;
-                    }
-                    let item_id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| event["item_id"].as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&item_id)
-                        .to_string();
-                    let name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    // 记录工具调用的中间状态
-                    let partial = self.response_tool_items.entry(item_id).or_default();
-                    partial.call_id = Some(call_id.clone());
-                    partial.name = Some(name.clone());
-                    partial.started = true;
-                    let _ = tx.send(LlmEvent::ToolCallStart {
-                        call_id,
-                        name,
-                        arguments: String::new(),
-                    });
-                },
-                // 工具调用参数增量
-                "response.function_call_arguments.delta" => {
-                    let item_id = event["item_id"].as_str().unwrap_or_default();
-                    let call_id = self
-                        .response_tool_items
-                        .get(item_id)
-                        .and_then(|partial| partial.call_id.clone())
-                        .unwrap_or_else(|| item_id.to_string());
-                    if let Some(delta) = event["delta"].as_str() {
-                        let _ = tx.send(LlmEvent::ToolCallDelta {
-                            call_id,
-                            delta: delta.to_string(),
-                        });
-                    }
-                },
-                // 工具调用参数完成
-                "response.function_call_arguments.done" => {
-                    let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
-                    let partial = self.response_tool_items.entry(item_id.clone()).or_default();
-                    if let Some(name) = event["name"].as_str() {
-                        partial.name = Some(name.to_string());
-                    }
-                    let call_id = partial.call_id.clone().unwrap_or(item_id);
-                    // 如果之前没有发送过 ToolCallStart（例如缺少 output_item.added 事件），在此补发
-                    if !partial.started {
-                        partial.started = true;
-                        let _ = tx.send(LlmEvent::ToolCallStart {
-                            call_id: call_id.clone(),
-                            name: partial.name.clone().unwrap_or_default(),
-                            arguments: String::new(),
-                        });
-                    }
-                    if let Some(arguments) = event["arguments"].as_str() {
-                        let _ = tx.send(LlmEvent::ToolCallDelta {
-                            call_id,
-                            delta: arguments.to_string(),
-                        });
-                    }
-                },
-                // 响应完成
-                "response.completed" => {
-                    let _ = tx.send(LlmEvent::Done {
-                        finish_reason: "stop".into(),
-                    });
-                },
-                _ => {},
-            }
-        }
-    }
-}
+    #[test]
+    fn responses_done_arguments_are_used_when_no_deltas_arrived() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut accumulator = LlmAccumulator::new();
 
-impl Default for LlmAccumulator {
-    fn default() -> Self {
-        Self::new()
+        accumulator.ingest_responses(
+            &serde_json::json!({
+                "event": "response.function_call_arguments.done",
+                "item_id": "item_1",
+                "name": "readFile",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            }),
+            &tx,
+        );
+
+        let events = drain_events(&mut rx);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LlmEvent::ToolCallStart { call_id, name, .. }
+                if call_id == "item_1" && name == "readFile"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LlmEvent::ToolCallDelta { call_id, delta }
+                if call_id == "item_1" && delta == "{\"path\":\"Cargo.toml\"}"
+        )));
+    }
+
+    #[test]
+    fn responses_completed_emits_done_once() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut accumulator = LlmAccumulator::new();
+        let event = serde_json::json!({"event": "response.completed"});
+
+        accumulator.ingest_responses(&event, &tx);
+        accumulator.ingest_responses(&event, &tx);
+
+        let done_count = drain_events(&mut rx)
+            .into_iter()
+            .filter(|event| matches!(event, LlmEvent::Done { .. }))
+            .count();
+
+        assert_eq!(done_count, 1);
+        assert!(accumulator.done_sent());
     }
 }

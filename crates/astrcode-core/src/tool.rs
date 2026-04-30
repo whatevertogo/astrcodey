@@ -17,6 +17,22 @@ use tokio::sync::mpsc;
 use crate::event::EventPayload;
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOrigin {
+    /// First-party core tools required by the coding runtime.
+    Builtin,
+    /// First-party tool packs shipped with the server but not fundamental to the tool trait.
+    Bundled,
+    /// Tools contributed by user or project extensions.
+    Extension,
+    /// Tools registered by a future SDK surface.
+    Sdk,
+    /// Tools adapted from future MCP integrations.
+    Mcp,
+}
+
+/// 工具定义，作为函数调用 schema 发送给 LLM。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     /// 唯一工具名称（如 "readFile"、"shell"）。
@@ -25,8 +41,8 @@ pub struct ToolDefinition {
     pub description: String,
     /// 工具参数的 JSON Schema 定义。
     pub parameters: serde_json::Value,
-    /// 是否为内置工具（`true`）或扩展注册的工具（`false`）。
-    pub is_builtin: bool,
+    /// 工具来源。来源只影响诊断、策略和优先级，不创建额外执行路径。
+    pub origin: ToolOrigin,
 }
 
 /// 工具执行结果。

@@ -37,7 +37,7 @@ impl Tool for WriteFileTool {
                           complete final content is known. Prefer editFile for narrow edits to \
                           existing files."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

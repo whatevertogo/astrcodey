@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::PromptCacheRetention;
+
 // ─── 顶层 Config ────────────────────────────────────────────────────────
 
 /// 顶层配置结构，对应配置文件的完整 JSON。
@@ -80,6 +82,8 @@ pub enum OpenAiApiMode {
 pub struct OpenAiProfileCapabilities {
     /// 是否支持 prompt cache key。
     pub supports_prompt_cache_key: Option<bool>,
+    /// 可选的 prompt cache retention。
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// 是否支持流式用量统计。
     pub supports_stream_usage: Option<bool>,
 }
@@ -110,6 +114,8 @@ pub struct RuntimeSection {
     pub llm_max_retries: Option<u32>,
     /// LLM 重试的指数退避基础延迟（毫秒）。
     pub llm_retry_base_delay_ms: Option<u64>,
+    /// LLM 采样温度（0.0-2.0）。未设置时使用 API 默认值。
+    pub llm_temperature: Option<f32>,
     // TODO: 压缩相关字段
     // TODO: 工具并发相关字段
     // TODO: Agent 限制相关字段
@@ -191,6 +197,7 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
             api_mode: Some(OpenAiApiMode::Responses),
             openai_capabilities: Some(OpenAiProfileCapabilities {
                 supports_prompt_cache_key: Some(true),
+                prompt_cache_retention: None,
                 supports_stream_usage: Some(true),
             }),
             models: vec![ModelConfig {

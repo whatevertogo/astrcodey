@@ -3,13 +3,10 @@
 //! prompt 组装走 pipeline：结构化输入 → `build_system_prompt()` 纯函数 → 完整字符串。
 //! 扩展通过 `PromptBuild` 事件追加结构化内容，不写固定 section。
 
-use std::collections::BTreeMap;
-
 /// 最终组装的提示词计划。
 #[derive(Debug, Clone)]
 pub struct PromptPlan {
     pub system_prompt: Option<String>,
-    pub extra_tools: Vec<crate::tool::ToolDefinition>,
 }
 
 impl PromptPlan {
@@ -21,7 +18,6 @@ impl PromptPlan {
             } else {
                 Some(trimmed.to_string())
             },
-            extra_tools: vec![],
         }
     }
 }
@@ -49,17 +45,6 @@ pub struct SystemPromptInput {
     pub extension_blocks: Vec<ExtensionPromptBlock>,
     /// 额外的系统指令（如子会话 prompt）。
     pub extra_instructions: Option<String>,
-    /// 可用工具摘要（名称 + 描述），用于渲染 Tools 区块。
-    pub tools: Vec<ToolSummary>,
-    /// `{{key}}` 模板变量替换表。
-    pub template_vars: BTreeMap<String, String>,
-}
-
-/// 工具的 prompt 层摘要——只含渲染 Tools section 所需的最小信息。
-#[derive(Debug, Clone)]
-pub struct ToolSummary {
-    pub name: String,
-    pub description: String,
 }
 
 /// 扩展贡献的文本块，带逻辑分类标签。
@@ -85,6 +70,5 @@ mod tests {
     fn prompt_plan_omits_blank_system_prompt() {
         let plan = PromptPlan::from_system_prompt("  ".to_string());
         assert!(plan.system_prompt.is_none());
-        assert!(plan.extra_tools.is_empty());
     }
 }

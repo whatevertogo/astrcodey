@@ -53,7 +53,7 @@ impl Tool for ShellTool {
                  exit code. Timeout: 120s.",
                 shell.name
             ),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

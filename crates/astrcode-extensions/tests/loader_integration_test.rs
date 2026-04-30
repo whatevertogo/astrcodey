@@ -38,7 +38,7 @@ async fn runtime_queues_and_flushes_tools() {
         name: "test_tool".into(),
         description: "test".into(),
         parameters: serde_json::json!({}),
-        is_builtin: false,
+        origin: astrcode_core::tool::ToolOrigin::Extension,
     };
     runtime.register_tool(def.clone());
     let tools = runtime.take_pending_tools();

@@ -120,7 +120,7 @@ impl Tool for ApplyPatchTool {
                           hunks, file creation, or deletion. Use editFile for a single exact \
                           replacement."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

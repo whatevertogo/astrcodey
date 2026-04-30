@@ -71,31 +71,19 @@ impl ExtensionLoader {
     /// 从指定目录加载所有扩展。
     ///
     /// 遍历目录中的每个子目录，查找包含 `extension.json` 清单文件的扩展。
-    async fn load_from_dir(dir: &PathBuf) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
+    async fn load_from_dir(dir: &Path) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
         let mut extensions = Vec::new();
         let mut errors = Vec::new();
 
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
+        let paths = match Self::extension_dirs(dir) {
+            Ok(paths) => paths,
             Err(e) => {
-                errors.push(format!("Cannot read extensions dir {}: {e}", dir.display()));
+                errors.push(e);
                 return (extensions, errors);
             },
         };
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // 跳过非目录项
-            if !path.is_dir() {
-                continue;
-            }
-
-            // 必须包含 extension.json 清单文件
-            let manifest_path = path.join("extension.json");
-            if !manifest_path.exists() {
-                continue;
-            }
-
+        for path in paths {
             match Self::load_extension(&path).await {
                 Ok(ext) => extensions.push(ext),
                 Err(e) => errors.push(format!("{}: {e}", path.display())),
@@ -103,6 +91,18 @@ impl ExtensionLoader {
         }
 
         (extensions, errors)
+    }
+
+    fn extension_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("Cannot read extensions dir {}: {e}", dir.display()))?;
+        let mut paths = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && path.join("extension.json").exists())
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
     }
 
     /// 加载单个扩展：读取并验证清单，然后加载原生库。
@@ -155,4 +155,37 @@ fn native_extensions_enabled() -> bool {
     std::env::var("ASTRCODE_ENABLE_NATIVE_EXTENSIONS")
         .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
         .unwrap_or(true) // 默认: 启用
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn extension_dirs_are_sorted_and_manifest_bound() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("astrcode-ext-loader-{suffix}"));
+        fs::create_dir_all(root.join("zeta")).unwrap();
+        fs::create_dir_all(root.join("alpha")).unwrap();
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        fs::write(root.join("zeta").join("extension.json"), "{}").unwrap();
+        fs::write(root.join("alpha").join("extension.json"), "{}").unwrap();
+
+        let dirs = ExtensionLoader::extension_dirs(&root).unwrap();
+        let names = dirs
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+    }
 }

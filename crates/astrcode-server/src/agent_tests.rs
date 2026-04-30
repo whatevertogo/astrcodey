@@ -12,7 +12,10 @@ use std::{
 use astrcode_core::{
     extension::{Extension, ExtensionContext, ExtensionError, HookEffect, HookMode},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
-    tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
+    tool::{
+        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
+        ToolResult,
+    },
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::{
@@ -112,7 +115,7 @@ impl Tool for PanicIfExecutedTool {
             name: "shell".into(),
             description: "test shell".into(),
             parameters: serde_json::json!({"type": "object"}),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
         }
     }
 
@@ -300,7 +303,7 @@ fn test_tool_definition(name: &str) -> ToolDefinition {
         name: name.into(),
         description: format!("test tool {name}"),
         parameters: serde_json::json!({"type": "object"}),
-        is_builtin: true,
+        origin: ToolOrigin::Builtin,
     }
 }
 

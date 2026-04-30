@@ -58,6 +58,7 @@ impl Config {
 
         // 默认使用 ChatCompletions 模式
         let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
+        let openai_capabilities = profile.openai_capabilities.as_ref();
 
         let llm = LlmSettings {
             provider_kind: profile.provider_kind.clone(),
@@ -85,6 +86,11 @@ impl Config {
                 .runtime
                 .llm_retry_base_delay_ms
                 .unwrap_or(super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
+            temperature: self.runtime.llm_temperature,
+            supports_prompt_cache_key: openai_capabilities
+                .and_then(|c| c.supports_prompt_cache_key)
+                .unwrap_or(false),
+            prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
         };
 
         Ok(EffectiveConfig { llm })
@@ -185,5 +191,34 @@ mod tests {
         let config = Config::default();
         let effective = config.into_effective().unwrap();
         assert_eq!(effective.llm.model_id, "deepseek-chat");
+    }
+
+    #[test]
+    fn test_runtime_temperature_is_resolved() {
+        let mut config = Config::default();
+        config.runtime.llm_temperature = Some(0.2);
+
+        let effective = config.into_effective().unwrap();
+
+        assert_eq!(effective.llm.temperature, Some(0.2));
+    }
+
+    #[test]
+    fn test_openai_prompt_cache_capabilities_are_resolved() {
+        let mut config = Config::default();
+        config.active_profile = "openai".into();
+        config.active_model = "gpt-4.1".into();
+        let previous = std::env::var("OPENAI_API_KEY").ok();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+        let effective = config.into_effective().unwrap();
+
+        assert!(effective.llm.supports_prompt_cache_key);
+        assert_eq!(effective.llm.prompt_cache_retention, None);
+        if let Some(value) = previous {
+            std::env::set_var("OPENAI_API_KEY", value);
+        } else {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
     }
 }

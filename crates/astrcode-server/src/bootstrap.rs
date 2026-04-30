@@ -3,7 +3,7 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口管理。
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use astrcode_ai::openai::OpenAiProvider;
 use astrcode_context::{
@@ -21,7 +21,7 @@ use astrcode_extensions::{
 };
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::shell::resolve_shell;
-use astrcode_tools::registry::ToolRegistry;
+use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 
 use crate::{session::SessionManager, session_spawner::ServerSessionSpawner};
 
@@ -106,6 +106,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         read_timeout_secs: effective.llm.read_timeout_secs,
         max_retries: effective.llm.max_retries,
         retry_base_delay_ms: effective.llm.retry_base_delay_ms,
+        temperature: effective.llm.temperature,
+        supports_prompt_cache_key: effective.llm.supports_prompt_cache_key,
+        prompt_cache_retention: effective.llm.prompt_cache_retention,
         extra_headers: Default::default(),
     };
     let llm_provider: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(
@@ -225,12 +228,19 @@ pub(crate) async fn build_tool_registry_snapshot(
     timeout_secs: u64,
 ) -> Arc<ToolRegistry> {
     let mut tool_registry = ToolRegistry::new();
-    tool_registry.register_builtins(PathBuf::from(working_dir), timeout_secs);
 
-    let extension_tools = extension_runner.collect_tool_adapters(working_dir).await;
-    // Preserve the old precedence: extension tools override built-ins, and
-    // earlier extensions win when duplicate extension tool names exist.
-    for tool in extension_tools.into_iter().rev() {
+    for tool in builtin_tools(std::path::PathBuf::from(working_dir), timeout_secs) {
+        tool_registry.register(tool);
+    }
+
+    // Extensions override builtins, and earlier registered extensions keep
+    // precedence over later registered extensions with the same tool name.
+    for tool in extension_runner
+        .collect_tool_adapters(working_dir)
+        .await
+        .into_iter()
+        .rev()
+    {
         tool_registry.register(tool);
     }
 
@@ -289,26 +299,13 @@ pub(crate) async fn build_system_prompt_snapshot(
             content: a,
         });
     }
-    if let Some(extra) = non_empty(extra_system_prompt.unwrap_or_default()) {
-        extension_blocks.push(ExtensionPromptBlock {
-            section: ExtensionSection::PlatformInstructions,
-            content: extra,
-        });
-    }
+    let extra_instructions = non_empty(extra_system_prompt.unwrap_or_default());
 
     let identity = astrcode_prompt::pipeline::load_identity_md(
         &astrcode_prompt::pipeline::user_identity_md_path(),
     );
     let project_rules =
         astrcode_prompt::pipeline::load_project_rules(std::path::Path::new(working_dir));
-
-    let tool_summaries: Vec<_> = tools
-        .iter()
-        .map(|t| astrcode_core::prompt::ToolSummary {
-            name: t.name.clone(),
-            description: t.description.clone(),
-        })
-        .collect();
 
     let input = SystemPromptInput {
         working_dir: working_dir.to_string(),
@@ -319,9 +316,7 @@ pub(crate) async fn build_system_prompt_snapshot(
         user_rules: None,
         project_rules,
         extension_blocks,
-        extra_instructions: None,
-        tools: tool_summaries,
-        template_vars: std::collections::BTreeMap::new(),
+        extra_instructions,
     };
 
     let plan = prompt_provider.assemble(input).await;
@@ -348,23 +343,54 @@ fn prompt_fingerprint(text: &str) -> String {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use astrcode_core::prompt::{PromptPlan, SystemPromptInput};
+    use astrcode_core::{
+        extension::{Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect},
+        prompt::{PromptPlan, SystemPromptInput},
+        tool::{ToolDefinition, ToolOrigin},
+    };
 
     use super::*;
 
     struct EchoSystemPrompts;
 
+    struct StaticToolExtension {
+        id: &'static str,
+        tool_name: &'static str,
+        description: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for StaticToolExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn subscriptions(&self) -> Vec<(ExtensionEvent, astrcode_core::extension::HookMode)> {
+            Vec::new()
+        }
+
+        async fn on_event(
+            &self,
+            _event: ExtensionEvent,
+            _ctx: &dyn ExtensionContext,
+        ) -> Result<HookEffect, ExtensionError> {
+            Ok(HookEffect::Allow)
+        }
+
+        fn tools(&self) -> Vec<ToolDefinition> {
+            vec![ToolDefinition {
+                name: self.tool_name.into(),
+                description: self.description.into(),
+                parameters: serde_json::json!({"type": "object"}),
+                origin: ToolOrigin::Extension,
+            }]
+        }
+    }
+
     #[async_trait::async_trait]
     impl PromptProvider for EchoSystemPrompts {
         async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-            let content = input
-                .extension_blocks
-                .iter()
-                .filter(|b| b.section == ExtensionSection::PlatformInstructions)
-                .map(|b| b.content.as_str())
-                .next()
-                .unwrap_or_default();
-            PromptPlan::from_system_prompt(content.to_string())
+            PromptPlan::from_system_prompt(input.extra_instructions.unwrap_or_default())
         }
     }
 
@@ -389,6 +415,34 @@ mod tests {
 
         assert_eq!(system_prompt, "child body");
         assert!(!fingerprint.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_snapshot_precedence_is_explicit() {
+        let runner = ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        );
+        runner
+            .register(Arc::new(StaticToolExtension {
+                id: "first",
+                tool_name: "shell",
+                description: "first extension shell",
+            }))
+            .await;
+        runner
+            .register(Arc::new(StaticToolExtension {
+                id: "second",
+                tool_name: "shell",
+                description: "second extension shell",
+            }))
+            .await;
+
+        let registry = build_tool_registry_snapshot(&runner, ".", 1).await;
+        let shell = registry.find_definition("shell").unwrap();
+
+        assert_eq!(shell.origin, ToolOrigin::Extension);
+        assert_eq!(shell.description, "first extension shell");
     }
 }
 

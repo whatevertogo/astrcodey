@@ -5,7 +5,8 @@
 
 use astrcode_core::render::{RenderSpec, RenderTone};
 use ratatui::{
-    Frame, layout::{Constraint, Direction, Layout, Margin, Rect},
+    Frame,
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -68,9 +69,10 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
         MessageRole::System => ("•", theme.system_label),
         MessageRole::Error => ("✖", theme.error_label),
     };
-    lines.push(Line::from(vec![
-        Span::styled(format!("{} {}", role_icon, msg.label), role_style),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("{} {}", role_icon, msg.label),
+        role_style,
+    )]));
 
     // 有 RenderSpec 时使用结构化渲染，否则 fallback 到 plain_text
     if let Some(spec) = msg.body.render_spec() {
@@ -105,13 +107,22 @@ fn render_spec_to_lines(
     prefix: &str,
 ) {
     match spec {
-        RenderSpec::Text { text, tone: _ }
-        | RenderSpec::Markdown { text, tone: _ } => {
+        RenderSpec::Text { text, tone: _ } | RenderSpec::Markdown { text, tone: _ } => {
             push_wrapped_line(lines, prefix, text, theme.body, width);
         },
-        RenderSpec::Box { title, children, tone: _ } => {
+        RenderSpec::Box {
+            title,
+            children,
+            tone: _,
+        } => {
             if let Some(title) = title {
-                push_wrapped_line(lines, prefix, &format!("• {title}"), theme.assistant_label, width);
+                push_wrapped_line(
+                    lines,
+                    prefix,
+                    &format!("• {title}"),
+                    theme.assistant_label,
+                    width,
+                );
             }
             let child_prefix = format!("{prefix}  ⎿ ");
             for child in children {
@@ -142,7 +153,12 @@ fn render_spec_to_lines(
                 push_wrapped_line(lines, prefix, &text, style, width);
             }
         },
-        RenderSpec::Progress { label, status, value, tone: _ } => {
+        RenderSpec::Progress {
+            label,
+            status,
+            value,
+            tone: _,
+        } => {
             let mut text = format!("• {label}");
             if let Some(status) = status {
                 text.push_str(" · ");
@@ -163,7 +179,11 @@ fn render_spec_to_lines(
                 push_wrapped_line(lines, prefix, line, style, width);
             }
         },
-        RenderSpec::Code { language, text, tone: _ } => {
+        RenderSpec::Code {
+            language,
+            text,
+            tone: _,
+        } => {
             if let Some(lang) = language {
                 push_wrapped_line(lines, prefix, &format!("```{lang}"), theme.dim, width);
             }
@@ -173,7 +193,13 @@ fn render_spec_to_lines(
         },
         RenderSpec::ImageRef { uri, alt, tone: _ } => {
             let caption = alt.as_deref().unwrap_or(uri);
-            push_wrapped_line(lines, prefix, &format!("[image: {caption}]"), theme.body, width);
+            push_wrapped_line(
+                lines,
+                prefix,
+                &format!("[image: {caption}]"),
+                theme.body,
+                width,
+            );
         },
         RenderSpec::RawAnsiLimited { text, tone: _ } => {
             let safe = strip_ansi_limited(text);
@@ -184,7 +210,13 @@ fn render_spec_to_lines(
     }
 }
 
-fn push_wrapped_line(lines: &mut Vec<Line<'static>>, prefix: &str, text: &str, style: Style, width: usize) {
+fn push_wrapped_line(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    text: &str,
+    style: Style,
+    width: usize,
+) {
     let prefix_width = text_width(prefix);
     let content_width = width.saturating_sub(prefix_width).max(1);
     let wrapped = visual_lines(text, content_width);
@@ -196,7 +228,11 @@ fn push_wrapped_line(lines: &mut Vec<Line<'static>>, prefix: &str, text: &str, s
         return;
     }
     for (i, line) in wrapped.iter().enumerate() {
-        let p = if i == 0 { prefix.to_string() } else { " ".repeat(prefix_width) };
+        let p = if i == 0 {
+            prefix.to_string()
+        } else {
+            " ".repeat(prefix_width)
+        };
         lines.push(Line::from(vec![
             Span::styled(p, style),
             Span::styled(line.clone(), style),
@@ -221,11 +257,15 @@ fn strip_ansi_limited(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch == '\u{1b}' && chars.next() == Some('[') {
             for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) { break; }
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
             }
         } else if ch == '\u{9b}' {
             for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) { break; }
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
             }
         } else if ch == '\n' || ch == '\t' || !ch.is_control() {
             output.push(ch);
@@ -235,7 +275,9 @@ fn strip_ansi_limited(text: &str) -> String {
 }
 
 fn text_width(text: &str) -> usize {
-    text.chars().map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0).max(1)).sum()
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0).max(1))
+        .sum()
 }
 
 // ─── Status / Composer / Footer / Slash palette (unchanged) ─────────────────
@@ -261,7 +303,11 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
     let active = state.focus == Focus::Input || state.focus == Focus::SlashPalette;
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(if active { theme.border_active } else { theme.border });
+        .border_style(if active {
+            theme.border_active
+        } else {
+            theme.border
+        });
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -270,16 +316,23 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
     let styled_lines: Vec<Line> = if state.input.is_empty() {
         vec![Line::from(vec![
             Span::styled("› ", theme.assistant_label),
-            Span::styled("Ask astrcode to inspect, edit, or explain…", theme.composer_placeholder),
+            Span::styled(
+                "Ask astrcode to inspect, edit, or explain…",
+                theme.composer_placeholder,
+            ),
         ])]
     } else {
-        lines.into_iter().enumerate().map(|(idx, line)| {
-            let prefix = if idx == 0 { "› " } else { "  " };
-            Line::from(vec![
-                Span::styled(prefix, theme.assistant_label),
-                Span::styled(line, theme.composer),
-            ])
-        }).collect()
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                let prefix = if idx == 0 { "› " } else { "  " };
+                Line::from(vec![
+                    Span::styled(prefix, theme.assistant_label),
+                    Span::styled(line, theme.composer),
+                ])
+            })
+            .collect()
     };
     frame.render_widget(Paragraph::new(Text::from(styled_lines)), inner);
 
@@ -291,38 +344,75 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
 }
 
 fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let session = state.active_session_id.as_deref().map(super::short_id).unwrap_or("none");
-    let model = if state.model_name.is_empty() { "model: pending".to_string() } else { format!("model: {}", state.model_name) };
-    let cwd = if state.working_dir.is_empty() { "cwd: pending" } else { state.working_dir.as_str() };
+    let session = state
+        .active_session_id
+        .as_deref()
+        .map(super::short_id)
+        .unwrap_or("none");
+    let model = if state.model_name.is_empty() {
+        "model: pending".to_string()
+    } else {
+        format!("model: {}", state.model_name)
+    };
+    let cwd = if state.working_dir.is_empty() {
+        "cwd: pending"
+    } else {
+        state.working_dir.as_str()
+    };
     let line = format!("{model} · {cwd} · session {session}");
     let hints = if state.available_sessions.is_empty() {
         "  › Enter send · Shift+Enter newline · /quit exit".into()
     } else {
-        format!("  › Enter send · Shift+Enter newline · sessions {} · /quit exit", state.available_sessions.len())
+        format!(
+            "  › Enter send · Shift+Enter newline · sessions {} · /quit exit",
+            state.available_sessions.len()
+        )
     };
-    frame.render_widget(Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(format!("  {line}"), theme.footer)),
-        Line::from(Span::styled(hints, theme.footer)),
-    ])), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(Span::styled(format!("  {line}"), theme.footer)),
+            Line::from(Span::styled(hints, theme.footer)),
+        ])),
+        area,
+    );
 }
 
 fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let commands = slash::filtered(&state.slash_filter);
-    if commands.is_empty() { return; }
+    if commands.is_empty() {
+        return;
+    }
     let height = commands.len().min(6) as u16 + 2;
     let popup = centered_rect(area, 70, height);
-    let inner = popup.inner(Margin { vertical: 1, horizontal: 1 });
-    let lines: Vec<Line> = commands.iter().enumerate().map(|(idx, command)| {
-        let selected = idx == state.slash_selected.min(commands.len().saturating_sub(1));
-        let label_style = if selected { theme.popup_selected } else { theme.assistant_label };
-        let desc_style = if selected { theme.body } else { theme.dim };
-        Line::from(vec![
-            Span::styled(format!("{:<16}", command.usage), label_style),
-            Span::styled(command.description, desc_style),
-        ])
-    }).collect();
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let lines: Vec<Line> = commands
+        .iter()
+        .enumerate()
+        .map(|(idx, command)| {
+            let selected = idx == state.slash_selected.min(commands.len().saturating_sub(1));
+            let label_style = if selected {
+                theme.popup_selected
+            } else {
+                theme.assistant_label
+            };
+            let desc_style = if selected { theme.body } else { theme.dim };
+            Line::from(vec![
+                Span::styled(format!("{:<16}", command.usage), label_style),
+                Span::styled(command.description, desc_style),
+            ])
+        })
+        .collect();
     frame.render_widget(Clear, popup);
-    frame.render_widget(Block::default().borders(Borders::ALL).border_style(theme.popup_border).title(" Slash Commands "), popup);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.popup_border)
+            .title(" Slash Commands "),
+        popup,
+    );
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -330,7 +420,12 @@ fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
     let width = ((area.width as u32 * percent_x as u32) / 100) as u16;
     let popup_width = width.max(24).min(area.width);
     let popup_height = height.min(area.height);
-    Rect { x: area.x + (area.width.saturating_sub(popup_width)) / 2, y: area.y + (area.height.saturating_sub(popup_height)) / 2, width: popup_width, height: popup_height }
+    Rect {
+        x: area.x + (area.width.saturating_sub(popup_width)) / 2,
+        y: area.y + (area.height.saturating_sub(popup_height)) / 2,
+        width: popup_width,
+        height: popup_height,
+    }
 }
 
 // ─── 输入编辑器布局 ───────────────────────────────────────────────────
@@ -338,7 +433,10 @@ fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
 fn composer_lines_and_cursor(state: &TuiState, width: u16) -> (Vec<String>, (u16, u16)) {
     let content_width = width.saturating_sub(2).max(1) as usize;
     let layout = layout_visual_text(&state.input, content_width, Some(state.input_cursor));
-    let cursor = (2 + layout.cursor_column.unwrap_or(0) as u16, layout.cursor_row.unwrap_or(0) as u16);
+    let cursor = (
+        2 + layout.cursor_column.unwrap_or(0) as u16,
+        layout.cursor_row.unwrap_or(0) as u16,
+    );
     let lines_empty = layout.lines.is_empty();
     (layout.lines, if lines_empty { (2, 0) } else { cursor })
 }
@@ -355,34 +453,67 @@ fn composer_height(state: &TuiState, width: u16) -> u16 {
 // ─── 文本布局引擎 ─────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
-struct VisualLayout { lines: Vec<String>, cursor_row: Option<usize>, cursor_column: Option<usize> }
+struct VisualLayout {
+    lines: Vec<String>,
+    cursor_row: Option<usize>,
+    cursor_column: Option<usize>,
+}
 
 fn layout_visual_text(text: &str, width: usize, cursor: Option<usize>) -> VisualLayout {
-    if width == 0 { return VisualLayout { lines: vec![], cursor_row: Some(0), cursor_column: Some(0) }; }
+    if width == 0 {
+        return VisualLayout {
+            lines: vec![],
+            cursor_row: Some(0),
+            cursor_column: Some(0),
+        };
+    }
     let mut layout = VisualLayout::default();
     let mut current_line = String::new();
     let mut current_width = 0usize;
     let mut current_row = 0usize;
     let mut consumed_chars = 0usize;
-    if cursor == Some(0) { layout.cursor_row = Some(0); layout.cursor_column = Some(0); }
+    if cursor == Some(0) {
+        layout.cursor_row = Some(0);
+        layout.cursor_column = Some(0);
+    }
     for ch in text.chars() {
-        if cursor == Some(consumed_chars) { layout.cursor_row = Some(current_row); layout.cursor_column = Some(current_width); }
+        if cursor == Some(consumed_chars) {
+            layout.cursor_row = Some(current_row);
+            layout.cursor_column = Some(current_width);
+        }
         if ch == '\n' {
             layout.lines.push(std::mem::take(&mut current_line));
-            current_width = 0; current_row += 1; consumed_chars += 1;
-            if cursor == Some(consumed_chars) { layout.cursor_row = Some(current_row); layout.cursor_column = Some(0); }
+            current_width = 0;
+            current_row += 1;
+            consumed_chars += 1;
+            if cursor == Some(consumed_chars) {
+                layout.cursor_row = Some(current_row);
+                layout.cursor_column = Some(0);
+            }
             continue;
         }
         let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
         if current_width + ch_width > width && !current_line.is_empty() {
             layout.lines.push(std::mem::take(&mut current_line));
-            current_width = 0; current_row += 1;
-            if cursor == Some(consumed_chars) { layout.cursor_row = Some(current_row); layout.cursor_column = Some(0); }
+            current_width = 0;
+            current_row += 1;
+            if cursor == Some(consumed_chars) {
+                layout.cursor_row = Some(current_row);
+                layout.cursor_column = Some(0);
+            }
         }
-        current_line.push(ch); current_width += ch_width; consumed_chars += 1;
-        if cursor == Some(consumed_chars) { layout.cursor_row = Some(current_row); layout.cursor_column = Some(current_width); }
+        current_line.push(ch);
+        current_width += ch_width;
+        consumed_chars += 1;
+        if cursor == Some(consumed_chars) {
+            layout.cursor_row = Some(current_row);
+            layout.cursor_column = Some(current_width);
+        }
     }
-    if cursor == Some(consumed_chars) { layout.cursor_row = Some(current_row); layout.cursor_column = Some(current_width); }
+    if cursor == Some(consumed_chars) {
+        layout.cursor_row = Some(current_row);
+        layout.cursor_column = Some(current_width);
+    }
     layout.lines.push(current_line);
     layout
 }

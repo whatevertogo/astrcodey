@@ -49,7 +49,7 @@ impl Tool for ReadFileTool {
                           user, findFiles, or grep. This is not a directory listing or content \
                           search tool. Supports line offset/limit and returns line-numbered text."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

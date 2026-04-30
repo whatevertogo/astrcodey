@@ -28,8 +28,6 @@ impl PromptProvider for PromptComposer {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     fn input() -> SystemPromptInput {
@@ -43,8 +41,6 @@ mod tests {
             project_rules: None,
             extension_blocks: vec![],
             extra_instructions: None,
-            template_vars: BTreeMap::new(),
-            tools: vec![],
         }
     }
 
@@ -52,6 +48,5 @@ mod tests {
     async fn assemble_returns_usable_prompt_plan() {
         let plan = PromptComposer::new().assemble(input()).await;
         assert!(plan.system_prompt.is_some());
-        assert!(plan.extra_tools.is_empty());
     }
 }

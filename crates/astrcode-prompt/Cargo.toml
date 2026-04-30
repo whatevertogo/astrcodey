@@ -2,7 +2,7 @@
 name = "astrcode-prompt"
 version = "0.1.0"
 edition = "2021"
-description = "Prompt composition pipeline: contributors, template rendering, dependency sorting"
+description = "Prompt composition pipeline with deterministic section ordering"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }

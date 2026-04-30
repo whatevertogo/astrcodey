@@ -23,7 +23,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use input::Action;
-use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, prelude::Widget, text::Text, widgets::Paragraph};
+use ratatui::{
+    Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, prelude::Widget, text::Text,
+    widgets::Paragraph,
+};
 use render::message_to_lines;
 use state::TuiState;
 use tokio::sync::mpsc;
@@ -92,8 +95,6 @@ async fn handle_action(
         Action::Quit => state.should_quit = true,
         Action::Tick => state.mark_dirty(),
         Action::Key(event) => handle_key(event, state, client, terminal).await?,
-        // 鼠标事件不需要处理 — 滚轮由终端原生处理
-        Action::ScrollTranscript(_) => {},
     }
     state.mark_dirty();
     Ok(())
@@ -152,7 +153,10 @@ async fn handle_key(
             }
         },
         KeyCode::Char(ch) => {
-            if event.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            if event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
                 return Ok(());
             }
             state.insert_char(ch);
@@ -304,11 +308,7 @@ impl TerminalSession {
     }
 
     /// 将消息内容插入终端 scrollback（在 viewport 上方）。
-    fn insert_message(
-        &mut self,
-        msg: &state::Message,
-        theme: &theme::Theme,
-    ) -> io::Result<()> {
+    fn insert_message(&mut self, msg: &state::Message, theme: &theme::Theme) -> io::Result<()> {
         let width = self.terminal.size()?.width;
         let lines = message_to_lines(msg, width, theme);
         let height = lines.len() as u16;

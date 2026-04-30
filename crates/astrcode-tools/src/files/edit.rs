@@ -41,7 +41,7 @@ impl Tool for EditFileTool {
                           must appear exactly once unless replaceAll is true. Prefer this over \
                           writeFile for small edits."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

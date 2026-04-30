@@ -90,41 +90,22 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 pub fn build_system_prompt(input: &SystemPromptInput) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    // 1. Identity
-    let identity = input
-        .identity
-        .as_deref()
-        .unwrap_or(DEFAULT_IDENTITY);
+    // Stable identity and behavioral policy come first for prompt-cache reuse.
+    let identity = input.identity.as_deref().unwrap_or(DEFAULT_IDENTITY);
     sections.push(format!("# Identity\n\n{}", identity.trim()));
 
-    // 2. Environment
-    sections.push(format!(
-        "# Environment\n\n工作目录：{}\n操作系统：{}\nShell：{}\n日期：{}",
-        input.working_dir, input.os, input.shell, input.date
-    ));
+    sections.push(format!("# Few Shot\n\n{}", FEW_SHOT));
+    sections.push(format!("# Response Style\n\n{}", RESPONSE_STYLE));
 
-    // 3. User Rules
     if let Some(rules) = &input.user_rules {
         sections.push(format!("# User Rules\n\n{}", rules.trim()));
     }
 
-    // 4. Project Rules (AGENTS.md)
     if let Some(project_rules) = &input.project_rules {
         sections.push(format!("# Project Rules\n\n{}", project_rules.trim()));
     }
 
-    // 5. Tools
-    if !input.tools.is_empty() {
-        let tools_text = input
-            .tools
-            .iter()
-            .map(|t| format!("- {}: {}", t.name, t.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-        sections.push(format!("# Tools\n\n{}", tools_text));
-    }
-
-    // 6. Extension blocks in order: PlatformInstructions, Skills, Agents
+    // Extension blocks remain grouped so their order is deterministic.
     push_extension_section(
         &mut sections,
         "Platform Instructions",
@@ -144,13 +125,13 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
         ExtensionSection::Agents,
     );
 
-    // 6. Few Shot
-    sections.push(format!("# Few Shot\n\n{}", FEW_SHOT));
+    // Volatile session metadata stays late for longer cacheable prefixes.
+    sections.push(format!(
+        "# Environment\n\n工作目录：{}\n操作系统：{}\nShell：{}\n日期：{}",
+        input.working_dir, input.os, input.shell, input.date
+    ));
 
-    // 7. Response Style
-    sections.push(format!("# Response Style\n\n{}", RESPONSE_STYLE));
-
-    // 8. Extra instructions (子会话等)
+    // Extra instructions (子会话等)
     if let Some(extra) = &input.extra_instructions {
         sections.push(extra.trim().to_string());
     }
@@ -230,8 +211,6 @@ fn non_empty_string(text: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     #[test]
@@ -259,8 +238,6 @@ mod tests {
                 },
             ],
             extra_instructions: Some("extra body".into()),
-            template_vars: BTreeMap::new(),
-            tools: vec![],
         };
 
         let prompt = build_system_prompt(&input);
@@ -277,25 +254,25 @@ mod tests {
         assert!(prompt.contains("# Response Style"));
         assert!(prompt.contains("extra body"));
 
-        // Ordering: Identity before Environment, Environment before Skills, etc.
+        // Ordering keeps stable policy text before volatile environment data.
         let identity = prompt.find("# Identity").unwrap();
-        let env = prompt.find("# Environment").unwrap();
+        let few_shot = prompt.find("# Few Shot").unwrap();
+        let style = prompt.find("# Response Style").unwrap();
         let user_rules = prompt.find("# User Rules").unwrap();
         let project_rules = prompt.find("# Project Rules").unwrap();
         let platform = prompt.find("# Platform Instructions").unwrap();
         let skills = prompt.find("# Skills").unwrap();
         let agents = prompt.find("# Agents").unwrap();
-        let few_shot = prompt.find("# Few Shot").unwrap();
-        let style = prompt.find("# Response Style").unwrap();
+        let env = prompt.find("# Environment").unwrap();
 
-        assert!(identity < env);
-        assert!(env < user_rules);
+        assert!(identity < few_shot);
+        assert!(few_shot < style);
+        assert!(style < user_rules);
         assert!(user_rules < project_rules);
         assert!(project_rules < platform);
         assert!(platform < skills);
         assert!(skills < agents);
-        assert!(agents < few_shot);
-        assert!(few_shot < style);
+        assert!(agents < env);
     }
 
     #[test]
@@ -310,8 +287,6 @@ mod tests {
             project_rules: None,
             extension_blocks: vec![],
             extra_instructions: None,
-            template_vars: BTreeMap::new(),
-            tools: vec![],
         };
 
         let prompt = build_system_prompt(&input);
@@ -327,5 +302,42 @@ mod tests {
         assert!(!prompt.contains("# Platform Instructions"));
         assert!(!prompt.contains("# Skills"));
         assert!(!prompt.contains("# Agents"));
+    }
+
+    #[test]
+    fn environment_changes_do_not_disturb_static_prefix() {
+        let base = SystemPromptInput {
+            working_dir: "/one".into(),
+            os: "linux".into(),
+            shell: "bash".into(),
+            date: "2026-04-29".into(),
+            identity: Some("stable identity".into()),
+            user_rules: Some("stable user rules".into()),
+            project_rules: Some("stable project rules".into()),
+            extension_blocks: vec![
+                ExtensionPromptBlock {
+                    section: ExtensionSection::PlatformInstructions,
+                    content: "stable platform".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Skills,
+                    content: "stable skills".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Agents,
+                    content: "stable agents".into(),
+                },
+            ],
+            extra_instructions: None,
+        };
+        let mut changed = base.clone();
+        changed.working_dir = "/two".into();
+        changed.shell = "zsh".into();
+
+        let first = build_system_prompt(&base);
+        let second = build_system_prompt(&changed);
+        let env = first.find("# Environment").unwrap();
+
+        assert_eq!(&first[..env], &second[..env]);
     }
 }

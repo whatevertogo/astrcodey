@@ -17,7 +17,7 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
         HookEffect, HookMode,
     },
-    tool::{ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolOrigin, ToolResult},
 };
 
 use crate::ffi::{
@@ -412,7 +412,7 @@ unsafe extern "C" fn ffi_register_tool(
         name: name.to_string(),
         description: desc.to_string(),
         parameters: params,
-        is_builtin: false,
+        origin: ToolOrigin::Extension,
     });
 }
 

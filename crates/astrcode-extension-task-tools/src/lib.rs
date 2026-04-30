@@ -13,7 +13,7 @@ use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
     },
-    tool::{ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolOrigin, ToolResult},
     types::project_hash_from_path,
 };
 use astrcode_support::hostpaths;
@@ -197,7 +197,7 @@ fn task_create_tool_definition() -> ToolDefinition {
         name: "taskCreate".into(),
         description: TASK_CREATE_DESCRIPTION.into(),
         parameters: parse_parameters(TASK_CREATE_PARAMETERS),
-        is_builtin: false,
+        origin: ToolOrigin::Bundled,
     }
 }
 
@@ -206,7 +206,7 @@ fn task_list_tool_definition() -> ToolDefinition {
         name: "taskList".into(),
         description: TASK_LIST_DESCRIPTION.into(),
         parameters: parse_parameters(TASK_LIST_PARAMETERS),
-        is_builtin: false,
+        origin: ToolOrigin::Bundled,
     }
 }
 
@@ -215,7 +215,7 @@ fn task_update_tool_definition() -> ToolDefinition {
         name: "taskUpdate".into(),
         description: TASK_UPDATE_DESCRIPTION.into(),
         parameters: parse_parameters(TASK_UPDATE_PARAMETERS),
-        is_builtin: false,
+        origin: ToolOrigin::Bundled,
     }
 }
 

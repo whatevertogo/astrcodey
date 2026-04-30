@@ -49,7 +49,7 @@ impl Tool for FindFilesTool {
                           only, not file contents. Use grep for content search and readFile to \
                           inspect a known result."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

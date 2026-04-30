@@ -124,15 +124,6 @@ pub fn command_line_for(spec: SlashCommandSpec) -> String {
     }
 }
 
-/// 生成所有斜杠命令的帮助文本。
-pub fn help_text() -> String {
-    COMMANDS
-        .iter()
-        .map(|command| format!("{:<16} {}", command.usage, command.description))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

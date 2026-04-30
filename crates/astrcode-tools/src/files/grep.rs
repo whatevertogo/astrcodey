@@ -108,7 +108,7 @@ impl Tool for GrepTool {
                           outputMode=files_with_matches; use outputMode=content when matching \
                           lines are needed. Use findFiles for path glob search."
                 .into(),
-            is_builtin: true,
+            origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

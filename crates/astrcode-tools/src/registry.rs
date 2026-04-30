@@ -1,6 +1,6 @@
 //! Tool registry for managing built-in and extension-registered tools.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use astrcode_core::tool::{
     ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult,
@@ -79,40 +79,32 @@ impl ToolRegistry {
     }
 }
 
-impl ToolRegistry {
-    /// Register all built-in tools with sensible defaults.
-    pub fn register_builtins(&mut self, working_dir: std::path::PathBuf, timeout_secs: u64) {
-        use std::sync::Arc;
-
-        // File tools
-        self.register(Arc::new(super::files::ReadFileTool {
+/// Build the core builtin tool set.
+pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(super::files::ReadFileTool {
             working_dir: working_dir.clone(),
-        }));
-        self.register(Arc::new(super::files::WriteFileTool {
+        }) as Arc<dyn Tool>,
+        Arc::new(super::files::WriteFileTool {
             working_dir: working_dir.clone(),
-        }));
-        self.register(Arc::new(super::files::EditFileTool {
+        }) as Arc<dyn Tool>,
+        Arc::new(super::files::EditFileTool {
             working_dir: working_dir.clone(),
-        }));
-        self.register(Arc::new(super::files::ApplyPatchTool {
+        }) as Arc<dyn Tool>,
+        Arc::new(super::files::ApplyPatchTool {
             working_dir: working_dir.clone(),
-        }));
-        self.register(Arc::new(super::files::FindFilesTool {
+        }) as Arc<dyn Tool>,
+        Arc::new(super::files::FindFilesTool {
             working_dir: working_dir.clone(),
-        }));
-        self.register(Arc::new(super::files::GrepTool {
+        }) as Arc<dyn Tool>,
+        Arc::new(super::files::GrepTool {
             working_dir: working_dir.clone(),
-        }));
-
-        // Shell tool
-        self.register(Arc::new(super::shell_tool::ShellTool {
-            working_dir: working_dir.clone(),
+        }) as Arc<dyn Tool>,
+        Arc::new(super::shell_tool::ShellTool {
+            working_dir,
             timeout_secs,
-        }));
-
-        // TODO: Plan/mode tools (taskWrite/enterPlanMode/exitPlanMode/upsertSessionPlan) —
-        // re-enable when wired
-    }
+        }) as Arc<dyn Tool>,
+    ]
 }
 
 impl Default for ToolRegistry {
@@ -128,7 +120,9 @@ mod tests {
     #[test]
     fn builtins_expose_apply_patch_after_parser_is_wired() {
         let mut registry = ToolRegistry::new();
-        registry.register_builtins(std::path::PathBuf::from("."), 30);
+        for tool in builtin_tools(std::path::PathBuf::from("."), 30) {
+            registry.register(tool);
+        }
 
         let names = registry
             .list_definitions()
@@ -142,6 +136,21 @@ mod tests {
     }
 
     #[test]
+    fn builtins_carry_builtin_origin() {
+        let mut registry = ToolRegistry::new();
+        for tool in builtin_tools(std::path::PathBuf::from("."), 30) {
+            registry.register(tool);
+        }
+
+        assert!(
+            registry
+                .list_definitions()
+                .iter()
+                .all(|definition| definition.origin == astrcode_core::tool::ToolOrigin::Builtin)
+        );
+    }
+
+    #[test]
     fn list_definitions_is_sorted_by_tool_name() {
         struct NamedTool(&'static str);
 
@@ -152,7 +161,7 @@ mod tests {
                     name: self.0.to_string(),
                     description: String::new(),
                     parameters: serde_json::json!({"type": "object"}),
-                    is_builtin: false,
+                    origin: astrcode_core::tool::ToolOrigin::Extension,
                 }
             }
 

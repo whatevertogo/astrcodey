@@ -207,6 +207,27 @@ pub enum LlmError {
     StreamParse(String),
 }
 
+/// OpenAI prompt cache retention 声明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheRetention {
+    /// 使用服务端默认的短期内存缓存。
+    InMemory,
+    /// 请求保留更长的 24 小时缓存。
+    #[serde(rename = "24h")]
+    TwentyFourHours,
+}
+
+impl PromptCacheRetention {
+    /// 返回 OpenAI 兼容请求体中的 wire 值。
+    pub fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::TwentyFourHours => "24h",
+        }
+    }
+}
+
 /// LLM 客户端配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmClientConfig {
@@ -222,6 +243,12 @@ pub struct LlmClientConfig {
     pub max_retries: u32,
     /// 指数退避的基础延迟（毫秒）。
     pub retry_base_delay_ms: u64,
+    /// 采样温度（0.0-2.0），None 使用 API 默认值。
+    pub temperature: Option<f32>,
+    /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
+    pub supports_prompt_cache_key: bool,
+    /// 可选的 OpenAI prompt cache retention。
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// 额外的 HTTP 请求头。
     pub extra_headers: std::collections::HashMap<String, String>,
 }
@@ -235,6 +262,9 @@ impl Default for LlmClientConfig {
             read_timeout_secs: 90,
             max_retries: 2,
             retry_base_delay_ms: 250,
+            temperature: None,
+            supports_prompt_cache_key: false,
+            prompt_cache_retention: None,
             extra_headers: std::collections::HashMap::new(),
         }
     }

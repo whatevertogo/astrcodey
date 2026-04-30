@@ -40,7 +40,11 @@
 
 Rust 扩展实现 `Extension::tools()` 返回定义，并覆盖 `Extension::execute_tool()` 执行工具。原生扩展通过 FFI 调用 `register_tool()` 注册定义，再调用 `register_tool_handler()` 绑定执行回调。
 
-工具执行进入现有 `CapabilityRouter` 的 dynamic 层，因此会和内置工具走同一条 `PreToolUse -> execute -> PostToolUse` pipeline。dynamic 工具优先于 stable 内置工具，用于项目级覆盖；内置工具不会被 extension reload 清空。
+工具执行进入 session 级 `ToolRegistry`。扩展工具会被 `ExtensionRunner`
+包装成普通 `Tool` trait object，因此会和内置工具走同一条
+`PreToolUse -> execute -> PostToolUse` pipeline。
+
+更完整的 tool / extension 边界见 [Tool Loading Boundary](tool-loading.md)。
 
 ## Manifest
 
@@ -66,6 +70,8 @@ Rust 扩展实现 `Extension::tools()` 返回定义，并覆盖 `Extension::exec
 ## 简单 Rust 扩展示意
 
 ```rust
+use astrcode_core::tool::{ToolDefinition, ToolOrigin, ToolResult};
+
 struct EchoExtension;
 
 #[async_trait::async_trait]
@@ -87,7 +93,7 @@ impl Extension for EchoExtension {
             name: "echo".into(),
             description: "Echo text".into(),
             parameters: serde_json::json!({"type":"object","properties":{"text":{"type":"string"}}}),
-            is_builtin: false,
+            origin: ToolOrigin::Extension,
         }]
     }
 
@@ -96,6 +102,7 @@ impl Extension for EchoExtension {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
+        _ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != "echo" {
             return Err(ExtensionError::NotFound(tool_name.into()));

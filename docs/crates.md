@@ -4,8 +4,8 @@
 |-------|-----|------|---------|
 | `astrcode-core` | 0 | 共享类型和 trait | SessionId, Tool, LlmProvider, EventStore, Config, Extension |
 | `astrcode-support` | 0 | 宿主环境工具 | hostpaths, ShellFamily, persist_tool_result |
-| `astrcode-ai` | 1 | LLM 提供者 | OpenAiProvider, RetryPolicy, CacheTracker, Utf8StreamDecoder |
-| `astrcode-prompt` | 1 | Prompt 组装 | PromptContributor, PromptComposer, LayeredPromptBuilder, PromptTemplate |
+| `astrcode-ai` | 1 | LLM 提供者 | OpenAiProvider, RetryPolicy, Utf8StreamDecoder |
+| `astrcode-prompt` | 1 | Prompt 组装 | PromptComposer, build_system_prompt |
 | `astrcode-tools` | 1 | 内置工具 | ToolRegistry, ReadFileTool, ShellTool, SpawnTool |
 | `astrcode-storage` | 1 | 会话持久化 | EventLog, FileSystemSessionRepository, FileConfigStore |
 | `astrcode-context` | 1 | 上下文管理 | TokenUsageTracker, CompactConfig, ToolResultBudget, FileAccessTracker |
@@ -16,6 +16,8 @@
 | `astrcode-tui` | 4 | 终端 UI | AppController, CliState, Theme |
 | `astrcode-exec` | 4 | 无头执行 | ExecConfig, execute() |
 | `astrcode-cli` | 4 | CLI 入口 | Commands (Tui/Exec/Server/Version/Config) |
+
+工具加载和扩展工具边界见 [Tool Loading Boundary](tool-loading.md)。
 
 ## 依赖方向
 
