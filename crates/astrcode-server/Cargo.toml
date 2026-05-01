@@ -13,7 +13,6 @@ astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-ai = { path = "../astrcode-ai" }
-astrcode-prompt = { path = "../astrcode-prompt" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-context = { path = "../astrcode-context" }

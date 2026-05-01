@@ -1,19 +1,17 @@
 //! 服务器引导模块 — 从配置组装所有服务。
 //!
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
-//! 会话管理器、扩展运行器和上下文窗口管理。
+//! 会话管理器、扩展运行器和上下文窗口设置。
 
 use std::{sync::Arc, time::Duration};
 
 use astrcode_ai::openai::OpenAiProvider;
-use astrcode_context::{
-    budget::ToolResultBudget, file_access::FileAccessTracker, settings::ContextWindowSettings,
-};
+use astrcode_context::{manager::LlmContextAssembler, settings::ContextWindowSettings};
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
     extension::ExtensionError,
     llm::{LlmClientConfig, LlmProvider},
-    prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
+    prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
     tool::ToolDefinition,
 };
 use astrcode_extensions::{
@@ -36,18 +34,12 @@ pub struct ServerRuntime {
     pub session_manager: Arc<SessionManager>,
     /// LLM 提供者，用于生成 AI 回复
     pub llm_provider: Arc<dyn LlmProvider>,
-    /// 提示词组装器，负责构建发送给 LLM 的系统提示词
-    pub prompt_provider: Arc<dyn PromptProvider>,
+    /// 上下文组装器，负责 system prompt、窗口估算和摘要压缩
+    pub context_assembler: Arc<LlmContextAssembler>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
     /// 已解析的最终配置（只读快照）
     pub effective: EffectiveConfig,
-    /// 上下文窗口管理设置
-    pub context_settings: ContextWindowSettings,
-    /// 工具结果预算控制器，限制工具返回数据的大小
-    pub tool_result_budget: Arc<ToolResultBudget>,
-    /// 文件访问追踪器，记录 Agent 访问过的文件
-    pub file_access_tracker: Arc<std::sync::Mutex<FileAccessTracker>>,
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -119,11 +111,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Some(effective.llm.context_limit),
     ));
 
-    // 3. 构建 prompt provider。
-    //
-    // PromptComposer 只负责组装系统提示词和上下文消息，不持有会话状态。
-    let prompt_provider: Arc<dyn PromptProvider> =
-        Arc::new(astrcode_prompt::composer::PromptComposer::new());
+    // 3. 初始化上下文组装器。
+    let context_settings = ContextWindowSettings::default();
+    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
 
     // 4. 确定当前项目工作目录。
     //
@@ -182,24 +172,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     extension_runner.bind(Arc::new(ServerSessionSpawner {
         session_manager: Arc::clone(&session_manager),
         llm: Arc::clone(&llm_provider),
-        prompt: Arc::clone(&prompt_provider),
+        context_assembler: Arc::clone(&context_assembler),
         extension_runner: Arc::clone(&extension_runner),
         read_timeout_secs: effective.llm.read_timeout_secs,
     }));
-
-    // 8. 初始化上下文窗口相关的共享状态。
-    //
-    // 这些对象用于控制工具结果裁剪、文件访问追踪和上下文恢复预算。
-    // 它们是跨会话共享的服务，但内部会按具体 Agent 回合使用。
-    let context_settings = ContextWindowSettings::default();
-    let tool_result_budget = Arc::new(ToolResultBudget::new(
-        context_settings.summary_reserve_tokens * 3, // aggregate
-        context_settings.max_tracked_files * 1024,   // inline
-        context_settings.recovery_token_budget * 3,  // preview
-    ));
-    let file_access_tracker = Arc::new(std::sync::Mutex::new(FileAccessTracker::new(
-        context_settings.max_tracked_files,
-    )));
 
     // 9. 返回运行时容器。
     //
@@ -209,12 +185,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     Ok(ServerRuntime {
         session_manager,
         llm_provider,
-        prompt_provider,
+        context_assembler,
         extension_runner,
         effective,
-        context_settings,
-        tool_result_budget,
-        file_access_tracker,
     })
 }
 
@@ -253,7 +226,7 @@ pub(crate) async fn build_tool_registry_snapshot(
 /// 都只在这里汇合一次。调用方应把结果写入 eventlog，后续回合直接复用。
 pub(crate) async fn build_system_prompt_snapshot(
     extension_runner: &ExtensionRunner,
-    prompt_provider: &dyn PromptProvider,
+    context_assembler: &LlmContextAssembler,
     session_id: &str,
     working_dir: &str,
     model_id: &str,
@@ -301,11 +274,11 @@ pub(crate) async fn build_system_prompt_snapshot(
     }
     let extra_instructions = non_empty(extra_system_prompt.unwrap_or_default());
 
-    let identity = astrcode_prompt::pipeline::load_identity_md(
-        &astrcode_prompt::pipeline::user_identity_md_path(),
+    let identity = astrcode_context::prompt::pipeline::load_identity_md(
+        &astrcode_context::prompt::pipeline::user_identity_md_path(),
     );
     let project_rules =
-        astrcode_prompt::pipeline::load_project_rules(std::path::Path::new(working_dir));
+        astrcode_context::prompt::pipeline::load_project_rules(std::path::Path::new(working_dir));
 
     let input = SystemPromptInput {
         working_dir: working_dir.to_string(),
@@ -319,8 +292,7 @@ pub(crate) async fn build_system_prompt_snapshot(
         extra_instructions,
     };
 
-    let plan = prompt_provider.assemble(input).await;
-    let system_prompt = plan.system_prompt.unwrap_or_default();
+    let system_prompt = context_assembler.assemble_system_prompt(input).await;
     let fingerprint = prompt_fingerprint(&system_prompt);
     Ok((system_prompt, fingerprint))
 }
@@ -345,13 +317,10 @@ mod tests {
 
     use astrcode_core::{
         extension::{Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect},
-        prompt::{PromptPlan, SystemPromptInput},
         tool::{ToolDefinition, ToolOrigin},
     };
 
     use super::*;
-
-    struct EchoSystemPrompts;
 
     struct StaticToolExtension {
         id: &'static str,
@@ -387,23 +356,17 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl PromptProvider for EchoSystemPrompts {
-        async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt(input.extra_instructions.unwrap_or_default())
-        }
-    }
-
     #[tokio::test]
     async fn child_extra_system_prompt_participates_in_snapshot_build() {
         let runner = ExtensionRunner::new(
             Duration::from_secs(1),
             Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
         );
+        let context_assembler = LlmContextAssembler::new(ContextWindowSettings::default());
 
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &runner,
-            &EchoSystemPrompts,
+            &context_assembler,
             "session-1",
             ".",
             "mock",
@@ -413,7 +376,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(system_prompt, "child body");
+        assert!(system_prompt.contains("child body"));
         assert!(!fingerprint.is_empty());
     }
 

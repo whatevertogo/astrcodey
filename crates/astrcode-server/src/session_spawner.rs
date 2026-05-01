@@ -6,9 +6,9 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use astrcode_context::manager::LlmContextAssembler;
 use astrcode_core::{
     event::{Event, EventPayload, ToolOutputStream},
-    prompt::PromptProvider,
     types::{new_message_id, new_turn_id},
 };
 use astrcode_extensions::{
@@ -18,7 +18,7 @@ use astrcode_extensions::{
 use tokio::sync::mpsc;
 
 use crate::{
-    agent_loop::{Agent, drive_agent, tool_name_matches_allowlist},
+    agent_loop::{Agent, AgentServices, drive_agent, tool_name_matches_allowlist},
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot},
     session::SessionManager,
 };
@@ -30,7 +30,7 @@ use crate::{
 pub(crate) struct ServerSessionSpawner {
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) llm: Arc<dyn astrcode_core::llm::LlmProvider>,
-    pub(crate) prompt: Arc<dyn PromptProvider>,
+    pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     pub(crate) read_timeout_secs: u64,
 }
@@ -87,7 +87,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         }
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.extension_runner,
-            self.prompt.as_ref(),
+            self.context_assembler.as_ref(),
             &child_sid,
             &request.working_dir,
             &model_id,
@@ -133,12 +133,14 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let agent = Agent::new(
             child_sid.clone(),
             request.working_dir.clone(),
-            Arc::clone(&self.llm),
             system_prompt,
-            tool_registry,
-            Arc::clone(&self.extension_runner),
             model_id,
-            8192,
+            AgentServices {
+                llm: Arc::clone(&self.llm),
+                tool_registry,
+                extension_runner: Arc::clone(&self.extension_runner),
+                context_assembler: Arc::clone(&self.context_assembler),
+            },
         )
         .with_tool_allowlist(request.allowed_tools);
 

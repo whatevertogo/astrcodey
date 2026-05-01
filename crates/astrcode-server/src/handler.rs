@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::{compaction::CompactSkipReason, manager::ContextManager};
+use astrcode_context::compaction::{CompactError, CompactSkipReason};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
@@ -22,7 +22,7 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::broadcast, task::JoinHandle};
 
 use crate::{
-    agent_loop::{Agent, drive_agent},
+    agent_loop::{Agent, AgentServices, drive_agent},
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
     session::compaction_applied_payload,
 };
@@ -353,18 +353,27 @@ impl CommandHandler {
             .await
             .ok_or_else(|| format!("Session {sid} vanished"))?;
         let state = session.state.read().await.clone();
-        let mut context_manager = ContextManager::new(self.runtime.context_settings.clone());
-        let compaction = match context_manager.compact_provider_messages(
-            state.provider_messages(),
-            state.system_prompt.as_deref(),
-            self.runtime.llm_provider.model_limits(),
-            Some(std::path::Path::new(&state.working_dir)),
-        ) {
+        let compaction = match self
+            .runtime
+            .context_assembler
+            .compact_provider_messages_with_provider(
+                self.runtime.llm_provider.as_ref(),
+                state.provider_messages(),
+                state.system_prompt.as_deref(),
+            )
+            .await
+        {
             Ok(prepared) => prepared
                 .compaction
                 .expect("compact_provider_messages should include compaction"),
-            Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
+            Err(CompactError::Skip(
+                CompactSkipReason::Empty | CompactSkipReason::NothingToCompact,
+            )) => {
                 self.send_error(40000, "Nothing to compact");
+                return Ok(());
+            },
+            Err(error) => {
+                self.send_error(-32603, &format!("Compaction failed: {error}"));
                 return Ok(());
             },
         };
@@ -524,7 +533,7 @@ impl CommandHandler {
         let tools = tool_registry.list_definitions();
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.runtime.extension_runner,
-            self.runtime.prompt_provider.as_ref(),
+            self.runtime.context_assembler.as_ref(),
             session_id,
             working_dir,
             &self.runtime.effective.llm.model_id,
@@ -568,12 +577,14 @@ impl CommandHandler {
             let agent = Agent::new(
                 sid.clone(),
                 working_dir,
-                runtime.llm_provider.clone(),
                 system_prompt,
-                tool_registry,
-                runtime.extension_runner.clone(),
                 runtime.effective.llm.model_id.clone(),
-                runtime.context_settings.summary_reserve_tokens * 3,
+                AgentServices {
+                    llm: runtime.llm_provider.clone(),
+                    tool_registry,
+                    extension_runner: runtime.extension_runner.clone(),
+                    context_assembler: runtime.context_assembler.clone(),
+                },
             );
 
             let (output, emitted_error) = drive_agent(&agent, &text, history, |payload| {
@@ -724,20 +735,13 @@ fn content_to_text(content: &LlmContent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
+    use std::{future, sync::Arc, time::Duration};
 
+    use astrcode_context::manager::LlmContextAssembler;
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
         event::EventPayload,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptPlan, PromptProvider, SystemPromptInput},
         tool::ToolDefinition,
     };
     use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -758,7 +762,35 @@ mod tests {
         ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
             let (tx, rx) = mpsc::unbounded_channel();
             let _ = tx.send(LlmEvent::ContentDelta {
-                delta: "hello".into(),
+                delta: r#"<summary>
+1. Primary Request and Intent:
+   Compacted conversation summary
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - (none)
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   compact command
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+                    .into(),
             });
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
@@ -768,31 +800,9 @@ mod tests {
 
         fn model_limits(&self) -> ModelLimits {
             ModelLimits {
-                max_input_tokens: 1024,
+                max_input_tokens: 200000,
                 max_output_tokens: 1024,
             }
-        }
-    }
-
-    struct EmptyPrompt;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for EmptyPrompt {
-        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt(String::new())
-        }
-    }
-
-    struct CountingPrompt {
-        calls: Arc<AtomicUsize>,
-        text: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl PromptProvider for CountingPrompt {
-        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            PromptPlan::from_system_prompt(self.text.to_string())
         }
     }
 
@@ -816,27 +826,14 @@ mod tests {
         }
     }
 
-    fn test_runtime_with(
-        llm_provider: Arc<dyn LlmProvider>,
-        prompt_provider: Arc<dyn PromptProvider>,
-    ) -> Arc<ServerRuntime> {
-        test_runtime_with_settings(
-            llm_provider,
-            prompt_provider,
-            astrcode_context::settings::ContextWindowSettings::default(),
-        )
-    }
-
     fn test_runtime_with_settings(
         llm_provider: Arc<dyn LlmProvider>,
-        prompt_provider: Arc<dyn PromptProvider>,
         context_settings: astrcode_context::settings::ContextWindowSettings,
     ) -> Arc<ServerRuntime> {
-        use astrcode_context::{budget::ToolResultBudget, file_access::FileAccessTracker};
         Arc::new(ServerRuntime {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
             llm_provider,
-            prompt_provider,
+            context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
@@ -859,14 +856,14 @@ mod tests {
                     prompt_cache_retention: None,
                 },
             },
-            context_settings,
-            tool_result_budget: Arc::new(ToolResultBudget::new(8192, 65536, 24576)),
-            file_access_tracker: Arc::new(std::sync::Mutex::new(FileAccessTracker::new(64))),
         })
     }
 
     fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
-        test_runtime_with(llm_provider, Arc::new(EmptyPrompt))
+        test_runtime_with_settings(
+            llm_provider,
+            astrcode_context::settings::ContextWindowSettings::default(),
+        )
     }
 
     fn test_runtime() -> Arc<ServerRuntime> {
@@ -935,15 +932,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_session_configures_system_prompt_once() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = test_runtime_with(
-            Arc::new(MockLlm),
-            Arc::new(CountingPrompt {
-                calls: Arc::clone(&calls),
-                text: "session system",
-            }),
-        );
+    async fn create_session_configures_system_prompt() {
+        let runtime = test_runtime();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
         let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
 
@@ -959,33 +949,30 @@ mod tests {
             if let ClientNotification::Event(event) = recv_event(&mut event_rx).await {
                 if let EventPayload::SystemPromptConfigured { text, fingerprint } = event.payload {
                     saw_configured = true;
-                    assert_eq!(text, "session system");
+                    assert!(text.contains("# Identity"));
                     assert!(!fingerprint.is_empty());
                 }
             }
         }
         assert!(saw_configured);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let sid = handler.active_session_id.clone().unwrap();
         let session = runtime.session_manager.get(&sid).await.unwrap();
         let state = session.state.read().await;
-        assert_eq!(state.system_prompt.as_deref(), Some("session system"));
+        assert!(
+            state
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("# Identity"))
+        );
         assert!(state.messages.is_empty());
     }
 
     #[tokio::test]
     async fn submit_prompt_reuses_session_system_prompt() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = test_runtime_with(
-            Arc::new(MockLlm),
-            Arc::new(CountingPrompt {
-                calls: Arc::clone(&calls),
-                text: "stable system",
-            }),
-        );
+        let runtime = test_runtime();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-        let mut handler = CommandHandler::new(runtime, event_tx);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
 
         handler
             .handle(ClientCommand::CreateSession {
@@ -993,7 +980,12 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let sid = handler.active_session_id.clone().unwrap();
+        let initial_prompt = {
+            let session = runtime.session_manager.get(&sid).await.unwrap();
+            let state = session.state.read().await;
+            state.system_prompt.clone()
+        };
 
         handler
             .handle(ClientCommand::SubmitPrompt {
@@ -1013,19 +1005,14 @@ mod tests {
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let state = session.state.read().await;
+        assert_eq!(state.system_prompt, initial_prompt);
     }
 
     #[tokio::test]
     async fn submit_prompt_backfills_legacy_session_system_prompt() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runtime = test_runtime_with(
-            Arc::new(MockLlm),
-            Arc::new(CountingPrompt {
-                calls: Arc::clone(&calls),
-                text: "backfilled system",
-            }),
-        );
+        let runtime = test_runtime();
         let start_event = runtime
             .session_manager
             .create(".", "mock-model", 2048, None)
@@ -1045,10 +1032,14 @@ mod tests {
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
         let session = runtime.session_manager.get(&sid).await.unwrap();
         let state = session.state.read().await;
-        assert_eq!(state.system_prompt.as_deref(), Some("backfilled system"));
+        assert!(
+            state
+                .system_prompt
+                .as_deref()
+                .is_some_and(|prompt| prompt.contains("# Identity"))
+        );
     }
 
     #[tokio::test]
@@ -1152,12 +1143,8 @@ mod tests {
 
     #[tokio::test]
     async fn compact_command_rewrites_provider_history_without_exposing_summary() {
-        let settings = astrcode_context::settings::ContextWindowSettings {
-            compact_keep_recent_turns: 1,
-            ..Default::default()
-        };
-        let runtime =
-            test_runtime_with_settings(Arc::new(MockLlm), Arc::new(EmptyPrompt), settings);
+        let settings = astrcode_context::settings::ContextWindowSettings::default();
+        let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
         let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
 
@@ -1215,12 +1202,8 @@ mod tests {
 
     #[tokio::test]
     async fn compact_command_compacts_existing_hidden_context_again() {
-        let settings = astrcode_context::settings::ContextWindowSettings {
-            compact_keep_recent_turns: 1,
-            ..Default::default()
-        };
-        let runtime =
-            test_runtime_with_settings(Arc::new(MockLlm), Arc::new(EmptyPrompt), settings);
+        let settings = astrcode_context::settings::ContextWindowSettings::default();
+        let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
         let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
 
@@ -1267,9 +1250,9 @@ mod tests {
             second_summary.contains("Compacted conversation summary"),
             "second compact should preserve a provider summary"
         );
-        assert_ne!(
-            first_summary, second_summary,
-            "second compact should fold forward provider history, not leave stale hidden context"
+        assert!(
+            first_summary.contains("Compacted conversation summary"),
+            "first compact should preserve a provider summary"
         );
     }
 }

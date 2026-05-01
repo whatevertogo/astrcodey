@@ -2,7 +2,7 @@
 
 use astrcode_core::prompt::{PromptPlan, PromptProvider, SystemPromptInput};
 
-use crate::pipeline;
+use super::pipeline;
 
 pub struct PromptComposer;
 

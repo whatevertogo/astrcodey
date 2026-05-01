@@ -2,7 +2,6 @@
 // 使用 use super::* 访问 agent_loop 模块的所有类型。
 
 use std::{
-    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -158,13 +157,8 @@ struct OverflowThenOkLlm {
     captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
 }
 
-struct ToolThenOverflowThenOkLlm {
-    call_count: AtomicUsize,
-    captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
-}
-
 #[async_trait::async_trait]
-impl LlmProvider for ToolThenOverflowThenOkLlm {
+impl LlmProvider for OverflowThenOkLlm {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
@@ -174,18 +168,44 @@ impl LlmProvider for ToolThenOverflowThenOkLlm {
         let (tx, rx) = mpsc::unbounded_channel();
         match call_count {
             0 => {
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: "read-1".into(),
-                    name: "readFile".into(),
-                    arguments: serde_json::json!({ "path": "notes.txt" }).to_string(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "tool_calls".into(),
+                let _ = tx.send(LlmEvent::Error {
+                    message: "maximum context length exceeded".into(),
                 });
             },
             1 => {
-                let _ = tx.send(LlmEvent::Error {
-                    message: "maximum context length exceeded".into(),
+                let _ = tx.send(LlmEvent::ContentDelta {
+                    delta: r#"<summary>
+1. Primary Request and Intent:
+   Compacted
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - prompt too long
+
+5. Problem Solving:
+   compacted and retrying
+
+6. All user messages:
+   - current
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   retry request
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+                        .into(),
+                });
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "stop".into(),
                 });
             },
             _ => {
@@ -197,39 +217,6 @@ impl LlmProvider for ToolThenOverflowThenOkLlm {
                     finish_reason: "stop".into(),
                 });
             },
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for OverflowThenOkLlm {
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        if call_count == 0 {
-            let _ = tx.send(LlmEvent::Error {
-                message: "maximum context length exceeded".into(),
-            });
-        } else {
-            *self.captured_messages.lock().unwrap() = messages;
-            let _ = tx.send(LlmEvent::ContentDelta {
-                delta: "recovered".into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
-                finish_reason: "stop".into(),
-            });
         }
         Ok(rx)
     }
@@ -355,43 +342,6 @@ struct DelayTool {
     delay_ms: u64,
 }
 
-struct MetadataReadTool {
-    path: std::path::PathBuf,
-}
-
-#[async_trait::async_trait]
-impl Tool for MetadataReadTool {
-    fn definition(&self) -> ToolDefinition {
-        test_tool_definition("readFile")
-    }
-
-    fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Sequential
-    }
-
-    async fn execute(
-        &self,
-        _arguments: serde_json::Value,
-        _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
-        Ok(ToolResult {
-            call_id: String::new(),
-            content: "read output".into(),
-            is_error: false,
-            error: None,
-            metadata: BTreeMap::from([
-                (
-                    "path".into(),
-                    serde_json::json!(self.path.display().to_string()),
-                ),
-                ("offset".into(), serde_json::json!(0)),
-                ("limit".into(), serde_json::json!(1)),
-            ]),
-            duration_ms: None,
-        })
-    }
-}
-
 #[async_trait::async_trait]
 impl Tool for DelayTool {
     fn definition(&self) -> ToolDefinition {
@@ -501,6 +451,28 @@ fn test_registry(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
     Arc::new(registry)
 }
 
+fn test_context_assembler() -> Arc<astrcode_context::manager::LlmContextAssembler> {
+    Arc::new(astrcode_context::manager::LlmContextAssembler::new(
+        astrcode_context::settings::ContextWindowSettings::default(),
+    ))
+}
+
+fn test_services<L>(
+    llm: Arc<L>,
+    tool_registry: Arc<ToolRegistry>,
+    extension_runner: Arc<ExtensionRunner>,
+) -> AgentServices
+where
+    L: LlmProvider + 'static,
+{
+    AgentServices {
+        llm,
+        tool_registry,
+        extension_runner,
+        context_assembler: test_context_assembler(),
+    }
+}
+
 fn tool_result_contents(messages: &[LlmMessage]) -> Vec<String> {
     messages
         .iter()
@@ -571,8 +543,8 @@ impl LlmProvider for ToolThenFinalLlm {
 
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
+            max_input_tokens: 200000,
+            max_output_tokens: 200000,
         }
     }
 }
@@ -594,19 +566,20 @@ async fn parallel_tools_in_same_batch_overlap() {
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(ToolCallsThenFinalLlm {
-            call_count: AtomicUsize::new(0),
-            calls: vec![("call-1", "first"), ("call-2", "second")],
-            captured_messages: Arc::new(Mutex::new(Vec::new())),
-        }),
         String::new(),
-        tool_registry,
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "first"), ("call-2", "second")],
+                captured_messages: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
 
     timeout(
@@ -645,19 +618,20 @@ async fn sequential_tool_splits_parallel_batches() {
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(ToolCallsThenFinalLlm {
-            call_count: AtomicUsize::new(0),
-            calls: vec![("call-1", "before"), ("call-2", "seq"), ("call-3", "after")],
-            captured_messages: Arc::new(Mutex::new(Vec::new())),
-        }),
         String::new(),
-        tool_registry,
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "before"), ("call-2", "seq"), ("call-3", "after")],
+                captured_messages: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
 
     agent
@@ -690,19 +664,20 @@ async fn parallel_results_are_committed_in_model_order() {
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(ToolCallsThenFinalLlm {
-            call_count: AtomicUsize::new(0),
-            calls: vec![("call-1", "slow"), ("call-2", "fast")],
-            captured_messages: Arc::clone(&captured_messages),
-        }),
         String::new(),
-        tool_registry,
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "slow"), ("call-2", "fast")],
+                captured_messages: Arc::clone(&captured_messages),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
 
     agent
@@ -732,19 +707,20 @@ async fn parallel_failure_does_not_drop_sibling_result() {
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(ToolCallsThenFinalLlm {
-            call_count: AtomicUsize::new(0),
-            calls: vec![("call-1", "fail"), ("call-2", "ok")],
-            captured_messages: Arc::clone(&captured_messages),
-        }),
         String::new(),
-        tool_registry,
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "fail"), ("call-2", "ok")],
+                captured_messages: Arc::clone(&captured_messages),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
 
     agent
@@ -777,14 +753,15 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(ToolThenFinalLlm {
-            call_count: AtomicUsize::new(0),
-        }),
         String::new(),
-        tool_registry,
-        extension_runner,
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(ToolThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+            }),
+            tool_registry,
+            extension_runner,
+        ),
     );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -822,17 +799,18 @@ async fn session_system_prompt_is_sent_to_llm() {
     let agent = Agent::new(
         "session-1".into(),
         ".".into(),
-        Arc::new(CapturingLlm {
-            messages: Arc::clone(&captured_messages),
-        }),
         "test system prompt".to_string(),
-        Arc::new(ToolRegistry::new()),
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(CapturingLlm {
+                messages: Arc::clone(&captured_messages),
+            }),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
 
     let output = agent.process_prompt("hello", vec![], None).await.unwrap();
@@ -879,18 +857,19 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
             .join("astrcode-provider-hook-chain")
             .to_string_lossy()
             .to_string(),
-        Arc::new(CapturingLlm {
-            messages: Arc::clone(&captured_messages),
-        }),
         String::new(),
-        test_registry(vec![Arc::new(DelayTool {
-            name: "visible",
-            mode: ExecutionMode::Sequential,
-            delay_ms: 0,
-        })]),
-        extension_runner,
         "mock".into(),
-        8192,
+        test_services(
+            Arc::new(CapturingLlm {
+                messages: Arc::clone(&captured_messages),
+            }),
+            test_registry(vec![Arc::new(DelayTool {
+                name: "visible",
+                mode: ExecutionMode::Sequential,
+                delay_ms: 0,
+            })]),
+            extension_runner,
+        ),
     );
 
     let output = agent.process_prompt("hello", vec![], None).await.unwrap();
@@ -911,15 +890,16 @@ async fn prompt_too_long_compacts_and_retries_once() {
     let agent = Agent::new(
         "overflow-session".into(),
         ".".into(),
-        llm.clone(),
         String::new(),
-        Arc::new(ToolRegistry::new()),
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
         "mock".into(),
-        8192,
+        test_services(
+            llm.clone(),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
     );
     let mut history = Vec::new();
     for index in 0..6 {
@@ -934,7 +914,7 @@ async fn prompt_too_long_compacts_and_retries_once() {
         .unwrap();
 
     assert_eq!(output.text, "recovered");
-    assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 3);
     assert!(
         captured_messages
             .lock()
@@ -956,56 +936,4 @@ async fn prompt_too_long_compacts_and_retries_once() {
     }
     assert!(saw_compaction);
     assert!(!saw_error);
-}
-
-#[tokio::test]
-async fn prompt_too_long_retry_preserves_read_file_recovery() {
-    let temp = std::env::temp_dir().join(format!(
-        "astrcode-overflow-recovery-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&temp).unwrap();
-    let file = temp.join("notes.txt");
-    std::fs::write(&file, "important context\nother line\n").unwrap();
-    let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let llm = Arc::new(ToolThenOverflowThenOkLlm {
-        call_count: AtomicUsize::new(0),
-        captured_messages: Arc::clone(&captured_messages),
-    });
-    let agent = Agent::new(
-        "overflow-recovery-session".into(),
-        temp.display().to_string(),
-        llm.clone(),
-        String::new(),
-        test_registry(vec![Arc::new(MetadataReadTool { path: file })]),
-        Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        )),
-        "mock".into(),
-        8192,
-    );
-    let mut history = Vec::new();
-    for index in 0..6 {
-        history.push(LlmMessage::user(format!("old user {index}")));
-        history.push(LlmMessage::assistant(format!("old answer {index}")));
-    }
-
-    let output = agent
-        .process_prompt("current", history, None)
-        .await
-        .unwrap();
-
-    assert_eq!(output.text, "recovered");
-    assert_eq!(llm.call_count.load(Ordering::SeqCst), 3);
-    let sent = captured_messages.lock().unwrap();
-    assert!(message_text_contains(
-        &sent,
-        "Recovered file context after compaction."
-    ));
-    assert!(message_text_contains(&sent, "important context"));
-    let _ = std::fs::remove_dir_all(temp);
 }

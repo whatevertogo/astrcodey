@@ -5,7 +5,7 @@
 
 pub mod agent_loop;
 pub mod agent {
-    pub use crate::agent_loop::{Agent, AgentTurnOutput};
+    pub use crate::agent_loop::{Agent, AgentServices, AgentTurnOutput};
 }
 pub mod bootstrap;
 pub mod handler;
