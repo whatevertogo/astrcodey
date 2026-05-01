@@ -6,7 +6,7 @@ use astrcode_core::{
     config::ModelSelection,
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
-        PreToolUseInput,
+        HookSubscription, PreToolUseInput,
     },
     tool::{ToolDefinition, ToolOrigin, ToolResult},
 };
@@ -26,8 +26,12 @@ impl Extension for SecurityExtension {
         "test-security"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![(ExtensionEvent::PreToolUse, HookMode::Blocking)]
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::PreToolUse,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(
@@ -72,8 +76,12 @@ impl Extension for AlwaysBlockExtension {
         "test-always-block"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![(ExtensionEvent::PreToolUse, HookMode::Blocking)]
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::PreToolUse,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(
@@ -95,7 +103,7 @@ impl Extension for EchoToolExtension {
         "test-echo-tool"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
         vec![]
     }
 
@@ -158,7 +166,7 @@ impl Extension for FixedToolExtension {
         self.id
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
         vec![]
     }
 
@@ -373,8 +381,12 @@ async fn extension_context_snapshot_works_for_nonblocking() {
         fn id(&self) -> &str {
             "test-faf"
         }
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-            vec![(ExtensionEvent::TurnStart, HookMode::NonBlocking)]
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::TurnStart,
+                mode: HookMode::NonBlocking,
+                priority: 0,
+            }]
         }
         async fn on_event(
             &self,

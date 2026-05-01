@@ -6,8 +6,7 @@
   "astrcode_version": "0.1.0",
   "library": "astrcode_extension_agent_tools.dll",
   "subscriptions": [
-    { "event": "session_start", "mode": "blocking" },
-    { "event": "prompt_build", "mode": "blocking" }
+    { "event": "prompt_build", "mode": "blocking", "priority": 0 }
   ],
   "tools": [
     {

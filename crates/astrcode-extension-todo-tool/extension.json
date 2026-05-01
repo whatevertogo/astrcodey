@@ -8,11 +8,13 @@
   "subscriptions": [
     {
       "event": "before_provider_request",
-      "mode": "blocking"
+      "mode": "blocking",
+      "priority": 0
     },
     {
       "event": "post_tool_use",
-      "mode": "blocking"
+      "mode": "blocking",
+      "priority": 0
     }
   ],
   "tools": [

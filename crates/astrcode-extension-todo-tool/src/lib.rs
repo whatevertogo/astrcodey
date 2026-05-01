@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
+        HookSubscription,
     },
     tool::{ToolDefinition, ToolOrigin, ToolResult},
     types::project_hash_from_path,
@@ -21,7 +22,7 @@ Update the progress todo list for the current session. Use it proactively for co
                                       working. Provide both content and activeForm for each item.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
-const REMINDER_THRESHOLD: u32 = 10;
+const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
 /// Compute session-local progress todo storage root.
@@ -45,10 +46,18 @@ impl Extension for TodoToolExtension {
         "astrcode-todo-tool"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
         vec![
-            (ExtensionEvent::BeforeProviderRequest, HookMode::Blocking),
-            (ExtensionEvent::PostToolUse, HookMode::Blocking),
+            HookSubscription {
+                event: ExtensionEvent::BeforeProviderRequest,
+                mode: HookMode::Blocking,
+                priority: 0,
+            },
+            HookSubscription {
+                event: ExtensionEvent::PostToolUse,
+                mode: HookMode::Blocking,
+                priority: 0,
+            },
         ]
     }
 
@@ -643,10 +652,18 @@ mod tests {
         assert_eq!(tool["parameters"], definition.parameters);
         assert_eq!(manifest["subscriptions"].as_array().unwrap().len(), 2);
         assert_eq!(
-            TodoToolExtension.subscriptions(),
+            TodoToolExtension.hook_subscriptions(),
             vec![
-                (ExtensionEvent::BeforeProviderRequest, HookMode::Blocking),
-                (ExtensionEvent::PostToolUse, HookMode::Blocking),
+                HookSubscription {
+                    event: ExtensionEvent::BeforeProviderRequest,
+                    mode: HookMode::Blocking,
+                    priority: 0,
+                },
+                HookSubscription {
+                    event: ExtensionEvent::PostToolUse,
+                    mode: HookMode::Blocking,
+                    priority: 0,
+                },
             ]
         );
     }

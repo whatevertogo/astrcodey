@@ -32,6 +32,11 @@ pub struct ExtensionRunner {
     timeout: Duration,
 }
 
+struct OrderedExtension {
+    ext: Arc<dyn Extension>,
+    mode: HookMode,
+}
+
 impl ExtensionRunner {
     /// 创建新的扩展运行器。
     ///
@@ -66,13 +71,10 @@ impl ExtensionRunner {
         event: ExtensionEvent,
         ctx: &dyn ExtensionContext,
     ) -> Result<(), ExtensionError> {
-        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
+        for ordered in self.ordered_extensions_for(&event).await {
+            let ext = ordered.ext;
 
-        for ext in &exts {
-            let mode = match_ext_mode(ext.as_ref(), &event);
-            let Some(mode) = mode else { continue };
-
-            match mode {
+            match ordered.mode {
                 HookMode::Blocking => {
                     // 带超时的同步执行
                     let result =
@@ -104,7 +106,6 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ext = Arc::clone(ext);
                     let evt = event.clone();
                     // 使用快照以在派生前释放借用
                     let snap_ctx = ctx.snapshot();
@@ -132,16 +133,13 @@ impl ExtensionRunner {
         event: ExtensionEvent,
         ctx: &dyn ExtensionContext,
     ) -> Result<ToolHookOutcome, ExtensionError> {
-        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
-
         let mut modified_input: Option<serde_json::Value> = None;
         let mut modified_result: Option<String> = None;
 
-        for ext in &exts {
-            let mode = match_ext_mode(ext.as_ref(), &event);
-            let Some(mode) = mode else { continue };
+        for ordered in self.ordered_extensions_for(&event).await {
+            let ext = ordered.ext;
 
-            match mode {
+            match ordered.mode {
                 HookMode::Blocking => {
                     let result =
                         tokio::time::timeout(self.timeout, ext.on_event(event.clone(), ctx))
@@ -169,7 +167,6 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ext = Arc::clone(ext);
                     let evt = event.clone();
                     let snap_ctx = ctx.snapshot();
                     tokio::spawn(async move {
@@ -199,20 +196,17 @@ impl ExtensionRunner {
         event: ExtensionEvent,
         ctx: &dyn ExtensionContext,
     ) -> Result<ProviderHookOutcome, ExtensionError> {
-        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
-
         let mut current_messages = ctx.provider_messages();
         let mut modified_messages = false;
 
-        for ext in &exts {
-            let mode = match_ext_mode(ext.as_ref(), &event);
-            let Some(mode) = mode else { continue };
+        for ordered in self.ordered_extensions_for(&event).await {
+            let ext = ordered.ext;
             let hook_ctx = ProviderMessagesContext {
                 base: ctx,
                 messages: current_messages.clone(),
             };
 
-            match mode {
+            match ordered.mode {
                 HookMode::Blocking => {
                     let result =
                         tokio::time::timeout(self.timeout, ext.on_event(event.clone(), &hook_ctx))
@@ -243,7 +237,6 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ext = Arc::clone(ext);
                     let evt = event.clone();
                     let snap_ctx = hook_ctx.snapshot();
                     tokio::spawn(async move {
@@ -267,14 +260,15 @@ impl ExtensionRunner {
         &self,
         ctx: &dyn ExtensionContext,
     ) -> Result<PromptContributions, ExtensionError> {
-        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
         let mut collected = PromptContributions::default();
 
-        for ext in &exts {
-            let mode = match_ext_mode(ext.as_ref(), &ExtensionEvent::PromptBuild);
-            let Some(mode) = mode else { continue };
+        for ordered in self
+            .ordered_extensions_for(&ExtensionEvent::PromptBuild)
+            .await
+        {
+            let ext = ordered.ext;
 
-            match mode {
+            match ordered.mode {
                 HookMode::Blocking => {
                     let result = tokio::time::timeout(
                         self.timeout,
@@ -353,6 +347,34 @@ impl ExtensionRunner {
             cmds.extend(ext.slash_commands());
         }
         cmds
+    }
+
+    async fn ordered_extensions_for(&self, event: &ExtensionEvent) -> Vec<OrderedExtension> {
+        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
+        let mut matched = exts
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, ext)| {
+                let subscription = ext
+                    .hook_subscriptions()
+                    .into_iter()
+                    .find(|sub| &sub.event == event)?;
+                Some((index, subscription.priority, subscription.mode, ext))
+            })
+            .collect::<Vec<_>>();
+
+        matched.sort_by(
+            |(left_index, left_priority, _, _), (right_index, right_priority, _, _)| {
+                right_priority
+                    .cmp(left_priority)
+                    .then_with(|| left_index.cmp(right_index))
+            },
+        );
+
+        matched
+            .into_iter()
+            .map(|(_, _, mode, ext)| OrderedExtension { ext, mode })
+            .collect()
     }
 }
 
@@ -594,16 +616,10 @@ impl ExtensionContext for ProviderMessagesSnapshot {
     }
 }
 
-/// 查找扩展对指定事件订阅的钩子模式。
-fn match_ext_mode(ext: &dyn Extension, event: &ExtensionEvent) -> Option<HookMode> {
-    ext.subscriptions()
-        .iter()
-        .find(|(e, _)| e == event)
-        .map(|(_, m)| *m)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use astrcode_core::{config::ModelSelection, extension::PromptContributions};
 
     use super::*;
@@ -611,6 +627,18 @@ mod tests {
     struct PromptContributionExtension;
     struct ProviderReplaceExtension;
     struct ProviderAppendExtension;
+    struct OrderedProviderAppendExtension {
+        id: &'static str,
+        text: &'static str,
+        priority: i32,
+    }
+    struct OrderedToolExtension {
+        id: &'static str,
+        label: &'static str,
+        priority: i32,
+        blocks: bool,
+        seen: Arc<Mutex<Vec<&'static str>>>,
+    }
 
     #[async_trait::async_trait]
     impl Extension for PromptContributionExtension {
@@ -618,8 +646,12 @@ mod tests {
             "prompt-contribution"
         }
 
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-            vec![(ExtensionEvent::PromptBuild, HookMode::Blocking)]
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::PromptBuild,
+                mode: HookMode::Blocking,
+                priority: 0,
+            }]
         }
 
         async fn on_event(
@@ -642,8 +674,12 @@ mod tests {
             "provider-replace"
         }
 
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-            vec![(ExtensionEvent::BeforeProviderRequest, HookMode::Blocking)]
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::BeforeProviderRequest,
+                mode: HookMode::Blocking,
+                priority: 0,
+            }]
         }
 
         async fn on_event(
@@ -664,8 +700,12 @@ mod tests {
             "provider-append"
         }
 
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-            vec![(ExtensionEvent::BeforeProviderRequest, HookMode::Blocking)]
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::BeforeProviderRequest,
+                mode: HookMode::Blocking,
+                priority: 0,
+            }]
         }
 
         async fn on_event(
@@ -681,6 +721,65 @@ mod tests {
             Ok(HookEffect::AppendMessages {
                 messages: vec![LlmMessage::user("appended")],
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for OrderedProviderAppendExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::BeforeProviderRequest,
+                mode: HookMode::Blocking,
+                priority: self.priority,
+            }]
+        }
+
+        async fn on_event(
+            &self,
+            event: ExtensionEvent,
+            _ctx: &dyn ExtensionContext,
+        ) -> Result<HookEffect, ExtensionError> {
+            assert_eq!(event, ExtensionEvent::BeforeProviderRequest);
+            Ok(HookEffect::AppendMessages {
+                messages: vec![LlmMessage::user(self.text)],
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for OrderedToolExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+            vec![HookSubscription {
+                event: ExtensionEvent::PreToolUse,
+                mode: HookMode::Blocking,
+                priority: self.priority,
+            }]
+        }
+
+        async fn on_event(
+            &self,
+            event: ExtensionEvent,
+            _ctx: &dyn ExtensionContext,
+        ) -> Result<HookEffect, ExtensionError> {
+            assert_eq!(event, ExtensionEvent::PreToolUse);
+            self.seen
+                .lock()
+                .expect("record hook order")
+                .push(self.label);
+            if self.blocks {
+                return Ok(HookEffect::Block {
+                    reason: self.label.to_string(),
+                });
+            }
+            Ok(HookEffect::Allow)
         }
     }
 
@@ -768,5 +867,101 @@ mod tests {
             panic!("provider hooks should produce modified messages");
         };
         assert_eq!(message_texts(&messages), ["replaced", "appended"]);
+    }
+
+    #[tokio::test]
+    async fn provider_hooks_use_priority_before_registration_order() {
+        let runner =
+            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        runner
+            .register(Arc::new(OrderedProviderAppendExtension {
+                id: "low",
+                text: "low",
+                priority: -1,
+            }))
+            .await;
+        runner
+            .register(Arc::new(OrderedProviderAppendExtension {
+                id: "high",
+                text: "high",
+                priority: 10,
+            }))
+            .await;
+
+        let outcome = runner
+            .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &TestContext)
+            .await
+            .expect("provider hook dispatch");
+
+        let ProviderHookOutcome::ModifiedMessages { messages } = outcome else {
+            panic!("provider hooks should produce modified messages");
+        };
+        assert_eq!(message_texts(&messages), ["original", "high", "low"]);
+    }
+
+    #[tokio::test]
+    async fn provider_hooks_keep_registration_order_for_equal_priority() {
+        let runner =
+            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        runner
+            .register(Arc::new(OrderedProviderAppendExtension {
+                id: "first",
+                text: "first",
+                priority: 0,
+            }))
+            .await;
+        runner
+            .register(Arc::new(OrderedProviderAppendExtension {
+                id: "second",
+                text: "second",
+                priority: 0,
+            }))
+            .await;
+
+        let outcome = runner
+            .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &TestContext)
+            .await
+            .expect("provider hook dispatch");
+
+        let ProviderHookOutcome::ModifiedMessages { messages } = outcome else {
+            panic!("provider hooks should produce modified messages");
+        };
+        assert_eq!(message_texts(&messages), ["original", "first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn tool_hooks_stop_after_higher_priority_block() {
+        let runner =
+            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        runner
+            .register(Arc::new(OrderedToolExtension {
+                id: "low",
+                label: "low",
+                priority: -1,
+                blocks: false,
+                seen: Arc::clone(&seen),
+            }))
+            .await;
+        runner
+            .register(Arc::new(OrderedToolExtension {
+                id: "high",
+                label: "high",
+                priority: 10,
+                blocks: true,
+                seen: Arc::clone(&seen),
+            }))
+            .await;
+
+        let outcome = runner
+            .dispatch_tool_hook(ExtensionEvent::PreToolUse, &TestContext)
+            .await
+            .expect("tool hook dispatch");
+
+        let ToolHookOutcome::Blocked { reason } = outcome else {
+            panic!("higher priority hook should block");
+        };
+        assert_eq!(reason, "high");
+        assert_eq!(seen.lock().expect("read hook order").as_slice(), ["high"]);
     }
 }

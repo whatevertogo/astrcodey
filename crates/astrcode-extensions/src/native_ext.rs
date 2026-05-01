@@ -15,7 +15,7 @@ use std::{
 use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
-        HookEffect, HookMode,
+        HookEffect, HookMode, HookSubscription,
     },
     tool::{ToolDefinition, ToolOrigin, ToolResult},
 };
@@ -145,13 +145,17 @@ impl Extension for NativeExtension {
         &self.id
     }
 
-    /// 返回此扩展订阅的所有 (事件, 模式) 对。
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+    /// 返回此扩展订阅的所有事件处理器。
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
         self.handlers
             .lock()
             .unwrap()
             .iter()
-            .map(|(e, m, _)| (e.clone(), *m))
+            .map(|(event, mode, _)| HookSubscription {
+                event: event.clone(),
+                mode: *mode,
+                priority: 0,
+            })
             .collect()
     }
 

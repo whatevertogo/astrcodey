@@ -3,6 +3,7 @@
 //! 测试扩展加载器在不存在的目录、空目录等边界条件下的行为，
 //! 以及扩展运行时的工具注册和取出功能，FFI 判别值的往返转换。
 
+use astrcode_core::extension::ExtensionManifest;
 use astrcode_extensions::{loader::ExtensionLoader, runtime::ExtensionRuntime};
 
 /// 测试加载器在不存在的路径下返回空结果且不报错
@@ -81,4 +82,30 @@ fn ffi_discriminants_roundtrip() {
         let back = ffi::mode_from_discriminant(d);
         assert_eq!(back, Some(mode));
     }
+}
+
+/// 测试清单订阅优先级使用显式协议字段。
+#[test]
+fn manifest_subscription_priority_is_explicit() {
+    let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+        "id": "priority-test",
+        "name": "Priority Test",
+        "library": "priority-test.dll",
+        "subscriptions": [
+            {
+                "event": "pre_tool_use",
+                "mode": "blocking",
+                "priority": 10
+            },
+            {
+                "event": "post_tool_use",
+                "mode": "advisory",
+                "priority": 25
+            }
+        ]
+    }))
+    .expect("manifest should deserialize");
+
+    assert_eq!(manifest.subscriptions[0].priority, 10);
+    assert_eq!(manifest.subscriptions[1].priority, 25);
 }

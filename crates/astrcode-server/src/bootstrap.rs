@@ -365,7 +365,7 @@ mod tests {
             self.id
         }
 
-        fn subscriptions(&self) -> Vec<(ExtensionEvent, astrcode_core::extension::HookMode)> {
+        fn hook_subscriptions(&self) -> Vec<astrcode_core::extension::HookSubscription> {
             Vec::new()
         }
 

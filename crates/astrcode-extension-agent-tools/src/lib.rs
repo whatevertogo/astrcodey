@@ -11,7 +11,7 @@ use agent::AgentConfig;
 use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
-        HookEffect, HookMode, PromptContributions,
+        HookEffect, HookMode, HookSubscription, PromptContributions,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ToolDefinition, ToolOrigin, ToolResult},
@@ -32,8 +32,12 @@ impl Extension for AgentToolsExtension {
         "astrcode-agent-tools"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![(ExtensionEvent::PromptBuild, HookMode::Blocking)]
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::PromptBuild,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(

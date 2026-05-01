@@ -10,7 +10,9 @@ use std::{
 };
 
 use astrcode_core::{
-    extension::{Extension, ExtensionContext, ExtensionError, HookEffect, HookMode},
+    extension::{
+        Extension, ExtensionContext, ExtensionError, HookEffect, HookMode, HookSubscription,
+    },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
@@ -47,8 +49,12 @@ impl Extension for BlockingPreToolExtension {
         "blocking-pre-tool"
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![(ExtensionEvent::PreToolUse, HookMode::Blocking)]
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::PreToolUse,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(
@@ -88,8 +94,12 @@ impl Extension for ProviderMessageExtension {
         self.id
     }
 
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![(ExtensionEvent::BeforeProviderRequest, HookMode::Blocking)]
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::BeforeProviderRequest,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(

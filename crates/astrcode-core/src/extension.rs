@@ -28,8 +28,8 @@ pub trait Extension: Send + Sync {
     /// 返回扩展的唯一标识符。
     fn id(&self) -> &str;
 
-    /// 返回此扩展订阅的事件及其钩子模式。
-    fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)>;
+    /// 返回此扩展订阅的事件、钩子模式及事件级优先级。
+    fn hook_subscriptions(&self) -> Vec<HookSubscription>;
 
     /// 处理事件。
     ///
@@ -149,6 +149,8 @@ pub struct ManifestSubscription {
     /// 钩子执行模式。
     #[serde(rename = "mode")]
     pub mode: HookMode,
+    /// 同一事件内的执行优先级，数值越大越先执行。
+    pub priority: i32,
 }
 
 // ─── Hook Input / Output ─────────────────────────────────────────────────
@@ -190,6 +192,20 @@ pub enum HookMode {
     /// 执行但结果仅供参考。
     /// 适用于：风格建议、可选指导。
     Advisory,
+}
+
+/// 运行时扩展订阅条目。
+///
+/// 相比旧版 `(ExtensionEvent, HookMode)`，这里把优先级绑定到单个事件订阅上，
+/// 让同一个扩展可以在不同 hook 上使用不同排序。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookSubscription {
+    /// 订阅的事件类型。
+    pub event: ExtensionEvent,
+    /// 钩子执行模式。
+    pub mode: HookMode,
+    /// 同一事件内的执行优先级，数值越大越先执行。
+    pub priority: i32,
 }
 
 // ─── Hook Effect ─────────────────────────────────────────────────────────
@@ -256,8 +272,8 @@ impl PromptContributions {
 pub struct ExtensionCapabilities {
     /// 扩展 ID。
     pub id: String,
-    /// 订阅的事件及其模式。
-    pub events: Vec<(ExtensionEvent, HookMode)>,
+    /// 订阅的事件、模式及事件级优先级。
+    pub events: Vec<HookSubscription>,
     /// 注册的工具数量。
     pub tool_count: usize,
     /// 注册的斜杠命令数量。

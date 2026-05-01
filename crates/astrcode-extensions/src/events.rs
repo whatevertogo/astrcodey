@@ -4,5 +4,5 @@
 //! 包括扩展能力、事件枚举、钩子效果、钩子模式和斜杠命令。
 
 pub use astrcode_core::extension::{
-    ExtensionCapabilities, ExtensionEvent, HookEffect, HookMode, SlashCommand,
+    ExtensionCapabilities, ExtensionEvent, HookEffect, HookMode, HookSubscription, SlashCommand,
 };
