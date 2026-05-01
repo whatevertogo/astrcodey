@@ -22,28 +22,40 @@ use super::{
 /// 主渲染入口：只渲染底部面板。
 pub fn render(state: &TuiState, frame: &mut Frame<'_>, theme: &Theme) {
     let area = frame.area();
-    let composer_height = composer_height(state, area.width)
-        .min(area.height.saturating_sub(2))
-        .max(3);
-    let status_height = if state.is_streaming || state.error.is_some() {
+    let footer_height = area.height.min(1);
+    let status_height = if state.error.is_some() && area.height > footer_height {
         1
     } else {
         0
     };
+    let live_height = activity_height(state, area.width).min(4).min(
+        area.height
+            .saturating_sub(footer_height + status_height + 2),
+    );
+    let composer_available = area
+        .height
+        .saturating_sub(footer_height + status_height + live_height);
+    let composer_height = composer_height(state, area.width)
+        .min(composer_available)
+        .max(composer_available.min(2));
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(status_height),
+            Constraint::Length(live_height),
             Constraint::Length(composer_height),
-            Constraint::Length(2),
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
     if status_height > 0 {
         render_status(state, frame, layout[0], theme);
     }
-    render_composer(state, frame, layout[1], theme);
-    render_footer(state, frame, layout[2], theme);
+    if live_height > 0 {
+        render_live_activity(state, frame, layout[1], theme);
+    }
+    render_composer(state, frame, layout[2], theme);
+    render_footer(state, frame, layout[3], theme);
 
     if state.show_slash_palette {
         render_slash_palette(state, frame, area, theme);
@@ -79,22 +91,25 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
         render_spec_to_lines(spec, &mut lines, content_width, theme, "  ");
     } else {
         let text = msg.body.plain_text();
-        let wrapped = visual_lines(text, content_width);
-        for line in wrapped {
-            lines.push(Line::from(vec![
-                Span::styled("  ", theme.dim),
-                Span::styled(line, body_style),
-            ]));
+        if !text.trim().is_empty() {
+            let wrapped = visual_lines(text, content_width);
+            for line in wrapped {
+                lines.push(Line::from(vec![
+                    Span::styled("  ", theme.dim),
+                    Span::styled(line, body_style),
+                ]));
+            }
         }
     }
 
     if msg.is_streaming {
         lines.push(Line::from(vec![
             Span::styled("  ⎿ ", theme.dim),
-            Span::styled("streaming…", theme.dim),
+            Span::styled("running...", theme.dim),
         ]));
     }
 
+    lines.push(Line::from(""));
     lines
 }
 
@@ -255,13 +270,13 @@ fn strip_ansi_limited(text: &str) -> String {
     let mut output = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.next() == Some('[') {
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else if ch == '\u{9b}' {
+        let is_csi = if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            true
+        } else {
+            ch == '\u{9b}'
+        };
+        if is_csi {
             for next in chars.by_ref() {
                 if ('@'..='~').contains(&next) {
                     break;
@@ -283,6 +298,9 @@ fn text_width(text: &str) -> usize {
 // ─── Status / Composer / Footer / Slash palette (unchanged) ─────────────────
 
 fn render_status(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
     let line = if let Some(error) = &state.error {
         Line::from(vec![
             Span::styled("error ", theme.error_label),
@@ -299,10 +317,23 @@ fn render_status(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn render_live_activity(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(activity_lines(state, area.width, theme))),
+        area,
+    );
+}
+
 fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
     let active = state.focus == Focus::Input || state.focus == Focus::SlashPalette;
     let block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
+        .borders(Borders::TOP)
         .border_style(if active {
             theme.border_active
         } else {
@@ -317,7 +348,7 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
         vec![Line::from(vec![
             Span::styled("› ", theme.assistant_label),
             Span::styled(
-                "Ask astrcode to inspect, edit, or explain…",
+                "Ask astrcode to inspect, edit, or explain...",
                 theme.composer_placeholder,
             ),
         ])]
@@ -344,6 +375,9 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
 }
 
 fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    if area.height == 0 {
+        return;
+    }
     let session = state
         .active_session_id
         .as_deref()
@@ -352,27 +386,24 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
     let model = if state.model_name.is_empty() {
         "model: pending".to_string()
     } else {
-        format!("model: {}", state.model_name)
+        state.model_name.clone()
     };
     let cwd = if state.working_dir.is_empty() {
-        "cwd: pending"
+        "cwd pending".into()
     } else {
-        state.working_dir.as_str()
+        compact_path(&state.working_dir)
     };
-    let line = format!("{model} · {cwd} · session {session}");
-    let hints = if state.available_sessions.is_empty() {
-        "  › Enter send · Shift+Enter newline · /quit exit".into()
+    let hints = if state.is_streaming {
+        "Esc stop"
     } else {
-        format!(
-            "  › Enter send · Shift+Enter newline · sessions {} · /quit exit",
-            state.available_sessions.len()
-        )
+        "Enter send · Shift+Enter newline · /help"
     };
+    let line = fit_line(
+        &format!("  {model} · {cwd} · session {session}   {hints}"),
+        area.width as usize,
+    );
     frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(Span::styled(format!("  {line}"), theme.footer)),
-            Line::from(Span::styled(hints, theme.footer)),
-        ])),
+        Paragraph::new(Line::from(Span::styled(line, theme.footer))),
         area,
     );
 }
@@ -383,7 +414,7 @@ fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, the
         return;
     }
     let height = commands.len().min(6) as u16 + 2;
-    let popup = centered_rect(area, 70, height);
+    let popup = bottom_popup_rect(area, 70, height);
     let inner = popup.inner(Margin {
         vertical: 1,
         horizontal: 1,
@@ -416,13 +447,14 @@ fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, the
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
+fn bottom_popup_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
     let width = ((area.width as u32 * percent_x as u32) / 100) as u16;
     let popup_width = width.max(24).min(area.width);
     let popup_height = height.min(area.height);
+    let bottom_gap = 3u16.min(area.height.saturating_sub(popup_height));
     Rect {
         x: area.x + (area.width.saturating_sub(popup_width)) / 2,
-        y: area.y + (area.height.saturating_sub(popup_height)) / 2,
+        y: area.y + area.height.saturating_sub(popup_height + bottom_gap),
         width: popup_width,
         height: popup_height,
     }
@@ -447,7 +479,125 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<String> {
 
 fn composer_height(state: &TuiState, width: u16) -> u16 {
     let content_width = width.saturating_sub(2).max(1) as usize;
-    (visual_lines(&state.input, content_width).len().max(1) as u16 + 2).min(8)
+    (visual_lines(&state.input, content_width).len().max(1) as u16 + 1).min(7)
+}
+
+fn activity_height(state: &TuiState, width: u16) -> u16 {
+    if let Some(message) = latest_live_message(state) {
+        let content_width = width.saturating_sub(4).max(1) as usize;
+        return (1 + last_visual_lines(message.body.plain_text(), content_width, 3).len()) as u16;
+    }
+    if should_show_status_activity(state) {
+        1
+    } else {
+        0
+    }
+}
+
+fn activity_lines(state: &TuiState, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    if let Some(message) = latest_live_message(state) {
+        let (icon, style) = match message.role {
+            MessageRole::Assistant => ("●", theme.assistant_label),
+            MessageRole::Tool => ("⏺", theme.tool_label),
+            MessageRole::Error => ("✖", theme.error_label),
+            MessageRole::User => ("›", theme.user_label),
+            MessageRole::System => ("•", theme.system_label),
+        };
+        let mut lines = vec![Line::from(vec![
+            Span::styled(format!("  {icon} "), style),
+            Span::styled(message.label.clone(), style),
+        ])];
+        let content_width = width.saturating_sub(4).max(1) as usize;
+        for line in last_visual_lines(message.body.plain_text(), content_width, 3) {
+            lines.push(Line::from(vec![
+                Span::styled("  ⎿ ", theme.dim),
+                Span::styled(line, theme.body),
+            ]));
+        }
+        return lines;
+    }
+
+    if should_show_status_activity(state) {
+        return vec![Line::from(vec![
+            Span::styled("  ● ", theme.status_busy),
+            Span::styled(state.status.clone(), theme.body),
+        ])];
+    }
+
+    Vec::new()
+}
+
+fn latest_live_message(state: &TuiState) -> Option<&Message> {
+    state
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.is_streaming)
+}
+
+fn should_show_status_activity(state: &TuiState) -> bool {
+    state.is_streaming
+        || (!state.status.is_empty()
+            && !state.status.starts_with("Ready")
+            && !state.status.ends_with("session(s)")
+            && state.status != "Ready")
+}
+
+fn last_visual_lines(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    let mut lines = visual_lines(text, width)
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    lines
+}
+
+fn compact_path(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<_> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() <= 3 {
+        return normalized;
+    }
+    let root = if normalized.contains(":/") {
+        parts.first().copied().unwrap_or_default()
+    } else if normalized.starts_with('/') {
+        ""
+    } else {
+        parts.first().copied().unwrap_or_default()
+    };
+    let tail = &parts[parts.len().saturating_sub(2)..];
+    if root.is_empty() {
+        format!("/.../{}", tail.join("/"))
+    } else {
+        format!("{root}/.../{}", tail.join("/"))
+    }
+}
+
+fn fit_line(text: &str, width: usize) -> String {
+    if width == 0 || text_width(text) <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return "…".into();
+    }
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push('…');
+    out
 }
 
 // ─── 文本布局引擎 ─────────────────────────────────────────────────────

@@ -19,7 +19,8 @@ use std::{
 use astrcode_client::{client::AstrcodeClient, stream::StreamItem};
 use astrcode_protocol::commands::ClientCommand;
 use crossterm::{
-    event::{self, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers},
+    execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use input::Action;
@@ -95,6 +96,10 @@ async fn handle_action(
         Action::Quit => state.should_quit = true,
         Action::Tick => state.mark_dirty(),
         Action::Key(event) => handle_key(event, state, client, terminal).await?,
+        Action::Paste(text) => {
+            let text = normalize_paste(&text);
+            state.insert_str(&text);
+        },
     }
     state.mark_dirty();
     Ok(())
@@ -225,17 +230,59 @@ async fn submit_current_input(
 }
 
 async fn execute_slash_command(
-    _command: slash::SlashCommand,
+    command: slash::SlashCommand,
     state: &mut TuiState,
-    _client: &Arc<Client>,
+    client: &Arc<Client>,
 ) -> io::Result<()> {
-    state.push_message(
-        state::MessageRole::System,
-        "System".into(),
-        format!("Slash command executed"),
-        false,
-        None,
-    );
+    match command {
+        slash::SlashCommand::New => {
+            let working_dir = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".into());
+            client
+                .send_command(&ClientCommand::CreateSession { working_dir })
+                .await
+                .map_err(io_error)?;
+            state.status = "Creating session".into();
+        },
+        slash::SlashCommand::Resume(session_id) => {
+            if session_id.trim().is_empty() {
+                state.push_message(
+                    state::MessageRole::System,
+                    "Usage".into(),
+                    "/resume <session-id>".into(),
+                    false,
+                    None,
+                );
+            } else {
+                let session_id = resolve_session_id(state, &session_id);
+                client
+                    .send_command(&ClientCommand::ResumeSession { session_id })
+                    .await
+                    .map_err(io_error)?;
+                state.status = "Resuming session".into();
+            }
+        },
+        slash::SlashCommand::Sessions => {
+            client
+                .send_command(&ClientCommand::ListSessions)
+                .await
+                .map_err(io_error)?;
+            state.status = "Listing sessions".into();
+        },
+        slash::SlashCommand::Quit => {
+            state.should_quit = true;
+        },
+        slash::SlashCommand::Help => {
+            state.push_message(
+                state::MessageRole::System,
+                "Help".into(),
+                slash_help_text(),
+                false,
+                None,
+            );
+        },
+    }
     state.mark_dirty();
     Ok(())
 }
@@ -252,6 +299,11 @@ fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
                             if action_tx.send(action).is_err() {
                                 break;
                             }
+                        }
+                    },
+                    Ok(event::Event::Paste(text)) => {
+                        if action_tx.send(Action::Paste(text)).is_err() {
+                            break;
                         }
                     },
                     Ok(event::Event::Resize(_, _)) => {
@@ -286,6 +338,7 @@ impl TerminalSession {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
+        execute!(stdout, EnableBracketedPaste)?;
         // 交替滚动：滚轮在 raw 模式下也工作
         // 光标移到底部，这样 inline viewport 在屏幕最后一行
         let (_, rows) = crossterm::terminal::size()?;
@@ -293,7 +346,7 @@ impl TerminalSession {
         stdout.flush()?;
 
         let options = TerminalOptions {
-            viewport: Viewport::Inline(6),
+            viewport: Viewport::Inline(12),
         };
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::with_options(backend, options)?;
@@ -323,6 +376,7 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
+        let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
 }
@@ -346,4 +400,29 @@ fn io_error(error: impl std::fmt::Display) -> io::Error {
 
 fn short_id(session_id: &str) -> &str {
     session_id.get(..8).unwrap_or(session_id)
+}
+
+fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn slash_help_text() -> String {
+    [
+        "/new                 create a fresh session",
+        "/sessions            list known sessions",
+        "/resume <id>         resume a session",
+        "/help                show this help",
+        "/quit                exit astrcode",
+    ]
+    .join("\n")
+}
+
+fn resolve_session_id(state: &TuiState, input: &str) -> String {
+    let needle = input.trim();
+    state
+        .available_sessions
+        .iter()
+        .find(|session_id| session_id.starts_with(needle))
+        .cloned()
+        .unwrap_or_else(|| needle.to_string())
 }

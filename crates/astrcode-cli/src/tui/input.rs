@@ -13,6 +13,8 @@ pub enum Action {
     Tick,
     /// 键盘按键事件
     Key(KeyEvent),
+    /// bracketed paste 文本
+    Paste(String),
 }
 
 /// 将 crossterm 键盘事件映射为 Action。

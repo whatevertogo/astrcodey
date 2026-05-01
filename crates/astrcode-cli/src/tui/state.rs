@@ -207,6 +207,18 @@ impl TuiState {
         self.mark_dirty();
     }
 
+    /// 在光标位置插入一段文本，用于 bracketed paste。
+    pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let byte_idx = self.cursor_byte_index();
+        self.input.insert_str(byte_idx, text);
+        self.input_cursor += text.chars().count();
+        self.sync_slash_filter();
+        self.mark_dirty();
+    }
+
     /// 删除光标前一个字符（退格键）。
     pub fn backspace(&mut self) {
         if self.input_cursor == 0 {
@@ -403,6 +415,13 @@ impl TuiState {
                     .map(|item| item.session_id.clone())
                     .collect();
                 self.status = format!("{} session(s)", sessions.len());
+                self.push_message(
+                    MessageRole::System,
+                    "Sessions".into(),
+                    session_list_body(sessions, self.active_session_id.as_deref()),
+                    false,
+                    None,
+                );
                 self.mark_dirty();
             },
             // UI 请求（如确认提示等）
@@ -507,7 +526,7 @@ impl TuiState {
                 self.push_message(
                     MessageRole::Tool,
                     tool_message_label(tool_name, None),
-                    tool_name.clone(),
+                    String::new(),
                     true,
                     Some(call_id.clone()),
                 );
@@ -570,14 +589,14 @@ impl TuiState {
                     if let Some(spec) = render_spec {
                         let spec = completed_tool_render_spec(tool_name, spec, result);
                         message.body.set_render(spec, result.content.clone());
-                    } else if !result.content.is_empty()
-                        && !message.body.contains_text(&result.content)
-                    {
-                        // 追加工具输出（去重）
-                        if !message.body.is_empty() {
-                            message.body.append_text("\n");
+                    } else if let Some(output) = tool_result_body(tool_name, result) {
+                        if !message.body.contains_text(&output) {
+                            // 追加工具输出（去重）
+                            if !message.body.is_empty() {
+                                message.body.append_text("\n");
+                            }
+                            message.body.append_text(&output);
                         }
-                        message.body.append_text(&result.content);
                     }
                     if result.is_error {
                         message.role = MessageRole::Error;
@@ -601,24 +620,21 @@ impl TuiState {
                     );
                 } else if let Some(spec) = render_spec {
                     let spec = completed_tool_render_spec(tool_name, spec, result);
-                    self.push_message(
-                        if result.is_error {
-                            MessageRole::Error
-                        } else {
-                            MessageRole::Tool
-                        },
-                        if result.is_error {
-                            "Tool Error".into()
-                        } else {
-                            tool_message_label(tool_name, None)
-                        },
+                    self.push_render_message(
+                        MessageRole::Tool,
+                        tool_message_label(tool_name, None),
+                        spec,
                         result.content.clone(),
+                        Some(call_id.clone()),
+                    );
+                } else if let Some(output) = tool_result_body(tool_name, result) {
+                    self.push_message(
+                        MessageRole::Tool,
+                        tool_message_label(tool_name, None),
+                        output,
                         false,
                         Some(call_id.clone()),
                     );
-                    if let Some(message) = self.find_message_mut(call_id) {
-                        message.body.set_render(spec, result.content.clone());
-                    }
                 }
             },
             EventPayload::CompactionStarted => {
@@ -710,6 +726,28 @@ impl TuiState {
         self.mark_dirty();
     }
 
+    fn push_render_message(
+        &mut self,
+        role: MessageRole,
+        label: String,
+        spec: RenderSpec,
+        fallback: String,
+        key: Option<String>,
+    ) {
+        let mut body = MessageBody::text(String::new());
+        body.set_render(spec, fallback);
+        let msg = Message {
+            role,
+            label,
+            body,
+            is_streaming: false,
+            key,
+        };
+        self.messages.push(msg.clone());
+        self.scrollback_queue.push(msg);
+        self.mark_dirty();
+    }
+
     /// 按 key 反向查找消息，返回可变引用。
     ///
     /// 从最新消息开始搜索，用于流式更新时定位已有消息。
@@ -756,24 +794,39 @@ impl TuiState {
 /// shell、agent、editFile、applyPatch 等工具的输出对用户有直接价值，需要显示；
 /// 其他工具（如搜索类）仅更新状态栏，避免刷屏。
 fn should_print_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "shell" | "agent" | "editFile" | "apply_patch" | "applyPatch"
-    )
+    // Claude Code 风格：工具调用应该可见，但结果需要折叠/摘要，避免刷屏。
+    !matches!(tool_name, "tool_search")
 }
 
 fn tool_message_label(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
+    let action = match tool_name {
+        "shell" => "Bash",
+        "readFile" => "Read",
+        "writeFile" => "Write",
+        "editFile" => "Edit",
+        "findFiles" => "Glob",
+        "grep" => "Search",
+        "apply_patch" | "applyPatch" => "Patch",
+        "agent" => "Task",
+        other => other,
+    };
+
     if tool_name == "agent" {
         if let Some(description) = arguments
             .and_then(|value| value["description"].as_str())
             .filter(|description| !description.trim().is_empty())
         {
-            return format!("Task({description})");
+            return format!("{action}({})", compact_inline(description, 56));
         }
-        return "Task".into();
+        return action.into();
     }
 
-    format!("Tool · {tool_name}")
+    if let Some(target) = tool_primary_target(tool_name, arguments) {
+        let target = target.strip_prefix("$ ").unwrap_or(&target);
+        return format!("{action}({})", compact_inline(target, 56));
+    }
+
+    action.into()
 }
 
 fn tool_request_body(tool_name: &str, arguments: &serde_json::Value) -> String {
@@ -798,11 +851,15 @@ fn tool_request_body(tool_name: &str, arguments: &serde_json::Value) -> String {
         };
     }
 
+    if let Some(summary) = tool_primary_target(tool_name, Some(arguments)) {
+        return summary;
+    }
+
     let args = serde_json::to_string(arguments).unwrap_or_default();
     if args.is_empty() || args == "{}" {
-        tool_name.into()
+        String::new()
     } else {
-        format!("{tool_name}\n{args}")
+        compact_inline(&args, 220)
     }
 }
 
@@ -815,6 +872,113 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
     let mut preview = compact.chars().take(max_chars).collect::<String>();
     preview.push('…');
     preview
+}
+
+fn tool_primary_target(tool_name: &str, arguments: Option<&serde_json::Value>) -> Option<String> {
+    let args = arguments?;
+    match tool_name {
+        "shell" => args["command"].as_str().map(|value| format!("$ {value}")),
+        "readFile" | "writeFile" | "editFile" => args["path"]
+            .as_str()
+            .or_else(|| args["file_path"].as_str())
+            .map(str::to_string),
+        "findFiles" => args["pattern"]
+            .as_str()
+            .or_else(|| args["glob"].as_str())
+            .map(|pattern| format!("pattern: {pattern}")),
+        "grep" => {
+            let pattern = args["pattern"]
+                .as_str()
+                .or_else(|| args["query"].as_str())
+                .unwrap_or_default();
+            let path = args["path"]
+                .as_str()
+                .or_else(|| args["glob"].as_str())
+                .unwrap_or_default();
+            match (pattern.is_empty(), path.is_empty()) {
+                (true, true) => None,
+                (false, true) => Some(format!("pattern: {pattern}")),
+                (true, false) => Some(path.to_string()),
+                (false, false) => Some(format!("{pattern} in {path}")),
+            }
+        },
+        "apply_patch" | "applyPatch" => Some("workspace patch".into()),
+        _ => None,
+    }
+}
+
+fn tool_result_body(tool_name: &str, result: &ToolResult) -> Option<String> {
+    if result.is_error {
+        return Some(
+            result
+                .error
+                .clone()
+                .filter(|error| !error.trim().is_empty())
+                .unwrap_or_else(|| result.content.clone()),
+        );
+    }
+
+    let content = result.content.trim();
+    if content.is_empty() {
+        return Some("done".into());
+    }
+
+    match tool_name {
+        "readFile" => Some(format!("read {} line(s)", content.lines().count().max(1))),
+        "findFiles" => Some(compact_lines("matched files", content, 8)),
+        "grep" => Some(compact_lines("matches", content, 10)),
+        "writeFile" | "editFile" | "apply_patch" | "applyPatch" => {
+            Some(compact_lines("result", content, 12))
+        },
+        _ => Some(compact_lines("output", content, 16)),
+    }
+}
+
+fn compact_lines(label: &str, text: &str, max_lines: usize) -> String {
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "done".into();
+    }
+
+    let mut output = Vec::new();
+    output.push(format!("{label}: {}", lines.len()));
+    for line in lines.iter().take(max_lines) {
+        output.push(format!("⎿ {}", compact_inline(line, 180)));
+    }
+    if lines.len() > max_lines {
+        output.push(format!("⎿ … {} more", lines.len() - max_lines));
+    }
+    output.join("\n")
+}
+
+fn session_list_body(
+    sessions: &[astrcode_protocol::events::SessionListItem],
+    active_session_id: Option<&str>,
+) -> String {
+    if sessions.is_empty() {
+        return "No sessions".into();
+    }
+
+    sessions
+        .iter()
+        .map(|session| {
+            let marker = if active_session_id == Some(session.session_id.as_str()) {
+                "*"
+            } else {
+                " "
+            };
+            let dir = if session.working_dir.is_empty() {
+                "unknown".into()
+            } else {
+                compact_inline(&session.working_dir, 72)
+            };
+            format!("{marker} {} · {dir}", super::short_id(&session.session_id))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn completed_tool_render_spec(
@@ -925,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn search_tool_results_do_not_enter_transcript() {
+    fn search_tool_results_enter_transcript_as_summary() {
         let mut state = TuiState::new();
 
         apply_payload(
@@ -944,8 +1108,10 @@ mod tests {
             },
         );
 
-        assert!(state.messages.is_empty());
-        assert_eq!(state.status, "grep completed");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].role, MessageRole::Tool);
+        assert_eq!(state.messages[0].label, "Search");
+        assert!(state.messages[0].body.plain_text().contains("matches: 1"));
     }
 
     #[test]
