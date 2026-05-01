@@ -14,7 +14,7 @@ use std::{
 
 use astrcode_context::{
     compaction::{CompactError, CompactSkipReason, is_prompt_too_long_message},
-    manager::{ContextPrepareInput, LlmContextAssembler},
+    manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
 };
 use astrcode_core::{
     config::ModelSelection,
@@ -725,10 +725,8 @@ impl Agent {
                                 .iter()
                                 .cloned()
                                 .partition(|message| message.role == LlmRole::System);
-                            if let Ok(prepared) = self
-                                .context_assembler
-                                .compact_provider_messages_with_provider(
-                                    self.llm.as_ref(),
+                            if let Some(prepared) = self
+                                .compact_for_overflow_retry(
                                     visible_messages,
                                     Some(&self.system_prompt),
                                 )
@@ -793,7 +791,7 @@ impl Agent {
             let tool_results = self
                 .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
                 .await?;
-            // 3. 提交：裁剪结果 + PostToolUse 钩子 + 追加到对话历史
+            // 3. 提交：PostToolUse 钩子 + 追加到对话历史
             self.commit_tool_results(CommitToolResults {
                 prepared: &prepared_tool_calls,
                 results: tool_results,
@@ -816,6 +814,32 @@ impl Agent {
                     }
                 }
             }
+        }
+    }
+
+    async fn compact_for_overflow_retry(
+        &self,
+        visible_messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+    ) -> Option<PreparedContext> {
+        match self
+            .context_assembler
+            .compact_provider_messages_with_provider(
+                self.llm.as_ref(),
+                visible_messages.clone(),
+                system_prompt,
+            )
+            .await
+        {
+            Ok(prepared) => Some(prepared),
+            Err(_) => self
+                .context_assembler
+                .compact_provider_messages(visible_messages, system_prompt)
+                .ok()
+                .map(|(messages, compaction)| PreparedContext {
+                    messages,
+                    compaction: Some(compaction),
+                }),
         }
     }
 }

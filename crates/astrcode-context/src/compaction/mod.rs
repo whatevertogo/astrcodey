@@ -22,34 +22,6 @@ pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::visible_message_text;
 
-/// 压缩配置参数。
-///
-/// 控制压缩行为的关键阈值和保留策略。
-pub struct CompactConfig {
-    /// 压缩时保留的最近对话轮数。
-    pub keep_recent_turns: u8,
-    /// 压缩时保留的最近用户消息条数。
-    pub keep_recent_user_messages: u8,
-    /// 触发自动压缩的上下文占用百分比阈值（0–100）。
-    pub threshold_percent: u8,
-    /// 压缩失败时的最大重试次数。
-    pub max_retry_attempts: u8,
-    /// LLM 压缩输出的最大 token 数。
-    pub max_output_tokens: usize,
-}
-
-impl Default for CompactConfig {
-    fn default() -> Self {
-        Self {
-            keep_recent_turns: 5,
-            keep_recent_user_messages: 3,
-            threshold_percent: 90,
-            max_retry_attempts: 3,
-            max_output_tokens: 200000,
-        }
-    }
-}
-
 /// 压缩操作的结果。
 ///
 /// 记录压缩前后的 token 数量以及 LLM 生成的摘要文本。
@@ -140,7 +112,7 @@ pub fn compact_messages(
         pre_tokens,
         post_tokens,
         summary,
-        messages_removed: keep_start,
+        messages_removed: removed_visible_messages(prefix),
         context_messages,
         retained_messages,
     })
@@ -219,7 +191,7 @@ pub async fn compact_messages_with_provider(
         pre_tokens,
         post_tokens,
         summary,
-        messages_removed: keep_start,
+        messages_removed: removed_visible_messages(prefix),
         context_messages,
         retained_messages,
     })
@@ -272,6 +244,13 @@ fn split_compact_start(messages: &[LlmMessage]) -> Option<usize> {
                 && !is_synthetic_context_message(message))
             .then_some(index)
         })
+}
+
+fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| !is_synthetic_context_message(message))
+        .count()
 }
 
 fn summarize_prefix(messages: &[LlmMessage]) -> String {
@@ -354,7 +333,73 @@ async fn collect_compact_output(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use astrcode_core::llm::ModelLimits;
+    use tokio::sync::mpsc;
+
     use super::*;
+
+    struct CapturingCompactProvider {
+        messages: Arc<Mutex<Vec<LlmMessage>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CapturingCompactProvider {
+        async fn generate(
+            &self,
+            messages: Vec<LlmMessage>,
+            _tools: Vec<astrcode_core::tool::ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            *self.messages.lock().unwrap() = messages;
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: valid_compact_summary().into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    fn valid_compact_summary() -> &'static str {
+        r#"<summary>
+1. Primary Request and Intent:
+   preserve structure
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - crates/astrcode-context/src/compaction/mod.rs
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - user asked for compact
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   compact parser
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+    }
 
     #[test]
     fn compact_keeps_recent_user_turns_and_builds_context_message() {
@@ -376,7 +421,7 @@ mod tests {
     #[test]
     fn compact_turn_split_ignores_synthetic_context_messages() {
         let messages = vec![
-            LlmMessage::user(format_compact_summary("old compacted work")),
+            LlmMessage::user(assemble::compact_summary_message_text("old compacted work")),
             LlmMessage::user("old real"),
             LlmMessage::assistant("answer"),
             LlmMessage::user("recent real"),
@@ -384,7 +429,7 @@ mod tests {
         let result = compact_messages(&messages, None).unwrap();
 
         assert_eq!(result.retained_messages.len(), 2);
-        assert_eq!(result.messages_removed, 2);
+        assert_eq!(result.messages_removed, 1);
     }
 
     #[test]
@@ -502,5 +547,36 @@ scratchpad that should not survive
         assert!(prompt.contains("<summary>"));
         assert!(!prompt.contains("<analysis>"));
         assert!(!prompt.contains("<recent_user_context_digest>"));
+    }
+
+    #[tokio::test]
+    async fn provider_compact_uses_incremental_prompt_when_previous_summary_exists() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let provider = CapturingCompactProvider {
+            messages: Arc::clone(&captured),
+        };
+        let messages = vec![
+            LlmMessage::user(assemble::compact_summary_message_text(
+                "prior compact summary",
+            )),
+            LlmMessage::user("old real"),
+            LlmMessage::assistant("answer"),
+            LlmMessage::user("recent real"),
+        ];
+
+        let result = compact_messages_with_provider(
+            &provider,
+            &messages,
+            None,
+            &ContextWindowSettings::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.messages_removed, 1);
+        let sent = captured.lock().unwrap();
+        let compact_system_prompt = visible_message_text(&sent[0]);
+        assert!(compact_system_prompt.contains("## Incremental Mode"));
+        assert!(compact_system_prompt.contains("prior compact summary"));
     }
 }

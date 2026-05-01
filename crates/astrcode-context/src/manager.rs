@@ -206,3 +206,47 @@ impl LlmContextAssembler {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::llm::LlmRole;
+
+    use super::*;
+
+    #[test]
+    fn prepare_provider_messages_uses_current_model_limits_each_call() {
+        let assembler = LlmContextAssembler::new(ContextWindowSettings::default());
+        let messages = vec![
+            LlmMessage::user("old user ".repeat(400)),
+            LlmMessage::assistant("old answer ".repeat(400)),
+            LlmMessage::user("current"),
+        ];
+
+        let large_window = assembler.prepare_provider_messages(ContextPrepareInput {
+            messages: messages.clone(),
+            system_prompt: None,
+            model_limits: ModelLimits {
+                max_input_tokens: 200_000,
+                max_output_tokens: 1024,
+            },
+        });
+        let small_window = assembler.prepare_provider_messages(ContextPrepareInput {
+            messages,
+            system_prompt: None,
+            model_limits: ModelLimits {
+                max_input_tokens: 100,
+                max_output_tokens: 1024,
+            },
+        });
+
+        assert!(large_window.compaction.is_none());
+        assert!(small_window.compaction.is_some());
+        assert!(small_window.messages.first().is_some_and(|message| {
+            message.role == LlmRole::User
+                && message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("<compact_summary>")))
+        }));
+    }
+}
