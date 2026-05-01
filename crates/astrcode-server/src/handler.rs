@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::compaction::{CompactError, CompactSkipReason};
+use astrcode_context::compaction::{CompactError, CompactPromptStyle, CompactSkipReason};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
@@ -24,6 +24,7 @@ use tokio::{sync::broadcast, task::JoinHandle};
 use crate::{
     agent_loop::{Agent, AgentServices, drive_agent},
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
+    forked_provider::CompactForkRunner,
     session::compaction_applied_payload,
 };
 
@@ -353,13 +354,19 @@ impl CommandHandler {
             .await
             .ok_or_else(|| format!("Session {sid} vanished"))?;
         let state = session.state.read().await.clone();
+        let tool_registry = self.ensure_tool_registry(&sid, &state.working_dir).await;
+        let compact_runner = CompactForkRunner::new(
+            Arc::clone(&self.runtime.llm_provider),
+            tool_registry.list_definitions(),
+        );
         let compaction = match self
             .runtime
             .context_assembler
-            .compact_provider_messages_with_provider(
-                self.runtime.llm_provider.as_ref(),
+            .compact_provider_messages_with_compact_runner(
+                &compact_runner,
                 state.provider_messages(),
                 state.system_prompt.as_deref(),
+                CompactPromptStyle::ForkedConversationPrompt,
             )
             .await
         {
@@ -808,6 +815,8 @@ mod tests {
 
     struct PendingLlm;
 
+    struct InvalidSummaryLlm;
+
     #[async_trait::async_trait]
     impl LlmProvider for PendingLlm {
         async fn generate(
@@ -821,6 +830,31 @@ mod tests {
         fn model_limits(&self) -> ModelLimits {
             ModelLimits {
                 max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for InvalidSummaryLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "not a compact summary".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 200000,
                 max_output_tokens: 1024,
             }
         }
@@ -1254,5 +1288,36 @@ mod tests {
             first_summary.contains("Compacted conversation summary"),
             "first compact should preserve a provider summary"
         );
+    }
+
+    #[tokio::test]
+    async fn compact_command_does_not_fallback_when_summary_is_invalid() {
+        let runtime = test_runtime_with_llm(Arc::new(InvalidSummaryLlm));
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        for text in ["one", "two", "three"] {
+            handler
+                .handle(ClientCommand::SubmitPrompt {
+                    text: text.into(),
+                    attachments: vec![],
+                })
+                .await
+                .unwrap();
+            assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+        }
+
+        handler.handle(ClientCommand::Compact).await.unwrap();
+
+        let sid = handler.active_session_id.clone().unwrap();
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let state = session.state.read().await;
+        assert!(state.context_messages.is_empty());
     }
 }

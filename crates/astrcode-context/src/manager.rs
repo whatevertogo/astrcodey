@@ -5,8 +5,8 @@ use astrcode_core::{
 
 use crate::{
     compaction::{
-        CompactError, CompactResult, CompactSkipReason, compact_messages,
-        compact_messages_with_provider,
+        CompactError, CompactPromptStyle, CompactResult, CompactSkipReason, CompactTextRunner,
+        compact_messages, compact_messages_with_provider, compact_messages_with_runner,
     },
     prompt::composer::PromptComposer,
     settings::ContextWindowSettings,
@@ -158,6 +158,46 @@ impl LlmContextAssembler {
         })
     }
 
+    pub async fn prepare_provider_messages_with_compact_runner(
+        &self,
+        input: ContextPrepareInput<'_>,
+        prompt_style: CompactPromptStyle,
+        runner: &dyn CompactTextRunner,
+    ) -> Result<PreparedContext, CompactError> {
+        let mut messages = input.messages;
+        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
+        let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
+            let prepared = match self
+                .compact_provider_messages_with_compact_runner(
+                    runner,
+                    messages.clone(),
+                    input.system_prompt,
+                    prompt_style,
+                )
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    let (fallback_messages, fallback_compaction) =
+                        self.compact_provider_messages(messages.clone(), input.system_prompt)?;
+                    PreparedContext {
+                        messages: fallback_messages,
+                        compaction: Some(fallback_compaction),
+                    }
+                },
+            };
+            messages = prepared.messages;
+            prepared.compaction
+        } else {
+            None
+        };
+
+        Ok(PreparedContext {
+            messages,
+            compaction,
+        })
+    }
+
     pub fn compact_provider_messages(
         &self,
         messages: Vec<LlmMessage>,
@@ -192,6 +232,32 @@ impl LlmContextAssembler {
         })
     }
 
+    pub async fn compact_provider_messages_with_compact_runner(
+        &self,
+        runner: &dyn CompactTextRunner,
+        messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+        prompt_style: CompactPromptStyle,
+    ) -> Result<PreparedContext, CompactError> {
+        let compaction = compact_messages_with_runner(
+            runner,
+            &messages,
+            system_prompt,
+            &self.settings,
+            prompt_style,
+        )
+        .await?;
+        let compacted_messages = [
+            compaction.context_messages.clone(),
+            compaction.retained_messages.clone(),
+        ]
+        .concat();
+        Ok(PreparedContext {
+            messages: compacted_messages,
+            compaction: Some(compaction),
+        })
+    }
+
     fn snapshot(
         &self,
         messages: &[LlmMessage],
@@ -206,6 +272,7 @@ impl LlmContextAssembler {
         )
     }
 }
+
 
 #[cfg(test)]
 mod tests {

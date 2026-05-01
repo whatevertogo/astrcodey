@@ -162,6 +162,16 @@ struct InvalidCompactThenOkLlm {
     captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
 }
 
+struct AutoCompactCapturingLlm {
+    call_count: AtomicUsize,
+    captured_compact_messages: Arc<Mutex<Vec<LlmMessage>>>,
+    captured_compact_tools: Arc<Mutex<Vec<ToolDefinition>>>,
+}
+
+struct CompactToolCallThenOkLlm {
+    call_count: AtomicUsize,
+}
+
 #[async_trait::async_trait]
 impl LlmProvider for OverflowThenOkLlm {
     async fn generate(
@@ -276,6 +286,104 @@ impl LlmProvider for InvalidCompactThenOkLlm {
             max_output_tokens: 1024,
         }
     }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AutoCompactCapturingLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if call_count == 0 {
+            *self.captured_compact_messages.lock().unwrap() = messages;
+            *self.captured_compact_tools.lock().unwrap() = tools;
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: valid_compact_summary().into(),
+            });
+        } else {
+            let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
+        }
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CompactToolCallThenOkLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if call_count == 0 {
+            let _ = tx.send(LlmEvent::ToolCallStart {
+                call_id: "compact-tool-call".into(),
+                name: "shell".into(),
+                arguments: "{}".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            });
+        } else {
+            let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+fn valid_compact_summary() -> &'static str {
+    r#"<summary>
+1. Primary Request and Intent:
+   compacted
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - current
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   compact request
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
 }
 
 struct PanicIfExecutedTool {
@@ -927,6 +1035,109 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
     assert_eq!(output.text, "ok");
     assert!(message_text_contains(&messages, "first provider note"));
     assert!(message_text_contains(&messages, "second provider note"));
+}
+
+#[tokio::test]
+async fn auto_compact_uses_forked_runner_with_tools() {
+    let captured_compact_messages = Arc::new(Mutex::new(Vec::new()));
+    let captured_compact_tools = Arc::new(Mutex::new(Vec::new()));
+    let llm = Arc::new(AutoCompactCapturingLlm {
+        call_count: AtomicUsize::new(0),
+        captured_compact_messages: Arc::clone(&captured_compact_messages),
+        captured_compact_tools: Arc::clone(&captured_compact_tools),
+    });
+    let agent = Agent::new(
+        "auto-compact-tools-session".into(),
+        ".".into(),
+        "main system prompt".into(),
+        "mock".into(),
+        test_services(
+            llm.clone(),
+            test_registry(vec![Arc::new(DelayTool {
+                name: "shell",
+                mode: ExecutionMode::Sequential,
+                delay_ms: 0,
+            })]),
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
+    );
+    let mut history = Vec::new();
+    for index in 0..10 {
+        history.push(LlmMessage::user(format!(
+            "old user {index} {}",
+            "x ".repeat(20)
+        )));
+        history.push(LlmMessage::assistant(format!(
+            "old answer {index} {}",
+            "y ".repeat(20)
+        )));
+    }
+
+    let output = agent
+        .process_prompt("current", history, None)
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "ok");
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    let compact_messages = captured_compact_messages.lock().unwrap();
+    assert!(message_text_contains(
+        &compact_messages,
+        "main system prompt"
+    ));
+    assert!(message_text_contains(
+        &compact_messages,
+        "Do not call tools"
+    ));
+    let compact_tools = captured_compact_tools.lock().unwrap();
+    assert!(compact_tools.iter().any(|tool| tool.name == "shell"));
+}
+
+#[tokio::test]
+async fn compact_tool_call_is_not_executed() {
+    let executed = Arc::new(AtomicBool::new(false));
+    let llm = Arc::new(CompactToolCallThenOkLlm {
+        call_count: AtomicUsize::new(0),
+    });
+    let agent = Agent::new(
+        "compact-tool-call-session".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            llm.clone(),
+            test_registry(vec![Arc::new(PanicIfExecutedTool {
+                executed: Arc::clone(&executed),
+            })]),
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
+    );
+    let mut history = Vec::new();
+    for index in 0..10 {
+        history.push(LlmMessage::user(format!(
+            "old user {index} {}",
+            "x ".repeat(20)
+        )));
+        history.push(LlmMessage::assistant(format!(
+            "old answer {index} {}",
+            "y ".repeat(20)
+        )));
+    }
+
+    let output = agent
+        .process_prompt("current", history, None)
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "ok");
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    assert!(!executed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

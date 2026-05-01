@@ -42,3 +42,20 @@ pub(crate) fn render_compact_system_prompt(
         .replace("{{RECENT_USER_CONTEXT_MESSAGES}}", "(none)")
         .replace("{{RUNTIME_CONTEXT}}", runtime_context.trim_end())
 }
+
+pub(crate) fn render_compact_user_request(
+    mode: &CompactPromptMode,
+    settings: &ContextWindowSettings,
+    contract_repair_feedback: Option<&str>,
+) -> String {
+    let compact_contract =
+        render_compact_system_prompt(None, mode, settings, contract_repair_feedback);
+    format!(
+        "You are compacting the conversation above for a continuing coding-agent session.\nUse \
+         only the conversation messages above and the previous compact summary if one is included \
+         in this request.\nDo not call tools, functions, external systems, or any provider \
+         tool-call interface. Tool calls are forbidden for this compact request.\nReturn exactly \
+         one <summary> block and no markdown fences, preamble, analysis, or extra \
+         text.\n\n{compact_contract}"
+    )
+}

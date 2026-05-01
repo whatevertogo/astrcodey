@@ -1004,6 +1004,51 @@ mod tests {
     }
 
     #[test]
+    fn forked_compact_and_main_request_share_prompt_cache_key() {
+        let provider = provider(OpenAiApiMode::Responses, true);
+        let tools = vec![sample_tool()];
+        let main_request = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("current user"),
+        ];
+        let forked_compact_request = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("return a compact <summary>"),
+        ];
+
+        let main_body = provider.build_request_body(&main_request, &tools);
+        let compact_body = provider.build_request_body(&forked_compact_request, &tools);
+
+        assert_eq!(
+            main_body["prompt_cache_key"],
+            compact_body["prompt_cache_key"]
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_changes_when_tools_change() {
+        let provider = provider(OpenAiApiMode::Responses, true);
+        let messages = vec![
+            LlmMessage::system("stable system"),
+            LlmMessage::user("hello"),
+        ];
+        let mut other_tool = sample_tool();
+        other_tool.name = "otherTool".into();
+
+        let first_body = provider.build_request_body(&messages, &[sample_tool()]);
+        let second_body = provider.build_request_body(&messages, &[other_tool]);
+
+        assert_ne!(
+            first_body["prompt_cache_key"],
+            second_body["prompt_cache_key"]
+        );
+    }
+
+    #[test]
     fn responses_done_arguments_are_not_replayed_after_deltas() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut accumulator = LlmAccumulator::new();

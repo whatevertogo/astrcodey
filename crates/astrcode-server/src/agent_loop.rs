@@ -13,7 +13,7 @@ use std::{
 };
 
 use astrcode_context::{
-    compaction::{CompactError, CompactSkipReason, is_prompt_too_long_message},
+    compaction::{CompactError, CompactPromptStyle, CompactSkipReason, is_prompt_too_long_message},
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
 };
 use astrcode_core::{
@@ -31,7 +31,7 @@ use astrcode_extensions::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
-use crate::session::compaction_applied_payload;
+use crate::{forked_provider::CompactForkRunner, session::compaction_applied_payload};
 
 /// 并行执行工具调用时的最大并发数。
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
@@ -547,15 +547,18 @@ impl Agent {
                 .iter()
                 .cloned()
                 .partition(|message| message.role == LlmRole::System);
+            let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.clone());
             let prepared_context = match self
                 .context_assembler
-                .prepare_provider_messages_with_provider(
+                .prepare_provider_messages_with_compact_runner(
                     ContextPrepareInput {
                         messages: visible_messages,
                         system_prompt: Some(&self.system_prompt),
                         model_limits: self.llm.model_limits(),
                     },
-                    self.llm.as_ref(),
+                    // 使用fork agent 进行compact
+                    CompactPromptStyle::ForkedConversationPrompt,
+                    &compact_runner,
                 )
                 .await
             {
@@ -729,6 +732,7 @@ impl Agent {
                                 .compact_for_overflow_retry(
                                     visible_messages,
                                     Some(&self.system_prompt),
+                                    &tools,
                                 )
                                 .await
                             {
@@ -821,13 +825,16 @@ impl Agent {
         &self,
         visible_messages: Vec<LlmMessage>,
         system_prompt: Option<&str>,
+        tools: &[ToolDefinition],
     ) -> Option<PreparedContext> {
+        let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.to_vec());
         match self
             .context_assembler
-            .compact_provider_messages_with_provider(
-                self.llm.as_ref(),
+            .compact_provider_messages_with_compact_runner(
+                &compact_runner,
                 visible_messages.clone(),
                 system_prompt,
+                CompactPromptStyle::ForkedConversationPrompt,
             )
             .await
         {

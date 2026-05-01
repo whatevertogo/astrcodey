@@ -20,7 +20,18 @@ mod prompt;
 
 pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
-use plan::visible_message_text;
+use plan::{PreparedCompactInput, visible_message_text};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactPromptStyle {
+    IsolatedSystemPrompt,
+    ForkedConversationPrompt,
+}
+
+#[async_trait::async_trait]
+pub trait CompactTextRunner: Send + Sync {
+    async fn run_compact_request(&self, messages: Vec<LlmMessage>) -> Result<String, CompactError>;
+}
 
 /// 压缩操作的结果。
 ///
@@ -84,6 +95,108 @@ impl From<LlmError> for CompactError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CompactJob {
+    prepared_input: PreparedCompactInput,
+    retained_messages: Vec<LlmMessage>,
+    pre_tokens: usize,
+    messages_removed: usize,
+}
+
+impl CompactJob {
+    pub fn build(
+        messages: &[LlmMessage],
+        system_prompt: Option<&str>,
+    ) -> Result<Self, CompactSkipReason> {
+        if messages.is_empty() {
+            return Err(CompactSkipReason::Empty);
+        }
+        let keep_start =
+            split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
+        if keep_start == 0 {
+            return Err(CompactSkipReason::NothingToCompact);
+        }
+
+        let prefix = &messages[..keep_start];
+        let prepared_input = plan::prepare_compact_input(prefix);
+        if prepared_input.messages.is_empty() {
+            return Err(CompactSkipReason::NothingToCompact);
+        }
+
+        Ok(Self {
+            prepared_input,
+            retained_messages: messages[keep_start..].to_vec(),
+            pre_tokens: estimate_request_tokens(messages, system_prompt),
+            messages_removed: removed_visible_messages(prefix),
+        })
+    }
+
+    pub fn request_messages(
+        &self,
+        style: CompactPromptStyle,
+        system_prompt: Option<&str>,
+        settings: &ContextWindowSettings,
+        repair_feedback: Option<&str>,
+    ) -> Vec<LlmMessage> {
+        match style {
+            CompactPromptStyle::IsolatedSystemPrompt => {
+                let compact_system_prompt = prompt::render_compact_system_prompt(
+                    system_prompt,
+                    &self.prepared_input.prompt_mode,
+                    settings,
+                    repair_feedback,
+                );
+                let mut messages = Vec::with_capacity(self.prepared_input.messages.len() + 1);
+                messages.push(LlmMessage::system(compact_system_prompt));
+                messages.extend(self.prepared_input.messages.clone());
+                messages
+            },
+            CompactPromptStyle::ForkedConversationPrompt => {
+                let mut messages = Vec::with_capacity(self.prepared_input.messages.len() + 2);
+                if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty())
+                {
+                    messages.push(LlmMessage::system(system_prompt.to_string()));
+                }
+                messages.extend(self.prepared_input.messages.clone());
+                messages.push(LlmMessage::user(prompt::render_compact_user_request(
+                    &self.prepared_input.prompt_mode,
+                    settings,
+                    repair_feedback,
+                )));
+                messages
+            },
+        }
+    }
+
+    pub fn finish(
+        &self,
+        raw_output: &str,
+        system_prompt: Option<&str>,
+    ) -> Result<CompactResult, CompactError> {
+        let parsed = parse_compact_output(raw_output)?;
+        if let Some(violation) = parse::compact_contract_violation(&parsed) {
+            return Err(CompactParseError::new(violation).into());
+        }
+        let summary = assemble::sanitize_compact_summary(&parsed.summary);
+        let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
+            &summary,
+        ))];
+        let post_tokens = estimate_request_tokens(
+            &[context_messages.clone(), self.retained_messages.clone()].concat(),
+            system_prompt,
+        );
+
+        Ok(CompactResult {
+            pre_tokens: self.pre_tokens,
+            post_tokens,
+            summary,
+            messages_removed: self.messages_removed,
+            context_messages,
+            retained_messages: self.retained_messages.clone(),
+        })
+    }
+}
+
 pub fn compact_messages(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
@@ -124,77 +237,72 @@ pub async fn compact_messages_with_provider(
     system_prompt: Option<&str>,
     settings: &ContextWindowSettings,
 ) -> Result<CompactResult, CompactError> {
-    if messages.is_empty() {
-        return Err(CompactSkipReason::Empty.into());
-    }
+    let runner = ProviderCompactRunner { provider };
+    compact_messages_with_runner(
+        &runner,
+        messages,
+        system_prompt,
+        settings,
+        CompactPromptStyle::IsolatedSystemPrompt,
+    )
+    .await
+}
 
-    let keep_start = split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
-    if keep_start == 0 {
-        return Err(CompactSkipReason::NothingToCompact.into());
-    }
-
-    let prefix = &messages[..keep_start];
-    let retained_messages = messages[keep_start..].to_vec();
-    let pre_tokens = estimate_request_tokens(messages, system_prompt);
+pub async fn compact_messages_with_runner(
+    runner: &dyn CompactTextRunner,
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+    settings: &ContextWindowSettings,
+    prompt_style: CompactPromptStyle,
+) -> Result<CompactResult, CompactError> {
+    let job = CompactJob::build(messages, system_prompt)?;
     let mut repair_feedback: Option<String> = None;
     let max_attempts = settings.compact_max_retry_attempts.max(1);
-    let mut parsed = None;
-    let mut last_parse_error = None;
+    let mut last_error: Option<CompactError> = None;
 
     for _ in 0..max_attempts {
-        let prepared_input = plan::prepare_compact_input(prefix);
-        if prepared_input.messages.is_empty() {
-            return Err(CompactSkipReason::NothingToCompact.into());
-        }
-        let compact_system_prompt = prompt::render_compact_system_prompt(
+        let compact_messages = job.request_messages(
+            prompt_style,
             system_prompt,
-            &prepared_input.prompt_mode,
             settings,
             repair_feedback.as_deref(),
         );
-        let mut compact_messages = Vec::with_capacity(prepared_input.messages.len() + 1);
-        compact_messages.push(LlmMessage::system(compact_system_prompt));
-        compact_messages.extend(prepared_input.messages);
-
-        let output = collect_compact_output(provider, compact_messages).await?;
-        match parse_compact_output(&output) {
-            Ok(candidate) => {
-                if let Some(violation) = parse::compact_contract_violation(&candidate) {
-                    repair_feedback = Some(violation);
-                    parsed = Some(candidate);
-                    continue;
-                }
-                parsed = Some(candidate);
+        let output = match runner.run_compact_request(compact_messages).await {
+            Ok(output) => output,
+            Err(error) => {
+                last_error = Some(error);
                 break;
             },
-            Err(error) => {
+        };
+        match job.finish(&output, system_prompt) {
+            Ok(compaction) => return Ok(compaction),
+            Err(CompactError::Parse(error)) => {
                 repair_feedback = Some(error.to_string());
-                last_parse_error = Some(error);
+                last_error = Some(CompactError::Parse(error));
+            },
+            Err(error) => {
+                last_error = Some(error);
+                break;
             },
         }
     }
 
-    let parsed = parsed.ok_or_else(|| {
-        last_parse_error
-            .unwrap_or_else(|| CompactParseError::new("compact response did not contain a summary"))
-    })?;
-    let summary = assemble::sanitize_compact_summary(&parsed.summary);
-    let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
-        &summary,
-    ))];
-    let post_tokens = estimate_request_tokens(
-        &[context_messages.clone(), retained_messages.clone()].concat(),
-        system_prompt,
-    );
+    Err(last_error.unwrap_or_else(|| {
+        CompactParseError::new("compact response did not contain a summary").into()
+    }))
+}
 
-    Ok(CompactResult {
-        pre_tokens,
-        post_tokens,
-        summary,
-        messages_removed: removed_visible_messages(prefix),
-        context_messages,
-        retained_messages,
-    })
+struct ProviderCompactRunner<'a> {
+    provider: &'a dyn LlmProvider,
+}
+
+#[async_trait::async_trait]
+impl CompactTextRunner for ProviderCompactRunner<'_> {
+    async fn run_compact_request(&self, messages: Vec<LlmMessage>) -> Result<String, CompactError> {
+        collect_compact_output(self.provider, messages)
+            .await
+            .map_err(CompactError::Llm)
+    }
 }
 
 pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
@@ -401,6 +509,12 @@ mod tests {
 </summary>"#
     }
 
+    fn message_text_contains(messages: &[LlmMessage], needle: &str) -> bool {
+        messages
+            .iter()
+            .any(|message| visible_message_text(message).contains(needle))
+    }
+
     #[test]
     fn compact_keeps_recent_user_turns_and_builds_context_message() {
         let messages = vec![
@@ -547,6 +661,100 @@ scratchpad that should not survive
         assert!(prompt.contains("<summary>"));
         assert!(!prompt.contains("<analysis>"));
         assert!(!prompt.contains("<recent_user_context_digest>"));
+    }
+
+    #[test]
+    fn forked_compact_request_uses_main_system_prompt_and_appends_summary_request() {
+        let settings = ContextWindowSettings::default();
+        let messages = vec![
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("recent user"),
+        ];
+        let job = CompactJob::build(&messages, Some("main system prompt")).unwrap();
+
+        let request = job.request_messages(
+            CompactPromptStyle::ForkedConversationPrompt,
+            Some("main system prompt"),
+            &settings,
+            None,
+        );
+
+        assert_eq!(request[0].role, LlmRole::System);
+        assert_eq!(visible_message_text(&request[0]), "main system prompt");
+        assert_eq!(request.last().unwrap().role, LlmRole::User);
+        let summary_request = visible_message_text(request.last().unwrap());
+        assert!(summary_request.contains("Do not call tools"));
+        assert!(summary_request.contains("1. Primary Request and Intent:"));
+        assert!(summary_request.contains("<summary>"));
+        assert!(!summary_request.contains("Current runtime system prompt"));
+    }
+
+    #[test]
+    fn isolated_compact_request_preserves_compact_system_prompt() {
+        let settings = ContextWindowSettings::default();
+        let messages = vec![
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("recent user"),
+        ];
+        let job = CompactJob::build(&messages, Some("main system prompt")).unwrap();
+
+        let request = job.request_messages(
+            CompactPromptStyle::IsolatedSystemPrompt,
+            Some("main system prompt"),
+            &settings,
+            None,
+        );
+
+        assert_eq!(request[0].role, LlmRole::System);
+        let compact_system_prompt = visible_message_text(&request[0]);
+        assert!(compact_system_prompt.contains("context summarization assistant"));
+        assert!(compact_system_prompt.contains("Current runtime system prompt"));
+        assert!(compact_system_prompt.contains("main system prompt"));
+    }
+
+    #[test]
+    fn compact_job_finish_rejects_missing_required_section() {
+        let messages = vec![
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("recent user"),
+        ];
+        let job = CompactJob::build(&messages, None).unwrap();
+
+        let error = job
+            .finish(
+                r#"<summary>
+1. Primary Request and Intent:
+   incomplete
+</summary>"#,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("missing required section"));
+    }
+
+    #[test]
+    fn compact_job_retry_feedback_is_included_in_next_request() {
+        let settings = ContextWindowSettings::default();
+        let messages = vec![
+            LlmMessage::user("old user"),
+            LlmMessage::assistant("old answer"),
+            LlmMessage::user("recent user"),
+        ];
+        let job = CompactJob::build(&messages, None).unwrap();
+
+        let request = job.request_messages(
+            CompactPromptStyle::ForkedConversationPrompt,
+            None,
+            &settings,
+            Some("missing <summary> block"),
+        );
+
+        assert!(message_text_contains(&request, "Contract Repair"));
+        assert!(message_text_contains(&request, "missing <summary> block"));
     }
 
     #[tokio::test]

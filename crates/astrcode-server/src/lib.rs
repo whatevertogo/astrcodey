@@ -8,6 +8,7 @@ pub mod agent {
     pub use crate::agent_loop::{Agent, AgentServices, AgentTurnOutput};
 }
 pub mod bootstrap;
+pub(crate) mod forked_provider;
 pub mod handler;
 pub mod session;
 pub(crate) mod session_spawner;
