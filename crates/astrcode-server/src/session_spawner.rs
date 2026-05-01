@@ -18,9 +18,7 @@ use astrcode_extensions::{
 use tokio::sync::mpsc;
 
 use crate::{
-    agent::Agent,
-    agent_turn::drive_agent,
-    agent_types::tool_name_matches_allowlist,
+    agent_loop::{Agent, drive_agent, tool_name_matches_allowlist},
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot},
     session::SessionManager,
 };

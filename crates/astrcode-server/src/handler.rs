@@ -21,8 +21,7 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::broadcast, task::JoinHandle};
 
 use crate::{
-    agent::Agent,
-    agent_turn::drive_agent,
+    agent_loop::{Agent, drive_agent},
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
 };
 

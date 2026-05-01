@@ -1,5 +1,5 @@
-// Agent 测试模块 — 通过 #[path] 注入 agent.rs 作为子模块。
-// 使用 use super::* 访问 agent 模块的所有类型。
+// Agent loop 测试模块 — 通过 #[path] 注入 agent_loop.rs 作为子模块。
+// 使用 use super::* 访问 agent_loop 模块的所有类型。
 
 use std::{
     sync::{
