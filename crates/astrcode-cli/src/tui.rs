@@ -1,14 +1,16 @@
 //! 交互式终端模式 (Inline Viewport)。
 //!
-//! TUI 运行在主屏幕上，底部渲染固定高度的输入面板。
+//! TUI 运行在主屏幕上，底部只保留很小的交互面板。
 //! 消息记录通过 `insert_before()` 写入终端原生 scrollback，
 //! 用户可用终端原生滚轮/键盘翻页查看历史消息。
 
+mod composer;
 mod input;
 mod render;
 mod slash;
 mod state;
 mod theme;
+mod tool_display;
 
 use std::{
     io::{self, Stdout, Write},
@@ -28,13 +30,15 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, prelude::Widget, text::Text,
     widgets::Paragraph,
 };
-use render::message_to_lines;
+use render::scrollback_entry_to_lines;
 use state::TuiState;
 use tokio::sync::mpsc;
 
 use crate::transport::InProcessTransport;
 
 type Client = AstrcodeClient<InProcessTransport>;
+
+const INLINE_VIEWPORT_HEIGHT: u16 = 4;
 
 /// TUI 主入口：初始化终端、启动事件循环。
 pub async fn run() -> io::Result<()> {
@@ -98,7 +102,7 @@ async fn handle_action(
         Action::Key(event) => handle_key(event, state, client, terminal).await?,
         Action::Paste(text) => {
             let text = normalize_paste(&text);
-            state.insert_str(&text);
+            state.insert_paste(&text);
         },
     }
     state.mark_dirty();
@@ -109,7 +113,7 @@ async fn handle_key(
     event: KeyEvent,
     state: &mut TuiState,
     client: &Arc<Client>,
-    _terminal: &mut TerminalSession,
+    terminal: &mut TerminalSession,
 ) -> io::Result<()> {
     match event.code {
         KeyCode::Esc => {
@@ -131,11 +135,14 @@ async fn handle_key(
             } else if state.show_slash_palette {
                 accept_slash_selection(state, client).await?;
             } else {
-                submit_current_input(state, client, Some(_terminal)).await?;
+                submit_current_input(state, client, Some(terminal)).await?;
             }
         },
         KeyCode::Tab if state.show_slash_palette => {
             accept_slash_selection(state, client).await?;
+        },
+        KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
+            state.delete_previous_word();
         },
         KeyCode::Backspace => state.backspace(),
         KeyCode::Delete => state.delete(),
@@ -146,22 +153,29 @@ async fn handle_key(
         KeyCode::Up => {
             if state.show_slash_palette {
                 state.slash_move_up(slash::filtered(&state.slash_filter).len());
-            } else {
+            } else if !state.move_visual_up(terminal.composer_width()) {
                 state.history_previous();
             }
         },
         KeyCode::Down => {
             if state.show_slash_palette {
                 state.slash_move_down(slash::filtered(&state.slash_filter).len());
-            } else {
+            } else if !state.move_visual_down(terminal.composer_width()) {
                 state.history_next();
             }
         },
+        KeyCode::Char(ch) if event.modifiers.contains(KeyModifiers::CONTROL) => {
+            match ch.to_ascii_lowercase() {
+                'a' => state.move_home(),
+                'e' => state.move_end(),
+                'u' => state.delete_before_cursor(),
+                'k' => state.delete_after_cursor(),
+                'w' => state.delete_previous_word(),
+                _ => {},
+            }
+        },
         KeyCode::Char(ch) => {
-            if event
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-            {
+            if event.modifiers.contains(KeyModifiers::ALT) {
                 return Ok(());
             }
             state.insert_char(ch);
@@ -181,7 +195,7 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
         return Ok(());
     };
     let current_has_argument = state
-        .input
+        .input_text()
         .split_once(char::is_whitespace)
         .is_some_and(|(_, rest)| !rest.trim().is_empty());
     if spec.needs_argument && !current_has_argument {
@@ -196,7 +210,7 @@ async fn submit_current_input(
     client: &Arc<Client>,
     _terminal: Option<&mut TerminalSession>,
 ) -> io::Result<()> {
-    let input = state.input.trim_end().to_string();
+    let input = state.input_text().trim_end().to_string();
     if input.trim().is_empty() {
         return Ok(());
     }
@@ -346,7 +360,7 @@ impl TerminalSession {
         stdout.flush()?;
 
         let options = TerminalOptions {
-            viewport: Viewport::Inline(12),
+            viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
         };
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::with_options(backend, options)?;
@@ -360,10 +374,21 @@ impl TerminalSession {
             .map(|_| ())
     }
 
-    /// 将消息内容插入终端 scrollback（在 viewport 上方）。
-    fn insert_message(&mut self, msg: &state::Message, theme: &theme::Theme) -> io::Result<()> {
+    fn composer_width(&self) -> usize {
+        self.terminal
+            .size()
+            .map(|area| area.width.saturating_sub(2).max(1) as usize)
+            .unwrap_or(80)
+    }
+
+    /// 将条目插入终端 scrollback（在 viewport 上方）。
+    fn insert_scrollback_entry(
+        &mut self,
+        entry: &state::ScrollbackEntry,
+        theme: &theme::Theme,
+    ) -> io::Result<()> {
         let width = self.terminal.size()?.width;
-        let lines = message_to_lines(msg, width, theme);
+        let lines = scrollback_entry_to_lines(entry, width, theme);
         let height = lines.len() as u16;
         self.terminal.insert_before(height, |buf| {
             let p = Paragraph::new(Text::from(lines.clone()));
@@ -387,9 +412,9 @@ fn flush_scrollback(
     terminal: &mut TerminalSession,
     theme: &theme::Theme,
 ) -> io::Result<()> {
-    let msgs: Vec<_> = state.scrollback_queue.drain(..).collect();
-    for msg in msgs {
-        terminal.insert_message(&msg, theme)?;
+    let entries: Vec<_> = state.scrollback_queue.drain(..).collect();
+    for entry in entries {
+        terminal.insert_scrollback_entry(&entry, theme)?;
     }
     Ok(())
 }

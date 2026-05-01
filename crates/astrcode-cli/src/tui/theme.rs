@@ -1,4 +1,4 @@
-//! Codex 风格终端主题：简洁的消息记录、聚焦的输入编辑器、清晰的状态强调色。
+//! Claude Code 风格终端主题：低噪音文本、轻量工具状态和克制强调色。
 //!
 //! 根据终端背景明暗自动选择配色方案，定义所有 UI 元素的样式常量。
 
@@ -50,35 +50,31 @@ impl Theme {
     /// 其他终端默认使用深色配色方案。
     pub fn detect() -> Self {
         let dark = is_terminal_dark();
-        // 次要文本颜色：深色终端用浅灰，浅色终端用深灰
+        // 次要文本颜色保持低饱和，避免抢正文注意力。
         let muted = if dark {
-            Color::Rgb(120, 129, 148)
+            Color::Rgb(124, 124, 118)
         } else {
-            Color::Rgb(96, 103, 120)
+            Color::Rgb(92, 92, 86)
         };
-        // 边框颜色
         let border = if dark {
-            Color::Rgb(54, 62, 79)
+            Color::Rgb(58, 58, 54)
         } else {
-            Color::Rgb(196, 204, 222)
+            Color::Rgb(198, 198, 188)
         };
-        // 强调色（助手标签、激活边框等）
         let accent = if dark {
-            Color::Rgb(112, 197, 255)
+            Color::Rgb(192, 169, 112)
         } else {
-            Color::Rgb(0, 120, 196)
+            Color::Rgb(126, 92, 35)
         };
-        // 用户标签颜色
         let user = if dark {
-            Color::Rgb(162, 214, 255)
+            Color::Rgb(156, 190, 150)
         } else {
-            Color::Rgb(18, 92, 160)
+            Color::Rgb(45, 118, 76)
         };
-        // 工具标签颜色（金黄色调）
         let tool = if dark {
-            Color::Rgb(225, 194, 104)
+            Color::Rgb(176, 160, 118)
         } else {
-            Color::Rgb(156, 108, 0)
+            Color::Rgb(118, 94, 46)
         };
 
         Self {
@@ -88,13 +84,27 @@ impl Theme {
             assistant_label: Style::default().fg(accent).add_modifier(Modifier::BOLD),
             tool_label: Style::default().fg(tool).add_modifier(Modifier::BOLD),
             system_label: Style::default().fg(muted).add_modifier(Modifier::BOLD),
-            error_label: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            body: Style::default().fg(if dark { Color::Gray } else { Color::Black }),
+            error_label: Style::default()
+                .fg(if dark {
+                    Color::Rgb(218, 112, 112)
+                } else {
+                    Color::Rgb(170, 40, 40)
+                })
+                .add_modifier(Modifier::BOLD),
+            body: Style::default().fg(if dark {
+                Color::Rgb(205, 205, 196)
+            } else {
+                Color::Rgb(35, 35, 32)
+            }),
             dim: Style::default().fg(muted),
             status: Style::default().fg(accent),
             status_busy: Style::default().fg(tool).add_modifier(Modifier::BOLD),
             footer: Style::default().fg(muted),
-            composer: Style::default().fg(if dark { Color::White } else { Color::Black }),
+            composer: Style::default().fg(if dark {
+                Color::Rgb(235, 235, 224)
+            } else {
+                Color::Rgb(24, 24, 22)
+            }),
             composer_placeholder: Style::default().fg(muted),
             popup_border: Style::default().fg(accent),
             popup_selected: Style::default().fg(accent).add_modifier(Modifier::BOLD),

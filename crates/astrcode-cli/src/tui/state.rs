@@ -7,10 +7,14 @@ use std::collections::BTreeMap;
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::ToolResult,
+    render::{RenderSpec, UI_RENDER_METADATA_KEY},
 };
 use astrcode_protocol::events::ClientNotification;
+
+use super::{
+    composer::{ComposerAction, ComposerState},
+    tool_display,
+};
 
 /// 消息角色枚举，用于区分不同来源的消息并应用对应样式。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,12 +73,6 @@ impl MessageBody {
         self.plain.push_str(text);
     }
 
-    fn push_newline_if_needed(&mut self) {
-        if !self.plain.ends_with('\n') {
-            self.plain.push('\n');
-        }
-    }
-
     fn set_render(&mut self, spec: RenderSpec, fallback: String) {
         self.plain = if fallback.is_empty() {
             spec.plain_text_fallback()
@@ -100,6 +98,19 @@ pub struct Message {
     pub key: Option<String>,
 }
 
+/// 待写入终端原生 scrollback 的条目。
+#[derive(Debug, Clone)]
+pub enum ScrollbackEntry {
+    /// 完整消息，适用于用户、工具摘要、系统消息和非流式回退。
+    Message(Message),
+    /// 流式消息的头部，只打印一次。
+    StreamHeader { role: MessageRole, label: String },
+    /// 流式正文片段，不重复打印角色标签。
+    StreamText { role: MessageRole, text: String },
+    /// 流式消息结束后的空行。
+    BlankLine,
+}
+
 /// 焦点位置枚举，指示当前激活的 UI 区域。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -121,14 +132,8 @@ pub struct TuiState {
     pub transcript_scroll: usize,
     /// 是否正在流式接收助手回复
     pub is_streaming: bool,
-    /// 输入框当前文本内容
-    pub input: String,
-    /// 输入框光标位置（以 char 索引计）
-    pub input_cursor: usize,
-    /// 历史输入记录（用于上下翻页浏览）
-    pub input_history: Vec<String>,
-    /// 当前历史浏览位置索引
-    pub input_history_idx: Option<usize>,
+    /// 输入框编辑器状态
+    composer: ComposerState,
     /// 可用会话列表
     pub available_sessions: Vec<String>,
     /// 当前活跃会话 ID
@@ -153,8 +158,49 @@ pub struct TuiState {
     pub dirty: bool,
     /// 是否应退出 TUI
     pub should_quit: bool,
-    /// 待写入 scrollback 的消息队列（已完成的消息，非流式）
-    pub scrollback_queue: Vec<Message>,
+    /// 待写入 scrollback 的消息队列。
+    pub scrollback_queue: Vec<ScrollbackEntry>,
+    /// 正在按片段写入 scrollback 的助手消息。
+    stream_scrollback: BTreeMap<String, StreamScrollbackState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StreamScrollbackState {
+    pending: String,
+    seen_delta: bool,
+}
+
+impl StreamScrollbackState {
+    fn take_ready_chunks(&mut self) -> Vec<String> {
+        let mut chunks = Vec::new();
+        loop {
+            if let Some(newline_idx) = self.pending.find('\n') {
+                let chunk = self.pending[..newline_idx].to_string();
+                self.pending.drain(..=newline_idx);
+                chunks.push(chunk);
+                continue;
+            }
+
+            if self.pending.chars().count() >= STREAM_CHUNK_CHARS {
+                chunks.push(drain_char_prefix(&mut self.pending, STREAM_CHUNK_CHARS));
+                continue;
+            }
+
+            break;
+        }
+        chunks
+    }
+}
+
+const STREAM_CHUNK_CHARS: usize = 160;
+
+fn drain_char_prefix(text: &mut String, char_count: usize) -> String {
+    let end = text
+        .char_indices()
+        .nth(char_count)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| text.len());
+    text.drain(..end).collect()
 }
 
 impl TuiState {
@@ -164,10 +210,7 @@ impl TuiState {
             messages: Vec::new(),
             transcript_scroll: 0,
             is_streaming: false,
-            input: String::new(),
-            input_cursor: 0,
-            input_history: Vec::new(),
-            input_history_idx: None,
+            composer: ComposerState::default(),
             available_sessions: Vec::new(),
             active_session_id: None,
             focus: Focus::Input,
@@ -181,6 +224,7 @@ impl TuiState {
             dirty: true,
             should_quit: false,
             scrollback_queue: Vec::new(),
+            stream_scrollback: BTreeMap::new(),
         }
     }
 
@@ -189,98 +233,89 @@ impl TuiState {
         self.dirty = true;
     }
 
+    /// 当前输入框展示文本。
+    pub fn input_text(&self) -> &str {
+        self.composer.text()
+    }
+
+    /// 当前输入框光标位置（char 索引）。
+    pub fn input_cursor(&self) -> usize {
+        self.composer.cursor()
+    }
+
     /// 在光标位置插入一个字符。
     pub fn insert_char(&mut self, ch: char) {
-        let byte_idx = self.cursor_byte_index();
-        self.input.insert(byte_idx, ch);
-        self.input_cursor += 1;
-        self.sync_slash_filter();
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::InsertChar(ch));
     }
 
     /// 在光标位置插入换行符。
     pub fn insert_newline(&mut self) {
-        let byte_idx = self.cursor_byte_index();
-        self.input.insert(byte_idx, '\n');
-        self.input_cursor += 1;
-        self.sync_slash_filter();
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::Newline);
     }
 
-    /// 在光标位置插入一段文本，用于 bracketed paste。
-    pub fn insert_str(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let byte_idx = self.cursor_byte_index();
-        self.input.insert_str(byte_idx, text);
-        self.input_cursor += text.chars().count();
-        self.sync_slash_filter();
-        self.mark_dirty();
+    /// 在光标位置插入 bracketed paste 文本；长文本会先折叠为占位符。
+    pub fn insert_paste(&mut self, text: &str) {
+        self.apply_composer_action(ComposerAction::InsertPaste(text.to_string()));
     }
 
     /// 删除光标前一个字符（退格键）。
     pub fn backspace(&mut self) {
-        if self.input_cursor == 0 {
-            return;
-        }
-        let remove_byte_idx = self
-            .input
-            .char_indices()
-            .nth(self.input_cursor - 1)
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-        self.input.remove(remove_byte_idx);
-        self.input_cursor -= 1;
-        self.sync_slash_filter();
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::Backspace);
     }
 
     /// 删除光标位置的字符（Delete 键）。
     pub fn delete(&mut self) {
-        let char_count = self.input.chars().count();
-        if self.input_cursor >= char_count {
-            return;
-        }
-        let remove_byte_idx = self
-            .input
-            .char_indices()
-            .nth(self.input_cursor)
-            .map(|(idx, _)| idx)
-            .unwrap_or_else(|| self.input.len());
-        self.input.remove(remove_byte_idx);
-        self.sync_slash_filter();
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::Delete);
     }
 
     /// 光标左移一个字符。
     pub fn move_left(&mut self) {
-        self.input_cursor = self.input_cursor.saturating_sub(1);
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::MoveLeft);
     }
 
     /// 光标右移一个字符，不超过文本末尾。
     pub fn move_right(&mut self) {
-        self.input_cursor = (self.input_cursor + 1).min(self.input.chars().count());
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::MoveRight);
     }
 
-    /// 光标移动到输入开头。
+    /// 光标移动到当前物理行开头。
     pub fn move_home(&mut self) {
-        self.input_cursor = 0;
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::MoveHome);
     }
 
-    /// 光标移动到输入末尾。
+    /// 光标移动到当前物理行末尾。
     pub fn move_end(&mut self) {
-        self.input_cursor = self.input.chars().count();
-        self.mark_dirty();
+        self.apply_composer_action(ComposerAction::MoveEnd);
+    }
+
+    /// 光标上移一个视觉行；返回 false 表示已在首行，可交给历史导航。
+    pub fn move_visual_up(&mut self, width: usize) -> bool {
+        self.apply_composer_action(ComposerAction::MoveVisualUp { width })
+    }
+
+    /// 光标下移一个视觉行；返回 false 表示已在末行，可交给历史导航。
+    pub fn move_visual_down(&mut self, width: usize) -> bool {
+        self.apply_composer_action(ComposerAction::MoveVisualDown { width })
+    }
+
+    /// 删除当前行中光标前的内容。
+    pub fn delete_before_cursor(&mut self) {
+        self.apply_composer_action(ComposerAction::DeleteBeforeCursor);
+    }
+
+    /// 删除当前行中光标后的内容。
+    pub fn delete_after_cursor(&mut self) {
+        self.apply_composer_action(ComposerAction::DeleteAfterCursor);
+    }
+
+    /// 删除光标前一个词。
+    pub fn delete_previous_word(&mut self) {
+        self.apply_composer_action(ComposerAction::DeletePreviousWord);
     }
 
     /// 替换输入框内容并将光标移到末尾。
     pub fn set_input(&mut self, input: String) {
-        self.input = input;
-        self.input_cursor = self.input.chars().count();
+        self.composer.set_text(input);
         self.sync_slash_filter();
         self.mark_dirty();
     }
@@ -289,51 +324,38 @@ impl TuiState {
     ///
     /// 返回被取出的文本内容。
     pub fn take_input(&mut self) -> String {
-        self.input_history_idx = None;
         self.close_slash();
-        self.input_cursor = 0;
-        std::mem::take(&mut self.input)
+        self.composer.take_submit_text()
     }
 
     /// 将输入记录到历史列表（去重，不记录空输入）。
     pub fn remember_input(&mut self, input: &str) {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        // 避免连续重复记录
-        if self.input_history.last().map(|v| v.as_str()) != Some(trimmed) {
-            self.input_history.push(trimmed.to_string());
-        }
+        self.composer.remember_input(input);
     }
 
     /// 浏览上一条历史输入。
     pub fn history_previous(&mut self) {
-        if self.input_history.is_empty() {
-            return;
+        if self.composer.history_previous() {
+            self.sync_slash_filter();
+            self.mark_dirty();
         }
-        let next_idx = match self.input_history_idx {
-            Some(idx) if idx > 0 => idx - 1,
-            Some(idx) => idx,
-            None => self.input_history.len().saturating_sub(1),
-        };
-        self.input_history_idx = Some(next_idx);
-        self.set_input(self.input_history[next_idx].clone());
     }
 
     /// 浏览下一条历史输入，到达末尾后清空输入框。
     pub fn history_next(&mut self) {
-        let Some(idx) = self.input_history_idx else {
-            return;
-        };
-        if idx + 1 >= self.input_history.len() {
-            self.input_history_idx = None;
-            self.set_input(String::new());
-            return;
+        if self.composer.history_next() {
+            self.sync_slash_filter();
+            self.mark_dirty();
         }
-        let next_idx = idx + 1;
-        self.input_history_idx = Some(next_idx);
-        self.set_input(self.input_history[next_idx].clone());
+    }
+
+    fn apply_composer_action(&mut self, action: ComposerAction) -> bool {
+        let changed = self.composer.apply(action);
+        if changed {
+            self.sync_slash_filter();
+            self.mark_dirty();
+        }
+        changed
     }
 
     /// 关闭斜杠命令面板，恢复焦点到输入框。
@@ -389,6 +411,7 @@ impl TuiState {
                 self.active_session_id = Some(session_id.clone());
                 self.working_dir = snapshot.working_dir.clone();
                 self.messages.clear();
+                self.stream_scrollback.clear();
                 self.transcript_scroll = 0;
                 for message in &snapshot.messages {
                     let role = match message.role.as_str() {
@@ -449,6 +472,7 @@ impl TuiState {
                 self.active_session_id = Some(event.session_id.clone());
                 self.working_dir = working_dir.clone();
                 self.model_name = model_id.clone();
+                self.stream_scrollback.clear();
                 self.push_message(
                     MessageRole::System,
                     "Session".into(),
@@ -480,6 +504,12 @@ impl TuiState {
             // 用户消息在按下 Enter 时已乐观推入，此处无需处理
             EventPayload::UserMessage { .. } => {},
             EventPayload::AssistantMessageStarted { message_id } => {
+                self.stream_scrollback
+                    .insert(message_id.clone(), StreamScrollbackState::default());
+                self.scrollback_queue.push(ScrollbackEntry::StreamHeader {
+                    role: MessageRole::Assistant,
+                    label: "Astrcode".into(),
+                });
                 self.push_message(
                     MessageRole::Assistant,
                     "Astrcode".into(),
@@ -493,13 +523,18 @@ impl TuiState {
                     message.body.append_text(delta);
                     self.mark_dirty();
                 }
+                self.push_assistant_stream_delta(message_id, delta);
             },
             EventPayload::AssistantMessageCompleted { message_id, text } => {
+                let streamed_to_scrollback = self.finish_assistant_stream(message_id, text);
                 if let Some(message) = self.find_message_mut(message_id) {
                     message.body.set_text(text.clone());
                     message.is_streaming = false;
-                    let completed = message.clone();
-                    self.scrollback_queue.push(completed);
+                    if !streamed_to_scrollback {
+                        let completed = message.clone();
+                        self.scrollback_queue
+                            .push(ScrollbackEntry::Message(completed));
+                    }
                     self.mark_dirty();
                 } else {
                     // 未找到已有消息（可能错过了 Started 事件），直接创建
@@ -518,23 +553,24 @@ impl TuiState {
             },
             EventPayload::ToolCallStarted { call_id, tool_name } => {
                 // 不需要在消息记录中显示的工具仅更新状态栏
-                if !should_print_tool(tool_name) {
+                if !tool_display::should_print_tool(tool_name) {
                     self.status = format!("Running {}", tool_name);
                     self.mark_dirty();
                     return;
                 }
+                let display = tool_display::started(tool_name);
                 self.push_message(
                     MessageRole::Tool,
-                    tool_message_label(tool_name, None),
-                    String::new(),
+                    display.label,
+                    display.body,
                     true,
                     Some(call_id.clone()),
                 );
             },
-            EventPayload::ToolCallArgumentsDelta { call_id, delta } => {
+            EventPayload::ToolCallArgumentsDelta { call_id, .. } => {
                 if let Some(message) = self.find_message_mut(call_id) {
-                    message.body.push_newline_if_needed();
-                    message.body.append_text(delta);
+                    let label = message.label.clone();
+                    self.status = format!("Running {label}");
                     self.mark_dirty();
                 }
             },
@@ -543,32 +579,30 @@ impl TuiState {
                 tool_name,
                 arguments,
             } => {
-                if !should_print_tool(tool_name) {
+                if !tool_display::should_print_tool(tool_name) {
                     self.status = format!("Running {}", tool_name);
                     self.mark_dirty();
                     return;
                 }
-                let body = tool_request_body(tool_name, arguments);
+                let display = tool_display::requested(tool_name, arguments);
                 if let Some(message) = self.find_message_mut(call_id) {
-                    message.label = tool_message_label(tool_name, Some(arguments));
-                    message.body.set_text(body);
+                    message.label = display.label;
+                    message.body.set_text(display.body);
                     self.mark_dirty();
                 } else {
                     self.push_message(
                         MessageRole::Tool,
-                        tool_message_label(tool_name, Some(arguments)),
-                        body,
+                        display.label,
+                        display.body,
                         true,
                         Some(call_id.clone()),
                     );
                 }
             },
-            EventPayload::ToolOutputDelta { call_id, delta, .. } => {
+            EventPayload::ToolOutputDelta { call_id, .. } => {
                 if let Some(message) = self.find_message_mut(call_id) {
-                    if !message.body.is_empty() {
-                        message.body.append_text("\n");
-                    }
-                    message.body.append_text(delta);
+                    let label = message.label.clone();
+                    self.status = format!("Receiving {label}");
                     self.mark_dirty();
                 }
             },
@@ -579,59 +613,60 @@ impl TuiState {
             } => {
                 let render_spec = ui_render_from_metadata(&result.metadata);
                 // 隐藏工具的成功结果仅更新状态栏
-                if !should_print_tool(tool_name) && !result.is_error && render_spec.is_none() {
+                if !tool_display::should_print_tool(tool_name)
+                    && !result.is_error
+                    && render_spec.is_none()
+                {
                     self.status = format!("{} completed", tool_name);
                     self.mark_dirty();
                     return;
                 }
+                let display = tool_display::completed(tool_name, result);
 
                 if let Some(message) = self.find_message_mut(call_id) {
                     if let Some(spec) = render_spec {
-                        let spec = completed_tool_render_spec(tool_name, spec, result);
+                        let spec = tool_display::completed_render_spec(tool_name, spec, result);
                         message.body.set_render(spec, result.content.clone());
-                    } else if let Some(output) = tool_result_body(tool_name, result) {
-                        if !message.body.contains_text(&output) {
-                            // 追加工具输出（去重）
-                            if !message.body.is_empty() {
-                                message.body.append_text("\n");
-                            }
-                            message.body.append_text(&output);
+                    } else if !display.body.is_empty() && !message.body.contains_text(&display.body)
+                    {
+                        // 追加工具输出（去重）
+                        if !message.body.is_empty() {
+                            message.body.append_text("\n");
                         }
+                        message.body.append_text(&display.body);
                     }
                     if result.is_error {
                         message.role = MessageRole::Error;
-                        message.label = "Tool Error".into();
+                        message.label = display.label;
                     }
                     message.is_streaming = false;
                     let completed = message.clone();
-                    self.scrollback_queue.push(completed);
+                    self.scrollback_queue
+                        .push(ScrollbackEntry::Message(completed));
                     self.mark_dirty();
                 } else if result.is_error {
                     // 工具错误但无已有消息记录，创建错误消息
                     self.push_message(
                         MessageRole::Error,
-                        "Tool Error".into(),
-                        result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| result.content.clone()),
+                        display.label,
+                        display.body,
                         false,
                         Some(call_id.clone()),
                     );
                 } else if let Some(spec) = render_spec {
-                    let spec = completed_tool_render_spec(tool_name, spec, result);
+                    let spec = tool_display::completed_render_spec(tool_name, spec, result);
                     self.push_render_message(
                         MessageRole::Tool,
-                        tool_message_label(tool_name, None),
+                        display.label,
                         spec,
                         result.content.clone(),
                         Some(call_id.clone()),
                     );
-                } else if let Some(output) = tool_result_body(tool_name, result) {
+                } else if !display.body.is_empty() {
                     self.push_message(
                         MessageRole::Tool,
-                        tool_message_label(tool_name, None),
-                        output,
+                        display.label,
+                        display.body,
                         false,
                         Some(call_id.clone()),
                     );
@@ -720,7 +755,8 @@ impl TuiState {
         self.messages.push(msg);
         if !is_streaming {
             if let Some(last) = self.messages.last() {
-                self.scrollback_queue.push(last.clone());
+                self.scrollback_queue
+                    .push(ScrollbackEntry::Message(last.clone()));
             }
         }
         self.mark_dirty();
@@ -744,8 +780,48 @@ impl TuiState {
             key,
         };
         self.messages.push(msg.clone());
-        self.scrollback_queue.push(msg);
+        self.scrollback_queue.push(ScrollbackEntry::Message(msg));
         self.mark_dirty();
+    }
+
+    fn push_assistant_stream_delta(&mut self, message_id: &str, delta: &str) {
+        let Some(stream) = self.stream_scrollback.get_mut(message_id) else {
+            return;
+        };
+        stream.seen_delta = true;
+        stream.pending.push_str(delta);
+        let chunks = stream.take_ready_chunks();
+        self.push_stream_texts(MessageRole::Assistant, chunks);
+    }
+
+    fn finish_assistant_stream(&mut self, message_id: &str, completed_text: &str) -> bool {
+        let Some(mut stream) = self.stream_scrollback.remove(message_id) else {
+            return false;
+        };
+        if !stream.seen_delta {
+            stream.pending.push_str(completed_text);
+        }
+
+        let mut chunks = stream.take_ready_chunks();
+        if !stream.pending.trim().is_empty() {
+            chunks.push(std::mem::take(&mut stream.pending));
+        }
+        self.push_stream_texts(MessageRole::Assistant, chunks);
+        self.scrollback_queue.push(ScrollbackEntry::BlankLine);
+        true
+    }
+
+    fn push_stream_texts(&mut self, role: MessageRole, chunks: Vec<String>) {
+        for text in chunks {
+            if text.is_empty() {
+                self.scrollback_queue.push(ScrollbackEntry::BlankLine);
+            } else {
+                self.scrollback_queue.push(ScrollbackEntry::StreamText {
+                    role: role.clone(),
+                    text,
+                });
+            }
+        }
     }
 
     /// 按 key 反向查找消息，返回可变引用。
@@ -763,195 +839,26 @@ impl TuiState {
     /// 输入以 `/` 开头时自动打开面板并提取过滤字符串，
     /// 输入不再以 `/` 开头时自动关闭面板。
     fn sync_slash_filter(&mut self) {
-        if self.input.starts_with('/') {
-            self.show_slash_palette = true;
-            self.focus = Focus::SlashPalette;
-            // 提取斜杠后的第一个词作为过滤条件
-            self.slash_filter = self
-                .input
+        let input = self.input_text();
+        if input.starts_with('/') {
+            let slash_filter = input
                 .trim_start_matches('/')
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
                 .to_string();
+            self.show_slash_palette = true;
+            self.focus = Focus::SlashPalette;
+            // 提取斜杠后的第一个词作为过滤条件
+            self.slash_filter = slash_filter;
         } else if self.focus == Focus::SlashPalette {
             self.close_slash();
         }
     }
-
-    /// 将 char 索引的光标位置转换为 byte 索引，用于字符串插入/删除。
-    fn cursor_byte_index(&self) -> usize {
-        self.input
-            .char_indices()
-            .nth(self.input_cursor)
-            .map(|(idx, _)| idx)
-            .unwrap_or_else(|| self.input.len())
-    }
-}
-
-/// 判断工具是否应在消息记录中显示。
-///
-/// shell、agent、editFile、applyPatch 等工具的输出对用户有直接价值，需要显示；
-/// 其他工具（如搜索类）仅更新状态栏，避免刷屏。
-fn should_print_tool(tool_name: &str) -> bool {
-    // Claude Code 风格：工具调用应该可见，但结果需要折叠/摘要，避免刷屏。
-    !matches!(tool_name, "tool_search")
-}
-
-fn tool_message_label(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
-    let action = match tool_name {
-        "shell" => "Bash",
-        "readFile" => "Read",
-        "writeFile" => "Write",
-        "editFile" => "Edit",
-        "findFiles" => "Glob",
-        "grep" => "Search",
-        "apply_patch" | "applyPatch" => "Patch",
-        "agent" => "Task",
-        other => other,
-    };
-
-    if tool_name == "agent" {
-        if let Some(description) = arguments
-            .and_then(|value| value["description"].as_str())
-            .filter(|description| !description.trim().is_empty())
-        {
-            return format!("{action}({})", compact_inline(description, 56));
-        }
-        return action.into();
-    }
-
-    if let Some(target) = tool_primary_target(tool_name, arguments) {
-        let target = target.strip_prefix("$ ").unwrap_or(&target);
-        return format!("{action}({})", compact_inline(target, 56));
-    }
-
-    action.into()
-}
-
-fn tool_request_body(tool_name: &str, arguments: &serde_json::Value) -> String {
-    if tool_name == "agent" {
-        let mut lines = Vec::new();
-        if let Some(subagent_type) = arguments["subagent_type"]
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-        {
-            lines.push(format!("subagent: {subagent_type}"));
-        }
-        if let Some(prompt) = arguments["prompt"]
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
-        {
-            lines.push(format!("prompt: {}", compact_inline(prompt, 180)));
-        }
-        return if lines.is_empty() {
-            "agent".into()
-        } else {
-            lines.join("\n")
-        };
-    }
-
-    if let Some(summary) = tool_primary_target(tool_name, Some(arguments)) {
-        return summary;
-    }
-
-    let args = serde_json::to_string(arguments).unwrap_or_default();
-    if args.is_empty() || args == "{}" {
-        String::new()
-    } else {
-        compact_inline(&args, 220)
-    }
 }
 
 fn compact_inline(text: &str, max_chars: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-
-    let mut preview = compact.chars().take(max_chars).collect::<String>();
-    preview.push('…');
-    preview
-}
-
-fn tool_primary_target(tool_name: &str, arguments: Option<&serde_json::Value>) -> Option<String> {
-    let args = arguments?;
-    match tool_name {
-        "shell" => args["command"].as_str().map(|value| format!("$ {value}")),
-        "readFile" | "writeFile" | "editFile" => args["path"]
-            .as_str()
-            .or_else(|| args["file_path"].as_str())
-            .map(str::to_string),
-        "findFiles" => args["pattern"]
-            .as_str()
-            .or_else(|| args["glob"].as_str())
-            .map(|pattern| format!("pattern: {pattern}")),
-        "grep" => {
-            let pattern = args["pattern"]
-                .as_str()
-                .or_else(|| args["query"].as_str())
-                .unwrap_or_default();
-            let path = args["path"]
-                .as_str()
-                .or_else(|| args["glob"].as_str())
-                .unwrap_or_default();
-            match (pattern.is_empty(), path.is_empty()) {
-                (true, true) => None,
-                (false, true) => Some(format!("pattern: {pattern}")),
-                (true, false) => Some(path.to_string()),
-                (false, false) => Some(format!("{pattern} in {path}")),
-            }
-        },
-        "apply_patch" | "applyPatch" => Some("workspace patch".into()),
-        _ => None,
-    }
-}
-
-fn tool_result_body(tool_name: &str, result: &ToolResult) -> Option<String> {
-    if result.is_error {
-        return Some(
-            result
-                .error
-                .clone()
-                .filter(|error| !error.trim().is_empty())
-                .unwrap_or_else(|| result.content.clone()),
-        );
-    }
-
-    let content = result.content.trim();
-    if content.is_empty() {
-        return Some("done".into());
-    }
-
-    match tool_name {
-        "readFile" => Some(format!("read {} line(s)", content.lines().count().max(1))),
-        "findFiles" => Some(compact_lines("matched files", content, 8)),
-        "grep" => Some(compact_lines("matches", content, 10)),
-        "writeFile" | "editFile" | "apply_patch" | "applyPatch" => {
-            Some(compact_lines("result", content, 12))
-        },
-        _ => Some(compact_lines("output", content, 16)),
-    }
-}
-
-fn compact_lines(label: &str, text: &str, max_lines: usize) -> String {
-    let lines: Vec<_> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if lines.is_empty() {
-        return "done".into();
-    }
-
-    let mut output = Vec::new();
-    output.push(format!("{label}: {}", lines.len()));
-    for line in lines.iter().take(max_lines) {
-        output.push(format!("⎿ {}", compact_inline(line, 180)));
-    }
-    if lines.len() > max_lines {
-        output.push(format!("⎿ … {} more", lines.len() - max_lines));
-    }
-    output.join("\n")
+    tool_display::compact_inline(text, max_chars)
 }
 
 fn session_list_body(
@@ -979,65 +886,6 @@ fn session_list_body(
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn completed_tool_render_spec(
-    tool_name: &str,
-    spec: RenderSpec,
-    result: &ToolResult,
-) -> RenderSpec {
-    if tool_name == "agent" {
-        agent_done_render_spec(spec, result)
-    } else {
-        spec
-    }
-}
-
-fn agent_done_render_spec(spec: RenderSpec, result: &ToolResult) -> RenderSpec {
-    let mut children = match spec {
-        RenderSpec::Box { children, .. } => children,
-        spec => vec![spec],
-    };
-
-    if let Some(child_session_id) = result
-        .metadata
-        .get("child_session_id")
-        .and_then(|value| value.as_str())
-    {
-        children.push(RenderSpec::KeyValue {
-            entries: vec![RenderKeyValue {
-                key: "session".into(),
-                value: child_session_id.into(),
-                tone: RenderTone::Muted,
-            }],
-            tone: RenderTone::Default,
-        });
-    }
-
-    if !result.content.trim().is_empty() {
-        children.push(RenderSpec::Markdown {
-            text: result.content.clone(),
-            tone: if result.is_error {
-                RenderTone::Error
-            } else {
-                RenderTone::Default
-            },
-        });
-    }
-
-    RenderSpec::Box {
-        title: Some(if result.is_error {
-            "Failed".into()
-        } else {
-            "Done".into()
-        }),
-        tone: if result.is_error {
-            RenderTone::Error
-        } else {
-            RenderTone::Success
-        },
-        children,
-    }
 }
 
 fn ui_render_from_metadata(metadata: &BTreeMap<String, serde_json::Value>) -> Option<RenderSpec> {
@@ -1159,7 +1007,8 @@ mod tests {
 
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, MessageRole::Error);
-        assert_eq!(state.messages[0].body.plain_text(), "glob failed");
+        assert_eq!(state.messages[0].label, "Glob");
+        assert!(state.messages[0].body.plain_text().contains("glob failed"));
     }
 
     #[test]
@@ -1192,6 +1041,90 @@ mod tests {
     }
 
     #[test]
+    fn assistant_deltas_enter_scrollback_incrementally() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantMessageStarted {
+                message_id: "msg-1".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantTextDelta {
+                message_id: "msg-1".into(),
+                delta: "first line\nsecond".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantMessageCompleted {
+                message_id: "msg-1".into(),
+                text: "first line\nsecond".into(),
+            },
+        );
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].body.plain_text(), "first line\nsecond");
+        assert!(matches!(
+            state.scrollback_queue.first(),
+            Some(ScrollbackEntry::StreamHeader { label, .. }) if label == "Astrcode"
+        ));
+        assert!(state.scrollback_queue.iter().any(|entry| {
+            matches!(entry, ScrollbackEntry::StreamText { text, .. } if text == "first line")
+        }));
+        assert!(state.scrollback_queue.iter().any(|entry| {
+            matches!(entry, ScrollbackEntry::StreamText { text, .. } if text == "second")
+        }));
+        assert!(matches!(
+            state.scrollback_queue.last(),
+            Some(ScrollbackEntry::BlankLine)
+        ));
+        assert!(!state
+            .scrollback_queue
+            .iter()
+            .any(|entry| matches!(entry, ScrollbackEntry::Message(message) if message.role == MessageRole::Assistant)));
+    }
+
+    #[test]
+    fn markdown_like_assistant_stream_is_not_reflowed_as_completed_message() {
+        let mut state = TuiState::new();
+
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantMessageStarted {
+                message_id: "msg-1".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantTextDelta {
+                message_id: "msg-1".into(),
+                delta: "# Title\n- item".into(),
+            },
+        );
+        apply_payload(
+            &mut state,
+            EventPayload::AssistantMessageCompleted {
+                message_id: "msg-1".into(),
+                text: "# Title\n- item".into(),
+            },
+        );
+
+        assert!(state.scrollback_queue.iter().any(|entry| {
+            matches!(entry, ScrollbackEntry::StreamText { text, .. } if text == "# Title")
+        }));
+        assert!(state.scrollback_queue.iter().any(|entry| {
+            matches!(entry, ScrollbackEntry::StreamText { text, .. } if text == "- item")
+        }));
+        assert!(!state
+            .scrollback_queue
+            .iter()
+            .any(|entry| matches!(entry, ScrollbackEntry::Message(message) if message.role == MessageRole::Assistant)));
+    }
+
+    #[test]
     fn input_history_recalls_prompts_and_commands() {
         let mut state = TuiState::new();
 
@@ -1199,17 +1132,17 @@ mod tests {
         state.remember_input("/sessions");
 
         state.history_previous();
-        assert_eq!(state.input, "/sessions");
+        assert_eq!(state.input_text(), "/sessions");
         assert_eq!(state.focus, Focus::SlashPalette);
 
         state.history_previous();
-        assert_eq!(state.input, "first prompt");
+        assert_eq!(state.input_text(), "first prompt");
         assert_eq!(state.focus, Focus::Input);
 
         state.history_next();
-        assert_eq!(state.input, "/sessions");
+        assert_eq!(state.input_text(), "/sessions");
 
         state.history_next();
-        assert!(state.input.is_empty());
+        assert!(state.input_text().is_empty());
     }
 }
