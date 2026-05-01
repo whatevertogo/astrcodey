@@ -14,6 +14,8 @@ pub struct ContextWindowSettings {
     pub compact_threshold_percent: u8,
     /// 压缩时保留的最近对话轮数。
     pub compact_keep_recent_turns: u8,
+    /// 压缩时额外按原文保留的最近真实用户消息条数。
+    pub compact_keep_recent_user_messages: usize,
     /// 压缩失败时的最大重试次数。
     pub compact_max_retry_attempts: u8,
     /// 最大追踪文件数量（用于压缩后的文件恢复）。
@@ -34,24 +36,28 @@ pub struct ContextWindowSettings {
     pub aggregate_tool_result_bytes: usize,
     /// micro-compact 触发前允许保留的旧工具结果数量。
     pub micro_compact_keep_recent_results: usize,
+    /// 工具结果空闲多久后可以进入 micro-compact，单位秒。
+    pub micro_compact_gap_threshold_secs: u64,
 }
 
 impl Default for ContextWindowSettings {
     fn default() -> Self {
         Self {
             auto_compact_enabled: true,
-            compact_threshold_percent: 90,
+            compact_threshold_percent: 85,
             compact_keep_recent_turns: 5,
+            compact_keep_recent_user_messages: 8,
             compact_max_retry_attempts: 3,
             max_tracked_files: 64,
-            max_recovered_files: 16,
-            recovery_token_budget: 8192,
-            summary_reserve_tokens: 40000,
-            compact_max_output_tokens: 4096,
+            max_recovered_files: 5,
+            recovery_token_budget: 50000,
+            summary_reserve_tokens: 20000,
+            compact_max_output_tokens: 20000,
             reserved_context_tokens: 4096,
             tool_result_max_bytes: 8192,
             aggregate_tool_result_bytes: 24576,
             micro_compact_keep_recent_results: 5,
+            micro_compact_gap_threshold_secs: 3600,
         }
     }
 }
