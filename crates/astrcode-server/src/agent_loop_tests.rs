@@ -104,11 +104,13 @@ impl Extension for ProviderMessageExtension {
             return Ok(HookEffect::Allow);
         }
 
-        let mut messages = ctx
+        let messages = ctx
             .provider_messages()
             .expect("BeforeProviderRequest should include provider messages");
-        messages.push(LlmMessage::user(self.text));
-        Ok(HookEffect::ModifiedMessages { messages })
+        assert!(message_text_contains(&messages, "hello"));
+        Ok(HookEffect::AppendMessages {
+            messages: vec![LlmMessage::user(self.text)],
+        })
     }
 }
 

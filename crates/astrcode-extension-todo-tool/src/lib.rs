@@ -59,15 +59,12 @@ impl Extension for TodoToolExtension {
     ) -> Result<HookEffect, ExtensionError> {
         match event {
             ExtensionEvent::BeforeProviderRequest => {
-                let Some(messages) = ctx.provider_messages() else {
-                    return Ok(HookEffect::Allow);
-                };
                 if ctx.find_tool(TODO_WRITE_TOOL_NAME).is_none() {
                     return Ok(HookEffect::Allow);
                 }
 
                 ProgressReminder::new(progress_store_root(ctx.session_id(), ctx.working_dir()))
-                    .before_provider_request(messages)
+                    .before_provider_request()
                     .map_err(ExtensionError::Internal)
             },
             ExtensionEvent::PostToolUse => {
@@ -261,10 +258,7 @@ impl ProgressReminder {
         Self { root }
     }
 
-    fn before_provider_request(
-        &self,
-        mut messages: Vec<astrcode_core::llm::LlmMessage>,
-    ) -> Result<HookEffect, String> {
+    fn before_provider_request(&self) -> Result<HookEffect, String> {
         let mut state = self.load_state()?;
         state.assistant_cycles_since_todo_write =
             state.assistant_cycles_since_todo_write.saturating_add(1);
@@ -278,10 +272,11 @@ impl ProgressReminder {
 
         let effect = if should_remind {
             state.assistant_cycles_since_reminder = 0;
-            messages.push(astrcode_core::llm::LlmMessage::user(reminder_message(
-                &items,
-            )));
-            HookEffect::ModifiedMessages { messages }
+            HookEffect::AppendMessages {
+                messages: vec![astrcode_core::llm::LlmMessage::user(reminder_message(
+                    &items,
+                ))],
+            }
         } else {
             HookEffect::Allow
         };
@@ -704,11 +699,9 @@ mod tests {
             })
             .unwrap();
 
-        let effect = reminder
-            .before_provider_request(vec![LlmMessage::user("continue")])
-            .unwrap();
+        let effect = reminder.before_provider_request().unwrap();
 
-        let HookEffect::ModifiedMessages { messages } = effect else {
+        let HookEffect::AppendMessages { messages } = effect else {
             panic!("stale todo list should inject a provider reminder");
         };
         assert!(text_exists(
@@ -729,9 +722,7 @@ mod tests {
             })
             .unwrap();
 
-        let effect = reminder
-            .before_provider_request(vec![LlmMessage::user("continue")])
-            .unwrap();
+        let effect = reminder.before_provider_request().unwrap();
 
         assert!(matches!(effect, HookEffect::Allow));
     }

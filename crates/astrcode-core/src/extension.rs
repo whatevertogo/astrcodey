@@ -215,6 +215,11 @@ pub enum HookEffect {
         messages: Vec<crate::llm::LlmMessage>,
     },
 
+    /// 向发送给 LLM 的消息列表尾部追加消息（仅 BeforeProviderRequest）。
+    AppendMessages {
+        messages: Vec<crate::llm::LlmMessage>,
+    },
+
     /// 修改 LLM 流式输出后的文本（仅 AfterProviderResponse）。
     ModifiedOutput { text: String },
 

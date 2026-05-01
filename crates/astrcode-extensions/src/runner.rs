@@ -91,6 +91,7 @@ impl ExtensionRunner {
                         HookEffect::ModifiedInput { .. }
                             | HookEffect::ModifiedResult { .. }
                             | HookEffect::ModifiedMessages { .. }
+                            | HookEffect::AppendMessages { .. }
                             | HookEffect::ModifiedOutput { .. }
                             | HookEffect::PromptContributions(_)
                     ) {
@@ -161,6 +162,7 @@ impl ExtensionRunner {
                             modified_result = Some(content);
                         },
                         HookEffect::ModifiedMessages { .. }
+                        | HookEffect::AppendMessages { .. }
                         | HookEffect::ModifiedOutput { .. }
                         | HookEffect::PromptContributions(_)
                         | HookEffect::Allow => {},
@@ -225,6 +227,12 @@ impl ExtensionRunner {
                         },
                         HookEffect::ModifiedMessages { messages } => {
                             current_messages = Some(messages);
+                            modified_messages = true;
+                        },
+                        HookEffect::AppendMessages { mut messages } => {
+                            current_messages
+                                .get_or_insert_with(Vec::new)
+                                .append(&mut messages);
                             modified_messages = true;
                         },
                         HookEffect::Allow
@@ -601,6 +609,8 @@ mod tests {
     use super::*;
 
     struct PromptContributionExtension;
+    struct ProviderReplaceExtension;
+    struct ProviderAppendExtension;
 
     #[async_trait::async_trait]
     impl Extension for PromptContributionExtension {
@@ -623,6 +633,54 @@ mod tests {
                 skills: vec!["skill".to_string()],
                 agents: vec!["agent".to_string()],
             }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for ProviderReplaceExtension {
+        fn id(&self) -> &str {
+            "provider-replace"
+        }
+
+        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+            vec![(ExtensionEvent::BeforeProviderRequest, HookMode::Blocking)]
+        }
+
+        async fn on_event(
+            &self,
+            event: ExtensionEvent,
+            _ctx: &dyn ExtensionContext,
+        ) -> Result<HookEffect, ExtensionError> {
+            assert_eq!(event, ExtensionEvent::BeforeProviderRequest);
+            Ok(HookEffect::ModifiedMessages {
+                messages: vec![LlmMessage::user("replaced")],
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for ProviderAppendExtension {
+        fn id(&self) -> &str {
+            "provider-append"
+        }
+
+        fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
+            vec![(ExtensionEvent::BeforeProviderRequest, HookMode::Blocking)]
+        }
+
+        async fn on_event(
+            &self,
+            event: ExtensionEvent,
+            ctx: &dyn ExtensionContext,
+        ) -> Result<HookEffect, ExtensionError> {
+            assert_eq!(event, ExtensionEvent::BeforeProviderRequest);
+            let messages = ctx
+                .provider_messages()
+                .expect("provider hook should see current messages");
+            assert!(message_texts(&messages).contains(&String::from("replaced")));
+            Ok(HookEffect::AppendMessages {
+                messages: vec![LlmMessage::user("appended")],
+            })
         }
     }
 
@@ -656,11 +714,26 @@ mod tests {
             None
         }
 
+        fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
+            Some(vec![LlmMessage::user("original")])
+        }
+
         fn log_warn(&self, _msg: &str) {}
 
         fn snapshot(&self) -> Arc<dyn ExtensionContext> {
             Arc::new(TestContext)
         }
+    }
+
+    fn message_texts(messages: &[LlmMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                astrcode_core::llm::LlmContent::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -677,5 +750,23 @@ mod tests {
         assert_eq!(contributions.system_prompts, ["system"]);
         assert_eq!(contributions.skills, ["skill"]);
         assert_eq!(contributions.agents, ["agent"]);
+    }
+
+    #[tokio::test]
+    async fn provider_message_hooks_replace_then_append() {
+        let runner =
+            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        runner.register(Arc::new(ProviderReplaceExtension)).await;
+        runner.register(Arc::new(ProviderAppendExtension)).await;
+
+        let outcome = runner
+            .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &TestContext)
+            .await
+            .expect("provider hook dispatch");
+
+        let ProviderHookOutcome::ModifiedMessages { messages } = outcome else {
+            panic!("provider hooks should produce modified messages");
+        };
+        assert_eq!(message_texts(&messages), ["replaced", "appended"]);
     }
 }
