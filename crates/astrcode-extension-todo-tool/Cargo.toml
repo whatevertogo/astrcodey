@@ -1,8 +1,8 @@
 [package]
-name = "astrcode-extension-task-tools"
+name = "astrcode-extension-todo-tool"
 version = "0.1.0"
 edition = "2021"
-description = "Task tracking tools extension"
+description = "Progress todo list extension"
 
 [lib]
 crate-type = ["rlib"]
@@ -11,5 +11,6 @@ crate-type = ["rlib"]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
 async-trait = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

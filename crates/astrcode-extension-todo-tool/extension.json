@@ -1,0 +1,55 @@
+{
+  "id": "astrcode-todo-tool",
+  "name": "Todo Tool",
+  "version": "0.1.0",
+  "description": "Single-agent progress todo list",
+  "astrcode_version": "0.1.0",
+  "library": "astrcode_extension_todo_tool.dll",
+  "subscriptions": [],
+  "tools": [
+    {
+      "name": "todoWrite",
+      "description": "Update the progress todo list for the current session. Use it proactively for complex multi-step work. Keep at most one item in_progress while actively working. Provide both content and activeForm for each item.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "todos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "description": "Imperative form describing what needs to be done."
+                },
+                "activeForm": {
+                  "type": "string",
+                  "description": "Present continuous form shown while the item is in_progress."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ]
+                }
+              },
+              "required": [
+                "content",
+                "activeForm",
+                "status"
+              ]
+            },
+            "description": "The full replacement progress todo list."
+          }
+        },
+        "required": [
+          "todos"
+        ]
+      }
+    }
+  ]
+}

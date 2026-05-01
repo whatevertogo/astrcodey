@@ -17,6 +17,9 @@ use astrcode_core::{
         ToolResult,
     },
 };
+use astrcode_extension_todo_tool::{
+    ProgressItem, ProgressListStore, ProgressStatus, TODO_WRITE_TOOL_NAME, progress_store_root,
+};
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::{
     sync::{Barrier, mpsc},
@@ -335,6 +338,30 @@ fn tool_result_contents(messages: &[LlmMessage]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+fn message_text_contains(messages: &[LlmMessage], needle: &str) -> bool {
+    messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|content| matches!(content, LlmContent::Text { text } if text.contains(needle)))
+    })
+}
+
+fn progress_item(content: &str, active_form: &str, status: ProgressStatus) -> ProgressItem {
+    ProgressItem {
+        content: content.to_string(),
+        active_form: active_form.to_string(),
+        status,
+        metadata: Default::default(),
+    }
+}
+
+fn test_progress_store(session_id: &str, working_dir: &str) -> ProgressListStore {
+    let root = progress_store_root(session_id, working_dir);
+    let _ = std::fs::remove_dir_all(&root);
+    ProgressListStore::new(root)
 }
 
 struct ToolThenFinalLlm {
@@ -665,4 +692,113 @@ async fn session_system_prompt_is_sent_to_llm() {
         )
     }));
     assert!(messages.iter().any(|message| message.role == LlmRole::User));
+}
+
+#[tokio::test]
+async fn todo_reminder_is_injected_after_stale_cycles() {
+    let session_id = "todo-reminder-session";
+    let working_dir = std::env::temp_dir()
+        .join("astrcode-agent-loop-todo-reminder")
+        .to_string_lossy()
+        .to_string();
+    let store = test_progress_store(session_id, &working_dir);
+    store
+        .replace(vec![
+            progress_item(
+                "Replace task tools",
+                "Replacing task tools",
+                ProgressStatus::InProgress,
+            ),
+            progress_item(
+                "Run verification",
+                "Running verification",
+                ProgressStatus::Pending,
+            ),
+        ])
+        .unwrap();
+    for _ in 0..3 {
+        store.record_assistant_cycle(false, false).unwrap();
+    }
+
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        session_id.into(),
+        working_dir,
+        Arc::new(CapturingLlm {
+            messages: Arc::clone(&captured_messages),
+        }),
+        String::new(),
+        test_registry(vec![Arc::new(DelayTool {
+            name: TODO_WRITE_TOOL_NAME,
+            mode: ExecutionMode::Sequential,
+            delay_ms: 0,
+        })]),
+        Arc::new(ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        )),
+        "mock".into(),
+        8192,
+    );
+
+    let output = agent
+        .process_prompt("continue", vec![], None)
+        .await
+        .unwrap();
+    let messages = captured_messages.lock().unwrap();
+
+    assert_eq!(output.text, "ok");
+    assert!(!output.text.contains("todoWrite tool has not been used"));
+    assert!(message_text_contains(
+        &messages,
+        "The todoWrite tool has not been used recently"
+    ));
+    assert!(message_text_contains(&messages, "Replace task tools"));
+}
+
+#[tokio::test]
+async fn todo_write_call_prevents_next_cycle_reminder() {
+    let session_id = "todo-write-reset-session";
+    let working_dir = std::env::temp_dir()
+        .join("astrcode-agent-loop-todo-write-reset")
+        .to_string_lossy()
+        .to_string();
+    let store = test_progress_store(session_id, &working_dir);
+    for _ in 0..2 {
+        store.record_assistant_cycle(false, false).unwrap();
+    }
+
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        session_id.into(),
+        working_dir,
+        Arc::new(ToolCallsThenFinalLlm {
+            call_count: AtomicUsize::new(0),
+            calls: vec![("call-1", TODO_WRITE_TOOL_NAME)],
+            captured_messages: Arc::clone(&captured_messages),
+        }),
+        String::new(),
+        test_registry(vec![Arc::new(DelayTool {
+            name: TODO_WRITE_TOOL_NAME,
+            mode: ExecutionMode::Sequential,
+            delay_ms: 0,
+        })]),
+        Arc::new(ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        )),
+        "mock".into(),
+        8192,
+    );
+
+    agent
+        .process_prompt("update todos", vec![], None)
+        .await
+        .unwrap();
+    let messages = captured_messages.lock().unwrap();
+
+    assert!(
+        !message_text_contains(&messages, "The todoWrite tool has not been used recently"),
+        "the provider request immediately after todoWrite should not receive stale reminder"
+    );
 }

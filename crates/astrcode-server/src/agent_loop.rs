@@ -21,6 +21,7 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolResult},
     types::*,
 };
+use astrcode_extension_todo_tool::{ProgressListStore, TODO_WRITE_TOOL_NAME, progress_store_root};
 use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
@@ -165,6 +166,61 @@ impl Agent {
                 provider_kind: String::new(),
             },
         )
+    }
+
+    fn progress_store(&self) -> ProgressListStore {
+        ProgressListStore::new(progress_store_root(&self.session_id, &self.working_dir))
+    }
+
+    fn todo_write_is_available(&self, tools: &[ToolDefinition]) -> bool {
+        tools.iter().any(|tool| tool.name == TODO_WRITE_TOOL_NAME)
+    }
+
+    fn maybe_append_progress_todo_reminder(
+        &self,
+        messages: &mut Vec<LlmMessage>,
+        tools: &[ToolDefinition],
+    ) -> bool {
+        if !self.todo_write_is_available(tools) {
+            return false;
+        }
+
+        let store = self.progress_store();
+        match store.should_insert_reminder() {
+            Ok(true) => match store.build_reminder_message() {
+                Ok(message) => {
+                    messages.push(LlmMessage::user(message));
+                    true
+                },
+                Err(error) => {
+                    tracing::warn!(error = %error, "Failed to build progress todo reminder");
+                    false
+                },
+            },
+            Ok(false) => false,
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to read progress todo reminder state");
+                false
+            },
+        }
+    }
+
+    fn record_progress_todo_cycle(
+        &self,
+        tools: &[ToolDefinition],
+        used_todo_write: bool,
+        reminder_inserted: bool,
+    ) {
+        if !self.todo_write_is_available(tools) {
+            return;
+        }
+
+        if let Err(error) = self
+            .progress_store()
+            .record_assistant_cycle(used_todo_write, reminder_inserted)
+        {
+            tracing::warn!(error = %error, "Failed to update progress todo reminder state");
+        }
     }
 
     /// 预处理工具调用列表。
@@ -528,6 +584,8 @@ impl Agent {
         // ── Agent 主循环 ──
         // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
         loop {
+            let reminder_inserted = self.maybe_append_progress_todo_reminder(&mut messages, &tools);
+
             // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
             let mut send_messages = messages.clone();
             {
@@ -637,6 +695,7 @@ impl Agent {
                         }
 
                         if tool_calls.is_empty() {
+                            self.record_progress_todo_cycle(&tools, false, reminder_inserted);
                             // 无工具调用：消息在此处完成并直接返回
                             if let (Some(text), true) = (completed_text.take(), message_started) {
                                 if let Some(tx) = &event_tx {
@@ -689,6 +748,9 @@ impl Agent {
             // ── 工具调用执行管线 ──
             // 1. 预处理：白名单检查 + PreToolUse 钩子
             let prepared_tool_calls = self.prepare_tool_calls(&tool_calls, &event_tx).await?;
+            let used_todo_write = prepared_tool_calls
+                .iter()
+                .any(|call| call.name == TODO_WRITE_TOOL_NAME);
             // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
             messages.push(assistant_tool_call_message(&prepared_tool_calls));
             // 2. 执行：按并行/串行模式调度工具
@@ -704,6 +766,7 @@ impl Agent {
                 &event_tx,
             )
             .await?;
+            self.record_progress_todo_cycle(&tools, used_todo_write, reminder_inserted);
 
             // 工具调用全部执行完毕后才发送消息完成事件，
             // 保证 completed 事件在所有 tool_call 事件之后。

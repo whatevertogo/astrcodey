@@ -169,12 +169,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "astrcode-extension-task-tools"
+name = "astrcode-extension-todo-tool"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
  "astrcode-support",
  "async-trait",
+ "chrono",
  "serde",
  "serde_json",
 ]
@@ -236,7 +237,7 @@ dependencies = [
  "astrcode-context",
  "astrcode-core",
  "astrcode-extension-agent-tools",
- "astrcode-extension-task-tools",
+ "astrcode-extension-todo-tool",
  "astrcode-extensions",
  "astrcode-log",
  "astrcode-prompt",
