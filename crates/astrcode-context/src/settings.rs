@@ -6,6 +6,7 @@
 /// 上下文窗口的完整配置项。
 ///
 /// 涵盖自动压缩触发条件、文件追踪与恢复策略、摘要预留空间等参数。
+#[derive(Debug, Clone)]
 pub struct ContextWindowSettings {
     /// 是否启用自动压缩（当上下文占用达到阈值时自动触发）。
     pub auto_compact_enabled: bool,
@@ -25,6 +26,14 @@ pub struct ContextWindowSettings {
     pub summary_reserve_tokens: usize,
     /// LLM 压缩输出的最大 token 数。
     pub compact_max_output_tokens: usize,
+    /// 预留的上下文余量；低于该余量时即使百分比未达到也会触发压缩。
+    pub reserved_context_tokens: usize,
+    /// 单条工具结果的最大内联字节数。
+    pub tool_result_max_bytes: usize,
+    /// 最近一批工具结果的累计字节预算。
+    pub aggregate_tool_result_bytes: usize,
+    /// micro-compact 触发前允许保留的旧工具结果数量。
+    pub micro_compact_keep_recent_results: usize,
 }
 
 impl Default for ContextWindowSettings {
@@ -37,8 +46,12 @@ impl Default for ContextWindowSettings {
             max_tracked_files: 64,
             max_recovered_files: 16,
             recovery_token_budget: 8192,
-            summary_reserve_tokens: 2048,
+            summary_reserve_tokens: 40000,
             compact_max_output_tokens: 4096,
+            reserved_context_tokens: 4096,
+            tool_result_max_bytes: 8192,
+            aggregate_tool_result_bytes: 24576,
+            micro_compact_keep_recent_results: 5,
         }
     }
 }

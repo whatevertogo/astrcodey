@@ -2,6 +2,7 @@
 // 使用 use super::* 访问 agent_loop 模块的所有类型。
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -152,6 +153,95 @@ impl LlmProvider for CapturingLlm {
     }
 }
 
+struct OverflowThenOkLlm {
+    call_count: AtomicUsize,
+    captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
+}
+
+struct ToolThenOverflowThenOkLlm {
+    call_count: AtomicUsize,
+    captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ToolThenOverflowThenOkLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        match call_count {
+            0 => {
+                let _ = tx.send(LlmEvent::ToolCallStart {
+                    call_id: "read-1".into(),
+                    name: "readFile".into(),
+                    arguments: serde_json::json!({ "path": "notes.txt" }).to_string(),
+                });
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "tool_calls".into(),
+                });
+            },
+            1 => {
+                let _ = tx.send(LlmEvent::Error {
+                    message: "maximum context length exceeded".into(),
+                });
+            },
+            _ => {
+                *self.captured_messages.lock().unwrap() = messages;
+                let _ = tx.send(LlmEvent::ContentDelta {
+                    delta: "recovered".into(),
+                });
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                });
+            },
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 1024,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for OverflowThenOkLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if call_count == 0 {
+            let _ = tx.send(LlmEvent::Error {
+                message: "maximum context length exceeded".into(),
+            });
+        } else {
+            *self.captured_messages.lock().unwrap() = messages;
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "recovered".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 1024,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
 struct PanicIfExecutedTool {
     executed: Arc<AtomicBool>,
 }
@@ -263,6 +353,43 @@ struct DelayTool {
     name: &'static str,
     mode: ExecutionMode,
     delay_ms: u64,
+}
+
+struct MetadataReadTool {
+    path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Tool for MetadataReadTool {
+    fn definition(&self) -> ToolDefinition {
+        test_tool_definition("readFile")
+    }
+
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::Sequential
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult {
+            call_id: String::new(),
+            content: "read output".into(),
+            is_error: false,
+            error: None,
+            metadata: BTreeMap::from([
+                (
+                    "path".into(),
+                    serde_json::json!(self.path.display().to_string()),
+                ),
+                ("offset".into(), serde_json::json!(0)),
+                ("limit".into(), serde_json::json!(1)),
+            ]),
+            duration_ms: None,
+        })
+    }
 }
 
 #[async_trait::async_trait]
@@ -772,4 +899,113 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
     assert_eq!(output.text, "ok");
     assert!(message_text_contains(&messages, "first provider note"));
     assert!(message_text_contains(&messages, "second provider note"));
+}
+
+#[tokio::test]
+async fn prompt_too_long_compacts_and_retries_once() {
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let llm = Arc::new(OverflowThenOkLlm {
+        call_count: AtomicUsize::new(0),
+        captured_messages: Arc::clone(&captured_messages),
+    });
+    let agent = Agent::new(
+        "overflow-session".into(),
+        ".".into(),
+        llm.clone(),
+        String::new(),
+        Arc::new(ToolRegistry::new()),
+        Arc::new(ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        )),
+        "mock".into(),
+        8192,
+    );
+    let mut history = Vec::new();
+    for index in 0..6 {
+        history.push(LlmMessage::user(format!("old user {index}")));
+        history.push(LlmMessage::assistant(format!("old answer {index}")));
+    }
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    let output = agent
+        .process_prompt("current", history, Some(event_tx))
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "recovered");
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
+    assert!(
+        captured_messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message_text_contains(
+                std::slice::from_ref(message),
+                "<compact_summary>"
+            ))
+    );
+    let mut saw_compaction = false;
+    let mut saw_error = false;
+    while let Ok(payload) = event_rx.try_recv() {
+        match payload {
+            EventPayload::CompactionCompleted { .. } => saw_compaction = true,
+            EventPayload::ErrorOccurred { .. } => saw_error = true,
+            _ => {},
+        }
+    }
+    assert!(saw_compaction);
+    assert!(!saw_error);
+}
+
+#[tokio::test]
+async fn prompt_too_long_retry_preserves_read_file_recovery() {
+    let temp = std::env::temp_dir().join(format!(
+        "astrcode-overflow-recovery-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp).unwrap();
+    let file = temp.join("notes.txt");
+    std::fs::write(&file, "important context\nother line\n").unwrap();
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let llm = Arc::new(ToolThenOverflowThenOkLlm {
+        call_count: AtomicUsize::new(0),
+        captured_messages: Arc::clone(&captured_messages),
+    });
+    let agent = Agent::new(
+        "overflow-recovery-session".into(),
+        temp.display().to_string(),
+        llm.clone(),
+        String::new(),
+        test_registry(vec![Arc::new(MetadataReadTool { path: file })]),
+        Arc::new(ExtensionRunner::new(
+            Duration::from_secs(1),
+            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+        )),
+        "mock".into(),
+        8192,
+    );
+    let mut history = Vec::new();
+    for index in 0..6 {
+        history.push(LlmMessage::user(format!("old user {index}")));
+        history.push(LlmMessage::assistant(format!("old answer {index}")));
+    }
+
+    let output = agent
+        .process_prompt("current", history, None)
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "recovered");
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 3);
+    let sent = captured_messages.lock().unwrap();
+    assert!(message_text_contains(
+        &sent,
+        "Recovered file context after compaction."
+    ));
+    assert!(message_text_contains(&sent, "important context"));
+    let _ = std::fs::remove_dir_all(temp);
 }

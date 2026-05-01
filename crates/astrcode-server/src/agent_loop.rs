@@ -12,7 +12,12 @@ use std::{
     time::Instant,
 };
 
-use astrcode_context::pruning::PruneState;
+use astrcode_context::{
+    compaction::is_prompt_too_long_message,
+    manager::{ContextManager, ContextPrepareInput},
+    pruning::PruneState,
+    settings::ContextWindowSettings,
+};
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
@@ -27,6 +32,8 @@ use astrcode_extensions::{
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
+
+use crate::session::compaction_applied_payload;
 
 /// 并行执行工具调用时的最大并发数。
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
@@ -99,6 +106,8 @@ pub struct Agent {
     extension_runner: Arc<ExtensionRunner>,
     /// 工具结果裁剪状态，用于在超出字节限制时截断工具输出。
     pruner: PruneState,
+    /// 上下文窗口管理配置。
+    context_settings: ContextWindowSettings,
     /// 工具白名单。设置后仅允许调用列表中的工具，用于子会话等受限场景。
     tool_allowlist: Option<HashSet<String>>,
 }
@@ -126,6 +135,11 @@ impl Agent {
         model_id: String,
         max_tool_result_bytes: usize,
     ) -> Self {
+        let context_settings = ContextWindowSettings {
+            tool_result_max_bytes: max_tool_result_bytes,
+            aggregate_tool_result_bytes: max_tool_result_bytes.saturating_mul(3),
+            ..Default::default()
+        };
         Self {
             session_id,
             working_dir,
@@ -135,6 +149,7 @@ impl Agent {
             tool_registry,
             extension_runner,
             pruner: PruneState::new(max_tool_result_bytes),
+            context_settings,
             tool_allowlist: None,
         }
     }
@@ -412,15 +427,11 @@ impl Agent {
     /// 4. 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
     async fn commit_tool_results(
         &self,
-        prepared: &[PreparedToolCall],
-        mut results: BTreeMap<usize, ToolResult>,
-        tools: &[ToolDefinition],
-        messages: &mut Vec<LlmMessage>,
-        all_tool_results: &mut Vec<ToolResult>,
-        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+        mut input: CommitToolResults<'_>,
     ) -> Result<(), AgentError> {
-        for call in prepared {
-            let mut result = results
+        for call in input.prepared {
+            let mut result = input
+                .results
                 .remove(&call.index)
                 .unwrap_or_else(|| missing_tool_result(call));
 
@@ -430,7 +441,7 @@ impl Agent {
                     result.error = Some(result.content.clone());
                 }
 
-                let mut post_ctx = self.build_ext_ctx_with_tools(tools);
+                let mut post_ctx = self.build_ext_ctx_with_tools(input.tools);
                 post_ctx.set_post_tool_use_input(PostToolUseInput {
                     tool_name: call.name.clone(),
                     tool_input: call.tool_input.clone(),
@@ -456,15 +467,18 @@ impl Agent {
                     ToolHookOutcome::Allow | ToolHookOutcome::ModifiedInput { .. } => {},
                 }
             }
+            input
+                .context_manager
+                .record_tool_result(&call.name, &result);
 
-            if let Some(tx) = event_tx {
+            if let Some(tx) = input.event_tx {
                 let _ = tx.send(EventPayload::ToolCallCompleted {
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
                     result: result.clone(),
                 });
             }
-            messages.push(LlmMessage {
+            input.messages.push(LlmMessage {
                 role: LlmRole::Tool,
                 content: vec![LlmContent::ToolResult {
                     tool_call_id: call.call_id.clone(),
@@ -473,7 +487,7 @@ impl Agent {
                 }],
                 name: Some(call.name.clone()),
             });
-            all_tool_results.push(result);
+            input.all_tool_results.push(result);
         }
 
         Ok(())
@@ -538,12 +552,38 @@ impl Agent {
         // 累积本轮 Agent 的最终文本输出和所有工具执行结果
         let mut final_text = String::new();
         let mut all_tool_results: Vec<ToolResult> = Vec::new();
+        let mut context_manager = ContextManager::new(self.context_settings.clone());
+        let mut did_overflow_retry_this_turn = false;
 
         // ── Agent 主循环 ──
         // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
         loop {
+            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
+                .iter()
+                .cloned()
+                .partition(|message| message.role == LlmRole::System);
+            let prepared_context = context_manager.prepare_provider_messages(ContextPrepareInput {
+                messages: visible_messages,
+                system_prompt: Some(&self.system_prompt),
+                model_limits: self.llm.model_limits(),
+                persist_dir: None,
+                working_dir: Some(std::path::Path::new(&self.working_dir)),
+            });
+            if let Some(compaction) = prepared_context.compaction {
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(EventPayload::CompactionStarted);
+                    let _ = tx.send(compaction_applied_payload(&compaction));
+                    let _ = tx.send(EventPayload::CompactionCompleted {
+                        pre_tokens: compaction.pre_tokens,
+                        post_tokens: compaction.post_tokens,
+                        summary: compaction.summary,
+                    });
+                }
+                messages = [system_messages.clone(), prepared_context.messages.clone()].concat();
+            }
+
             // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
-            let mut send_messages = messages.clone();
+            let mut send_messages = [system_messages, prepared_context.messages].concat();
             {
                 let mut ext_ctx = self.build_ext_ctx_with_tools(&tools);
                 ext_ctx.set_provider_messages(send_messages.clone());
@@ -591,6 +631,7 @@ impl Agent {
             // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
             // 避免消息在工具执行前就被标记为已完成。
             let mut completed_text: Option<String> = None;
+            let mut retry_provider_request = false;
 
             // 消费 LLM 事件流，处理文本增量和工具调用增量
             while let Some(event) = rx.recv().await {
@@ -672,6 +713,35 @@ impl Agent {
                         break;
                     },
                     LlmEvent::Error { message } => {
+                        if is_prompt_too_long_message(&message) && !did_overflow_retry_this_turn {
+                            did_overflow_retry_this_turn = true;
+                            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
+                                .iter()
+                                .cloned()
+                                .partition(|message| message.role == LlmRole::System);
+                            if let Ok(prepared) = context_manager.compact_provider_messages(
+                                visible_messages,
+                                Some(&self.system_prompt),
+                                self.llm.model_limits(),
+                                Some(std::path::Path::new(&self.working_dir)),
+                            ) {
+                                let compaction = prepared
+                                    .compaction
+                                    .expect("compact_provider_messages should include compaction");
+                                if let Some(tx) = &event_tx {
+                                    let _ = tx.send(EventPayload::CompactionStarted);
+                                    let _ = tx.send(compaction_applied_payload(&compaction));
+                                    let _ = tx.send(EventPayload::CompactionCompleted {
+                                        pre_tokens: compaction.pre_tokens,
+                                        post_tokens: compaction.post_tokens,
+                                        summary: compaction.summary,
+                                    });
+                                }
+                                messages = [system_messages, prepared.messages].concat();
+                                retry_provider_request = true;
+                                break;
+                            }
+                        }
                         if let Some(tx) = &event_tx {
                             let _ = tx.send(EventPayload::ErrorOccurred {
                                 code: -32603,
@@ -685,6 +755,9 @@ impl Agent {
                         return Err(AgentError::Llm(message));
                     },
                 }
+            }
+            if retry_provider_request {
+                continue;
             }
 
             // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
@@ -712,14 +785,15 @@ impl Agent {
                 .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
                 .await?;
             // 3. 提交：裁剪结果 + PostToolUse 钩子 + 追加到对话历史
-            self.commit_tool_results(
-                &prepared_tool_calls,
-                tool_results,
-                &tools,
-                &mut messages,
-                &mut all_tool_results,
-                &event_tx,
-            )
+            self.commit_tool_results(CommitToolResults {
+                prepared: &prepared_tool_calls,
+                results: tool_results,
+                tools: &tools,
+                messages: &mut messages,
+                all_tool_results: &mut all_tool_results,
+                context_manager: &mut context_manager,
+                event_tx: &event_tx,
+            })
             .await?;
 
             // 工具调用全部执行完毕后才发送消息完成事件，
@@ -765,6 +839,16 @@ pub(crate) struct PreparedToolCall {
     pub(crate) tool_input: serde_json::Value,
     pub(crate) mode: ExecutionMode,
     pub(crate) outcome: PreparedToolOutcome,
+}
+
+struct CommitToolResults<'a> {
+    prepared: &'a [PreparedToolCall],
+    results: BTreeMap<usize, ToolResult>,
+    tools: &'a [ToolDefinition],
+    messages: &'a mut Vec<LlmMessage>,
+    all_tool_results: &'a mut Vec<ToolResult>,
+    context_manager: &'a mut ContextManager,
+    event_tx: &'a Option<mpsc::UnboundedSender<EventPayload>>,
 }
 
 pub(crate) enum PreparedToolOutcome {

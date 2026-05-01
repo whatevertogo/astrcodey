@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
@@ -19,6 +20,8 @@ use astrcode_core::{
 };
 use astrcode_protocol::events::ClientNotification;
 use tokio::sync::{RwLock, broadcast};
+
+pub(crate) const COMPACTION_APPLIED_EVENT: &str = "context.compaction_applied";
 
 // ─── Session ─────────────────────────────────────────────────────────────
 
@@ -41,6 +44,8 @@ pub struct Session {
 pub struct SessionState {
     /// 对话消息历史（包含用户、助手和工具消息）
     pub messages: Vec<LlmMessage>,
+    /// 只发送给 provider 的合成上下文，不在普通会话快照中展示。
+    pub context_messages: Vec<LlmMessage>,
     /// 会话的工作目录
     pub working_dir: String,
     /// 使用的模型标识
@@ -63,6 +68,7 @@ impl SessionState {
     fn new(working_dir: String, model_id: String) -> Self {
         Self {
             messages: Vec::new(),
+            context_messages: Vec::new(),
             working_dir,
             model_id,
             phase: Phase::Idle,
@@ -70,6 +76,30 @@ impl SessionState {
             pending_tool_calls: HashSet::new(),
             created_at: String::new(),
         }
+    }
+
+    pub fn provider_messages(&self) -> Vec<LlmMessage> {
+        let mut messages = Vec::with_capacity(
+            self.context_messages
+                .len()
+                .saturating_add(self.messages.len()),
+        );
+        messages.extend(self.context_messages.clone());
+        messages.extend(self.messages.clone());
+        messages
+    }
+}
+
+pub(crate) fn compaction_applied_payload(compaction: &CompactResult) -> EventPayload {
+    EventPayload::Custom {
+        name: COMPACTION_APPLIED_EVENT.into(),
+        data: serde_json::json!({
+            "messagesRemoved": compaction.messages_removed,
+            "contextMessages": compaction.context_messages,
+            "summary": compaction.summary,
+            "preTokens": compaction.pre_tokens,
+            "postTokens": compaction.post_tokens,
+        }),
     }
 }
 
@@ -133,6 +163,7 @@ impl EventReducer {
                 state.phase = Phase::Idle;
                 // 清理完整状态，避免已删除 session 的残留数据被误用
                 state.messages.clear();
+                state.context_messages.clear();
                 state.system_prompt = None;
                 state.pending_tool_calls.clear();
             },
@@ -218,6 +249,9 @@ impl EventReducer {
             EventPayload::ErrorOccurred { .. } => {
                 state.phase = Phase::Error;
             },
+            EventPayload::Custom { name, data } if name == COMPACTION_APPLIED_EVENT => {
+                apply_compaction_projection(data, state);
+            },
             EventPayload::Custom { .. } => {},
         }
     }
@@ -230,6 +264,25 @@ impl EventReducer {
         }
         state
     }
+}
+
+fn apply_compaction_projection(data: &serde_json::Value, state: &mut SessionState) {
+    let Some(messages_removed) = data
+        .get("messagesRemoved")
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as usize)
+    else {
+        return;
+    };
+    let context_messages = data
+        .get("contextMessages")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Vec<LlmMessage>>(value).ok())
+        .unwrap_or_default();
+
+    let drain_end = messages_removed.min(state.messages.len());
+    state.messages.drain(..drain_end);
+    state.context_messages = context_messages;
 }
 
 // ─── SessionManager ──────────────────────────────────────────────────────

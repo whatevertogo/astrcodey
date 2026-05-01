@@ -7,9 +7,11 @@
 pub mod budget;
 pub mod compaction;
 pub mod file_access;
+pub mod manager;
 pub mod pruning;
 pub mod settings;
 pub mod token_usage;
+pub mod tool_results;
 
 /// 找到 `<= max` 的最近 UTF-8 字符边界，防止截断多字节字符。
 ///

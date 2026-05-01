@@ -5,6 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use astrcode_context::{compaction::CompactSkipReason, manager::ContextManager};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
@@ -23,6 +24,7 @@ use tokio::{sync::broadcast, task::JoinHandle};
 use crate::{
     agent_loop::{Agent, drive_agent},
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
+    session::compaction_applied_payload,
 };
 
 struct AgentTurnInput {
@@ -144,6 +146,10 @@ impl CommandHandler {
                 self.abort_active_turn().await?;
             },
 
+            ClientCommand::Compact => {
+                self.compact_active_session().await?;
+            },
+
             ClientCommand::ResumeSession { session_id }
             | ClientCommand::SwitchSession { session_id } => {
                 self.resume_session(session_id).await;
@@ -252,7 +258,7 @@ impl CommandHandler {
             .ok_or_else(|| format!("Session {sid} vanished"))?;
 
         let state = session.state.read().await.clone();
-        let history = state.messages;
+        let history = state.provider_messages();
         let working_dir = state.working_dir;
         let system_prompt = state.system_prompt;
         let tool_registry = self.ensure_tool_registry(&sid, &working_dir).await;
@@ -324,6 +330,56 @@ impl CommandHandler {
             Some(&active_turn.turn_id),
             EventPayload::AgentRunCompleted {
                 reason: "aborted".into(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn compact_active_session(&mut self) -> Result<(), String> {
+        if self.active_turn.is_some() {
+            self.send_error(40900, "Cannot compact while a turn is running");
+            return Ok(());
+        }
+
+        let Some(sid) = self.active_session_id.clone() else {
+            self.send_error(40400, "No active session");
+            return Ok(());
+        };
+        let session = self
+            .runtime
+            .session_manager
+            .get(&sid)
+            .await
+            .ok_or_else(|| format!("Session {sid} vanished"))?;
+        let state = session.state.read().await.clone();
+        let mut context_manager = ContextManager::new(self.runtime.context_settings.clone());
+        let compaction = match context_manager.compact_provider_messages(
+            state.provider_messages(),
+            state.system_prompt.as_deref(),
+            self.runtime.llm_provider.model_limits(),
+            Some(std::path::Path::new(&state.working_dir)),
+        ) {
+            Ok(prepared) => prepared
+                .compaction
+                .expect("compact_provider_messages should include compaction"),
+            Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
+                self.send_error(40000, "Nothing to compact");
+                return Ok(());
+            },
+        };
+
+        self.record_and_broadcast(&sid, None, EventPayload::CompactionStarted)
+            .await?;
+        self.record_and_broadcast(&sid, None, compaction_applied_payload(&compaction))
+            .await?;
+        self.record_and_broadcast(
+            &sid,
+            None,
+            EventPayload::CompactionCompleted {
+                pre_tokens: compaction.pre_tokens,
+                post_tokens: compaction.post_tokens,
+                summary: compaction.summary,
             },
         )
         .await?;
@@ -689,7 +745,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::session::SessionManager;
+    use crate::session::{COMPACTION_APPLIED_EVENT, SessionManager};
 
     struct MockLlm;
 
@@ -764,10 +820,19 @@ mod tests {
         llm_provider: Arc<dyn LlmProvider>,
         prompt_provider: Arc<dyn PromptProvider>,
     ) -> Arc<ServerRuntime> {
-        use astrcode_context::{
-            budget::ToolResultBudget, file_access::FileAccessTracker,
-            settings::ContextWindowSettings,
-        };
+        test_runtime_with_settings(
+            llm_provider,
+            prompt_provider,
+            astrcode_context::settings::ContextWindowSettings::default(),
+        )
+    }
+
+    fn test_runtime_with_settings(
+        llm_provider: Arc<dyn LlmProvider>,
+        prompt_provider: Arc<dyn PromptProvider>,
+        context_settings: astrcode_context::settings::ContextWindowSettings,
+    ) -> Arc<ServerRuntime> {
+        use astrcode_context::{budget::ToolResultBudget, file_access::FileAccessTracker};
         Arc::new(ServerRuntime {
             session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
             llm_provider,
@@ -794,7 +859,7 @@ mod tests {
                     prompt_cache_retention: None,
                 },
             },
-            context_settings: ContextWindowSettings::default(),
+            context_settings,
             tool_result_budget: Arc::new(ToolResultBudget::new(8192, 65536, 24576)),
             file_access_tracker: Arc::new(std::sync::Mutex::new(FileAccessTracker::new(64))),
         })
@@ -827,6 +892,20 @@ mod tests {
             };
             if let EventPayload::TurnCompleted { finish_reason } = event.payload {
                 return finish_reason;
+            }
+        }
+    }
+
+    async fn drain_until_compaction_completed(
+        event_rx: &mut broadcast::Receiver<ClientNotification>,
+    ) {
+        loop {
+            let notification = recv_event(event_rx).await;
+            let ClientNotification::Event(event) = notification else {
+                continue;
+            };
+            if matches!(event.payload, EventPayload::CompactionCompleted { .. }) {
+                return;
             }
         }
     }
@@ -1069,5 +1148,128 @@ mod tests {
 
         assert!(handler.active_turn.is_none());
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
+    }
+
+    #[tokio::test]
+    async fn compact_command_rewrites_provider_history_without_exposing_summary() {
+        let settings = astrcode_context::settings::ContextWindowSettings {
+            compact_keep_recent_turns: 1,
+            ..Default::default()
+        };
+        let runtime =
+            test_runtime_with_settings(Arc::new(MockLlm), Arc::new(EmptyPrompt), settings);
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        for text in ["one", "two", "three"] {
+            handler
+                .handle(ClientCommand::SubmitPrompt {
+                    text: text.into(),
+                    attachments: vec![],
+                })
+                .await
+                .unwrap();
+            assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+        }
+
+        handler.handle(ClientCommand::Compact).await.unwrap();
+
+        let mut saw_applied = false;
+        let mut saw_completed = false;
+        while !saw_completed {
+            let notification = recv_event(&mut event_rx).await;
+            let ClientNotification::Event(event) = notification else {
+                continue;
+            };
+            match event.payload {
+                EventPayload::Custom { name, .. } if name == COMPACTION_APPLIED_EVENT => {
+                    saw_applied = true;
+                },
+                EventPayload::CompactionCompleted { .. } => saw_completed = true,
+                _ => {},
+            }
+        }
+        assert!(saw_applied);
+
+        let sid = handler.active_session_id.clone().unwrap();
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let state = session.state.read().await;
+        assert!(!state.context_messages.is_empty());
+        assert!(state.provider_messages().iter().any(|message| {
+            message_to_dto(message)
+                .content
+                .contains("<compact_summary>")
+        }));
+        assert!(state.messages.iter().all(|message| {
+            !message_to_dto(message)
+                .content
+                .contains("<compact_summary>")
+        }));
+    }
+
+    #[tokio::test]
+    async fn compact_command_compacts_existing_hidden_context_again() {
+        let settings = astrcode_context::settings::ContextWindowSettings {
+            compact_keep_recent_turns: 1,
+            ..Default::default()
+        };
+        let runtime =
+            test_runtime_with_settings(Arc::new(MockLlm), Arc::new(EmptyPrompt), settings);
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+
+        handler
+            .handle(ClientCommand::CreateSession {
+                working_dir: ".".into(),
+            })
+            .await
+            .unwrap();
+        for text in ["one", "two", "three", "four"] {
+            handler
+                .handle(ClientCommand::SubmitPrompt {
+                    text: text.into(),
+                    attachments: vec![],
+                })
+                .await
+                .unwrap();
+            assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+        }
+
+        handler.handle(ClientCommand::Compact).await.unwrap();
+        drain_until_compaction_completed(&mut event_rx).await;
+        let sid = handler.active_session_id.clone().unwrap();
+        let session = runtime.session_manager.get(&sid).await.unwrap();
+        let first_summary = {
+            let state = session.state.read().await;
+            message_to_dto(&state.context_messages[0]).content
+        };
+
+        handler
+            .handle(ClientCommand::SubmitPrompt {
+                text: "five".into(),
+                attachments: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+        handler.handle(ClientCommand::Compact).await.unwrap();
+        drain_until_compaction_completed(&mut event_rx).await;
+
+        let state = session.state.read().await;
+        let second_summary = message_to_dto(&state.context_messages[0]).content;
+        assert!(
+            second_summary.contains("Compacted conversation summary"),
+            "second compact should preserve a provider summary"
+        );
+        assert_ne!(
+            first_summary, second_summary,
+            "second compact should fold forward provider history, not leave stale hidden context"
+        );
     }
 }
