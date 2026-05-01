@@ -18,3 +18,5 @@ globset = "0.4"
 ignore = "0.4"
 regex = "1"
 tracing = { workspace = true }
+grep-searcher = "0.1.16"
+grep-regex = "0.1.14"

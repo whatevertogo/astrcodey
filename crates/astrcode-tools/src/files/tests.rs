@@ -138,6 +138,8 @@ async fn read_file_reports_text_pagination_metadata() {
     assert!(!result.is_error, "{result:?}");
     assert_eq!(result.metadata["totalLines"], serde_json::json!(3));
     assert_eq!(result.metadata["shownLines"], serde_json::json!(1));
+    assert_eq!(result.metadata["offset"], serde_json::json!(0));
+    assert_eq!(result.metadata["limit"], serde_json::json!(1));
     assert_eq!(result.metadata["returnedChars"], serde_json::json!(8));
     assert_eq!(result.metadata["nextCharOffset"], serde_json::json!(8));
     assert_eq!(result.metadata["hasMore"], serde_json::json!(true));
@@ -216,6 +218,68 @@ async fn read_file_marks_binary_files_without_reading_text() {
 }
 
 #[tokio::test]
+async fn edit_file_applies_multiple_edits_atomically() {
+    let temp = unique_temp_dir("edit-file-multi");
+    let file = temp.path().join("notes.txt");
+    std::fs::write(&file, "alpha\nbeta\ngamma\n").expect("seed file");
+    let tool = EditFileTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": "notes.txt",
+                "edits": [
+                    { "oldStr": "alpha", "newStr": "one" },
+                    { "oldStr": "gamma", "newStr": "three" }
+                ]
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("editFile should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(result.metadata["operationCount"], serde_json::json!(2));
+    assert_eq!(result.metadata["replacements"], serde_json::json!(2));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("updated file should be readable"),
+        "one\nbeta\nthree\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_multi_edit_does_not_write_after_late_failure() {
+    let temp = unique_temp_dir("edit-file-multi-failure");
+    let file = temp.path().join("notes.txt");
+    std::fs::write(&file, "alpha\nbeta\n").expect("seed file");
+    let tool = EditFileTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let error = tool
+        .execute(
+            serde_json::json!({
+                "path": "notes.txt",
+                "edits": [
+                    { "oldStr": "alpha", "newStr": "one" },
+                    { "oldStr": "missing", "newStr": "nope" }
+                ]
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect_err("late multiEdit failure should fail the call");
+
+    assert!(error.to_string().contains("oldStr not found"));
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("original file should be readable"),
+        "alpha\nbeta\n"
+    );
+}
+
+#[tokio::test]
 async fn find_files_respects_gitignore_hidden_and_brace_glob() {
     let temp = unique_temp_dir("find-files-filters");
     std::fs::write(temp.path().join(".gitignore"), "ignored/\n").expect("seed gitignore");
@@ -265,7 +329,12 @@ async fn find_files_reports_truncation_and_blocks_root_escape() {
         .expect("findFiles should execute");
 
     assert_eq!(result.metadata["count"], serde_json::json!(2));
+    assert_eq!(result.metadata["totalMatches"], serde_json::json!(3));
+    assert_eq!(result.metadata["offset"], serde_json::json!(0));
+    assert_eq!(result.metadata["nextOffset"], serde_json::json!(2));
     assert_eq!(result.metadata["truncated"], serde_json::json!(true));
+    assert_eq!(result.metadata["hasMore"], serde_json::json!(true));
+    assert_eq!(result.metadata["files"].as_array().map(Vec::len), Some(2));
 
     let escaped = tool
         .execute(
@@ -279,6 +348,36 @@ async fn find_files_reports_truncation_and_blocks_root_escape() {
         escaped.metadata["pathEscapesWorkingDir"],
         serde_json::json!(true)
     );
+}
+
+#[tokio::test]
+async fn find_files_supports_offset_pagination() {
+    let temp = unique_temp_dir("find-files-offset");
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        std::fs::write(temp.path().join(name), "").expect("seed file");
+    }
+    let tool = FindFilesTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "*.rs",
+                "offset": 1,
+                "maxResults": 1
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("findFiles should execute");
+
+    assert_eq!(result.content.lines().count(), 1);
+    assert_eq!(result.metadata["count"], serde_json::json!(1));
+    assert_eq!(result.metadata["totalMatches"], serde_json::json!(3));
+    assert_eq!(result.metadata["offset"], serde_json::json!(1));
+    assert_eq!(result.metadata["nextOffset"], serde_json::json!(2));
+    assert_eq!(result.metadata["files"].as_array().map(Vec::len), Some(1));
 }
 
 #[tokio::test]
@@ -374,6 +473,37 @@ async fn grep_respects_gitignore_and_skips_binary_files() {
     assert!(!result.content.contains("ignored.rs"));
     assert!(!result.content.contains("binary.rs"));
     assert_eq!(result.metadata["skippedFiles"], serde_json::json!(1));
+}
+
+#[tokio::test]
+async fn grep_multiline_matches_across_line_breaks() {
+    let temp = unique_temp_dir("grep-multiline");
+    std::fs::write(
+        temp.path().join("lib.rs"),
+        "fn start() {\n    work();\n    finish();\n}\n",
+    )
+    .expect("seed file");
+    let tool = GrepTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "fn start\\(\\) \\{.*finish\\(\\);",
+                "outputMode": "content",
+                "-U": "true"
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("grep should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(result.metadata["multiline"], serde_json::json!(true));
+    assert!(result.content.contains(":1-3:"));
+    assert!(result.content.contains("fn start()"));
+    assert!(result.content.contains("finish();"));
 }
 
 #[tokio::test]

@@ -1,15 +1,20 @@
 use std::{
     collections::BTreeMap,
+    io,
     path::{Path, PathBuf},
     time::Instant,
 };
 
 use astrcode_core::tool::*;
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use super::shared::{collect_grep_files, error_result, is_binary, tool_call_id, trunc};
+use super::shared::{collect_grep_files, error_result, tool_call_id, trunc};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
@@ -38,6 +43,9 @@ struct GrepArgs {
     /// 是否大小写不敏感
     #[serde(default, alias = "case_insensitive")]
     case_insensitive: bool,
+    /// 是否启用跨行匹配
+    #[serde(default)]
+    multiline: bool,
     /// 最大匹配数/文件数（默认 250）
     #[serde(default, alias = "max_matches")]
     max_matches: Option<usize>,
@@ -97,6 +105,8 @@ struct GrepMatch {
     before: Vec<String>,
     /// 匹配行后的上下文行
     after: Vec<String>,
+    /// 匹配跨越的行数
+    line_count: usize,
 }
 
 #[async_trait::async_trait]
@@ -129,6 +139,10 @@ impl Tool for GrepTool {
                         "description": "Search subdirectories. Defaults to true for directories."
                     },
                     "caseInsensitive": { "type": "boolean" },
+                    "multiline": {
+                        "type": "boolean",
+                        "description": "Enable ripgrep multiline search. Allows matches to span line breaks and makes '.' match newlines."
+                    },
                     "maxMatches": {
                         "type": "integer",
                         "minimum": 1,
@@ -181,15 +195,17 @@ impl Tool for GrepTool {
         let started_at = Instant::now();
         let args: GrepArgs = serde_json::from_value(normalize_grep_args(args))
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
-        let pattern = if args.literal {
-            regex::escape(&args.pattern)
-        } else {
-            args.pattern.clone()
-        };
-        let re = regex::RegexBuilder::new(&pattern)
+        let mut matcher_builder = RegexMatcherBuilder::new();
+        matcher_builder
             .case_insensitive(args.case_insensitive)
-            .build()
-            .map_err(|e| ToolError::Execution(format!("regex: {e}")))?;
+            .multi_line(args.multiline)
+            .dot_matches_new_line(args.multiline);
+        let matcher = if args.literal {
+            matcher_builder.build(&regex::escape(&args.pattern))
+        } else {
+            matcher_builder.build(&args.pattern)
+        }
+        .map_err(|e| ToolError::Execution(format!("regex: {e}")))?;
         let root = args
             .path
             .as_deref()
@@ -230,13 +246,15 @@ impl Tool for GrepTool {
         let options = GrepOptions {
             before_context: args.before_context.unwrap_or(0),
             after_context: args.after_context.unwrap_or(0),
+            multiline: args.multiline,
         };
-        run_grep(&files, &re, &options, &mut state)
+        run_grep(&files, &matcher, &options, &mut state)
             .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
         let matches = render_grep_output(args.output_mode, &state);
         let mut meta = BTreeMap::new();
         meta.insert("pattern".into(), serde_json::json!(args.pattern));
         meta.insert("literal".into(), serde_json::json!(args.literal));
+        meta.insert("multiline".into(), serde_json::json!(args.multiline));
         meta.insert("returned".into(), serde_json::json!(matches.len()));
         meta.insert("hasMore".into(), serde_json::json!(state.has_more));
         meta.insert(
@@ -274,6 +292,8 @@ fn normalize_grep_args(mut args: Value) -> Value {
     move_alias(object, "-A", "afterContext");
     move_alias(object, "-B", "beforeContext");
     move_alias(object, "-i", "caseInsensitive");
+    move_alias(object, "-U", "multiline");
+    move_alias(object, "--multiline", "multiline");
     move_alias(object, "case_insensitive", "caseInsensitive");
     move_alias(object, "before_context", "beforeContext");
     move_alias(object, "after_context", "afterContext");
@@ -288,6 +308,7 @@ fn normalize_grep_args(mut args: Value) -> Value {
     normalize_bool_field(object, "literal");
     normalize_bool_field(object, "recursive");
     normalize_bool_field(object, "caseInsensitive");
+    normalize_bool_field(object, "multiline");
     normalize_usize_field(object, "maxMatches");
     normalize_usize_field(object, "offset");
     normalize_usize_field(object, "beforeContext");
@@ -350,6 +371,8 @@ struct GrepOptions {
     before_context: usize,
     /// 匹配行后的上下文行数
     after_context: usize,
+    /// 是否启用跨行搜索
+    multiline: bool,
 }
 
 /// grep 搜索过程中的累积状态。
@@ -377,12 +400,17 @@ struct GrepState {
 /// 对候选文件执行 grep 搜索。
 fn run_grep(
     files: &[PathBuf],
-    re: &regex::Regex,
+    matcher: &RegexMatcher,
     options: &GrepOptions,
     state: &mut GrepState,
 ) -> std::io::Result<()> {
     for file in files {
-        let Some(result) = grep_file(file, re, options, state)? else {
+        let result = grep_file(file, matcher, options)?;
+        if result.binary_detected {
+            state.skipped_files += 1;
+            continue;
+        }
+        let Some(result) = result.into_match_result() else {
             continue;
         };
 
@@ -431,60 +459,115 @@ struct GrepFileResult {
     file: String,
     count: usize,
     matches: Vec<GrepMatch>,
+    binary_detected: bool,
+}
+
+impl GrepFileResult {
+    fn into_match_result(self) -> Option<Self> {
+        (self.count > 0).then_some(self)
+    }
 }
 
 /// 对单个文件执行 grep 搜索，收集匹配行及其上下文。
 fn grep_file(
     path: &Path,
-    re: &regex::Regex,
+    matcher: &RegexMatcher,
     options: &GrepOptions,
-    state: &mut GrepState,
-) -> std::io::Result<Option<GrepFileResult>> {
-    if is_binary(path) {
-        state.skipped_files += 1;
-        return Ok(None);
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-            state.skipped_files += 1;
-            return Ok(None);
-        },
-        Err(error) => return Err(error),
-    };
-    let lines: Vec<&str> = content.lines().collect();
+) -> std::io::Result<GrepFileResult> {
     let file = path.display().to_string();
-    let mut count = 0usize;
-    let mut matches = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if !re.is_match(line) {
-            continue;
-        }
+    let mut searcher = SearcherBuilder::new()
+        .before_context(options.before_context)
+        .after_context(options.after_context)
+        .multi_line(options.multiline)
+        .binary_detection(BinaryDetection::quit(0))
+        .line_number(true)
+        .build();
+    let mut sink = RipgrepSink::new(file);
+    searcher.search_path(matcher, path, &mut sink)?;
+    Ok(sink.into_result())
+}
 
-        count += 1;
-        let before_start = i.saturating_sub(options.before_context);
-        let before = lines[before_start..i]
-            .iter()
-            .map(|line| trunc(line, 500))
-            .collect();
-        let after_end = (i + 1 + options.after_context).min(lines.len());
-        let after = lines[i + 1..after_end]
-            .iter()
-            .map(|line| trunc(line, 500))
-            .collect();
-        matches.push(GrepMatch {
-            file: file.clone(),
-            line_no: i + 1,
-            line: trunc(line, 500),
-            before,
-            after,
-        });
+struct RipgrepSink {
+    file: String,
+    count: usize,
+    matches: Vec<GrepMatch>,
+    pending_before: Vec<String>,
+    last_match_index: Option<usize>,
+    binary_detected: bool,
+}
+
+impl RipgrepSink {
+    fn new(file: String) -> Self {
+        Self {
+            file,
+            count: 0,
+            matches: Vec::new(),
+            pending_before: Vec::new(),
+            last_match_index: None,
+            binary_detected: false,
+        }
     }
-    Ok((count > 0).then_some(GrepFileResult {
-        file,
-        count,
-        matches,
-    }))
+
+    fn into_result(self) -> GrepFileResult {
+        GrepFileResult {
+            file: self.file,
+            count: self.count,
+            matches: self.matches,
+            binary_detected: self.binary_detected,
+        }
+    }
+}
+
+impl Sink for RipgrepSink {
+    type Error = io::Error;
+
+    fn matched(&mut self, _: &Searcher, matched: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+        self.count += 1;
+        self.matches.push(GrepMatch {
+            file: self.file.clone(),
+            line_no: matched.line_number().unwrap_or(0) as usize,
+            line: line_text(matched.bytes()),
+            before: std::mem::take(&mut self.pending_before),
+            after: Vec::new(),
+            line_count: match_line_count(matched.bytes()),
+        });
+        self.last_match_index = Some(self.matches.len() - 1);
+        Ok(true)
+    }
+
+    fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> Result<bool, Self::Error> {
+        match context.kind() {
+            SinkContextKind::Before => self.pending_before.push(line_text(context.bytes())),
+            SinkContextKind::After => {
+                if let Some(index) = self.last_match_index {
+                    self.matches[index].after.push(line_text(context.bytes()));
+                }
+            },
+            SinkContextKind::Other => {},
+        }
+        Ok(true)
+    }
+
+    fn context_break(&mut self, _: &Searcher) -> Result<bool, Self::Error> {
+        self.pending_before.clear();
+        self.last_match_index = None;
+        Ok(true)
+    }
+
+    fn binary_data(&mut self, _: &Searcher, _: u64) -> Result<bool, Self::Error> {
+        self.binary_detected = true;
+        Ok(false)
+    }
+}
+
+fn line_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    trunc(text.trim_end_matches(['\r', '\n']), 500)
+}
+
+fn match_line_count(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    text.trim_end_matches(['\r', '\n']).lines().count().max(1)
 }
 
 /// 根据输出模式将搜索状态渲染为文本行列表。
@@ -504,7 +587,12 @@ fn render_grep_output(mode: GrepOutputMode, state: &GrepState) -> Vec<String> {
                 for line in &m.before {
                     parts.push(format!("{}-{}", m.file, line));
                 }
-                parts.push(format!("{}:{}:{}", m.file, m.line_no, m.line));
+                let line_label = if m.line_count > 1 {
+                    format!("{}-{}", m.line_no, m.line_no + m.line_count - 1)
+                } else {
+                    m.line_no.to_string()
+                };
+                parts.push(format!("{}:{}:{}", m.file, line_label, m.line));
                 for line in &m.after {
                     parts.push(format!("{}+{}", m.file, line));
                 }

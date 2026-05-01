@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    time::{Instant, SystemTime},
+};
 
 use astrcode_core::tool::*;
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
@@ -27,6 +31,9 @@ struct FindFilesArgs {
     /// 返回结果的最大数量（默认 500）
     #[serde(default)]
     max_results: Option<usize>,
+    /// 跳过的结果数量（用于分页）
+    #[serde(default)]
+    offset: Option<usize>,
     /// 是否遵循 .gitignore 排除规则（默认 true）
     #[serde(default = "default_true")]
     respect_gitignore: bool,
@@ -65,6 +72,11 @@ impl Tool for FindFilesTool {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Maximum number of paths to return (default 500)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of sorted paths to skip for pagination."
                     },
                     "respectGitignore": {
                         "type": "boolean",
@@ -124,25 +136,47 @@ impl Tool for FindFilesTool {
         .map_err(|e| ToolError::Execution(format!("findFiles: {e}")))?;
         results.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
         let total = results.len();
-        let truncated = total > max_results;
-        let out: Vec<_> = results
-            .into_iter()
-            .take(max_results)
-            .map(|(s, _)| s)
-            .collect();
+        let offset = args.offset.unwrap_or(0).min(total);
+        let out: Vec<_> = results.into_iter().skip(offset).take(max_results).collect();
+        let next_offset = offset.saturating_add(out.len());
+        let truncated = next_offset < total;
+        let files = out
+            .iter()
+            .map(|(path, modified)| {
+                serde_json::json!({
+                    "path": path,
+                    "modifiedUnixMs": modified_unix_ms(*modified)
+                })
+            })
+            .collect::<Vec<_>>();
+        let paths = out.into_iter().map(|(path, _)| path).collect::<Vec<_>>();
         let mut meta = BTreeMap::new();
-        meta.insert("count".into(), serde_json::json!(out.len()));
+        meta.insert("count".into(), serde_json::json!(paths.len()));
+        meta.insert("totalMatches".into(), serde_json::json!(total));
+        meta.insert("offset".into(), serde_json::json!(offset));
         meta.insert("maxResults".into(), serde_json::json!(max_results));
         meta.insert("truncated".into(), serde_json::json!(truncated));
+        meta.insert("hasMore".into(), serde_json::json!(truncated));
+        if truncated {
+            meta.insert("nextOffset".into(), serde_json::json!(next_offset));
+        }
         meta.insert("root".into(), serde_json::json!(root.display().to_string()));
         meta.insert("pattern".into(), serde_json::json!(args.pattern));
+        meta.insert("files".into(), serde_json::json!(files));
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
-            content: out.join("\n"),
+            content: paths.join("\n"),
             is_error: false,
             error: None,
             metadata: meta,
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+}
+
+fn modified_unix_ms(modified: SystemTime) -> u128 {
+    modified
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }

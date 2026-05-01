@@ -174,6 +174,8 @@ fn matches_file_type(path: &Path, file_type: &str) -> bool {
 }
 
 pub(super) fn image_media_type(path: &Path) -> Option<&'static str> {
+    // TODO: Use content sniffing or a MIME/magic-byte table so media detection
+    // does not rely only on file extensions.
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     IMAGE_TYPES
         .iter()
@@ -259,6 +261,8 @@ pub(super) fn is_unc_path(path: &Path) -> bool {
 
 /// 通过检测前 8KB 中是否包含 NULL 字节来判断文件是否为二进制文件。
 pub(super) fn is_binary(p: &Path) -> bool {
+    // TODO: Replace the simple NUL-byte heuristic with shared MIME/magic-byte
+    // detection that can classify non-text files without embedded NUL bytes.
     std::fs::read(p)
         .map(|d| d.iter().take(8192).any(|&b| b == 0))
         .unwrap_or(false)

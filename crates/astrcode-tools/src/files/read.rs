@@ -145,6 +145,10 @@ impl Tool for ReadFileTool {
         meta.insert("path".into(), serde_json::json!(path.display().to_string()));
         meta.insert("totalLines".into(), serde_json::json!(total_lines));
         meta.insert("shownLines".into(), serde_json::json!(lines.len()));
+        meta.insert("offset".into(), serde_json::json!(offset));
+        if args.limit.is_some() {
+            meta.insert("limit".into(), serde_json::json!(limit));
+        }
         meta.insert("charOffset".into(), serde_json::json!(char_offset));
         meta.insert("maxChars".into(), serde_json::json!(max_chars));
         meta.insert(
