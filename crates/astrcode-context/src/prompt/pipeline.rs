@@ -161,6 +161,9 @@ fn push_extension_section(
 // ─── AGENTS.md 加载（供 bootstrap 使用） ────────────────────────────────
 
 /// 从 working_dir 向上遍历查找所有 AGENTS.md，由浅到深排序。
+///
+/// 目录越深的 AGENTS.md 规则越具体，因此加载时先返回浅层，再返回深层，
+/// 让最终 prompt 里的冲突规则顺序和覆盖语义一致。
 pub fn find_agents_files(working_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut current = Some(working_dir);

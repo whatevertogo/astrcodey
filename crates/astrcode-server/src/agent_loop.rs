@@ -13,14 +13,18 @@ use std::{
 };
 
 use astrcode_context::{
-    compaction::{CompactError, CompactPromptStyle, CompactSkipReason, is_prompt_too_long_message},
+    compaction::{
+        CompactError, CompactPromptStyle, CompactRequestOptions, CompactResult, CompactSkipReason,
+        is_prompt_too_long_message,
+    },
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
 };
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
-    extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
+    extension::{CompactTrigger, ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
+    storage::CompactSnapshotInput,
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolResult},
     types::*,
 };
@@ -31,7 +35,14 @@ use astrcode_extensions::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
-use crate::{forked_provider::CompactForkRunner, session::compaction_applied_payload};
+use crate::{
+    compact_hooks::{
+        CompactHookContext, collect_compact_instructions, compact_trigger_name,
+        dispatch_post_compact,
+    },
+    forked_provider::CompactForkRunner,
+    session::{SessionManager, compaction_applied_payload},
+};
 
 /// 并行执行工具调用时的最大并发数。
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
@@ -86,7 +97,8 @@ where
 /// Agent — a transient turn processor.
 ///
 /// Created from a session projection, processes one turn, emits event payloads,
-/// and is discarded. Session identity and persistence stay in the handler.
+/// and is discarded. Durable event persistence stays in the handler; compact
+/// transcript snapshots are written through the injected session manager.
 pub struct Agent {
     /// 所属会话的唯一标识。
     session_id: SessionId,
@@ -104,6 +116,8 @@ pub struct Agent {
     extension_runner: Arc<ExtensionRunner>,
     /// 上下文组装器，负责窗口估算与摘要压缩。
     context_assembler: Arc<LlmContextAssembler>,
+    /// 会话管理器，用于写 compact 前 transcript snapshot。
+    session_manager: Arc<SessionManager>,
     /// 工具白名单。设置后仅允许调用列表中的工具，用于子会话等受限场景。
     tool_allowlist: Option<HashSet<String>>,
 }
@@ -114,6 +128,7 @@ pub struct AgentServices {
     pub tool_registry: Arc<ToolRegistry>,
     pub extension_runner: Arc<ExtensionRunner>,
     pub context_assembler: Arc<LlmContextAssembler>,
+    pub session_manager: Arc<SessionManager>,
 }
 
 impl Agent {
@@ -141,6 +156,7 @@ impl Agent {
             tool_registry: services.tool_registry,
             extension_runner: services.extension_runner,
             context_assembler: services.context_assembler,
+            session_manager: services.session_manager,
             tool_allowlist: None,
         }
     }
@@ -548,16 +564,51 @@ impl Agent {
                 .cloned()
                 .partition(|message| message.role == LlmRole::System);
             let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.clone());
+            let prepare_input = ContextPrepareInput {
+                messages: visible_messages,
+                system_prompt: Some(&self.system_prompt),
+                model_limits: self.llm.model_limits(),
+            };
+            let compact_message_count = prepare_input.messages.len();
+            let compact_options = if self
+                .context_assembler
+                .should_compact_provider_messages(&prepare_input)
+            {
+                let compact_instructions = match self
+                    .compact_instructions(
+                        CompactTrigger::AutoThreshold,
+                        compact_message_count,
+                        &tools,
+                    )
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        let _ = self
+                            .extension_runner
+                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                            .await;
+                        return Err(error);
+                    },
+                };
+                let transcript_path = self
+                    .write_compact_snapshot(
+                        CompactTrigger::AutoThreshold,
+                        prepare_input.messages.clone(),
+                        Some(&self.system_prompt),
+                    )
+                    .await;
+                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
+                    .with_custom_instructions(compact_instructions)
+                    .with_transcript_path(transcript_path)
+            } else {
+                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
+            };
             let prepared_context = match self
                 .context_assembler
-                .prepare_provider_messages_with_compact_runner(
-                    ContextPrepareInput {
-                        messages: visible_messages,
-                        system_prompt: Some(&self.system_prompt),
-                        model_limits: self.llm.model_limits(),
-                    },
-                    // 使用fork agent 进行compact
-                    CompactPromptStyle::ForkedConversationPrompt,
+                .prepare_provider_messages_with_compact_runner_options(
+                    prepare_input,
+                    compact_options,
                     &compact_runner,
                 )
                 .await
@@ -579,6 +630,21 @@ impl Agent {
                 Err(error) => return Err(AgentError::Llm(error.to_string())),
             };
             if let Some(compaction) = prepared_context.compaction {
+                if let Err(error) = self
+                    .notify_post_compact(
+                        CompactTrigger::AutoThreshold,
+                        compact_message_count,
+                        &tools,
+                        &compaction,
+                    )
+                    .await
+                {
+                    let _ = self
+                        .extension_runner
+                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                        .await;
+                    return Err(error);
+                }
                 if let Some(tx) = &event_tx {
                     let _ = tx.send(EventPayload::CompactionStarted);
                     let _ = tx.send(compaction_applied_payload(&compaction));
@@ -728,14 +794,24 @@ impl Agent {
                                 .iter()
                                 .cloned()
                                 .partition(|message| message.role == LlmRole::System);
-                            if let Some(prepared) = self
+                            let overflow_compaction = self
                                 .compact_for_overflow_retry(
                                     visible_messages,
                                     Some(&self.system_prompt),
                                     &tools,
                                 )
-                                .await
-                            {
+                                .await;
+                            let prepared = match overflow_compaction {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    let _ = self
+                                        .extension_runner
+                                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                                        .await;
+                                    return Err(error);
+                                },
+                            };
+                            if let Some(prepared) = prepared {
                                 let compaction = prepared
                                     .compaction
                                     .expect("compact_provider_messages should include compaction");
@@ -826,28 +902,136 @@ impl Agent {
         visible_messages: Vec<LlmMessage>,
         system_prompt: Option<&str>,
         tools: &[ToolDefinition],
-    ) -> Option<PreparedContext> {
+    ) -> Result<Option<PreparedContext>, AgentError> {
+        let message_count = visible_messages.len();
+        let compact_instructions = self
+            .compact_instructions(CompactTrigger::PromptTooLongRetry, message_count, tools)
+            .await?;
+        let transcript_path = self
+            .write_compact_snapshot(
+                CompactTrigger::PromptTooLongRetry,
+                visible_messages.clone(),
+                system_prompt,
+            )
+            .await;
         let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.to_vec());
-        match self
+        let compact_options =
+            CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
+                .with_custom_instructions(compact_instructions)
+                .with_transcript_path(transcript_path.clone());
+        let prepared = match self
             .context_assembler
-            .compact_provider_messages_with_compact_runner(
+            .compact_provider_messages_with_compact_runner_options(
                 &compact_runner,
                 visible_messages.clone(),
                 system_prompt,
-                CompactPromptStyle::ForkedConversationPrompt,
+                compact_options,
             )
             .await
         {
             Ok(prepared) => Some(prepared),
             Err(_) => self
                 .context_assembler
-                .compact_provider_messages(visible_messages, system_prompt)
+                .compact_provider_messages_with_render_options(
+                    visible_messages,
+                    system_prompt,
+                    astrcode_context::compaction::CompactSummaryRenderOptions { transcript_path },
+                )
                 .ok()
                 .map(|(messages, compaction)| PreparedContext {
                     messages,
                     compaction: Some(compaction),
                 }),
+        };
+
+        if let Some(prepared) = &prepared {
+            if let Some(compaction) = &prepared.compaction {
+                self.notify_post_compact(
+                    CompactTrigger::PromptTooLongRetry,
+                    message_count,
+                    tools,
+                    compaction,
+                )
+                .await?;
+            }
         }
+
+        Ok(prepared)
+    }
+
+    async fn write_compact_snapshot(
+        &self,
+        trigger: CompactTrigger,
+        provider_messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+    ) -> Option<String> {
+        let snapshot = CompactSnapshotInput {
+            trigger: compact_trigger_name(trigger).into(),
+            model_id: self.model_id.clone(),
+            working_dir: self.working_dir.clone(),
+            system_prompt: system_prompt.map(str::to_string),
+            provider_messages,
+        };
+        match self
+            .session_manager
+            .write_compact_snapshot(&self.session_id, snapshot)
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    trigger = compact_trigger_name(trigger),
+                    error = %error,
+                    "Failed to write compact transcript snapshot"
+                );
+                None
+            },
+        }
+    }
+
+    async fn compact_instructions(
+        &self,
+        trigger: CompactTrigger,
+        message_count: usize,
+        tools: &[ToolDefinition],
+    ) -> Result<Vec<String>, AgentError> {
+        collect_compact_instructions(
+            &self.extension_runner,
+            CompactHookContext {
+                session_id: &self.session_id,
+                working_dir: &self.working_dir,
+                model_id: &self.model_id,
+                tools,
+                trigger,
+                message_count,
+            },
+        )
+        .await
+        .map_err(AgentError::Extension)
+    }
+
+    async fn notify_post_compact(
+        &self,
+        trigger: CompactTrigger,
+        message_count: usize,
+        tools: &[ToolDefinition],
+        compaction: &CompactResult,
+    ) -> Result<(), AgentError> {
+        dispatch_post_compact(
+            &self.extension_runner,
+            CompactHookContext {
+                session_id: &self.session_id,
+                working_dir: &self.working_dir,
+                model_id: &self.model_id,
+                tools,
+                trigger,
+                message_count,
+            },
+            compaction,
+        )
+        .await
+        .map_err(AgentError::Extension)
     }
 }
 

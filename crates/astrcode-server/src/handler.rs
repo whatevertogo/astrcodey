@@ -5,12 +5,15 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::compaction::{CompactError, CompactPromptStyle, CompactSkipReason};
+use astrcode_context::compaction::{
+    CompactError, CompactPromptStyle, CompactRequestOptions, CompactSkipReason,
+};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
-    extension::ExtensionEvent,
+    extension::{CompactTrigger, ExtensionEvent},
     llm::{LlmContent, LlmMessage},
+    storage::CompactSnapshotInput,
     types::{SessionId, TurnId, new_message_id, new_turn_id},
 };
 use astrcode_extensions::context::ServerExtensionContext;
@@ -24,6 +27,10 @@ use tokio::{sync::broadcast, task::JoinHandle};
 use crate::{
     agent_loop::{Agent, AgentServices, drive_agent},
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
+    compact_hooks::{
+        CompactHookContext, collect_compact_instructions, compact_trigger_name,
+        dispatch_post_compact,
+    },
     forked_provider::CompactForkRunner,
     session::compaction_applied_payload,
 };
@@ -355,18 +362,63 @@ impl CommandHandler {
             .ok_or_else(|| format!("Session {sid} vanished"))?;
         let state = session.state.read().await.clone();
         let tool_registry = self.ensure_tool_registry(&sid, &state.working_dir).await;
-        let compact_runner = CompactForkRunner::new(
-            Arc::clone(&self.runtime.llm_provider),
-            tool_registry.list_definitions(),
-        );
+        let provider_messages = state.provider_messages();
+        let tools = tool_registry.list_definitions();
+        let compact_instructions = match collect_compact_instructions(
+            &self.runtime.extension_runner,
+            CompactHookContext {
+                session_id: &sid,
+                working_dir: &state.working_dir,
+                model_id: &state.model_id,
+                tools: &tools,
+                trigger: CompactTrigger::ManualCommand,
+                message_count: provider_messages.len(),
+            },
+        )
+        .await
+        {
+            Ok(instructions) => instructions,
+            Err(error) => {
+                self.send_error(-32603, &format!("Compaction failed: {error}"));
+                return Ok(());
+            },
+        };
+        let snapshot_path = match self
+            .runtime
+            .session_manager
+            .write_compact_snapshot(
+                &sid,
+                CompactSnapshotInput {
+                    trigger: compact_trigger_name(CompactTrigger::ManualCommand).into(),
+                    model_id: state.model_id.clone(),
+                    working_dir: state.working_dir.clone(),
+                    system_prompt: state.system_prompt.clone(),
+                    provider_messages: provider_messages.clone(),
+                },
+            )
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                self.send_error(
+                    -32603,
+                    &format!("Compaction failed: could not write transcript snapshot: {error}"),
+                );
+                return Ok(());
+            },
+        };
+        let compact_runner =
+            CompactForkRunner::new(Arc::clone(&self.runtime.llm_provider), tools.clone());
         let compaction = match self
             .runtime
             .context_assembler
-            .compact_provider_messages_with_compact_runner(
+            .compact_provider_messages_with_compact_runner_options(
                 &compact_runner,
-                state.provider_messages(),
+                provider_messages.clone(),
                 state.system_prompt.as_deref(),
-                CompactPromptStyle::ForkedConversationPrompt,
+                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
+                    .with_custom_instructions(compact_instructions)
+                    .with_transcript_path(snapshot_path),
             )
             .await
         {
@@ -384,6 +436,24 @@ impl CommandHandler {
                 return Ok(());
             },
         };
+
+        if let Err(error) = dispatch_post_compact(
+            &self.runtime.extension_runner,
+            CompactHookContext {
+                session_id: &sid,
+                working_dir: &state.working_dir,
+                model_id: &state.model_id,
+                tools: &tools,
+                trigger: CompactTrigger::ManualCommand,
+                message_count: provider_messages.len(),
+            },
+            &compaction,
+        )
+        .await
+        {
+            self.send_error(-32603, &format!("Compaction failed: {error}"));
+            return Ok(());
+        }
 
         self.record_and_broadcast(&sid, None, EventPayload::CompactionStarted)
             .await?;
@@ -591,6 +661,7 @@ impl CommandHandler {
                     tool_registry,
                     extension_runner: runtime.extension_runner.clone(),
                     context_assembler: runtime.context_assembler.clone(),
+                    session_manager: runtime.session_manager.clone(),
                 },
             );
 

@@ -96,6 +96,7 @@ impl ExtensionRunner {
                             | HookEffect::AppendMessages { .. }
                             | HookEffect::ModifiedOutput { .. }
                             | HookEffect::PromptContributions(_)
+                            | HookEffect::CompactContributions(_)
                     ) {
                         tracing::warn!(
                             "extension returned {:?} on {:?} — effect ignored (only \
@@ -163,6 +164,7 @@ impl ExtensionRunner {
                         | HookEffect::AppendMessages { .. }
                         | HookEffect::ModifiedOutput { .. }
                         | HookEffect::PromptContributions(_)
+                        | HookEffect::CompactContributions(_)
                         | HookEffect::Allow => {},
                     }
                 },
@@ -233,7 +235,8 @@ impl ExtensionRunner {
                         | HookEffect::ModifiedInput { .. }
                         | HookEffect::ModifiedResult { .. }
                         | HookEffect::ModifiedOutput { .. }
-                        | HookEffect::PromptContributions(_) => {},
+                        | HookEffect::PromptContributions(_)
+                        | HookEffect::CompactContributions(_) => {},
                     }
                 },
                 HookMode::NonBlocking => {
@@ -297,6 +300,58 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     tracing::warn!(
                         "extension {} subscribes to PromptBuild as NonBlocking; prompt \
+                         contributions require Blocking or Advisory mode",
+                        ext.id()
+                    );
+                },
+            }
+        }
+
+        Ok(collected)
+    }
+
+    /// 分发 PreCompact hook，收集插件提供的 compact 摘要指令。
+    pub async fn collect_compact_contributions(
+        &self,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<CompactContributions, ExtensionError> {
+        let mut collected = CompactContributions::default();
+
+        for ordered in self
+            .ordered_extensions_for(&ExtensionEvent::PreCompact)
+            .await
+        {
+            let ext = ordered.ext;
+
+            match ordered.mode {
+                HookMode::Blocking => {
+                    let result = tokio::time::timeout(
+                        self.timeout,
+                        ext.on_event(ExtensionEvent::PreCompact, ctx),
+                    )
+                    .await
+                    .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+
+                    match result {
+                        HookEffect::CompactContributions(contributions) => {
+                            collected.merge(contributions);
+                        },
+                        HookEffect::Block { reason } => {
+                            return Err(ExtensionError::Blocked { reason });
+                        },
+                        _ => {},
+                    }
+                },
+                HookMode::Advisory => {
+                    if let HookEffect::CompactContributions(contributions) =
+                        ext.on_event(ExtensionEvent::PreCompact, ctx).await?
+                    {
+                        collected.merge(contributions);
+                    }
+                },
+                HookMode::NonBlocking => {
+                    tracing::warn!(
+                        "extension {} subscribes to PreCompact as NonBlocking; compact \
                          contributions require Blocking or Advisory mode",
                         ext.id()
                     );
@@ -537,6 +592,14 @@ impl ExtensionContext for ProviderMessagesContext<'_> {
         self.base.post_tool_use_input()
     }
 
+    fn pre_compact_input(&self) -> Option<PreCompactInput> {
+        self.base.pre_compact_input()
+    }
+
+    fn post_compact_input(&self) -> Option<PostCompactInput> {
+        self.base.post_compact_input()
+    }
+
     fn register_tool(&self, def: ToolDefinition) {
         self.base.register_tool(def);
     }
@@ -598,6 +661,14 @@ impl ExtensionContext for ProviderMessagesSnapshot {
 
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.base.post_tool_use_input()
+    }
+
+    fn pre_compact_input(&self) -> Option<PreCompactInput> {
+        self.base.pre_compact_input()
+    }
+
+    fn post_compact_input(&self) -> Option<PostCompactInput> {
+        self.base.post_compact_input()
     }
 
     fn provider_messages(&self) -> Option<Vec<LlmMessage>> {

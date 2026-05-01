@@ -12,7 +12,9 @@ use std::{
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
-    extension::{ExtensionContext, PostToolUseInput, PreToolUseInput},
+    extension::{
+        ExtensionContext, PostCompactInput, PostToolUseInput, PreCompactInput, PreToolUseInput,
+    },
     llm::LlmMessage,
     tool::ToolDefinition,
 };
@@ -39,6 +41,10 @@ pub struct ServerExtensionContext {
     pre_tool_use_input: Option<PreToolUseInput>,
     /// PostToolUse 钩子的输入数据
     post_tool_use_input: Option<PostToolUseInput>,
+    /// PreCompact 钩子的输入数据
+    pre_compact_input: Option<PreCompactInput>,
+    /// PostCompact 钩子的输入数据
+    post_compact_input: Option<PostCompactInput>,
     /// 扩展注册的待处理工具列表
     pending_tools: Mutex<Vec<ToolDefinition>>,
     /// LLM 提供者消息列表
@@ -62,6 +68,8 @@ impl ServerExtensionContext {
             custom_event_tx: None,
             pre_tool_use_input: None,
             post_tool_use_input: None,
+            pre_compact_input: None,
+            post_compact_input: None,
             pending_tools: Mutex::new(Vec::new()),
             provider_messages: None,
         }
@@ -86,12 +94,32 @@ impl ServerExtensionContext {
     pub fn set_pre_tool_use_input(&mut self, input: PreToolUseInput) {
         self.pre_tool_use_input = Some(input);
         self.post_tool_use_input = None;
+        self.pre_compact_input = None;
+        self.post_compact_input = None;
     }
 
     /// 附加当前工具调用的结果数据，供 PostToolUse 钩子使用。
     pub fn set_post_tool_use_input(&mut self, input: PostToolUseInput) {
         self.pre_tool_use_input = None;
         self.post_tool_use_input = Some(input);
+        self.pre_compact_input = None;
+        self.post_compact_input = None;
+    }
+
+    /// 附加当前 compact 前置数据，供 PreCompact 钩子使用。
+    pub fn set_pre_compact_input(&mut self, input: PreCompactInput) {
+        self.pre_tool_use_input = None;
+        self.post_tool_use_input = None;
+        self.pre_compact_input = Some(input);
+        self.post_compact_input = None;
+    }
+
+    /// 附加当前 compact 结果数据，供 PostCompact 钩子使用。
+    pub fn set_post_compact_input(&mut self, input: PostCompactInput) {
+        self.pre_tool_use_input = None;
+        self.post_tool_use_input = None;
+        self.pre_compact_input = None;
+        self.post_compact_input = Some(input);
     }
 
     /// 附加 LLM 提供者消息，供 BeforeProviderRequest 钩子使用。
@@ -112,6 +140,8 @@ impl ServerExtensionContext {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            pre_compact_input: self.pre_compact_input.clone(),
+            post_compact_input: self.post_compact_input.clone(),
             provider_messages: self.provider_messages.clone(),
         })
     }
@@ -126,6 +156,8 @@ pub struct ServerExtensionContextSnapshot {
     model_selection: ModelSelection,
     pre_tool_use_input: Option<PreToolUseInput>,
     post_tool_use_input: Option<PostToolUseInput>,
+    pre_compact_input: Option<PreCompactInput>,
+    post_compact_input: Option<PostCompactInput>,
     provider_messages: Option<Vec<LlmMessage>>,
 }
 
@@ -156,6 +188,12 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.post_tool_use_input.clone()
     }
+    fn pre_compact_input(&self) -> Option<PreCompactInput> {
+        self.pre_compact_input.clone()
+    }
+    fn post_compact_input(&self) -> Option<PostCompactInput> {
+        self.post_compact_input.clone()
+    }
     fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
         self.provider_messages.clone()
     }
@@ -169,6 +207,8 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            pre_compact_input: self.pre_compact_input.clone(),
+            post_compact_input: self.post_compact_input.clone(),
             provider_messages: self.provider_messages.clone(),
         })
     }
@@ -216,6 +256,14 @@ impl ExtensionContext for ServerExtensionContext {
         self.post_tool_use_input.clone()
     }
 
+    fn pre_compact_input(&self) -> Option<PreCompactInput> {
+        self.pre_compact_input.clone()
+    }
+
+    fn post_compact_input(&self) -> Option<PostCompactInput> {
+        self.post_compact_input.clone()
+    }
+
     /// 注册一个工具定义到待处理列表
     fn register_tool(&self, def: ToolDefinition) {
         self.pending_tools.lock().unwrap().push(def);
@@ -241,6 +289,8 @@ impl ExtensionContext for ServerExtensionContext {
             model_selection: self.model_selection.clone(),
             pre_tool_use_input: self.pre_tool_use_input.clone(),
             post_tool_use_input: self.post_tool_use_input.clone(),
+            pre_compact_input: self.pre_compact_input.clone(),
+            post_compact_input: self.post_compact_input.clone(),
             provider_messages: self.provider_messages.clone(),
         })
     }

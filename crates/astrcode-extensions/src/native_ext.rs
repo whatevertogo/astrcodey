@@ -233,6 +233,17 @@ impl Extension for NativeExtension {
                         })?;
                         return Ok(HookEffect::PromptContributions(contributions));
                     },
+                    // 5 = CompactContributions
+                    5 => {
+                        let content = self.read_and_release_output(output_ptr, output_len);
+                        let contributions = serde_json::from_str(&content).map_err(|e| {
+                            ExtensionError::Internal(format!(
+                                "extension {} returned invalid CompactContributions JSON: {e}",
+                                self.id
+                            ))
+                        })?;
+                        return Ok(HookEffect::CompactContributions(contributions));
+                    },
                     _ => {
                         self.release_output(output_ptr, output_len);
                     },

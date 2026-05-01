@@ -21,7 +21,7 @@ pub struct ContextWindowSettings {
 impl Default for ContextWindowSettings {
     fn default() -> Self {
         Self {
-            // TODO: 后期需要让用户可控制
+            // TODO: 后期需要让用户可控制。
             auto_compact_enabled: true,
             compact_threshold_percent: 83.5,
             compact_max_retry_attempts: 3,

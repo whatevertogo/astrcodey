@@ -11,7 +11,8 @@ use std::{
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionContext, ExtensionError, HookEffect, HookMode, HookSubscription,
+        CompactContributions, CompactTrigger, Extension, ExtensionContext, ExtensionError,
+        HookEffect, HookMode, HookSubscription,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
     tool::{
@@ -20,6 +21,7 @@ use astrcode_core::{
     },
 };
 use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_storage::noop::NoopEventStore;
 use tokio::{
     sync::{Barrier, mpsc},
     time::{sleep, timeout},
@@ -88,6 +90,11 @@ struct ProviderMessageExtension {
     required_tool: Option<&'static str>,
 }
 
+struct CompactInstructionExtension {
+    pre_seen: Arc<AtomicBool>,
+    post_seen: Arc<AtomicBool>,
+}
+
 #[async_trait::async_trait]
 impl Extension for ProviderMessageExtension {
     fn id(&self) -> &str {
@@ -121,6 +128,58 @@ impl Extension for ProviderMessageExtension {
         Ok(HookEffect::AppendMessages {
             messages: vec![LlmMessage::user(self.text)],
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for CompactInstructionExtension {
+    fn id(&self) -> &str {
+        "compact-instruction"
+    }
+
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![
+            HookSubscription {
+                event: ExtensionEvent::PreCompact,
+                mode: HookMode::Blocking,
+                priority: 0,
+            },
+            HookSubscription {
+                event: ExtensionEvent::PostCompact,
+                mode: HookMode::Blocking,
+                priority: 0,
+            },
+        ]
+    }
+
+    async fn on_event(
+        &self,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        match event {
+            ExtensionEvent::PreCompact => {
+                let input = ctx
+                    .pre_compact_input()
+                    .expect("PreCompact should include compact payload");
+                assert_eq!(input.trigger, CompactTrigger::AutoThreshold);
+                assert!(input.message_count > 0);
+                self.pre_seen.store(true, Ordering::SeqCst);
+                Ok(HookEffect::CompactContributions(CompactContributions {
+                    instructions: vec!["preserve hook supplied compact instruction".into()],
+                }))
+            },
+            ExtensionEvent::PostCompact => {
+                let input = ctx
+                    .post_compact_input()
+                    .expect("PostCompact should include compact payload");
+                assert_eq!(input.trigger, CompactTrigger::AutoThreshold);
+                assert!(input.pre_tokens >= input.post_tokens);
+                self.post_seen.store(true, Ordering::SeqCst);
+                Ok(HookEffect::Allow)
+            },
+            _ => Ok(HookEffect::Allow),
+        }
     }
 }
 
@@ -627,6 +686,7 @@ where
         tool_registry,
         extension_runner,
         context_assembler: test_context_assembler(),
+        session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
     }
 }
 
@@ -1046,6 +1106,18 @@ async fn auto_compact_uses_forked_runner_with_tools() {
         captured_compact_messages: Arc::clone(&captured_compact_messages),
         captured_compact_tools: Arc::clone(&captured_compact_tools),
     });
+    let compact_pre_seen = Arc::new(AtomicBool::new(false));
+    let compact_post_seen = Arc::new(AtomicBool::new(false));
+    let extension_runner = Arc::new(ExtensionRunner::new(
+        Duration::from_secs(1),
+        Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+    ));
+    extension_runner
+        .register(Arc::new(CompactInstructionExtension {
+            pre_seen: Arc::clone(&compact_pre_seen),
+            post_seen: Arc::clone(&compact_post_seen),
+        }))
+        .await;
     let agent = Agent::new(
         "auto-compact-tools-session".into(),
         ".".into(),
@@ -1058,10 +1130,7 @@ async fn auto_compact_uses_forked_runner_with_tools() {
                 mode: ExecutionMode::Sequential,
                 delay_ms: 0,
             })]),
-            Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-            )),
+            extension_runner,
         ),
     );
     let mut history = Vec::new();
@@ -1092,8 +1161,14 @@ async fn auto_compact_uses_forked_runner_with_tools() {
         &compact_messages,
         "Do not call tools"
     ));
+    assert!(message_text_contains(
+        &compact_messages,
+        "preserve hook supplied compact instruction"
+    ));
     let compact_tools = captured_compact_tools.lock().unwrap();
     assert!(compact_tools.iter().any(|tool| tool.name == "shell"));
+    assert!(compact_pre_seen.load(Ordering::SeqCst));
+    assert!(compact_post_seen.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

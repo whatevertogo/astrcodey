@@ -2,6 +2,10 @@
 //!
 //! 提供 system prompt 组装、token 估算和 LLM 驱动的摘要压缩，
 //! 生成 provider-ready 的完整 LLM 上下文。
+//!
+//! 本 crate 只描述“上下文应该长什么样”：system prompt、可见对话、
+//! compact 触发条件、摘要 contract 与压缩后的消息形态。真正的 provider
+//! 调用、工具快照、session/eventlog 编排仍由 server/runtime 层负责。
 
 pub mod compaction;
 pub mod manager;

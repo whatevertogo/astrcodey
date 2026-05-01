@@ -105,6 +105,12 @@ pub enum ExtensionEvent {
     // ── Prompt 组装 ──
     /// 构建 system prompt 前收集插件提供的提示词片段。
     PromptBuild,
+
+    // ── 上下文压缩 ──
+    /// 上下文压缩前收集额外摘要指令。
+    PreCompact,
+    /// 上下文压缩完成后通知扩展。
+    PostCompact,
 }
 
 // ─── Extension Manifest ──────────────────────────────────────────────────
@@ -175,6 +181,42 @@ pub struct PostToolUseInput {
     pub tool_result: ToolResult,
 }
 
+/// 触发 compact 的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// 自动阈值触发的 compact。
+    AutoThreshold,
+    /// Provider 返回 prompt-too-long 后触发的重试 compact。
+    PromptTooLongRetry,
+    /// 用户手动执行 compact 命令。
+    ManualCommand,
+}
+
+/// PreCompact 钩子的输入数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreCompactInput {
+    /// compact 的触发来源。
+    pub trigger: CompactTrigger,
+    /// 即将参与 compact 判断或执行的可见消息数量。
+    pub message_count: usize,
+}
+
+/// PostCompact 钩子的输入数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostCompactInput {
+    /// compact 的触发来源。
+    pub trigger: CompactTrigger,
+    /// compact 前的估算 token 数。
+    pub pre_tokens: usize,
+    /// compact 后的估算 token 数。
+    pub post_tokens: usize,
+    /// compact 移除的可见消息数量。
+    pub messages_removed: usize,
+    /// LLM 或 deterministic fallback 生成的摘要。
+    pub summary: String,
+}
+
 // ─── Hook Mode ───────────────────────────────────────────────────────────
 
 /// 钩子订阅的执行模式。
@@ -241,6 +283,9 @@ pub enum HookEffect {
 
     /// 为 prompt 组装提供受控片段（仅 PromptBuild）。
     PromptContributions(PromptContributions),
+
+    /// 为 compact 摘要提供额外指令（仅 PreCompact）。
+    CompactContributions(CompactContributions),
 }
 
 /// 插件在 PromptBuild hook 中提供的 prompt 片段。
@@ -262,6 +307,20 @@ impl PromptContributions {
         self.system_prompts.extend(other.system_prompts);
         self.skills.extend(other.skills);
         self.agents.extend(other.agents);
+    }
+}
+
+/// 插件在 PreCompact hook 中提供的 compact 摘要指令。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactContributions {
+    /// 追加到 compact prompt 的摘要指令。
+    #[serde(default)]
+    pub instructions: Vec<String>,
+}
+
+impl CompactContributions {
+    pub fn merge(&mut self, other: CompactContributions) {
+        self.instructions.extend(other.instructions);
     }
 }
 
@@ -325,6 +384,16 @@ pub trait ExtensionContext: Send + Sync {
 
     /// 获取当前 PostToolUse 载荷（仅在工具钩子上下文中可用）。
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        None
+    }
+
+    /// 获取当前 PreCompact 载荷（仅在 compact 钩子上下文中可用）。
+    fn pre_compact_input(&self) -> Option<PreCompactInput> {
+        None
+    }
+
+    /// 获取当前 PostCompact 载荷（仅在 compact 钩子上下文中可用）。
+    fn post_compact_input(&self) -> Option<PostCompactInput> {
         None
     }
 

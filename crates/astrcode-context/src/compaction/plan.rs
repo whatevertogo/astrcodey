@@ -1,3 +1,9 @@
+//! Compact 输入规划。
+//!
+//! 这里把原始 LLM 消息转换成适合摘要模型阅读的紧凑消息序列，并识别
+//! 是否存在上一轮 compact summary。真正的“保留哪些尾部消息”在
+//! `compaction::CompactJob` 中完成。
+
 use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 
 use super::{
@@ -9,16 +15,24 @@ use super::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompactPromptMode {
+    /// 首次压缩，没有可合并的旧 summary。
     Fresh,
+    /// 已有旧 summary，本次要求模型输出合并后的完整 summary。
     Incremental { previous_summary: String },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedCompactInput {
+    /// 归一化后的历史消息，用作 compact request 的对话正文。
     pub messages: Vec<LlmMessage>,
+    /// 决定使用 fresh 还是 incremental prompt。
     pub prompt_mode: CompactPromptMode,
 }
 
+/// 准备摘要模型要读取的消息前缀。
+///
+/// Synthetic compact summary 不再作为普通用户消息重复压缩，而是转成
+/// incremental prompt 的 previous summary。
 pub(crate) fn prepare_compact_input(messages: &[LlmMessage]) -> PreparedCompactInput {
     let prompt_mode = latest_previous_summary(messages)
         .map(|previous_summary| CompactPromptMode::Incremental { previous_summary })
@@ -33,6 +47,7 @@ pub(crate) fn prepare_compact_input(messages: &[LlmMessage]) -> PreparedCompactI
     }
 }
 
+/// 把多模态/工具内容降级成摘要模型可读的纯文本。
 pub(crate) fn visible_message_text(message: &LlmMessage) -> String {
     message
         .content
@@ -49,6 +64,7 @@ pub(crate) fn visible_message_text(message: &LlmMessage) -> String {
         .join("\n")
 }
 
+/// 找到最近一次 compact summary，用于 incremental compact。
 fn latest_previous_summary(messages: &[LlmMessage]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
         if message.role != LlmRole::User {
@@ -62,6 +78,7 @@ fn latest_previous_summary(messages: &[LlmMessage]) -> Option<String> {
     })
 }
 
+/// 去掉 system/synthetic message，并把工具消息归一化为普通 tool result。
 fn normalize_compaction_message(message: &LlmMessage) -> Option<LlmMessage> {
     match message.role {
         LlmRole::System => None,

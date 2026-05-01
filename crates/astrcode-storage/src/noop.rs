@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    storage::{EventStore, StorageError},
+    storage::{CompactSnapshotInput, EventStore, StorageError},
     types::{Cursor, SessionId},
 };
 use tokio::sync::Mutex;
@@ -110,5 +110,13 @@ impl EventStore for NoopEventStore {
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.sessions.lock().await.remove(session_id);
         Ok(())
+    }
+
+    async fn write_compact_snapshot(
+        &self,
+        _session_id: &SessionId,
+        _snapshot: CompactSnapshotInput,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(None)
     }
 }

@@ -140,6 +140,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 tool_registry,
                 extension_runner: Arc::clone(&self.extension_runner),
                 context_assembler: Arc::clone(&self.context_assembler),
+                session_manager: Arc::clone(&self.session_manager),
             },
         )
         .with_tool_allowlist(request.allowed_tools);

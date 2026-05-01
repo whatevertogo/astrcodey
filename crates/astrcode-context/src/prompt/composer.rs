@@ -7,6 +7,7 @@ use super::pipeline;
 pub struct PromptComposer;
 
 impl PromptComposer {
+    /// PromptComposer 当前无状态；保留构造函数便于作为 provider 注入。
     pub fn new() -> Self {
         Self
     }

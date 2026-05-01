@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{event::Event, types::*};
+use crate::{event::Event, llm::LlmMessage, types::*};
 
 /// 会话事件存储 trait。
 ///
@@ -61,6 +61,36 @@ pub trait EventStore: Send + Sync {
 
     /// 删除会话及其所有数据。
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError>;
+
+    /// 写入 compact 前的 provider transcript snapshot。
+    ///
+    /// 返回值是可供用户或后续工具读取的快照路径；不支持快照的存储实现可以返回
+    /// `Ok(None)`。
+    async fn write_compact_snapshot(
+        &self,
+        _session_id: &SessionId,
+        _snapshot: CompactSnapshotInput,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+}
+
+/// compact 前 transcript snapshot 的存储输入。
+///
+/// 这是持久化边界的数据包；调用方决定收集哪些 provider messages，存储层只负责
+/// 把它写成可读的 JSONL 文件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactSnapshotInput {
+    /// compact 触发来源，例如 `auto_threshold`。
+    pub trigger: String,
+    /// 当前模型标识。
+    pub model_id: String,
+    /// 当前工作目录。
+    pub working_dir: String,
+    /// 当前 session system prompt。
+    pub system_prompt: Option<String>,
+    /// compact 前的 provider 可见消息，不包含单独记录的 system prompt。
+    pub provider_messages: Vec<LlmMessage>,
 }
 
 /// 会话元数据，用于列表展示。

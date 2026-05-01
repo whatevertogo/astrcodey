@@ -18,6 +18,7 @@ use astrcode_core::extension::{ExtensionEvent, HookMode};
 /// - ModifiedResult (2): `output_ptr/len` 携带修改后的内容字符串。
 /// - ModifiedInput (3): `output_ptr/len` 携带替换的工具输入 JSON。
 /// - PromptContributions (4): `output_ptr/len` 携带 PromptContributions JSON。
+/// - CompactContributions (5): `output_ptr/len` 携带 CompactContributions JSON。
 pub type EventCallback = unsafe extern "C" fn(
     event: u8,
     ctx: *const c_void,
@@ -161,6 +162,8 @@ pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
         ExtensionEvent::AfterProviderResponse => 7,
         ExtensionEvent::UserPromptSubmit => 8,
         ExtensionEvent::PromptBuild => 9,
+        ExtensionEvent::PreCompact => 10,
+        ExtensionEvent::PostCompact => 11,
     }
 }
 
@@ -177,6 +180,8 @@ pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
         7 => Some(ExtensionEvent::AfterProviderResponse),
         8 => Some(ExtensionEvent::UserPromptSubmit),
         9 => Some(ExtensionEvent::PromptBuild),
+        10 => Some(ExtensionEvent::PreCompact),
+        11 => Some(ExtensionEvent::PostCompact),
         _ => None,
     }
 }

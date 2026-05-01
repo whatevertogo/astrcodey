@@ -7,11 +7,13 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    storage::{EventStore, StorageError},
+    storage::{CompactSnapshotInput, EventStore, StorageError},
     types::{Cursor, ProjectHash, SessionId, validate_session_id},
 };
 use astrcode_support::hostpaths;
+use chrono::Utc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::{event_log::EventLog, snapshot::SnapshotManager};
 
@@ -201,5 +203,96 @@ impl EventStore for FileSystemSessionRepository {
             std::fs::remove_dir_all(&dir)?;
         }
         Ok(())
+    }
+
+    async fn write_compact_snapshot(
+        &self,
+        session_id: &SessionId,
+        snapshot: CompactSnapshotInput,
+    ) -> Result<Option<String>, StorageError> {
+        validate_session_id(session_id).map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        let _meta = self.get_or_open_meta(session_id).await?;
+
+        let dir = self.session_dir(session_id).join("compact-snapshots");
+        tokio::fs::create_dir_all(&dir).await?;
+
+        let created_at = Utc::now();
+        let path = dir.join(format!(
+            "compact-{}-{}.jsonl",
+            created_at.timestamp_millis(),
+            Uuid::new_v4()
+        ));
+
+        let mut lines = Vec::with_capacity(snapshot.provider_messages.len() + 1);
+        lines.push(
+            serde_json::json!({
+                "type": "metadata",
+                "session_id": session_id,
+                "trigger": snapshot.trigger,
+                "created_at": created_at.to_rfc3339(),
+                "model_id": snapshot.model_id,
+                "working_dir": snapshot.working_dir,
+                "system_prompt": snapshot.system_prompt,
+                "message_count": snapshot.provider_messages.len(),
+            })
+            .to_string(),
+        );
+        for (index, message) in snapshot.provider_messages.into_iter().enumerate() {
+            lines.push(
+                serde_json::json!({
+                    "type": "message",
+                    "index": index,
+                    "message": message,
+                })
+                .to_string(),
+            );
+        }
+
+        let mut content = lines.join("\n");
+        content.push('\n');
+        tokio::fs::write(&path, content).await?;
+
+        Ok(Some(path.to_string_lossy().to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{llm::LlmMessage, storage::CompactSnapshotInput};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn compact_snapshot_writes_metadata_and_messages() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = FileSystemSessionRepository {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            base_path: temp_dir.path().join("sessions"),
+        };
+        let session_id = "session-test".to_string();
+        repo.create_session(&session_id, ".", "mock", None)
+            .await
+            .unwrap();
+
+        let path = repo
+            .write_compact_snapshot(
+                &session_id,
+                CompactSnapshotInput {
+                    trigger: "manual_command".into(),
+                    model_id: "mock".into(),
+                    working_dir: ".".into(),
+                    system_prompt: Some("system".into()),
+                    provider_messages: vec![LlmMessage::user("hello")],
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("\"type\":\"metadata\""));
+        assert!(content.contains("\"trigger\":\"manual_command\""));
+        assert!(content.contains("\"type\":\"message\""));
+        assert!(path.contains("compact-snapshots"));
     }
 }

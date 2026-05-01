@@ -15,7 +15,7 @@ use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{EventStore, StorageError},
+    storage::{CompactSnapshotInput, EventStore, StorageError},
     types::*,
 };
 use astrcode_protocol::events::ClientNotification;
@@ -99,6 +99,7 @@ pub(crate) fn compaction_applied_payload(compaction: &CompactResult) -> EventPay
             "summary": compaction.summary,
             "preTokens": compaction.pre_tokens,
             "postTokens": compaction.post_tokens,
+            "transcriptPath": compaction.transcript_path.clone(),
         }),
     }
 }
@@ -363,6 +364,17 @@ impl SessionManager {
             EventReducer::reduce(&stored, &mut *session.state.write().await);
         }
         Ok(stored)
+    }
+
+    pub async fn write_compact_snapshot(
+        &self,
+        session_id: &SessionId,
+        snapshot: CompactSnapshotInput,
+    ) -> Result<Option<String>, SessionError> {
+        Ok(self
+            .store
+            .write_compact_snapshot(session_id, snapshot)
+            .await?)
     }
 
     /// Get active session by ID.
