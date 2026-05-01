@@ -21,6 +21,8 @@ Update the progress todo list for the current session. Use it proactively for co
                                       working. Provide both content and activeForm for each item.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
+const REMINDER_THRESHOLD: u32 = 10;
+const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
 /// Compute session-local progress todo storage root.
 pub fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
@@ -44,15 +46,43 @@ impl Extension for TodoToolExtension {
     }
 
     fn subscriptions(&self) -> Vec<(ExtensionEvent, HookMode)> {
-        vec![]
+        vec![
+            (ExtensionEvent::BeforeProviderRequest, HookMode::Blocking),
+            (ExtensionEvent::PostToolUse, HookMode::Blocking),
+        ]
     }
 
     async fn on_event(
         &self,
-        _event: ExtensionEvent,
-        _ctx: &dyn ExtensionContext,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
     ) -> Result<HookEffect, ExtensionError> {
-        Ok(HookEffect::Allow)
+        match event {
+            ExtensionEvent::BeforeProviderRequest => {
+                let Some(messages) = ctx.provider_messages() else {
+                    return Ok(HookEffect::Allow);
+                };
+                if ctx.find_tool(TODO_WRITE_TOOL_NAME).is_none() {
+                    return Ok(HookEffect::Allow);
+                }
+
+                ProgressReminder::new(progress_store_root(ctx.session_id(), ctx.working_dir()))
+                    .before_provider_request(messages)
+                    .map_err(ExtensionError::Internal)
+            },
+            ExtensionEvent::PostToolUse => {
+                let Some(input) = ctx.post_tool_use_input() else {
+                    return Ok(HookEffect::Allow);
+                };
+                if input.tool_name == TODO_WRITE_TOOL_NAME {
+                    ProgressReminder::new(progress_store_root(ctx.session_id(), ctx.working_dir()))
+                        .record_todo_write()
+                        .map_err(ExtensionError::Internal)?;
+                }
+                Ok(HookEffect::Allow)
+            },
+            _ => Ok(HookEffect::Allow),
+        }
     }
 
     fn tools(&self) -> Vec<ToolDefinition> {
@@ -215,6 +245,108 @@ impl ProgressListStore {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ProgressReminderState {
+    assistant_cycles_since_todo_write: u32,
+    assistant_cycles_since_reminder: u32,
+}
+
+struct ProgressReminder {
+    root: PathBuf,
+}
+
+impl ProgressReminder {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn before_provider_request(
+        &self,
+        mut messages: Vec<astrcode_core::llm::LlmMessage>,
+    ) -> Result<HookEffect, String> {
+        let mut state = self.load_state()?;
+        state.assistant_cycles_since_todo_write =
+            state.assistant_cycles_since_todo_write.saturating_add(1);
+        state.assistant_cycles_since_reminder =
+            state.assistant_cycles_since_reminder.saturating_add(1);
+
+        let items = ProgressListStore::new(self.root.clone()).load_items()?;
+        let should_remind = !items.is_empty()
+            && state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
+            && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD;
+
+        let effect = if should_remind {
+            state.assistant_cycles_since_reminder = 0;
+            messages.push(astrcode_core::llm::LlmMessage::user(reminder_message(
+                &items,
+            )));
+            HookEffect::ModifiedMessages { messages }
+        } else {
+            HookEffect::Allow
+        };
+
+        self.save_state(&state)?;
+        Ok(effect)
+    }
+
+    fn record_todo_write(&self) -> Result<(), String> {
+        let mut state = self.load_state()?;
+        state.assistant_cycles_since_todo_write = 0;
+        self.save_state(&state)
+    }
+
+    fn load_state(&self) -> Result<ProgressReminderState, String> {
+        let path = self.root.join(REMINDER_STATE_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content)
+                .map_err(|error| format!("parse reminder state: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(ProgressReminderState::default())
+            },
+            Err(error) => Err(format!("read reminder state: {error}")),
+        }
+    }
+
+    fn save_state(&self, state: &ProgressReminderState) -> Result<(), String> {
+        std::fs::create_dir_all(&self.root).map_err(|error| {
+            format!(
+                "create todo reminder directory {}: {error}",
+                self.root.display()
+            )
+        })?;
+        let path = self.root.join(REMINDER_STATE_FILE);
+        let tmp = self.root.join(format!("{REMINDER_STATE_FILE}.tmp"));
+        let json = serde_json::to_string_pretty(state)
+            .map_err(|error| format!("serialize reminder state: {error}"))?;
+        std::fs::write(&tmp, json).map_err(|error| format!("write reminder state: {error}"))?;
+        std::fs::rename(&tmp, &path).map_err(|error| format!("save reminder state: {error}"))?;
+        Ok(())
+    }
+}
+
+fn reminder_message(items: &[ProgressItem]) -> String {
+    let todo_items = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            format!(
+                "{}. [{}] {}",
+                index + 1,
+                status_label(item.status),
+                item.content
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "The todoWrite tool has not been used recently. If this work benefits from progress \
+         tracking, update the todo list. Ignore this reminder if the task is simple or the list \
+         is already irrelevant. Never mention this reminder to the user.\n\nCurrent todo \
+         list:\n{todo_items}"
+    )
+}
+
 fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
     let args = serde_json::from_value::<TodoWriteArgs>(arguments)
         .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
@@ -298,6 +430,14 @@ fn now_utc() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+fn status_label(status: ProgressStatus) -> &'static str {
+    match status {
+        ProgressStatus::Pending => "pending",
+        ProgressStatus::InProgress => "in_progress",
+        ProgressStatus::Completed => "completed",
+    }
+}
+
 fn todo_write_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TODO_WRITE_TOOL_NAME.into(),
@@ -360,6 +500,8 @@ fn metadata<const N: usize>(entries: [(&str, serde_json::Value); N]) -> BTreeMap
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::llm::{LlmContent, LlmMessage};
+
     use super::*;
 
     fn item(content: &str, active_form: &str, status: ProgressStatus) -> ProgressItem {
@@ -371,12 +513,36 @@ mod tests {
         }
     }
 
-    fn test_store(name: &str) -> ProgressListStore {
+    fn test_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir()
             .join("astrcode-todo-tool-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&root);
-        ProgressListStore::new(root)
+        root
+    }
+
+    fn test_store(name: &str) -> ProgressListStore {
+        ProgressListStore::new(test_root(name))
+    }
+
+    fn session_root(name: &str) -> PathBuf {
+        let session_id = format!("session-{name}");
+        let working_dir = std::env::temp_dir()
+            .join("astrcode-todo-tool-tests")
+            .join(format!("workspace-{name}"))
+            .to_string_lossy()
+            .to_string();
+        let root = progress_store_root(&session_id, &working_dir);
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    fn text_exists(messages: &[LlmMessage], needle: &str) -> bool {
+        messages.iter().any(|message| {
+            message.content.iter().any(
+                |content| matches!(content, LlmContent::Text { text } if text.contains(needle)),
+            )
+        })
     }
 
     #[test]
@@ -480,6 +646,14 @@ mod tests {
         assert_eq!(tool["name"], definition.name);
         assert_eq!(tool["description"], definition.description);
         assert_eq!(tool["parameters"], definition.parameters);
+        assert_eq!(manifest["subscriptions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            TodoToolExtension.subscriptions(),
+            vec![
+                (ExtensionEvent::BeforeProviderRequest, HookMode::Blocking),
+                (ExtensionEvent::PostToolUse, HookMode::Blocking),
+            ]
+        );
     }
 
     #[test]
@@ -502,5 +676,84 @@ mod tests {
             .expect("write should succeed");
 
         assert!(result.verification_nudge_needed);
+    }
+
+    #[test]
+    fn before_provider_request_injects_stale_nonempty_todo_reminder() {
+        let root = session_root("stale-reminder");
+        let store = ProgressListStore::new(root.clone());
+        store
+            .replace(vec![
+                item(
+                    "Replace task tools",
+                    "Replacing task tools",
+                    ProgressStatus::InProgress,
+                ),
+                item(
+                    "Run verification",
+                    "Running verification",
+                    ProgressStatus::Pending,
+                ),
+            ])
+            .unwrap();
+        let reminder = ProgressReminder::new(root);
+        reminder
+            .save_state(&ProgressReminderState {
+                assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
+                assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
+            })
+            .unwrap();
+
+        let effect = reminder
+            .before_provider_request(vec![LlmMessage::user("continue")])
+            .unwrap();
+
+        let HookEffect::ModifiedMessages { messages } = effect else {
+            panic!("stale todo list should inject a provider reminder");
+        };
+        assert!(text_exists(
+            &messages,
+            "The todoWrite tool has not been used recently"
+        ));
+        assert!(text_exists(&messages, "Replace task tools"));
+    }
+
+    #[test]
+    fn before_provider_request_skips_empty_todo_reminder() {
+        let root = session_root("empty-reminder");
+        let reminder = ProgressReminder::new(root);
+        reminder
+            .save_state(&ProgressReminderState {
+                assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
+                assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
+            })
+            .unwrap();
+
+        let effect = reminder
+            .before_provider_request(vec![LlmMessage::user("continue")])
+            .unwrap();
+
+        assert!(matches!(effect, HookEffect::Allow));
+    }
+
+    #[test]
+    fn post_tool_use_resets_todo_write_staleness() {
+        let root = session_root("post-tool-reset");
+        let reminder = ProgressReminder::new(root);
+        reminder
+            .save_state(&ProgressReminderState {
+                assistant_cycles_since_todo_write: REMINDER_THRESHOLD,
+                assistant_cycles_since_reminder: REMINDER_THRESHOLD,
+            })
+            .unwrap();
+        reminder.record_todo_write().unwrap();
+
+        assert_eq!(
+            reminder
+                .load_state()
+                .unwrap()
+                .assistant_cycles_since_todo_write,
+            0
+        );
     }
 }

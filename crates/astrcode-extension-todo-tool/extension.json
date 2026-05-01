@@ -5,7 +5,16 @@
   "description": "Single-agent progress todo list",
   "astrcode_version": "0.1.0",
   "library": "astrcode_extension_todo_tool.dll",
-  "subscriptions": [],
+  "subscriptions": [
+    {
+      "event": "before_provider_request",
+      "mode": "blocking"
+    },
+    {
+      "event": "post_tool_use",
+      "mode": "blocking"
+    }
+  ],
   "tools": [
     {
       "name": "todoWrite",

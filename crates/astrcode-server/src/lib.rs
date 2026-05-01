@@ -9,7 +9,6 @@ pub mod agent {
 }
 pub mod bootstrap;
 pub mod handler;
-pub(crate) mod progress_todo_reminder;
 pub mod session;
 pub(crate) mod session_spawner;
 pub mod transport;

@@ -8,7 +8,9 @@
 use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
+    config::ModelSelection,
     extension::*,
+    llm::LlmMessage,
     tool::{Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
 use tokio::sync::RwLock;
@@ -197,16 +199,21 @@ impl ExtensionRunner {
     ) -> Result<ProviderHookOutcome, ExtensionError> {
         let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
 
-        let mut modified_messages = None;
+        let mut current_messages = ctx.provider_messages();
+        let mut modified_messages = false;
 
         for ext in &exts {
             let mode = match_ext_mode(ext.as_ref(), &event);
             let Some(mode) = mode else { continue };
+            let hook_ctx = ProviderMessagesContext {
+                base: ctx,
+                messages: current_messages.clone(),
+            };
 
             match mode {
                 HookMode::Blocking => {
                     let result =
-                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), ctx))
+                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), &hook_ctx))
                             .await
                             .map_err(|_| {
                                 ExtensionError::Timeout(self.timeout.as_millis() as u64)
@@ -217,7 +224,8 @@ impl ExtensionRunner {
                             return Ok(ProviderHookOutcome::Blocked { reason });
                         },
                         HookEffect::ModifiedMessages { messages } => {
-                            modified_messages = Some(messages);
+                            current_messages = Some(messages);
+                            modified_messages = true;
                         },
                         HookEffect::Allow
                         | HookEffect::ModifiedInput { .. }
@@ -229,20 +237,20 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     let ext = Arc::clone(ext);
                     let evt = event.clone();
-                    let snap_ctx = ctx.snapshot();
+                    let snap_ctx = hook_ctx.snapshot();
                     tokio::spawn(async move {
                         let _ = ext.on_event(evt, snap_ctx.as_ref()).await;
                     });
                 },
                 HookMode::Advisory => {
-                    let _ = ext.on_event(event.clone(), ctx).await;
+                    let _ = ext.on_event(event.clone(), &hook_ctx).await;
                 },
             }
         }
 
-        Ok(match modified_messages {
-            Some(messages) => ProviderHookOutcome::ModifiedMessages { messages },
-            None => ProviderHookOutcome::Allow,
+        Ok(match (modified_messages, current_messages) {
+            (true, Some(messages)) => ProviderHookOutcome::ModifiedMessages { messages },
+            _ => ProviderHookOutcome::Allow,
         })
     }
 
@@ -458,6 +466,124 @@ pub enum ProviderHookOutcome {
     ModifiedMessages {
         messages: Vec<astrcode_core::llm::LlmMessage>,
     },
+}
+
+struct ProviderMessagesContext<'a> {
+    base: &'a dyn ExtensionContext,
+    messages: Option<Vec<LlmMessage>>,
+}
+
+#[async_trait::async_trait]
+impl ExtensionContext for ProviderMessagesContext<'_> {
+    fn session_id(&self) -> &str {
+        self.base.session_id()
+    }
+
+    fn working_dir(&self) -> &str {
+        self.base.working_dir()
+    }
+
+    fn model_selection(&self) -> ModelSelection {
+        self.base.model_selection()
+    }
+
+    fn config_value(&self, key: &str) -> Option<String> {
+        self.base.config_value(key)
+    }
+
+    async fn emit_custom_event(&self, name: &str, data: serde_json::Value) {
+        self.base.emit_custom_event(name, data).await;
+    }
+
+    fn find_tool(&self, name: &str) -> Option<ToolDefinition> {
+        self.base.find_tool(name)
+    }
+
+    fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
+        self.base.pre_tool_use_input()
+    }
+
+    fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        self.base.post_tool_use_input()
+    }
+
+    fn register_tool(&self, def: ToolDefinition) {
+        self.base.register_tool(def);
+    }
+
+    fn drain_registered_tools(&self) -> Vec<ToolDefinition> {
+        self.base.drain_registered_tools()
+    }
+
+    fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
+        self.messages.clone()
+    }
+
+    fn log_warn(&self, msg: &str) {
+        self.base.log_warn(msg);
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExtensionContext> {
+        Arc::new(ProviderMessagesSnapshot {
+            base: self.base.snapshot(),
+            messages: self.messages.clone(),
+        })
+    }
+}
+
+struct ProviderMessagesSnapshot {
+    base: Arc<dyn ExtensionContext>,
+    messages: Option<Vec<LlmMessage>>,
+}
+
+#[async_trait::async_trait]
+impl ExtensionContext for ProviderMessagesSnapshot {
+    fn session_id(&self) -> &str {
+        self.base.session_id()
+    }
+
+    fn working_dir(&self) -> &str {
+        self.base.working_dir()
+    }
+
+    fn model_selection(&self) -> ModelSelection {
+        self.base.model_selection()
+    }
+
+    fn config_value(&self, key: &str) -> Option<String> {
+        self.base.config_value(key)
+    }
+
+    async fn emit_custom_event(&self, name: &str, data: serde_json::Value) {
+        self.base.emit_custom_event(name, data).await;
+    }
+
+    fn find_tool(&self, name: &str) -> Option<ToolDefinition> {
+        self.base.find_tool(name)
+    }
+
+    fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
+        self.base.pre_tool_use_input()
+    }
+
+    fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        self.base.post_tool_use_input()
+    }
+
+    fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
+        self.messages.clone()
+    }
+
+    fn log_warn(&self, msg: &str) {
+        self.base.log_warn(msg);
+    }
+
+    fn snapshot(&self) -> Arc<dyn ExtensionContext> {
+        Arc::new(ProviderMessagesSnapshot {
+            base: self.base.snapshot(),
+            messages: self.messages.clone(),
+        })
+    }
 }
 
 /// 查找扩展对指定事件订阅的钩子模式。

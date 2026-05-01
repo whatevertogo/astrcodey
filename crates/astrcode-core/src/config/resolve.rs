@@ -205,9 +205,11 @@ mod tests {
 
     #[test]
     fn test_openai_prompt_cache_capabilities_are_resolved() {
-        let mut config = Config::default();
-        config.active_profile = "openai".into();
-        config.active_model = "gpt-4.1".into();
+        let config = Config {
+            active_profile: "openai".into(),
+            active_model: "gpt-4.1".into(),
+            ..Config::default()
+        };
         let previous = std::env::var("OPENAI_API_KEY").ok();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
 
