@@ -9,34 +9,131 @@
   "tools": [
     {
       "name": "taskCreate",
-      "description": "Create a tracked task in the task list",
+      "description": "Create a session-local tracked task. Use it for complex multi-step work; mark tasks in_progress before starting and completed only when done.",
       "parameters": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-          "subject": { "type": "string", "description": "Brief task title" },
-          "description": { "type": "string", "description": "What needs to be done" },
-          "blocks": { "type": "array", "items": { "type": "string" }, "description": "Task IDs this task blocks" }
+          "subject": {
+            "type": "string",
+            "description": "Brief imperative task title."
+          },
+          "description": {
+            "type": "string",
+            "description": "Detailed task requirements."
+          },
+          "activeForm": {
+            "type": "string",
+            "description": "Present-progress phrase used when the task is in_progress."
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Task IDs this task blocks."
+          }
         },
-        "required": ["subject", "description"]
+        "required": [
+          "subject",
+          "description"
+        ]
       }
     },
     {
       "name": "taskList",
-      "description": "List all tracked tasks with their statuses",
-      "parameters": { "type": "object", "properties": {} }
+      "description": "List session-local tracked tasks and their dependency status.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "taskGet",
+      "description": "Get a session-local tracked task by id.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Task ID."
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
     },
     {
       "name": "taskUpdate",
-      "description": "Update task status or properties",
+      "description": "Update or delete a session-local tracked task. Use action=\"delete\" for deletion; deletion is not a TaskStatus.",
       "parameters": {
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-          "id": { "type": "string", "description": "Task ID" },
-          "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
-          "subject": { "type": "string" },
-          "description": { "type": "string" }
+          "id": {
+            "type": "string",
+            "description": "Task ID."
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "delete"
+            ],
+            "description": "Use delete to remove the task and clean dependency edges."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+            ]
+          },
+          "subject": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "activeForm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required when status is in_progress. Null clears it."
+          },
+          "blocks": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "replace": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "add": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "remove": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Either replace the full blocks set or patch it with add/remove."
+          }
         },
-        "required": ["id"]
+        "required": [
+          "id"
+        ]
       }
     }
   ]

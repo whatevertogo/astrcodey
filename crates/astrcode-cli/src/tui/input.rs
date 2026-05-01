@@ -9,8 +9,8 @@ use crossterm::event::{KeyEvent, KeyEventKind};
 pub enum Action {
     /// 退出 TUI
     Quit,
-    /// 刷新时钟周期（用于触发重绘，如终端窗口大小变化）
-    Tick,
+    /// 终端窗口大小变化
+    Resize,
     /// 键盘按键事件
     Key(KeyEvent),
     /// bracketed paste 文本

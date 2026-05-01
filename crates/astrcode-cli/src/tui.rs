@@ -27,7 +27,10 @@ use crossterm::{
 };
 use input::Action;
 use ratatui::{
-    Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, prelude::Widget, text::Text,
+    Terminal, TerminalOptions, Viewport,
+    backend::{Backend, CrosstermBackend},
+    prelude::Widget,
+    text::Text,
     widgets::Paragraph,
 };
 use render::scrollback_entry_to_lines;
@@ -98,7 +101,7 @@ async fn handle_action(
 ) -> io::Result<()> {
     match action {
         Action::Quit => state.should_quit = true,
-        Action::Tick => state.mark_dirty(),
+        Action::Resize => terminal.sync_resize()?,
         Action::Key(event) => handle_key(event, state, client, terminal).await?,
         Action::Paste(text) => {
             let text = normalize_paste(&text);
@@ -321,7 +324,7 @@ fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
                         }
                     },
                     Ok(event::Event::Resize(_, _)) => {
-                        if action_tx.send(Action::Tick).is_err() {
+                        if action_tx.send(Action::Resize).is_err() {
                             break;
                         }
                     },
@@ -374,6 +377,11 @@ impl TerminalSession {
             .map(|_| ())
     }
 
+    fn sync_resize(&mut self) -> io::Result<()> {
+        self.terminal.autoresize()?;
+        self.terminal.clear()
+    }
+
     fn composer_width(&self) -> usize {
         self.terminal
             .size()
@@ -387,15 +395,24 @@ impl TerminalSession {
         entry: &state::ScrollbackEntry,
         theme: &theme::Theme,
     ) -> io::Result<()> {
-        let width = self.terminal.size()?.width;
-        let lines = scrollback_entry_to_lines(entry, width, theme);
-        let height = lines.len() as u16;
-        self.terminal.insert_before(height, |buf| {
-            let p = Paragraph::new(Text::from(lines.clone()));
-            Widget::render(p, buf.area, buf);
-        })?;
-        Ok(())
+        insert_scrollback_entry(&mut self.terminal, entry, theme)
     }
+}
+
+fn insert_scrollback_entry<B: Backend>(
+    terminal: &mut Terminal<B>,
+    entry: &state::ScrollbackEntry,
+    theme: &theme::Theme,
+) -> io::Result<()> {
+    terminal.autoresize()?;
+    let width = terminal.size()?.width;
+    let lines = scrollback_entry_to_lines(entry, width, theme);
+    let height = lines.len() as u16;
+    terminal.insert_before(height, |buf| {
+        let p = Paragraph::new(Text::from(lines.clone()));
+        Widget::render(p, buf.area, buf);
+    })?;
+    Ok(())
 }
 
 impl Drop for TerminalSession {
@@ -450,4 +467,42 @@ fn resolve_session_id(state: &TuiState, input: &str) -> String {
         .find(|session_id| session_id.starts_with(needle))
         .cloned()
         .unwrap_or_else(|| needle.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::backend::TestBackend;
+    use state::{MessageRole, ScrollbackEntry};
+
+    use super::*;
+
+    #[test]
+    fn scrollback_insert_autoresizes_inline_viewport_before_writing() {
+        let theme = theme::Theme::detect();
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+            },
+        )
+        .unwrap();
+        let entry = ScrollbackEntry::StreamText {
+            role: MessageRole::Assistant,
+            text: "alpha beta gamma delta".into(),
+        };
+
+        terminal.backend_mut().resize(8, 6);
+        insert_scrollback_entry(&mut terminal, &entry, &theme).unwrap();
+
+        {
+            let frame = terminal.get_frame();
+            assert_eq!(frame.area().width, 8);
+        }
+
+        let state = TuiState::new();
+        terminal
+            .draw(|frame| render::render(&state, frame, &theme))
+            .unwrap();
+    }
 }
