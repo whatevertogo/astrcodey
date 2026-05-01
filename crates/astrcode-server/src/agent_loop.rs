@@ -21,13 +21,16 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolResult},
     types::*,
 };
-use astrcode_extension_todo_tool::{ProgressListStore, TODO_WRITE_TOOL_NAME, progress_store_root};
 use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
+
+use crate::progress_todo_reminder::{
+    ProgressTodoReminder, TODO_WRITE_TOOL_NAME, todo_write_is_available,
+};
 
 /// 并行执行工具调用时的最大并发数。
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
@@ -168,12 +171,8 @@ impl Agent {
         )
     }
 
-    fn progress_store(&self) -> ProgressListStore {
-        ProgressListStore::new(progress_store_root(&self.session_id, &self.working_dir))
-    }
-
     fn todo_write_is_available(&self, tools: &[ToolDefinition]) -> bool {
-        tools.iter().any(|tool| tool.name == TODO_WRITE_TOOL_NAME)
+        todo_write_is_available(tools)
     }
 
     fn maybe_append_progress_todo_reminder(
@@ -185,24 +184,7 @@ impl Agent {
             return false;
         }
 
-        let store = self.progress_store();
-        match store.should_insert_reminder() {
-            Ok(true) => match store.build_reminder_message() {
-                Ok(message) => {
-                    messages.push(LlmMessage::user(message));
-                    true
-                },
-                Err(error) => {
-                    tracing::warn!(error = %error, "Failed to build progress todo reminder");
-                    false
-                },
-            },
-            Ok(false) => false,
-            Err(error) => {
-                tracing::warn!(error = %error, "Failed to read progress todo reminder state");
-                false
-            },
-        }
+        ProgressTodoReminder::new(&self.session_id, &self.working_dir).maybe_append(messages, tools)
     }
 
     fn record_progress_todo_cycle(
@@ -215,12 +197,11 @@ impl Agent {
             return;
         }
 
-        if let Err(error) = self
-            .progress_store()
-            .record_assistant_cycle(used_todo_write, reminder_inserted)
-        {
-            tracing::warn!(error = %error, "Failed to update progress todo reminder state");
-        }
+        ProgressTodoReminder::new(&self.session_id, &self.working_dir).record_cycle(
+            tools,
+            used_todo_write,
+            reminder_inserted,
+        );
     }
 
     /// 预处理工具调用列表。

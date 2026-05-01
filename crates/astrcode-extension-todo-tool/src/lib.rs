@@ -21,8 +21,6 @@ Update the progress todo list for the current session. Use it proactively for co
                                       working. Provide both content and activeForm for each item.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
-const REMINDER_FILE: &str = "reminder.json";
-const REMINDER_THRESHOLD: u32 = 10;
 
 /// Compute session-local progress todo storage root.
 pub fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
@@ -83,7 +81,15 @@ impl Extension for TodoToolExtension {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TodoWriteArgs {
-    todos: Vec<ProgressItem>,
+    todos: Vec<TodoInputItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TodoInputItem {
+    content: String,
+    active_form: String,
+    status: ProgressStatus,
 }
 
 /// Progress item status for the single-agent todo list.
@@ -113,14 +119,6 @@ pub struct ProgressList {
     pub schema_version: u32,
     pub items: Vec<ProgressItem>,
     pub updated_at: String,
-}
-
-/// Persisted stale-reminder counters.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProgressReminderState {
-    pub assistant_cycles_since_todo_write: u32,
-    pub assistant_cycles_since_reminder: u32,
 }
 
 /// Result of replacing the todo list.
@@ -168,79 +166,6 @@ impl ProgressListStore {
         })
     }
 
-    pub fn load_reminder_state(&self) -> Result<ProgressReminderState, String> {
-        let path = self.root.join(REMINDER_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|error| format!("parse reminder state: {error}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(ProgressReminderState::default())
-            },
-            Err(error) => Err(format!("read reminder state: {error}")),
-        }
-    }
-
-    pub fn record_assistant_cycle(
-        &self,
-        used_todo_write: bool,
-        reminder_inserted: bool,
-    ) -> Result<ProgressReminderState, String> {
-        let mut state = self.load_reminder_state()?;
-        if used_todo_write {
-            state.assistant_cycles_since_todo_write = 0;
-        } else {
-            state.assistant_cycles_since_todo_write =
-                state.assistant_cycles_since_todo_write.saturating_add(1);
-        }
-
-        if reminder_inserted {
-            state.assistant_cycles_since_reminder = 0;
-        } else {
-            state.assistant_cycles_since_reminder =
-                state.assistant_cycles_since_reminder.saturating_add(1);
-        }
-
-        self.save_reminder_state(&state)?;
-        Ok(state)
-    }
-
-    pub fn should_insert_reminder(&self) -> Result<bool, String> {
-        let state = self.load_reminder_state()?;
-        Ok(
-            state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
-                && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD,
-        )
-    }
-
-    pub fn build_reminder_message(&self) -> Result<String, String> {
-        let items = self.load_items()?;
-        let mut message = String::from(
-            "The todoWrite tool has not been used recently. If this work benefits from progress \
-             tracking, update the todo list. Ignore this reminder if the task is simple or the \
-             list is already irrelevant. Never mention this reminder to the user.",
-        );
-
-        if !items.is_empty() {
-            let todo_items = items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    format!(
-                        "{}. [{}] {}",
-                        index + 1,
-                        status_label(item.status),
-                        item.content
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            message.push_str("\n\nCurrent todo list:\n");
-            message.push_str(&todo_items);
-        }
-
-        Ok(message)
-    }
-
     fn load_progress(&self) -> Result<ProgressList, String> {
         let path = self.root.join(PROGRESS_FILE);
         match std::fs::read_to_string(&path) {
@@ -274,11 +199,6 @@ impl ProgressListStore {
         self.write_json(PROGRESS_FILE, &progress)
     }
 
-    fn save_reminder_state(&self, state: &ProgressReminderState) -> Result<(), String> {
-        self.ensure_dir()?;
-        self.write_json(REMINDER_FILE, state)
-    }
-
     fn write_json<T: Serialize>(&self, file_name: &str, value: &T) -> Result<(), String> {
         let path = self.root.join(file_name);
         let tmp = self.root.join(format!("{file_name}.tmp"));
@@ -298,7 +218,7 @@ impl ProgressListStore {
 fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
     let args = serde_json::from_value::<TodoWriteArgs>(arguments)
         .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
-    let outcome = store.replace(args.todos)?;
+    let outcome = store.replace(args.todos.into_iter().map(ProgressItem::from).collect())?;
 
     let mut content = String::from(
         "Todos have been modified successfully. Continue to use the todo list to track your \
@@ -350,6 +270,17 @@ fn validate_text(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+impl From<TodoInputItem> for ProgressItem {
+    fn from(item: TodoInputItem) -> Self {
+        Self {
+            content: item.content,
+            active_form: item.active_form,
+            status: item.status,
+            metadata: BTreeMap::new(),
+        }
+    }
+}
+
 fn needs_verification_nudge(items: &[ProgressItem]) -> bool {
     items.len() >= 3
         && items
@@ -365,14 +296,6 @@ fn needs_verification_nudge(items: &[ProgressItem]) -> bool {
 
 fn now_utc() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-fn status_label(status: ProgressStatus) -> &'static str {
-    match status {
-        ProgressStatus::Pending => "pending",
-        ProgressStatus::InProgress => "in_progress",
-        ProgressStatus::Completed => "completed",
-    }
 }
 
 fn todo_write_tool_definition() -> ToolDefinition {
@@ -557,21 +480,6 @@ mod tests {
         assert_eq!(tool["name"], definition.name);
         assert_eq!(tool["description"], definition.description);
         assert_eq!(tool["parameters"], definition.parameters);
-    }
-
-    #[test]
-    fn reminder_state_tracks_cycles() {
-        let store = test_store("reminder-state");
-        assert!(!store.should_insert_reminder().unwrap());
-
-        for _ in 0..3 {
-            store.record_assistant_cycle(false, false).unwrap();
-        }
-        assert!(store.should_insert_reminder().unwrap());
-
-        let state = store.record_assistant_cycle(true, false).unwrap();
-        assert_eq!(state.assistant_cycles_since_todo_write, 0);
-        assert!(!store.should_insert_reminder().unwrap());
     }
 
     #[test]

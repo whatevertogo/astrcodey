@@ -17,9 +17,7 @@ use astrcode_core::{
         ToolResult,
     },
 };
-use astrcode_extension_todo_tool::{
-    ProgressItem, ProgressListStore, ProgressStatus, TODO_WRITE_TOOL_NAME, progress_store_root,
-};
+use astrcode_extension_todo_tool::{ProgressItem, ProgressListStore, ProgressStatus};
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::{
     sync::{Barrier, mpsc},
@@ -27,6 +25,10 @@ use tokio::{
 };
 
 use super::*;
+use crate::progress_todo_reminder::{
+    ProgressReminderState, REMINDER_THRESHOLD, TODO_WRITE_TOOL_NAME, load_state,
+    progress_todo_root, seed_state, seeded_stale_state,
+};
 
 #[test]
 fn claude_tool_aliases_match_local_tool_names() {
@@ -359,7 +361,7 @@ fn progress_item(content: &str, active_form: &str, status: ProgressStatus) -> Pr
 }
 
 fn test_progress_store(session_id: &str, working_dir: &str) -> ProgressListStore {
-    let root = progress_store_root(session_id, working_dir);
+    let root = progress_todo_root(&session_id.to_string(), working_dir);
     let _ = std::fs::remove_dir_all(&root);
     ProgressListStore::new(root)
 }
@@ -716,14 +718,12 @@ async fn todo_reminder_is_injected_after_stale_cycles() {
             ),
         ])
         .unwrap();
-    for _ in 0..3 {
-        store.record_assistant_cycle(false, false).unwrap();
-    }
+    seed_state(&session_id.to_string(), &working_dir, &seeded_stale_state()).unwrap();
 
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         session_id.into(),
-        working_dir,
+        working_dir.clone(),
         Arc::new(CapturingLlm {
             messages: Arc::clone(&captured_messages),
         }),
@@ -763,15 +763,21 @@ async fn todo_write_call_prevents_next_cycle_reminder() {
         .join("astrcode-agent-loop-todo-write-reset")
         .to_string_lossy()
         .to_string();
-    let store = test_progress_store(session_id, &working_dir);
-    for _ in 0..2 {
-        store.record_assistant_cycle(false, false).unwrap();
-    }
+    let _store = test_progress_store(session_id, &working_dir);
+    seed_state(
+        &session_id.to_string(),
+        &working_dir,
+        &ProgressReminderState {
+            assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
+            assistant_cycles_since_reminder: REMINDER_THRESHOLD,
+        },
+    )
+    .unwrap();
 
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         session_id.into(),
-        working_dir,
+        working_dir.clone(),
         Arc::new(ToolCallsThenFinalLlm {
             call_count: AtomicUsize::new(0),
             calls: vec![("call-1", TODO_WRITE_TOOL_NAME)],
@@ -800,5 +806,11 @@ async fn todo_write_call_prevents_next_cycle_reminder() {
     assert!(
         !message_text_contains(&messages, "The todoWrite tool has not been used recently"),
         "the provider request immediately after todoWrite should not receive stale reminder"
+    );
+    assert_eq!(
+        load_state(&session_id.to_string(), &working_dir)
+            .unwrap()
+            .assistant_cycles_since_todo_write,
+        1
     );
 }
