@@ -2,10 +2,9 @@
 name = "astrcode-context"
 version = "0.1.0"
 edition = "2021"
-description = "LLM context assembly: system prompt composition, token estimation, and summary compaction"
+description = "LLM context window management: token estimation and summary compaction"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-support = { path = "../astrcode-support" }
 tokio = { workspace = true }
 async-trait = { workspace = true }

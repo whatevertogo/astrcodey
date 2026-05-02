@@ -14,10 +14,11 @@ use std::{
 
 use astrcode_context::{
     compaction::{
-        CompactError, CompactPromptStyle, CompactRequestOptions, CompactResult, CompactSkipReason,
-        is_prompt_too_long_message,
+        CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
+        compact_messages_with_render_options, is_prompt_too_long_message,
     },
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
+    token_usage::should_compact as token_should_compact,
 };
 use astrcode_core::{
     config::ModelSelection,
@@ -40,7 +41,7 @@ use crate::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
         dispatch_post_compact,
     },
-    forked_provider::CompactForkRunner,
+    forked_provider::compact_with_forked_provider,
     session::{SessionManager, compaction_applied_payload},
 };
 
@@ -168,12 +169,531 @@ impl Agent {
         self
     }
 
-    /// 检查指定工具名是否在白名单中。
-    /// 如果未设置白名单，则允许所有工具。
-    fn tool_is_allowed(&self, name: &str) -> bool {
-        self.tool_allowlist
-            .as_ref()
-            .is_none_or(|allowed| tool_name_matches_allowlist(allowed, name))
+    /// 处理用户输入的完整 Agent 循环。
+    ///
+    /// 整体流程：
+    /// 1. 分发 `TurnStart` 和 `UserPromptSubmit` 扩展事件。
+    /// 2. 使用 session 初始化时固定下来的 system prompt 构造消息前缀。
+    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM），直到 LLM 不再请求工具调用为止。
+    ///
+    /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
+    /// 由 handler 层包装会话/回合元数据后决定持久化策略。
+    pub async fn process_prompt(
+        &self,
+        user_text: &str,
+        history: Vec<LlmMessage>,
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    ) -> Result<AgentTurnOutput, AgentError> {
+        // 构建扩展上下文，填充工具定义供扩展钩子查询
+        let mut ext_ctx = self.build_ext_ctx();
+        let mut tools = self.tool_registry.list_definitions();
+        if let Some(allowed) = &self.tool_allowlist {
+            tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
+        }
+        let tool_map: std::collections::HashMap<_, _> =
+            tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
+        ext_ctx.set_tools(tool_map);
+
+        // 分发 TurnStart 事件，通知扩展新回合开始
+        self.extension_runner
+            .dispatch(ExtensionEvent::TurnStart, &ext_ctx)
+            .await?;
+
+        // 分发 UserPromptSubmit 事件。
+        // 如果扩展通过 Blocking 钩子拒绝了提示词，先触发 TurnEnd 再返回错误。
+        if let Err(e) = self
+            .extension_runner
+            .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
+            .await
+        {
+            let _ = self
+                .extension_runner
+                .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                .await;
+            return Err(e.into());
+        }
+
+        // 每轮都以同一份 session system prompt 开头；历史来自 eventlog 投影。
+        let mut messages = Vec::with_capacity(history.len() + 2);
+        if !self.system_prompt.trim().is_empty() {
+            messages.push(LlmMessage::system(self.system_prompt.clone()));
+        }
+        messages.extend(
+            history
+                .into_iter()
+                .filter(|message| message.role != LlmRole::System),
+        );
+        messages.push(LlmMessage::user(user_text));
+
+        // 累积本轮 Agent 的最终文本输出和所有工具执行结果
+        let mut final_text = String::new();
+        let mut all_tool_results: Vec<ToolResult> = Vec::new();
+        let mut did_overflow_retry_this_turn = false;
+
+        // ── Agent 主循环 ──
+        // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
+        loop {
+            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
+                .iter()
+                .cloned()
+                .partition(|message| message.role == LlmRole::System);
+            let prepare_input = ContextPrepareInput {
+                messages: visible_messages,
+                system_prompt: Some(&self.system_prompt),
+                model_limits: self.llm.model_limits(),
+            };
+            let compact_message_count = prepare_input.messages.len();
+            let should_auto_compact = self.context_assembler.auto_compact_enabled()
+                && token_should_compact(self.context_assembler.prompt_snapshot(&prepare_input));
+            let prepared_context = if should_auto_compact {
+                let compact_instructions = match self
+                    .compact_instructions(
+                        CompactTrigger::AutoThreshold,
+                        compact_message_count,
+                        &tools,
+                    )
+                    .await
+                {
+                    Ok(instructions) => instructions,
+                    Err(error) => {
+                        let _ = self
+                            .extension_runner
+                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                            .await;
+                        return Err(error);
+                    },
+                };
+                let transcript_path = self
+                    .write_compact_snapshot(
+                        CompactTrigger::AutoThreshold,
+                        prepare_input.messages.clone(),
+                        Some(&self.system_prompt),
+                    )
+                    .await;
+                let render_options = CompactSummaryRenderOptions { transcript_path };
+                match compact_with_forked_provider(
+                    Arc::clone(&self.llm),
+                    tools.clone(),
+                    &prepare_input.messages,
+                    prepare_input.system_prompt,
+                    self.context_assembler.settings(),
+                    &compact_instructions,
+                    &render_options,
+                )
+                .await
+                {
+                    Ok(compaction) => prepared_context_from_compaction(compaction),
+                    Err(_) => match compact_messages_with_render_options(
+                        &prepare_input.messages,
+                        prepare_input.system_prompt,
+                        &render_options,
+                    ) {
+                        Ok(compaction) => prepared_context_from_compaction(compaction),
+                        Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
+                            self.context_assembler.prepare_messages(prepare_input)
+                        },
+                    },
+                }
+            } else {
+                self.context_assembler.prepare_messages(prepare_input)
+            };
+            if let Some(compaction) = prepared_context.compaction {
+                if let Err(error) = self
+                    .notify_post_compact(
+                        CompactTrigger::AutoThreshold,
+                        compact_message_count,
+                        &tools,
+                        &compaction,
+                    )
+                    .await
+                {
+                    let _ = self
+                        .extension_runner
+                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                        .await;
+                    return Err(error);
+                }
+                if let Some(tx) = &event_tx {
+                    let _ = tx.send(EventPayload::CompactionStarted);
+                    let _ = tx.send(compaction_applied_payload(&compaction));
+                    let _ = tx.send(EventPayload::CompactionCompleted {
+                        pre_tokens: compaction.pre_tokens,
+                        post_tokens: compaction.post_tokens,
+                        summary: compaction.summary,
+                    });
+                }
+                messages = [system_messages.clone(), prepared_context.messages.clone()].concat();
+            }
+
+            // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
+            let mut send_messages = [system_messages, prepared_context.messages].concat();
+            {
+                let mut ext_ctx = self.build_ext_ctx_with_tools(&tools);
+                ext_ctx.set_provider_messages(send_messages.clone());
+                match self
+                    .extension_runner
+                    .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &ext_ctx)
+                    .await?
+                {
+                    ProviderHookOutcome::Blocked { reason } => {
+                        self.extension_runner
+                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                            .await?;
+                        return Err(AgentError::Llm(reason));
+                    },
+                    ProviderHookOutcome::ModifiedMessages { messages } => {
+                        send_messages = messages;
+                    },
+                    ProviderHookOutcome::Allow => {},
+                }
+            }
+            let mut rx = match self.llm.generate(send_messages, tools.clone()).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    // LLM 调用级别失败（网络/认证等），需要通知客户端，
+                    // 否则外部消费者无法感知此错误（流中错误通过 LlmEvent::Error 已有处理）
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(EventPayload::ErrorOccurred {
+                            code: -32603,
+                            message: e.to_string(),
+                            recoverable: false,
+                        });
+                    }
+                    let _ = self
+                        .extension_runner
+                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                        .await;
+                    return Err(e.into());
+                },
+            };
+            // 每轮 LLM 调用的局部状态
+            let message_id = new_message_id(); // 本轮消息的唯一 ID
+            let mut message_started = false; // 是否已发送 AssistantMessageStarted
+            let mut current_text = String::new(); // 本轮累积的文本增量
+            let mut tool_calls: Vec<PendingToolCall> = Vec::new(); // LLM 请求的工具调用
+            // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
+            // 避免消息在工具执行前就被标记为已完成。
+            let mut completed_text: Option<String> = None;
+            let mut retry_provider_request = false;
+
+            // 消费 LLM 事件流，处理文本增量和工具调用增量
+            while let Some(event) = rx.recv().await {
+                match event {
+                    LlmEvent::ContentDelta { delta } => {
+                        if let Some(tx) = &event_tx {
+                            if !message_started {
+                                let _ = tx.send(EventPayload::AssistantMessageStarted {
+                                    message_id: message_id.clone(),
+                                });
+                                message_started = true;
+                            }
+                            let _ = tx.send(EventPayload::AssistantTextDelta {
+                                message_id: message_id.clone(),
+                                delta: delta.clone(),
+                            });
+                        }
+                        current_text.push_str(&delta);
+                    },
+                    LlmEvent::ToolCallStart {
+                        call_id,
+                        name,
+                        arguments,
+                    } => {
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ToolCallStarted {
+                                call_id: call_id.clone(),
+                                tool_name: name.clone(),
+                            });
+                            if !arguments.is_empty() {
+                                let _ = tx.send(EventPayload::ToolCallArgumentsDelta {
+                                    call_id: call_id.clone(),
+                                    delta: arguments.clone(),
+                                });
+                            }
+                        }
+                        tool_calls.push(PendingToolCall {
+                            call_id,
+                            name,
+                            arguments,
+                        });
+                    },
+                    LlmEvent::ToolCallDelta { call_id, delta } => {
+                        if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
+                            tc.arguments.push_str(&delta);
+                        }
+                        if let Some(tx) = &event_tx {
+                            let _ =
+                                tx.send(EventPayload::ToolCallArgumentsDelta { call_id, delta });
+                        }
+                    },
+                    LlmEvent::Done { finish_reason } => {
+                        if !current_text.is_empty() {
+                            let text = std::mem::take(&mut current_text);
+                            messages.push(LlmMessage::assistant(&text));
+                            final_text.push_str(&text);
+                            completed_text = Some(text);
+                        }
+
+                        if tool_calls.is_empty() {
+                            // 无工具调用：消息在此处完成并直接返回
+                            if let (Some(text), true) = (completed_text.take(), message_started) {
+                                if let Some(tx) = &event_tx {
+                                    let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                                        message_id: message_id.clone(),
+                                        text,
+                                    });
+                                }
+                            }
+                            self.extension_runner
+                                .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                                .await?;
+                            return Ok(AgentTurnOutput {
+                                text: final_text,
+                                finish_reason,
+                                tool_results: all_tool_results,
+                            });
+                        }
+                        break;
+                    },
+                    LlmEvent::Error { message } => {
+                        if is_prompt_too_long_message(&message) && !did_overflow_retry_this_turn {
+                            did_overflow_retry_this_turn = true;
+                            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
+                                .iter()
+                                .cloned()
+                                .partition(|message| message.role == LlmRole::System);
+                            let overflow_compaction = self
+                                .compact_for_overflow_retry(
+                                    visible_messages,
+                                    Some(&self.system_prompt),
+                                    &tools,
+                                )
+                                .await;
+                            let prepared = match overflow_compaction {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    let _ = self
+                                        .extension_runner
+                                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                                        .await;
+                                    return Err(error);
+                                },
+                            };
+                            if let Some(prepared) = prepared {
+                                let compaction = prepared
+                                    .compaction
+                                    .expect("compact_provider_messages should include compaction");
+                                if let Some(tx) = &event_tx {
+                                    let _ = tx.send(EventPayload::CompactionStarted);
+                                    let _ = tx.send(compaction_applied_payload(&compaction));
+                                    let _ = tx.send(EventPayload::CompactionCompleted {
+                                        pre_tokens: compaction.pre_tokens,
+                                        post_tokens: compaction.post_tokens,
+                                        summary: compaction.summary,
+                                    });
+                                }
+                                messages = [system_messages, prepared.messages].concat();
+                                retry_provider_request = true;
+                                break;
+                            }
+                        }
+                        if let Some(tx) = &event_tx {
+                            let _ = tx.send(EventPayload::ErrorOccurred {
+                                code: -32603,
+                                message: message.clone(),
+                                recoverable: false,
+                            });
+                        }
+                        self.extension_runner
+                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                            .await?;
+                        return Err(AgentError::Llm(message));
+                    },
+                }
+            }
+            if retry_provider_request {
+                continue;
+            }
+
+            // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
+            if let Err(e) = self
+                .extension_runner
+                .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
+                .await
+            {
+                let _ = self
+                    .extension_runner
+                    .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
+                    .await;
+                return Err(e.into());
+            }
+
+            // ── 工具调用执行管线 ──
+            // 1. 预处理：白名单检查 + PreToolUse 钩子
+            let prepared_tool_calls = self
+                .prepare_tool_calls(&tool_calls, &tools, &event_tx)
+                .await?;
+            // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
+            messages.push(assistant_tool_call_message(&prepared_tool_calls));
+            // 2. 执行：按并行/串行模式调度工具
+            let tool_results = self
+                .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
+                .await?;
+            // 3. 提交：PostToolUse 钩子 + 追加到对话历史
+            self.commit_tool_results(CommitToolResults {
+                prepared: &prepared_tool_calls,
+                results: tool_results,
+                tools: &tools,
+                messages: &mut messages,
+                all_tool_results: &mut all_tool_results,
+                event_tx: &event_tx,
+            })
+            .await?;
+
+            // 工具调用全部执行完毕后才发送消息完成事件，
+            // 保证 completed 事件在所有 tool_call 事件之后。
+            if let Some(text) = completed_text.take() {
+                if message_started {
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                            message_id: message_id.clone(),
+                            text,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    async fn compact_for_overflow_retry(
+        &self,
+        visible_messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+        tools: &[ToolDefinition],
+    ) -> Result<Option<PreparedContext>, AgentError> {
+        let message_count = visible_messages.len();
+        let compact_instructions = self
+            .compact_instructions(CompactTrigger::PromptTooLongRetry, message_count, tools)
+            .await?;
+        let transcript_path = self
+            .write_compact_snapshot(
+                CompactTrigger::PromptTooLongRetry,
+                visible_messages.clone(),
+                system_prompt,
+            )
+            .await;
+        let render_options = CompactSummaryRenderOptions {
+            transcript_path: transcript_path.clone(),
+        };
+        let prepared = match compact_with_forked_provider(
+            Arc::clone(&self.llm),
+            tools.to_vec(),
+            &visible_messages,
+            system_prompt,
+            self.context_assembler.settings(),
+            &compact_instructions,
+            &render_options,
+        )
+        .await
+        {
+            Ok(compaction) => Some(prepared_context_from_compaction(compaction)),
+            Err(_) => compact_messages_with_render_options(
+                &visible_messages,
+                system_prompt,
+                &CompactSummaryRenderOptions { transcript_path },
+            )
+            .ok()
+            .map(prepared_context_from_compaction),
+        };
+
+        if let Some(prepared) = &prepared {
+            if let Some(compaction) = &prepared.compaction {
+                self.notify_post_compact(
+                    CompactTrigger::PromptTooLongRetry,
+                    message_count,
+                    tools,
+                    compaction,
+                )
+                .await?;
+            }
+        }
+
+        Ok(prepared)
+    }
+
+    async fn write_compact_snapshot(
+        &self,
+        trigger: CompactTrigger,
+        provider_messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+    ) -> Option<String> {
+        let snapshot = CompactSnapshotInput {
+            trigger: compact_trigger_name(trigger).into(),
+            model_id: self.model_id.clone(),
+            working_dir: self.working_dir.clone(),
+            system_prompt: system_prompt.map(str::to_string),
+            provider_messages,
+        };
+        match self
+            .session_manager
+            .write_compact_snapshot(&self.session_id, snapshot)
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    trigger = compact_trigger_name(trigger),
+                    error = %error,
+                    "Failed to write compact transcript snapshot"
+                );
+                None
+            },
+        }
+    }
+
+    async fn compact_instructions(
+        &self,
+        trigger: CompactTrigger,
+        message_count: usize,
+        tools: &[ToolDefinition],
+    ) -> Result<Vec<String>, AgentError> {
+        collect_compact_instructions(
+            &self.extension_runner,
+            CompactHookContext {
+                session_id: &self.session_id,
+                working_dir: &self.working_dir,
+                model_id: &self.model_id,
+                tools,
+                trigger,
+                message_count,
+            },
+        )
+        .await
+        .map_err(AgentError::Extension)
+    }
+
+    async fn notify_post_compact(
+        &self,
+        trigger: CompactTrigger,
+        message_count: usize,
+        tools: &[ToolDefinition],
+        compaction: &CompactResult,
+    ) -> Result<(), AgentError> {
+        dispatch_post_compact(
+            &self.extension_runner,
+            CompactHookContext {
+                session_id: &self.session_id,
+                working_dir: &self.working_dir,
+                model_id: &self.model_id,
+                tools,
+                trigger,
+                message_count,
+            },
+            compaction,
+        )
+        .await
+        .map_err(AgentError::Extension)
     }
 
     /// 构建当前回合的扩展上下文，包含会话 ID、工作目录和模型信息。
@@ -199,6 +719,14 @@ impl Agent {
                 .collect(),
         );
         ctx
+    }
+
+    /// 检查指定工具名是否在白名单中。
+    /// 如果未设置白名单，则允许所有工具。
+    fn tool_is_allowed(&self, name: &str) -> bool {
+        self.tool_allowlist
+            .as_ref()
+            .is_none_or(|allowed| tool_name_matches_allowlist(allowed, name))
     }
 
     /// 预处理工具调用列表。
@@ -494,545 +1022,6 @@ impl Agent {
 
         Ok(())
     }
-
-    /// 处理用户输入的完整 Agent 循环。
-    ///
-    /// 整体流程：
-    /// 1. 分发 `TurnStart` 和 `UserPromptSubmit` 扩展事件。
-    /// 2. 使用 session 初始化时固定下来的 system prompt 构造消息前缀。
-    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM），直到 LLM 不再请求工具调用为止。
-    ///
-    /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
-    /// 由 handler 层包装会话/回合元数据后决定持久化策略。
-    pub async fn process_prompt(
-        &self,
-        user_text: &str,
-        history: Vec<LlmMessage>,
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
-    ) -> Result<AgentTurnOutput, AgentError> {
-        // 构建扩展上下文，填充工具定义供扩展钩子查询
-        let mut ext_ctx = self.build_ext_ctx();
-        let mut tools = self.tool_registry.list_definitions();
-        if let Some(allowed) = &self.tool_allowlist {
-            tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
-        }
-        let tool_map: std::collections::HashMap<_, _> =
-            tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
-        ext_ctx.set_tools(tool_map);
-
-        // 分发 TurnStart 事件，通知扩展新回合开始
-        self.extension_runner
-            .dispatch(ExtensionEvent::TurnStart, &ext_ctx)
-            .await?;
-
-        // 分发 UserPromptSubmit 事件。
-        // 如果扩展通过 Blocking 钩子拒绝了提示词，先触发 TurnEnd 再返回错误。
-        if let Err(e) = self
-            .extension_runner
-            .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
-            .await
-        {
-            let _ = self
-                .extension_runner
-                .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                .await;
-            return Err(e.into());
-        }
-
-        // 每轮都以同一份 session system prompt 开头；历史来自 eventlog 投影。
-        let mut messages = Vec::with_capacity(history.len() + 2);
-        if !self.system_prompt.trim().is_empty() {
-            messages.push(LlmMessage::system(self.system_prompt.clone()));
-        }
-        messages.extend(
-            history
-                .into_iter()
-                .filter(|message| message.role != LlmRole::System),
-        );
-        messages.push(LlmMessage::user(user_text));
-
-        // 累积本轮 Agent 的最终文本输出和所有工具执行结果
-        let mut final_text = String::new();
-        let mut all_tool_results: Vec<ToolResult> = Vec::new();
-        let mut did_overflow_retry_this_turn = false;
-
-        // ── Agent 主循环 ──
-        // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
-        loop {
-            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
-                .iter()
-                .cloned()
-                .partition(|message| message.role == LlmRole::System);
-            let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.clone());
-            let prepare_input = ContextPrepareInput {
-                messages: visible_messages,
-                system_prompt: Some(&self.system_prompt),
-                model_limits: self.llm.model_limits(),
-            };
-            let compact_message_count = prepare_input.messages.len();
-            let compact_options = if self
-                .context_assembler
-                .should_compact_provider_messages(&prepare_input)
-            {
-                let compact_instructions = match self
-                    .compact_instructions(
-                        CompactTrigger::AutoThreshold,
-                        compact_message_count,
-                        &tools,
-                    )
-                    .await
-                {
-                    Ok(instructions) => instructions,
-                    Err(error) => {
-                        let _ = self
-                            .extension_runner
-                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                            .await;
-                        return Err(error);
-                    },
-                };
-                let transcript_path = self
-                    .write_compact_snapshot(
-                        CompactTrigger::AutoThreshold,
-                        prepare_input.messages.clone(),
-                        Some(&self.system_prompt),
-                    )
-                    .await;
-                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
-                    .with_custom_instructions(compact_instructions)
-                    .with_transcript_path(transcript_path)
-            } else {
-                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
-            };
-            let prepared_context = match self
-                .context_assembler
-                .prepare_provider_messages_with_compact_runner_options(
-                    prepare_input,
-                    compact_options,
-                    &compact_runner,
-                )
-                .await
-            {
-                Ok(prepared_context) => prepared_context,
-                Err(CompactError::Skip(
-                    CompactSkipReason::Empty | CompactSkipReason::NothingToCompact,
-                )) => self
-                    .context_assembler
-                    .prepare_provider_messages(ContextPrepareInput {
-                        messages: messages
-                            .iter()
-                            .filter(|message| message.role != LlmRole::System)
-                            .cloned()
-                            .collect(),
-                        system_prompt: Some(&self.system_prompt),
-                        model_limits: self.llm.model_limits(),
-                    }),
-                Err(error) => return Err(AgentError::Llm(error.to_string())),
-            };
-            if let Some(compaction) = prepared_context.compaction {
-                if let Err(error) = self
-                    .notify_post_compact(
-                        CompactTrigger::AutoThreshold,
-                        compact_message_count,
-                        &tools,
-                        &compaction,
-                    )
-                    .await
-                {
-                    let _ = self
-                        .extension_runner
-                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                        .await;
-                    return Err(error);
-                }
-                if let Some(tx) = &event_tx {
-                    let _ = tx.send(EventPayload::CompactionStarted);
-                    let _ = tx.send(compaction_applied_payload(&compaction));
-                    let _ = tx.send(EventPayload::CompactionCompleted {
-                        pre_tokens: compaction.pre_tokens,
-                        post_tokens: compaction.post_tokens,
-                        summary: compaction.summary,
-                    });
-                }
-                messages = [system_messages.clone(), prepared_context.messages.clone()].concat();
-            }
-
-            // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
-            let mut send_messages = [system_messages, prepared_context.messages].concat();
-            {
-                let mut ext_ctx = self.build_ext_ctx_with_tools(&tools);
-                ext_ctx.set_provider_messages(send_messages.clone());
-                match self
-                    .extension_runner
-                    .dispatch_provider_hook(ExtensionEvent::BeforeProviderRequest, &ext_ctx)
-                    .await?
-                {
-                    ProviderHookOutcome::Blocked { reason } => {
-                        self.extension_runner
-                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                            .await?;
-                        return Err(AgentError::Llm(reason));
-                    },
-                    ProviderHookOutcome::ModifiedMessages { messages } => {
-                        send_messages = messages;
-                    },
-                    ProviderHookOutcome::Allow => {},
-                }
-            }
-            let mut rx = match self.llm.generate(send_messages, tools.clone()).await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    // LLM 调用级别失败（网络/认证等），需要通知客户端，
-                    // 否则外部消费者无法感知此错误（流中错误通过 LlmEvent::Error 已有处理）
-                    if let Some(tx) = &event_tx {
-                        let _ = tx.send(EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: e.to_string(),
-                            recoverable: false,
-                        });
-                    }
-                    let _ = self
-                        .extension_runner
-                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                        .await;
-                    return Err(e.into());
-                },
-            };
-            // 每轮 LLM 调用的局部状态
-            let message_id = new_message_id(); // 本轮消息的唯一 ID
-            let mut message_started = false; // 是否已发送 AssistantMessageStarted
-            let mut current_text = String::new(); // 本轮累积的文本增量
-            let mut tool_calls: Vec<PendingToolCall> = Vec::new(); // LLM 请求的工具调用
-            // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
-            // 避免消息在工具执行前就被标记为已完成。
-            let mut completed_text: Option<String> = None;
-            let mut retry_provider_request = false;
-
-            // 消费 LLM 事件流，处理文本增量和工具调用增量
-            while let Some(event) = rx.recv().await {
-                match event {
-                    LlmEvent::ContentDelta { delta } => {
-                        if let Some(tx) = &event_tx {
-                            if !message_started {
-                                let _ = tx.send(EventPayload::AssistantMessageStarted {
-                                    message_id: message_id.clone(),
-                                });
-                                message_started = true;
-                            }
-                            let _ = tx.send(EventPayload::AssistantTextDelta {
-                                message_id: message_id.clone(),
-                                delta: delta.clone(),
-                            });
-                        }
-                        current_text.push_str(&delta);
-                    },
-                    LlmEvent::ToolCallStart {
-                        call_id,
-                        name,
-                        arguments,
-                    } => {
-                        if let Some(tx) = &event_tx {
-                            let _ = tx.send(EventPayload::ToolCallStarted {
-                                call_id: call_id.clone(),
-                                tool_name: name.clone(),
-                            });
-                            if !arguments.is_empty() {
-                                let _ = tx.send(EventPayload::ToolCallArgumentsDelta {
-                                    call_id: call_id.clone(),
-                                    delta: arguments.clone(),
-                                });
-                            }
-                        }
-                        tool_calls.push(PendingToolCall {
-                            call_id,
-                            name,
-                            arguments,
-                        });
-                    },
-                    LlmEvent::ToolCallDelta { call_id, delta } => {
-                        if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
-                            tc.arguments.push_str(&delta);
-                        }
-                        if let Some(tx) = &event_tx {
-                            let _ =
-                                tx.send(EventPayload::ToolCallArgumentsDelta { call_id, delta });
-                        }
-                    },
-                    LlmEvent::Done { finish_reason } => {
-                        if !current_text.is_empty() {
-                            let text = std::mem::take(&mut current_text);
-                            messages.push(LlmMessage::assistant(&text));
-                            final_text.push_str(&text);
-                            completed_text = Some(text);
-                        }
-
-                        if tool_calls.is_empty() {
-                            // 无工具调用：消息在此处完成并直接返回
-                            if let (Some(text), true) = (completed_text.take(), message_started) {
-                                if let Some(tx) = &event_tx {
-                                    let _ = tx.send(EventPayload::AssistantMessageCompleted {
-                                        message_id: message_id.clone(),
-                                        text,
-                                    });
-                                }
-                            }
-                            self.extension_runner
-                                .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                                .await?;
-                            return Ok(AgentTurnOutput {
-                                text: final_text,
-                                finish_reason,
-                                tool_results: all_tool_results,
-                            });
-                        }
-                        break;
-                    },
-                    LlmEvent::Error { message } => {
-                        if is_prompt_too_long_message(&message) && !did_overflow_retry_this_turn {
-                            did_overflow_retry_this_turn = true;
-                            let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
-                                .iter()
-                                .cloned()
-                                .partition(|message| message.role == LlmRole::System);
-                            let overflow_compaction = self
-                                .compact_for_overflow_retry(
-                                    visible_messages,
-                                    Some(&self.system_prompt),
-                                    &tools,
-                                )
-                                .await;
-                            let prepared = match overflow_compaction {
-                                Ok(prepared) => prepared,
-                                Err(error) => {
-                                    let _ = self
-                                        .extension_runner
-                                        .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                                        .await;
-                                    return Err(error);
-                                },
-                            };
-                            if let Some(prepared) = prepared {
-                                let compaction = prepared
-                                    .compaction
-                                    .expect("compact_provider_messages should include compaction");
-                                if let Some(tx) = &event_tx {
-                                    let _ = tx.send(EventPayload::CompactionStarted);
-                                    let _ = tx.send(compaction_applied_payload(&compaction));
-                                    let _ = tx.send(EventPayload::CompactionCompleted {
-                                        pre_tokens: compaction.pre_tokens,
-                                        post_tokens: compaction.post_tokens,
-                                        summary: compaction.summary,
-                                    });
-                                }
-                                messages = [system_messages, prepared.messages].concat();
-                                retry_provider_request = true;
-                                break;
-                            }
-                        }
-                        if let Some(tx) = &event_tx {
-                            let _ = tx.send(EventPayload::ErrorOccurred {
-                                code: -32603,
-                                message: message.clone(),
-                                recoverable: false,
-                            });
-                        }
-                        self.extension_runner
-                            .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                            .await?;
-                        return Err(AgentError::Llm(message));
-                    },
-                }
-            }
-            if retry_provider_request {
-                continue;
-            }
-
-            // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
-            if let Err(e) = self
-                .extension_runner
-                .dispatch(ExtensionEvent::AfterProviderResponse, &ext_ctx)
-                .await
-            {
-                let _ = self
-                    .extension_runner
-                    .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
-                    .await;
-                return Err(e.into());
-            }
-
-            // ── 工具调用执行管线 ──
-            // 1. 预处理：白名单检查 + PreToolUse 钩子
-            let prepared_tool_calls = self
-                .prepare_tool_calls(&tool_calls, &tools, &event_tx)
-                .await?;
-            // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
-            messages.push(assistant_tool_call_message(&prepared_tool_calls));
-            // 2. 执行：按并行/串行模式调度工具
-            let tool_results = self
-                .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
-                .await?;
-            // 3. 提交：PostToolUse 钩子 + 追加到对话历史
-            self.commit_tool_results(CommitToolResults {
-                prepared: &prepared_tool_calls,
-                results: tool_results,
-                tools: &tools,
-                messages: &mut messages,
-                all_tool_results: &mut all_tool_results,
-                event_tx: &event_tx,
-            })
-            .await?;
-
-            // 工具调用全部执行完毕后才发送消息完成事件，
-            // 保证 completed 事件在所有 tool_call 事件之后。
-            if let Some(text) = completed_text.take() {
-                if message_started {
-                    if let Some(tx) = &event_tx {
-                        let _ = tx.send(EventPayload::AssistantMessageCompleted {
-                            message_id: message_id.clone(),
-                            text,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    async fn compact_for_overflow_retry(
-        &self,
-        visible_messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<Option<PreparedContext>, AgentError> {
-        let message_count = visible_messages.len();
-        let compact_instructions = self
-            .compact_instructions(CompactTrigger::PromptTooLongRetry, message_count, tools)
-            .await?;
-        let transcript_path = self
-            .write_compact_snapshot(
-                CompactTrigger::PromptTooLongRetry,
-                visible_messages.clone(),
-                system_prompt,
-            )
-            .await;
-        let compact_runner = CompactForkRunner::new(Arc::clone(&self.llm), tools.to_vec());
-        let compact_options =
-            CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
-                .with_custom_instructions(compact_instructions)
-                .with_transcript_path(transcript_path.clone());
-        let prepared = match self
-            .context_assembler
-            .compact_provider_messages_with_compact_runner_options(
-                &compact_runner,
-                visible_messages.clone(),
-                system_prompt,
-                compact_options,
-            )
-            .await
-        {
-            Ok(prepared) => Some(prepared),
-            Err(_) => self
-                .context_assembler
-                .compact_provider_messages_with_render_options(
-                    visible_messages,
-                    system_prompt,
-                    astrcode_context::compaction::CompactSummaryRenderOptions { transcript_path },
-                )
-                .ok()
-                .map(|(messages, compaction)| PreparedContext {
-                    messages,
-                    compaction: Some(compaction),
-                }),
-        };
-
-        if let Some(prepared) = &prepared {
-            if let Some(compaction) = &prepared.compaction {
-                self.notify_post_compact(
-                    CompactTrigger::PromptTooLongRetry,
-                    message_count,
-                    tools,
-                    compaction,
-                )
-                .await?;
-            }
-        }
-
-        Ok(prepared)
-    }
-
-    async fn write_compact_snapshot(
-        &self,
-        trigger: CompactTrigger,
-        provider_messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-    ) -> Option<String> {
-        let snapshot = CompactSnapshotInput {
-            trigger: compact_trigger_name(trigger).into(),
-            model_id: self.model_id.clone(),
-            working_dir: self.working_dir.clone(),
-            system_prompt: system_prompt.map(str::to_string),
-            provider_messages,
-        };
-        match self
-            .session_manager
-            .write_compact_snapshot(&self.session_id, snapshot)
-            .await
-        {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    session_id = %self.session_id,
-                    trigger = compact_trigger_name(trigger),
-                    error = %error,
-                    "Failed to write compact transcript snapshot"
-                );
-                None
-            },
-        }
-    }
-
-    async fn compact_instructions(
-        &self,
-        trigger: CompactTrigger,
-        message_count: usize,
-        tools: &[ToolDefinition],
-    ) -> Result<Vec<String>, AgentError> {
-        collect_compact_instructions(
-            &self.extension_runner,
-            CompactHookContext {
-                session_id: &self.session_id,
-                working_dir: &self.working_dir,
-                model_id: &self.model_id,
-                tools,
-                trigger,
-                message_count,
-            },
-        )
-        .await
-        .map_err(AgentError::Extension)
-    }
-
-    async fn notify_post_compact(
-        &self,
-        trigger: CompactTrigger,
-        message_count: usize,
-        tools: &[ToolDefinition],
-        compaction: &CompactResult,
-    ) -> Result<(), AgentError> {
-        dispatch_post_compact(
-            &self.extension_runner,
-            CompactHookContext {
-                session_id: &self.session_id,
-                working_dir: &self.working_dir,
-                model_id: &self.model_id,
-                tools,
-                trigger,
-                message_count,
-            },
-            compaction,
-        )
-        .await
-        .map_err(AgentError::Extension)
-    }
 }
 
 /// Agent 回合的输出结果。
@@ -1183,6 +1172,18 @@ pub(crate) fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
         error: Some(message),
         metadata: Default::default(),
         duration_ms: None,
+    }
+}
+
+fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContext {
+    let messages = [
+        compaction.context_messages.clone(),
+        compaction.retained_messages.clone(),
+    ]
+    .concat();
+    PreparedContext {
+        messages,
+        compaction: Some(compaction),
     }
 }
 

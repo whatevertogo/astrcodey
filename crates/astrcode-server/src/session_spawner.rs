@@ -87,7 +87,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         }
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.extension_runner,
-            self.context_assembler.as_ref(),
             &child_sid,
             &request.working_dir,
             &model_id,

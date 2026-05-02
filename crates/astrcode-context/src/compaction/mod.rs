@@ -6,7 +6,9 @@
 //! 这里定义 compact 的语义边界：如何选择要压缩的消息、如何渲染摘要
 //! request、如何校验模型返回的 `<summary>`，以及如何把摘要重新组装成
 //! provider 可见的 synthetic user message。真正的工具权限、hook 和 provider
-//! 调用细节由调用方通过 [`CompactTextRunner`] 承担。
+//! 调用细节由调用方通过闭包承担。
+
+use std::future::Future;
 
 use astrcode_core::llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole};
 
@@ -27,59 +29,13 @@ pub use assemble::{CompactSummaryEnvelope, CompactSummaryRenderOptions, format_c
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactPromptStyle {
-    /// 独立摘要请求：使用 compact 专用 system prompt。
-    IsolatedSystemPrompt,
-    /// forked 对话请求：保留主 system prompt，把摘要要求追加为最后一条 user message。
-    ForkedConversationPrompt,
-}
-
-/// 单次 compact 请求的渲染选项。
-///
-/// `custom_instructions` 用于承接 PreCompact hook 或手动 compact 指令，
-/// 但不会改变九段 `<summary>` contract。
-#[derive(Debug, Clone)]
-pub struct CompactRequestOptions {
-    pub prompt_style: CompactPromptStyle,
-    pub custom_instructions: Vec<String>,
-    pub render_options: CompactSummaryRenderOptions,
-}
-
-impl CompactRequestOptions {
-    pub fn new(prompt_style: CompactPromptStyle) -> Self {
-        Self {
-            prompt_style,
-            custom_instructions: Vec::new(),
-            render_options: CompactSummaryRenderOptions::default(),
-        }
-    }
-
-    pub fn with_custom_instructions(mut self, custom_instructions: Vec<String>) -> Self {
-        self.custom_instructions = custom_instructions;
-        self
-    }
-
-    pub fn with_transcript_path(mut self, transcript_path: Option<String>) -> Self {
-        self.render_options.transcript_path = transcript_path;
-        self
-    }
-}
-
-impl From<CompactPromptStyle> for CompactRequestOptions {
-    fn from(value: CompactPromptStyle) -> Self {
-        Self::new(value)
-    }
-}
-
-#[async_trait::async_trait]
-pub trait CompactTextRunner: Send + Sync {
-    /// 执行一次 compact LLM 请求并返回完整文本。
-    ///
-    /// runner 不应该执行工具调用；如果模型尝试调用工具，调用方应把它视为
-    /// compact 失败，让自动路径回落到 deterministic fallback。
-    async fn run_compact_request(&self, messages: Vec<LlmMessage>) -> Result<String, CompactError>;
-}
+type CompactParts = (
+    Vec<LlmMessage>,
+    PreparedCompactInput,
+    Vec<LlmMessage>,
+    usize,
+    usize,
+);
 
 /// 压缩操作的结果。
 ///
@@ -147,151 +103,6 @@ impl From<LlmError> for CompactError {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct CompactJob {
-    prepared_input: PreparedCompactInput,
-    retained_messages: Vec<LlmMessage>,
-    pre_tokens: usize,
-    messages_removed: usize,
-}
-
-impl CompactJob {
-    /// 从完整可见消息窗口构建 compact job。
-    ///
-    /// 当前策略以最近一条真实 assistant 消息作为 retained tail 起点；
-    /// 这样 compact 不会截断正在进行的用户请求。
-    pub fn build(
-        messages: &[LlmMessage],
-        system_prompt: Option<&str>,
-    ) -> Result<Self, CompactSkipReason> {
-        if messages.is_empty() {
-            return Err(CompactSkipReason::Empty);
-        }
-        let keep_start =
-            split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
-        if keep_start == 0 {
-            return Err(CompactSkipReason::NothingToCompact);
-        }
-
-        let prefix = &messages[..keep_start];
-        let prepared_input = plan::prepare_compact_input(prefix);
-        if prepared_input.messages.is_empty() {
-            return Err(CompactSkipReason::NothingToCompact);
-        }
-
-        Ok(Self {
-            prepared_input,
-            retained_messages: messages[keep_start..].to_vec(),
-            pre_tokens: estimate_request_tokens(messages, system_prompt),
-            messages_removed: removed_visible_messages(prefix),
-        })
-    }
-
-    pub fn request_messages(
-        &self,
-        style: CompactPromptStyle,
-        system_prompt: Option<&str>,
-        settings: &ContextWindowSettings,
-        repair_feedback: Option<&str>,
-    ) -> Vec<LlmMessage> {
-        self.request_messages_with_options(
-            &CompactRequestOptions::new(style),
-            system_prompt,
-            settings,
-            repair_feedback,
-        )
-    }
-
-    /// 生成发给 compact runner/provider 的请求消息。
-    ///
-    /// 同一个 job 可以用 isolated 或 forked 两种 prompt style 执行，
-    /// 这样 context 可以复用 compact 语义，而 server 可以选择更适合 prompt cache
-    /// 的 forked runner。
-    pub fn request_messages_with_options(
-        &self,
-        options: &CompactRequestOptions,
-        system_prompt: Option<&str>,
-        settings: &ContextWindowSettings,
-        repair_feedback: Option<&str>,
-    ) -> Vec<LlmMessage> {
-        match options.prompt_style {
-            CompactPromptStyle::IsolatedSystemPrompt => {
-                let compact_system_prompt = prompt::render_compact_system_prompt_with_instructions(
-                    system_prompt,
-                    &self.prepared_input.prompt_mode,
-                    settings,
-                    repair_feedback,
-                    &options.custom_instructions,
-                );
-                let mut messages = Vec::with_capacity(self.prepared_input.messages.len() + 1);
-                messages.push(LlmMessage::system(compact_system_prompt));
-                messages.extend(self.prepared_input.messages.clone());
-                messages
-            },
-            CompactPromptStyle::ForkedConversationPrompt => {
-                let mut messages = Vec::with_capacity(self.prepared_input.messages.len() + 2);
-                if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty())
-                {
-                    messages.push(LlmMessage::system(system_prompt.to_string()));
-                }
-                messages.extend(self.prepared_input.messages.clone());
-                messages.push(LlmMessage::user(
-                    prompt::render_compact_user_request_with_instructions(
-                        &self.prepared_input.prompt_mode,
-                        settings,
-                        repair_feedback,
-                        &options.custom_instructions,
-                    ),
-                ));
-                messages
-            },
-        }
-    }
-
-    pub fn finish(
-        &self,
-        raw_output: &str,
-        system_prompt: Option<&str>,
-    ) -> Result<CompactResult, CompactError> {
-        self.finish_with_render_options(
-            raw_output,
-            system_prompt,
-            &CompactSummaryRenderOptions::default(),
-        )
-    }
-
-    pub fn finish_with_render_options(
-        &self,
-        raw_output: &str,
-        system_prompt: Option<&str>,
-        render_options: &CompactSummaryRenderOptions,
-    ) -> Result<CompactResult, CompactError> {
-        let parsed = parse_compact_output(raw_output)?;
-        if let Some(violation) = parse::compact_contract_violation(&parsed) {
-            return Err(CompactParseError::new(violation).into());
-        }
-        let summary = assemble::sanitize_compact_summary(&parsed.summary);
-        let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
-            &summary,
-            render_options,
-        ))];
-        let post_tokens = estimate_request_tokens(
-            &[context_messages.clone(), self.retained_messages.clone()].concat(),
-            system_prompt,
-        );
-
-        Ok(CompactResult {
-            pre_tokens: self.pre_tokens,
-            post_tokens,
-            summary,
-            messages_removed: self.messages_removed,
-            context_messages,
-            retained_messages: self.retained_messages.clone(),
-            transcript_path: render_options.transcript_path.clone(),
-        })
-    }
-}
-
 /// 不调用 LLM 的 compact fallback。
 ///
 /// 自动 compact 路径需要保证普通对话不会因为摘要模型格式错误而完全阻断；
@@ -313,36 +124,17 @@ pub fn compact_messages_with_render_options(
     system_prompt: Option<&str>,
     render_options: &CompactSummaryRenderOptions,
 ) -> Result<CompactResult, CompactSkipReason> {
-    if messages.is_empty() {
-        return Err(CompactSkipReason::Empty);
-    }
-    let keep_start = split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
-    if keep_start == 0 {
-        return Err(CompactSkipReason::NothingToCompact);
-    }
-
-    let prefix = &messages[..keep_start];
-    let retained_messages = messages[keep_start..].to_vec();
-    let pre_tokens = estimate_request_tokens(messages, system_prompt);
-    let summary = summarize_prefix(prefix);
-    let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
-        &summary,
-        render_options,
-    ))];
-    let post_tokens = estimate_request_tokens(
-        &[context_messages.clone(), retained_messages.clone()].concat(),
-        system_prompt,
-    );
-
-    Ok(CompactResult {
-        pre_tokens,
-        post_tokens,
+    let (prefix, _prepared_input, retained_messages, pre_tokens, messages_removed) =
+        prepare_compact_parts(messages, system_prompt)?;
+    let summary = summarize_prefix(&prefix);
+    Ok(finish_compact_summary(
         summary,
-        messages_removed: removed_visible_messages(prefix),
-        context_messages,
         retained_messages,
-        transcript_path: render_options.transcript_path.clone(),
-    })
+        pre_tokens,
+        messages_removed,
+        system_prompt,
+        render_options,
+    ))
 }
 
 /// 使用 provider 直接生成 compact summary 的兼容入口。
@@ -352,63 +144,59 @@ pub async fn compact_messages_with_provider(
     system_prompt: Option<&str>,
     settings: &ContextWindowSettings,
 ) -> Result<CompactResult, CompactError> {
-    let runner = ProviderCompactRunner { provider };
-    compact_messages_with_runner_options(
-        &runner,
+    compact_messages_with_request(
         messages,
         system_prompt,
         settings,
-        CompactRequestOptions::new(CompactPromptStyle::IsolatedSystemPrompt),
+        &[],
+        &CompactSummaryRenderOptions::default(),
+        |request_messages| collect_compact_output(provider, request_messages),
     )
     .await
 }
 
-/// 使用调用方提供的 runner 生成 compact summary。
-pub async fn compact_messages_with_runner(
-    runner: &dyn CompactTextRunner,
+/// 使用调用方提供的文本请求函数生成 compact summary。
+pub async fn compact_messages_with_request<F, Fut>(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
     settings: &ContextWindowSettings,
-    prompt_style: CompactPromptStyle,
-) -> Result<CompactResult, CompactError> {
-    compact_messages_with_runner_options(
-        runner,
-        messages,
-        system_prompt,
-        settings,
-        CompactRequestOptions::new(prompt_style),
-    )
-    .await
-}
-
-/// 使用 runner 和完整请求选项生成 compact summary。
-pub async fn compact_messages_with_runner_options(
-    runner: &dyn CompactTextRunner,
-    messages: &[LlmMessage],
-    system_prompt: Option<&str>,
-    settings: &ContextWindowSettings,
-    options: CompactRequestOptions,
-) -> Result<CompactResult, CompactError> {
-    let job = CompactJob::build(messages, system_prompt)?;
+    custom_instructions: &[String],
+    render_options: &CompactSummaryRenderOptions,
+    mut request_text: F,
+) -> Result<CompactResult, CompactError>
+where
+    F: FnMut(Vec<LlmMessage>) -> Fut,
+    Fut: Future<Output = Result<String, CompactError>>,
+{
+    let (_prefix, prepared_input, retained_messages, pre_tokens, messages_removed) =
+        prepare_compact_parts(messages, system_prompt)?;
     let mut repair_feedback: Option<String> = None;
     let max_attempts = settings.compact_max_retry_attempts.max(1);
     let mut last_error: Option<CompactError> = None;
 
     for _ in 0..max_attempts {
-        let compact_messages = job.request_messages_with_options(
-            &options,
+        let compact_messages = request_messages(
+            &prepared_input,
             system_prompt,
             settings,
             repair_feedback.as_deref(),
+            custom_instructions,
         );
-        let output = match runner.run_compact_request(compact_messages).await {
+        let output = match request_text(compact_messages).await {
             Ok(output) => output,
             Err(error) => {
                 last_error = Some(error);
                 break;
             },
         };
-        match job.finish_with_render_options(&output, system_prompt, &options.render_options) {
+        match finish_compact_output(
+            &output,
+            retained_messages.clone(),
+            pre_tokens,
+            messages_removed,
+            system_prompt,
+            render_options,
+        ) {
             Ok(compaction) => return Ok(compaction),
             Err(CompactError::Parse(error)) => {
                 repair_feedback = Some(error.to_string());
@@ -424,19 +212,6 @@ pub async fn compact_messages_with_runner_options(
     Err(last_error.unwrap_or_else(|| {
         CompactParseError::new("compact response did not contain a summary").into()
     }))
-}
-
-struct ProviderCompactRunner<'a> {
-    provider: &'a dyn LlmProvider,
-}
-
-#[async_trait::async_trait]
-impl CompactTextRunner for ProviderCompactRunner<'_> {
-    async fn run_compact_request(&self, messages: Vec<LlmMessage>) -> Result<String, CompactError> {
-        collect_compact_output(self.provider, messages)
-            .await
-            .map_err(CompactError::Llm)
-    }
 }
 
 pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
@@ -498,6 +273,107 @@ fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
         .iter()
         .filter(|message| !is_synthetic_context_message(message))
         .count()
+}
+
+fn prepare_compact_parts(
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+) -> Result<CompactParts, CompactSkipReason> {
+    if messages.is_empty() {
+        return Err(CompactSkipReason::Empty);
+    }
+    let keep_start = split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
+    if keep_start == 0 {
+        return Err(CompactSkipReason::NothingToCompact);
+    }
+
+    let prefix = messages[..keep_start].to_vec();
+    let prepared_input = plan::prepare_compact_input(&prefix);
+    if prepared_input.messages.is_empty() {
+        return Err(CompactSkipReason::NothingToCompact);
+    }
+
+    let retained_messages = messages[keep_start..].to_vec();
+    let pre_tokens = estimate_request_tokens(messages, system_prompt);
+    let messages_removed = removed_visible_messages(&prefix);
+    Ok((
+        prefix,
+        prepared_input,
+        retained_messages,
+        pre_tokens,
+        messages_removed,
+    ))
+}
+
+fn request_messages(
+    prepared_input: &PreparedCompactInput,
+    system_prompt: Option<&str>,
+    settings: &ContextWindowSettings,
+    repair_feedback: Option<&str>,
+    custom_instructions: &[String],
+) -> Vec<LlmMessage> {
+    let mut messages = Vec::with_capacity(prepared_input.messages.len() + 2);
+    if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty()) {
+        messages.push(LlmMessage::system(system_prompt.to_string()));
+    }
+    messages.extend(prepared_input.messages.clone());
+    messages.push(LlmMessage::user(prompt::render_compact_request(
+        &prepared_input.prompt_mode,
+        settings,
+        repair_feedback,
+        custom_instructions,
+    )));
+    messages
+}
+
+fn finish_compact_output(
+    raw_output: &str,
+    retained_messages: Vec<LlmMessage>,
+    pre_tokens: usize,
+    messages_removed: usize,
+    system_prompt: Option<&str>,
+    render_options: &CompactSummaryRenderOptions,
+) -> Result<CompactResult, CompactError> {
+    let parsed = parse_compact_output(raw_output)?;
+    if let Some(violation) = parse::compact_contract_violation(&parsed) {
+        return Err(CompactParseError::new(violation).into());
+    }
+    Ok(finish_compact_summary(
+        assemble::sanitize_compact_summary(&parsed.summary),
+        retained_messages,
+        pre_tokens,
+        messages_removed,
+        system_prompt,
+        render_options,
+    ))
+}
+
+fn finish_compact_summary(
+    summary: String,
+    retained_messages: Vec<LlmMessage>,
+    pre_tokens: usize,
+    messages_removed: usize,
+    system_prompt: Option<&str>,
+    render_options: &CompactSummaryRenderOptions,
+) -> CompactResult {
+    let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
+        &summary,
+        render_options,
+    ))];
+    let post_tokens = estimate_request_tokens(
+        &[context_messages.clone(), retained_messages.clone()].concat(),
+        system_prompt,
+    );
+
+    CompactResult {
+        pre_tokens,
+        post_tokens,
+        summary,
+        messages_removed,
+        context_messages,
+        retained_messages,
+        transcript_path: render_options.transcript_path.clone(),
+    }
 }
 
 fn summarize_prefix(messages: &[LlmMessage]) -> String {
@@ -564,14 +440,14 @@ fn truncate_summary_line(text: &str) -> String {
 async fn collect_compact_output(
     provider: &dyn LlmProvider,
     messages: Vec<LlmMessage>,
-) -> Result<String, LlmError> {
+) -> Result<String, CompactError> {
     let mut rx = provider.generate(messages, Vec::new()).await?;
     let mut output = String::new();
     while let Some(event) = rx.recv().await {
         match event {
             LlmEvent::ContentDelta { delta } => output.push_str(&delta),
             LlmEvent::Done { .. } => break,
-            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message)),
+            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message).into()),
             LlmEvent::ToolCallStart { .. } | LlmEvent::ToolCallDelta { .. } => {},
         }
     }
@@ -646,12 +522,6 @@ mod tests {
 9. Optional Next Step:
    - (none)
 </summary>"#
-    }
-
-    fn message_text_contains(messages: &[LlmMessage], needle: &str) -> bool {
-        messages
-            .iter()
-            .any(|message| visible_message_text(message).contains(needle))
     }
 
     #[test]
@@ -800,7 +670,7 @@ scratchpad that should not survive
     #[test]
     fn compact_template_contains_required_nine_section_contract() {
         let settings = ContextWindowSettings::default();
-        let prompt = prompt::render_compact_system_prompt_with_instructions(
+        let prompt = prompt::render_compact_contract(
             Some("system prompt"),
             &plan::CompactPromptMode::Fresh,
             &settings,
@@ -826,22 +696,33 @@ scratchpad that should not survive
         assert!(!prompt.contains("<recent_user_context_digest>"));
     }
 
-    #[test]
-    fn forked_compact_request_uses_main_system_prompt_and_appends_summary_request() {
+    #[tokio::test]
+    async fn compact_request_closure_receives_forked_prompt() {
         let settings = ContextWindowSettings::default();
         let messages = vec![
             LlmMessage::user("old user"),
             LlmMessage::assistant("old answer"),
             LlmMessage::user("recent user"),
         ];
-        let job = CompactJob::build(&messages, Some("main system prompt")).unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_request = Arc::clone(&captured);
 
-        let request = job.request_messages(
-            CompactPromptStyle::ForkedConversationPrompt,
+        let result = compact_messages_with_request(
+            &messages,
             Some("main system prompt"),
             &settings,
-            None,
-        );
+            &[String::from("preserve compact instruction")],
+            &CompactSummaryRenderOptions::default(),
+            move |request| {
+                *captured_for_request.lock().unwrap() = request;
+                async { Ok(valid_compact_summary().to_string()) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.messages_removed, 1);
+        let request = captured.lock().unwrap();
 
         assert_eq!(request[0].role, LlmRole::System);
         assert_eq!(visible_message_text(&request[0]), "main system prompt");
@@ -850,52 +731,8 @@ scratchpad that should not survive
         assert!(summary_request.contains("Do not call tools"));
         assert!(summary_request.contains("1. Primary Request and Intent:"));
         assert!(summary_request.contains("<summary>"));
+        assert!(summary_request.contains("preserve compact instruction"));
         assert!(!summary_request.contains("Current runtime system prompt"));
-    }
-
-    #[test]
-    fn isolated_compact_request_preserves_compact_system_prompt() {
-        let settings = ContextWindowSettings::default();
-        let messages = vec![
-            LlmMessage::user("old user"),
-            LlmMessage::assistant("old answer"),
-            LlmMessage::user("recent user"),
-        ];
-        let job = CompactJob::build(&messages, Some("main system prompt")).unwrap();
-
-        let request = job.request_messages(
-            CompactPromptStyle::IsolatedSystemPrompt,
-            Some("main system prompt"),
-            &settings,
-            None,
-        );
-
-        assert_eq!(request[0].role, LlmRole::System);
-        let compact_system_prompt = visible_message_text(&request[0]);
-        assert!(compact_system_prompt.contains("context summarization assistant"));
-        assert!(compact_system_prompt.contains("Current runtime system prompt"));
-        assert!(compact_system_prompt.contains("main system prompt"));
-    }
-
-    #[test]
-    fn compact_job_retry_feedback_is_included_in_next_request() {
-        let settings = ContextWindowSettings::default();
-        let messages = vec![
-            LlmMessage::user("old user"),
-            LlmMessage::assistant("old answer"),
-            LlmMessage::user("recent user"),
-        ];
-        let job = CompactJob::build(&messages, None).unwrap();
-
-        let request = job.request_messages(
-            CompactPromptStyle::ForkedConversationPrompt,
-            None,
-            &settings,
-            Some("missing <summary> block"),
-        );
-
-        assert!(message_text_contains(&request, "Contract Repair"));
-        assert!(message_text_contains(&request, "missing <summary> block"));
     }
 
     #[tokio::test]
@@ -925,8 +762,8 @@ scratchpad that should not survive
 
         assert_eq!(result.messages_removed, 1);
         let sent = captured.lock().unwrap();
-        let compact_system_prompt = visible_message_text(&sent[0]);
-        assert!(compact_system_prompt.contains("## Incremental Mode"));
-        assert!(compact_system_prompt.contains("prior compact summary"));
+        let summary_request = visible_message_text(sent.last().unwrap());
+        assert!(summary_request.contains("## Incremental Mode"));
+        assert!(summary_request.contains("prior compact summary"));
     }
 }

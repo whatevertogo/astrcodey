@@ -2,7 +2,7 @@
 //!
 //! 这里把原始 LLM 消息转换成适合摘要模型阅读的紧凑消息序列，并识别
 //! 是否存在上一轮 compact summary。真正的“保留哪些尾部消息”在
-//! `compaction::CompactJob` 中完成。
+//! `compaction` 主流程中完成。
 
 use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 

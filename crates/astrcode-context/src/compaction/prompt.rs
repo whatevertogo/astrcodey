@@ -10,7 +10,7 @@ const BASE_COMPACT_PROMPT_TEMPLATE: &str = include_str!("../templates/compact/ba
 const INCREMENTAL_COMPACT_PROMPT_TEMPLATE: &str =
     include_str!("../templates/compact/incremental.md");
 
-pub(crate) fn render_compact_system_prompt_with_instructions(
+pub(crate) fn render_compact_contract(
     system_prompt: Option<&str>,
     mode: &CompactPromptMode,
     settings: &ContextWindowSettings,
@@ -54,13 +54,13 @@ pub(crate) fn render_compact_system_prompt_with_instructions(
 ///
 /// forked 模式保留主 system prompt 和 tools 以复用 provider prompt cache，
 /// 因此 compact 指令必须作为最后一条 user message 注入。
-pub(crate) fn render_compact_user_request_with_instructions(
+pub(crate) fn render_compact_request(
     mode: &CompactPromptMode,
     settings: &ContextWindowSettings,
     contract_repair_feedback: Option<&str>,
     custom_instructions: &[String],
 ) -> String {
-    let compact_contract = render_compact_system_prompt_with_instructions(
+    let compact_contract = render_compact_contract(
         None,
         mode,
         settings,

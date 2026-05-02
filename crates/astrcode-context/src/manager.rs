@@ -1,15 +1,10 @@
-use astrcode_core::{
-    llm::{LlmMessage, LlmProvider, ModelLimits},
-    prompt::{PromptProvider, SystemPromptInput},
-};
+use astrcode_core::llm::{LlmMessage, LlmProvider, ModelLimits};
 
 use crate::{
     compaction::{
-        CompactError, CompactPromptStyle, CompactRequestOptions, CompactResult, CompactSkipReason,
-        CompactSummaryRenderOptions, CompactTextRunner, compact_messages_with_provider,
-        compact_messages_with_render_options, compact_messages_with_runner_options,
+        CompactError, CompactResult, CompactSkipReason, compact_messages_with_provider,
+        compact_messages_with_render_options,
     },
-    prompt::composer::PromptComposer,
     settings::ContextWindowSettings,
     token_usage::{build_prompt_snapshot, should_compact},
 };
@@ -38,30 +33,12 @@ pub struct PreparedContext {
     pub compaction: Option<CompactResult>,
 }
 
-/// 高层入口输入：同时包含 system prompt 组装和上下文窗口管理所需数据。
-pub struct LlmContextInput<'a> {
-    pub system_prompt_input: SystemPromptInput,
-    pub history: Vec<LlmMessage>,
-    pub user_message: Option<LlmMessage>,
-    pub model_limits: ModelLimits,
-    pub provider: Option<&'a dyn LlmProvider>,
-}
-
-/// 高层入口输出：server 可直接拿去构造 provider request。
-#[derive(Debug, Clone)]
-pub struct PreparedLlmContext {
-    pub system_prompt: String,
-    pub messages: Vec<LlmMessage>,
-    pub compaction: Option<CompactResult>,
-}
-
 /// LLM 上下文组装门面。
 ///
-/// 它把 prompt composer、token gate 与 compact pipeline 串起来；
-/// 不持有 provider/model limits，避免模型切换后沿用旧窗口。
+/// 它负责 token gate 与 compact pipeline；不持有 provider/model limits，
+/// 避免模型切换后沿用旧窗口。
 pub struct LlmContextAssembler {
     settings: ContextWindowSettings,
-    prompt: PromptComposer,
 }
 
 pub type ContextManager = LlmContextAssembler;
@@ -69,66 +46,25 @@ pub type ContextManager = LlmContextAssembler;
 impl LlmContextAssembler {
     /// 创建上下文组装器；settings 是稳定策略，模型窗口由每次 request 输入提供。
     pub fn new(settings: ContextWindowSettings) -> Self {
-        Self {
-            settings,
-            prompt: PromptComposer::new(),
-        }
-    }
-
-    pub async fn prepare(
-        &self,
-        input: LlmContextInput<'_>,
-    ) -> Result<PreparedLlmContext, CompactError> {
-        let system_prompt = self.assemble_system_prompt(input.system_prompt_input).await;
-        let mut messages = input.history;
-        if let Some(user_message) = input.user_message {
-            messages.push(user_message);
-        }
-
-        let prepared = if let Some(provider) = input.provider {
-            self.prepare_provider_messages_with_provider(
-                ContextPrepareInput {
-                    messages,
-                    system_prompt: Some(&system_prompt),
-                    model_limits: input.model_limits,
-                },
-                provider,
-            )
-            .await?
-        } else {
-            self.prepare_provider_messages(ContextPrepareInput {
-                messages,
-                system_prompt: Some(&system_prompt),
-                model_limits: input.model_limits,
-            })
-        };
-
-        Ok(PreparedLlmContext {
-            system_prompt,
-            messages: prepared.messages,
-            compaction: prepared.compaction,
-        })
-    }
-
-    pub async fn assemble_system_prompt(&self, input: SystemPromptInput) -> String {
-        self.prompt
-            .assemble(input)
-            .await
-            .system_prompt
-            .unwrap_or_default()
+        Self { settings }
     }
 
     /// 准备 provider 可见消息；达到阈值时使用 deterministic compact fallback。
     ///
     /// 这个入口不需要 LLM/provider，适合测试或没有 provider-backed compact 的路径。
-    pub fn prepare_provider_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+    pub fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
         let mut messages = input.messages;
         let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
         let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
-            match self.compact_provider_messages(messages.clone(), input.system_prompt) {
-                Ok((compacted_messages, compaction)) => {
-                    messages = compacted_messages;
-                    Some(compaction)
+            match compact_messages_with_render_options(
+                &messages,
+                input.system_prompt,
+                &Default::default(),
+            ) {
+                Ok(compaction) => {
+                    let prepared = prepared_context_from_compaction(compaction);
+                    messages = prepared.messages;
+                    prepared.compaction
                 },
                 Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => None,
             }
@@ -142,22 +78,27 @@ impl LlmContextAssembler {
         }
     }
 
-    /// 只判断当前输入是否会触发 automatic compact。
-    ///
-    /// server 用它在真正 compact 前收集 PreCompact hook 指令，避免低于阈值时
-    /// 无意义地执行 hook。
-    pub fn should_compact_provider_messages(&self, input: &ContextPrepareInput<'_>) -> bool {
-        self.settings.auto_compact_enabled && {
-            should_compact(self.snapshot(
-                &input.messages,
-                input.system_prompt,
-                input.model_limits.clone(),
-            ))
-        }
+    pub fn auto_compact_enabled(&self) -> bool {
+        self.settings.auto_compact_enabled
+    }
+
+    pub fn settings(&self) -> &ContextWindowSettings {
+        &self.settings
+    }
+
+    pub fn prompt_snapshot(
+        &self,
+        input: &ContextPrepareInput<'_>,
+    ) -> crate::token_usage::PromptTokenSnapshot {
+        self.snapshot(
+            &input.messages,
+            input.system_prompt,
+            input.model_limits.clone(),
+        )
     }
 
     /// 准备 provider 可见消息；达到阈值时优先使用 provider-backed compact。
-    pub async fn prepare_provider_messages_with_provider(
+    pub async fn prepare_messages_with_provider(
         &self,
         input: ContextPrepareInput<'_>,
         provider: &dyn LlmProvider,
@@ -165,22 +106,22 @@ impl LlmContextAssembler {
         let mut messages = input.messages;
         let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
         let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
-            let prepared = match self
-                .compact_provider_messages_with_provider(
-                    provider,
-                    messages.clone(),
-                    input.system_prompt,
-                )
-                .await
+            let prepared = match compact_messages_with_provider(
+                provider,
+                &messages,
+                input.system_prompt,
+                &self.settings,
+            )
+            .await
             {
-                Ok(prepared) => prepared,
+                Ok(compaction) => prepared_context_from_compaction(compaction),
                 Err(_) => {
-                    let (fallback_messages, fallback_compaction) =
-                        self.compact_provider_messages(messages.clone(), input.system_prompt)?;
-                    PreparedContext {
-                        messages: fallback_messages,
-                        compaction: Some(fallback_compaction),
-                    }
+                    let fallback_compaction = compact_messages_with_render_options(
+                        &messages,
+                        input.system_prompt,
+                        &Default::default(),
+                    )?;
+                    prepared_context_from_compaction(fallback_compaction)
                 },
             };
             messages = prepared.messages;
@@ -192,164 +133,6 @@ impl LlmContextAssembler {
         Ok(PreparedContext {
             messages,
             compaction,
-        })
-    }
-
-    /// 准备 provider 可见消息；达到阈值时通过调用方提供的 compact runner 生成摘要。
-    ///
-    /// runner 把“如何调用 LLM”留给 server/runtime；context 只负责 compact 语义。
-    pub async fn prepare_provider_messages_with_compact_runner(
-        &self,
-        input: ContextPrepareInput<'_>,
-        prompt_style: CompactPromptStyle,
-        runner: &dyn CompactTextRunner,
-    ) -> Result<PreparedContext, CompactError> {
-        self.prepare_provider_messages_with_compact_runner_options(
-            input,
-            CompactRequestOptions::new(prompt_style),
-            runner,
-        )
-        .await
-    }
-
-    /// 与 runner-based prepare 相同，但允许调用方追加 compact prompt 指令。
-    pub async fn prepare_provider_messages_with_compact_runner_options(
-        &self,
-        input: ContextPrepareInput<'_>,
-        options: CompactRequestOptions,
-        runner: &dyn CompactTextRunner,
-    ) -> Result<PreparedContext, CompactError> {
-        let mut messages = input.messages;
-        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
-        let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
-            let render_options = options.render_options.clone();
-            let prepared = match self
-                .compact_provider_messages_with_compact_runner_options(
-                    runner,
-                    messages.clone(),
-                    input.system_prompt,
-                    options,
-                )
-                .await
-            {
-                Ok(prepared) => prepared,
-                Err(_) => {
-                    let (fallback_messages, fallback_compaction) = self
-                        .compact_provider_messages_with_render_options(
-                            messages.clone(),
-                            input.system_prompt,
-                            render_options,
-                        )?;
-                    PreparedContext {
-                        messages: fallback_messages,
-                        compaction: Some(fallback_compaction),
-                    }
-                },
-            };
-            messages = prepared.messages;
-            prepared.compaction
-        } else {
-            None
-        };
-
-        Ok(PreparedContext {
-            messages,
-            compaction,
-        })
-    }
-
-    /// 对已有 provider messages 执行 deterministic compact。
-    pub fn compact_provider_messages(
-        &self,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-    ) -> Result<(Vec<LlmMessage>, CompactResult), CompactSkipReason> {
-        self.compact_provider_messages_with_render_options(
-            messages,
-            system_prompt,
-            CompactSummaryRenderOptions::default(),
-        )
-    }
-
-    /// 对已有 provider messages 执行 deterministic compact，并使用指定渲染选项。
-    pub fn compact_provider_messages_with_render_options(
-        &self,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        render_options: CompactSummaryRenderOptions,
-    ) -> Result<(Vec<LlmMessage>, CompactResult), CompactSkipReason> {
-        let compaction =
-            compact_messages_with_render_options(&messages, system_prompt, &render_options)?;
-        let compacted_messages = [
-            compaction.context_messages.clone(),
-            compaction.retained_messages.clone(),
-        ]
-        .concat();
-        Ok((compacted_messages, compaction))
-    }
-
-    /// 对已有 provider messages 执行 provider-backed compact。
-    pub async fn compact_provider_messages_with_provider(
-        &self,
-        provider: &dyn LlmProvider,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-    ) -> Result<PreparedContext, CompactError> {
-        let compaction =
-            compact_messages_with_provider(provider, &messages, system_prompt, &self.settings)
-                .await?;
-        let compacted_messages = [
-            compaction.context_messages.clone(),
-            compaction.retained_messages.clone(),
-        ]
-        .concat();
-        Ok(PreparedContext {
-            messages: compacted_messages,
-            compaction: Some(compaction),
-        })
-    }
-
-    /// 对已有 provider messages 执行 runner-backed compact。
-    pub async fn compact_provider_messages_with_compact_runner(
-        &self,
-        runner: &dyn CompactTextRunner,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        prompt_style: CompactPromptStyle,
-    ) -> Result<PreparedContext, CompactError> {
-        self.compact_provider_messages_with_compact_runner_options(
-            runner,
-            messages,
-            system_prompt,
-            CompactRequestOptions::new(prompt_style),
-        )
-        .await
-    }
-
-    /// 与 runner-backed compact 相同，但允许调用方控制 prompt style 与附加指令。
-    pub async fn compact_provider_messages_with_compact_runner_options(
-        &self,
-        runner: &dyn CompactTextRunner,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        options: CompactRequestOptions,
-    ) -> Result<PreparedContext, CompactError> {
-        let compaction = compact_messages_with_runner_options(
-            runner,
-            &messages,
-            system_prompt,
-            &self.settings,
-            options,
-        )
-        .await?;
-        let compacted_messages = [
-            compaction.context_messages.clone(),
-            compaction.retained_messages.clone(),
-        ]
-        .concat();
-        Ok(PreparedContext {
-            messages: compacted_messages,
-            compaction: Some(compaction),
         })
     }
 
@@ -368,6 +151,18 @@ impl LlmContextAssembler {
     }
 }
 
+fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContext {
+    let messages = [
+        compaction.context_messages.clone(),
+        compaction.retained_messages.clone(),
+    ]
+    .concat();
+    PreparedContext {
+        messages,
+        compaction: Some(compaction),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -376,7 +171,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prepare_provider_messages_uses_current_model_limits_each_call() {
+    fn prepare_messages_uses_current_model_limits_each_call() {
         let assembler = LlmContextAssembler::new(ContextWindowSettings::default());
         let messages = vec![
             LlmMessage::user("old user ".repeat(400)),
@@ -384,7 +179,7 @@ mod tests {
             LlmMessage::user("current"),
         ];
 
-        let large_window = assembler.prepare_provider_messages(ContextPrepareInput {
+        let large_window = assembler.prepare_messages(ContextPrepareInput {
             messages: messages.clone(),
             system_prompt: None,
             model_limits: ModelLimits {
@@ -392,7 +187,7 @@ mod tests {
                 max_output_tokens: 1024,
             },
         });
-        let small_window = assembler.prepare_provider_messages(ContextPrepareInput {
+        let small_window = assembler.prepare_messages(ContextPrepareInput {
             messages,
             system_prompt: None,
             model_limits: ModelLimits {

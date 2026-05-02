@@ -8,6 +8,7 @@ members = [
     "crates/astrcode-tools",
     "crates/astrcode-storage",
     "crates/astrcode-context",
+    "crates/astrcode-prompt",
     "crates/astrcode-extensions",
     "crates/astrcode-server",
     "crates/astrcode-protocol",

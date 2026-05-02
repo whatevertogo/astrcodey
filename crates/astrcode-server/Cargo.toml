@@ -16,6 +16,7 @@ astrcode-ai = { path = "../astrcode-ai" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-context = { path = "../astrcode-context" }
+astrcode-prompt = { path = "../astrcode-prompt" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", default-features = false }
 astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", default-features = false }

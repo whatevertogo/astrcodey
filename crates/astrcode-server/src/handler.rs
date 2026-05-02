@@ -5,9 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::compaction::{
-    CompactError, CompactPromptStyle, CompactRequestOptions, CompactSkipReason,
-};
+use astrcode_context::compaction::{CompactError, CompactSkipReason, CompactSummaryRenderOptions};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
@@ -31,7 +29,7 @@ use crate::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
         dispatch_post_compact,
     },
-    forked_provider::CompactForkRunner,
+    forked_provider::compact_with_forked_provider,
     session::compaction_applied_payload,
 };
 
@@ -407,24 +405,21 @@ impl CommandHandler {
                 return Ok(());
             },
         };
-        let compact_runner =
-            CompactForkRunner::new(Arc::clone(&self.runtime.llm_provider), tools.clone());
-        let compaction = match self
-            .runtime
-            .context_assembler
-            .compact_provider_messages_with_compact_runner_options(
-                &compact_runner,
-                provider_messages.clone(),
-                state.system_prompt.as_deref(),
-                CompactRequestOptions::new(CompactPromptStyle::ForkedConversationPrompt)
-                    .with_custom_instructions(compact_instructions)
-                    .with_transcript_path(snapshot_path),
-            )
-            .await
+        let render_options = CompactSummaryRenderOptions {
+            transcript_path: snapshot_path,
+        };
+        let compaction = match compact_with_forked_provider(
+            Arc::clone(&self.runtime.llm_provider),
+            tools.clone(),
+            &provider_messages,
+            state.system_prompt.as_deref(),
+            self.runtime.context_assembler.settings(),
+            &compact_instructions,
+            &render_options,
+        )
+        .await
         {
-            Ok(prepared) => prepared
-                .compaction
-                .expect("compact_provider_messages should include compaction"),
+            Ok(compaction) => compaction,
             Err(CompactError::Skip(
                 CompactSkipReason::Empty | CompactSkipReason::NothingToCompact,
             )) => {
@@ -610,7 +605,6 @@ impl CommandHandler {
         let tools = tool_registry.list_definitions();
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.runtime.extension_runner,
-            self.runtime.context_assembler.as_ref(),
             session_id,
             working_dir,
             &self.runtime.effective.llm.model_id,

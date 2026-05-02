@@ -135,7 +135,6 @@ name = "astrcode-context"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
- "astrcode-support",
  "async-trait",
  "tokio",
 ]
@@ -205,6 +204,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-prompt"
+version = "0.1.0"
+dependencies = [
+ "astrcode-core",
+ "astrcode-support",
+ "async-trait",
+ "tokio",
+]
+
+[[package]]
 name = "astrcode-protocol"
 version = "0.1.0"
 dependencies = [
@@ -224,6 +233,7 @@ dependencies = [
  "astrcode-extension-todo-tool",
  "astrcode-extensions",
  "astrcode-log",
+ "astrcode-prompt",
  "astrcode-protocol",
  "astrcode-storage",
  "astrcode-support",

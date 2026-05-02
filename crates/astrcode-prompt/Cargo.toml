@@ -1,0 +1,13 @@
+[package]
+name = "astrcode-prompt"
+version = "0.1.0"
+edition = "2021"
+description = "System prompt composition for AstrCode sessions"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

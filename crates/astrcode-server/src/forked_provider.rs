@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use astrcode_context::compaction::{CompactError, CompactTextRunner};
+use astrcode_context::{
+    compaction::{
+        CompactError, CompactResult, CompactSummaryRenderOptions, compact_messages_with_request,
+    },
+    settings::ContextWindowSettings,
+};
 use astrcode_core::{
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
     tool::ToolDefinition,
@@ -110,22 +115,20 @@ impl ForkedProviderRunner {
     }
 }
 
-pub(crate) struct CompactForkRunner {
+#[derive(Clone)]
+struct CompactForkRunner {
     forked: ForkedProviderRunner,
     tools: Vec<ToolDefinition>,
 }
 
 impl CompactForkRunner {
-    pub(crate) fn new(llm: Arc<dyn LlmProvider>, tools: Vec<ToolDefinition>) -> Self {
+    fn new(llm: Arc<dyn LlmProvider>, tools: Vec<ToolDefinition>) -> Self {
         Self {
             forked: ForkedProviderRunner::new(llm),
             tools,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl CompactTextRunner for CompactForkRunner {
     async fn run_compact_request(&self, messages: Vec<LlmMessage>) -> Result<String, CompactError> {
         self.forked
             .run_one_turn(ForkedProviderRequest {
@@ -142,4 +145,28 @@ impl CompactTextRunner for CompactForkRunner {
             })
             .map_err(|error| CompactError::Llm(error.into_llm_error()))
     }
+}
+
+pub(crate) async fn compact_with_forked_provider(
+    llm: Arc<dyn LlmProvider>,
+    tools: Vec<ToolDefinition>,
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+    settings: &ContextWindowSettings,
+    custom_instructions: &[String],
+    render_options: &CompactSummaryRenderOptions,
+) -> Result<CompactResult, CompactError> {
+    let runner = CompactForkRunner::new(llm, tools);
+    compact_messages_with_request(
+        messages,
+        system_prompt,
+        settings,
+        custom_instructions,
+        render_options,
+        move |request_messages| {
+            let runner = runner.clone();
+            async move { runner.run_compact_request(request_messages).await }
+        },
+    )
+    .await
 }

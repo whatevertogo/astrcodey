@@ -11,12 +11,13 @@ use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
     extension::ExtensionError,
     llm::{LlmClientConfig, LlmProvider},
-    prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
+    prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
     tool::ToolDefinition,
 };
 use astrcode_extensions::{
     context::ServerExtensionContext, loader::ExtensionLoader, runner::ExtensionRunner,
 };
+use astrcode_prompt::{composer::PromptComposer, pipeline};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
@@ -34,7 +35,7 @@ pub struct ServerRuntime {
     pub session_manager: Arc<SessionManager>,
     /// LLM 提供者，用于生成 AI 回复
     pub llm_provider: Arc<dyn LlmProvider>,
-    /// 上下文组装器，负责 system prompt、窗口估算和摘要压缩
+    /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
@@ -226,7 +227,6 @@ pub(crate) async fn build_tool_registry_snapshot(
 /// 都只在这里汇合一次。调用方应把结果写入 eventlog，后续回合直接复用。
 pub(crate) async fn build_system_prompt_snapshot(
     extension_runner: &ExtensionRunner,
-    context_assembler: &LlmContextAssembler,
     session_id: &str,
     working_dir: &str,
     model_id: &str,
@@ -274,11 +274,8 @@ pub(crate) async fn build_system_prompt_snapshot(
     }
     let extra_instructions = non_empty(extra_system_prompt.unwrap_or_default());
 
-    let identity = astrcode_context::prompt::pipeline::load_identity_md(
-        &astrcode_context::prompt::pipeline::user_identity_md_path(),
-    );
-    let project_rules =
-        astrcode_context::prompt::pipeline::load_project_rules(std::path::Path::new(working_dir));
+    let identity = pipeline::load_identity_md(&pipeline::user_identity_md_path());
+    let project_rules = pipeline::load_project_rules(std::path::Path::new(working_dir));
 
     let input = SystemPromptInput {
         working_dir: working_dir.to_string(),
@@ -292,7 +289,11 @@ pub(crate) async fn build_system_prompt_snapshot(
         extra_instructions,
     };
 
-    let system_prompt = context_assembler.assemble_system_prompt(input).await;
+    let system_prompt = PromptComposer::new()
+        .assemble(input)
+        .await
+        .system_prompt
+        .unwrap_or_default();
     let fingerprint = prompt_fingerprint(&system_prompt);
     Ok((system_prompt, fingerprint))
 }
@@ -362,11 +363,8 @@ mod tests {
             Duration::from_secs(1),
             Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
         );
-        let context_assembler = LlmContextAssembler::new(ContextWindowSettings::default());
-
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &runner,
-            &context_assembler,
             "session-1",
             ".",
             "mock",
