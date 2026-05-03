@@ -31,8 +31,9 @@ pub(crate) fn render_compact_contract(
         .map(|value| {
             format!(
                 "\n## Contract Repair\nThe previous compact response violated the required XML \
-                 contract.\nReturn the <summary> block exactly as specified and do not add any \
-                 preamble, explanation, or Markdown fence.\nViolation details:\n{value}"
+                 contract.\nReturn one <analysis> scratchpad block followed by the <summary> \
+                 block exactly as specified, and do not add any preamble, explanation, or \
+                 Markdown fence.\nViolation details:\n{value}"
             )
         })
         .unwrap_or_default();
@@ -72,8 +73,9 @@ pub(crate) fn render_compact_request(
          only the conversation messages above and the previous compact summary if one is included \
          in this request.\nDo not call tools, functions, external systems, or any provider \
          tool-call interface. Tool calls are forbidden for this compact request.\nReturn exactly \
-         one <summary> block and no markdown fences, preamble, analysis, or extra \
-         text.\n\n{compact_contract}"
+         one <analysis> scratchpad block followed by one <summary> block, with no markdown \
+         fences, preamble, or extra text. The <analysis> block is private drafting context and \
+         will be stripped before the continued session sees the result.\n\n{compact_contract}"
     )
 }
 

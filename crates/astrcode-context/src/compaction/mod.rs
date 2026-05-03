@@ -489,7 +489,11 @@ mod tests {
     }
 
     fn valid_compact_summary() -> &'static str {
-        r#"<summary>
+        r#"<analysis>
+The summary should preserve the compact contract and omit this scratchpad later.
+</analysis>
+
+<summary>
 1. Primary Request and Intent:
    preserve structure
 
@@ -609,6 +613,10 @@ scratchpad that should not survive
     #[test]
     fn parse_compact_output_accepts_required_nine_section_summary() {
         let raw = r#"
+<analysis>
+scratchpad that should be ignored
+</analysis>
+
 <summary>
 1. Primary Request and Intent:
    preserve structure
@@ -642,6 +650,8 @@ scratchpad that should not survive
         let parsed = parse_compact_output(raw).unwrap();
 
         assert!(parsed.summary.contains("Primary Request and Intent"));
+        assert!(!parsed.summary.contains("scratchpad"));
+        assert!(!parsed.summary.contains("<analysis>"));
     }
 
     #[test]
@@ -687,8 +697,26 @@ scratchpad that should not survive
             assert!(prompt.contains(section), "missing {section}");
         }
         assert!(prompt.contains("<summary>"));
-        assert!(!prompt.contains("<analysis>"));
+        assert!(prompt.contains("<analysis>"));
+        assert!(prompt.contains("scratchpad"));
         assert!(!prompt.contains("<recent_user_context_digest>"));
+    }
+
+    #[test]
+    fn compact_repair_prompt_preserves_analysis_then_summary_contract() {
+        let settings = ContextWindowSettings::default();
+        let prompt = prompt::render_compact_contract(
+            None,
+            &plan::CompactPromptMode::Fresh,
+            &settings,
+            Some("missing section"),
+            &[],
+        );
+
+        assert!(
+            prompt.contains("Return one <analysis> scratchpad block followed by the <summary>")
+        );
+        assert!(!prompt.contains("Return the <summary> block exactly"));
     }
 
     #[tokio::test]
@@ -724,6 +752,7 @@ scratchpad that should not survive
         assert_eq!(request.last().unwrap().role, LlmRole::User);
         let summary_request = visible_message_text(request.last().unwrap());
         assert!(summary_request.contains("Do not call tools"));
+        assert!(summary_request.contains("<analysis>"));
         assert!(summary_request.contains("1. Primary Request and Intent:"));
         assert!(summary_request.contains("<summary>"));
         assert!(summary_request.contains("preserve compact instruction"));
