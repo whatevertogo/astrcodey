@@ -41,8 +41,6 @@ pub struct LlmContextAssembler {
     settings: ContextWindowSettings,
 }
 
-pub type ContextManager = LlmContextAssembler;
-
 impl LlmContextAssembler {
     /// 创建上下文组装器；settings 是稳定策略，模型窗口由每次 request 输入提供。
     pub fn new(settings: ContextWindowSettings) -> Self {
@@ -162,7 +160,6 @@ fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContex
         compaction: Some(compaction),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -29,14 +29,6 @@ pub use assemble::{CompactSummaryEnvelope, CompactSummaryRenderOptions, format_c
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
 
-type CompactParts = (
-    Vec<LlmMessage>,
-    PreparedCompactInput,
-    Vec<LlmMessage>,
-    usize,
-    usize,
-);
-
 /// 压缩操作的结果。
 ///
 /// 记录压缩前后的 token 数量以及 LLM 生成的摘要文本。
@@ -56,6 +48,14 @@ pub struct CompactResult {
     pub retained_messages: Vec<LlmMessage>,
     /// compact 前 transcript snapshot 的可读路径。
     pub transcript_path: Option<String>,
+}
+
+struct PreparedCompactParts {
+    prefix: Vec<LlmMessage>,
+    prepared_input: PreparedCompactInput,
+    retained_messages: Vec<LlmMessage>,
+    pre_tokens: usize,
+    messages_removed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,14 +124,13 @@ pub fn compact_messages_with_render_options(
     system_prompt: Option<&str>,
     render_options: &CompactSummaryRenderOptions,
 ) -> Result<CompactResult, CompactSkipReason> {
-    let (prefix, _prepared_input, retained_messages, pre_tokens, messages_removed) =
-        prepare_compact_parts(messages, system_prompt)?;
-    let summary = summarize_prefix(&prefix);
+    let parts = prepare_compact_parts(messages, system_prompt)?;
+    let summary = summarize_prefix(&parts.prefix);
     Ok(finish_compact_summary(
         summary,
-        retained_messages,
-        pre_tokens,
-        messages_removed,
+        parts.retained_messages,
+        parts.pre_tokens,
+        parts.messages_removed,
         system_prompt,
         render_options,
     ))
@@ -168,15 +167,14 @@ where
     F: FnMut(Vec<LlmMessage>) -> Fut,
     Fut: Future<Output = Result<String, CompactError>>,
 {
-    let (_prefix, prepared_input, retained_messages, pre_tokens, messages_removed) =
-        prepare_compact_parts(messages, system_prompt)?;
+    let parts = prepare_compact_parts(messages, system_prompt)?;
     let mut repair_feedback: Option<String> = None;
     let max_attempts = settings.compact_max_retry_attempts.max(1);
     let mut last_error: Option<CompactError> = None;
 
     for _ in 0..max_attempts {
         let compact_messages = request_messages(
-            &prepared_input,
+            &parts.prepared_input,
             system_prompt,
             settings,
             repair_feedback.as_deref(),
@@ -191,9 +189,9 @@ where
         };
         match finish_compact_output(
             &output,
-            retained_messages.clone(),
-            pre_tokens,
-            messages_removed,
+            parts.retained_messages.clone(),
+            parts.pre_tokens,
+            parts.messages_removed,
             system_prompt,
             render_options,
         ) {
@@ -278,7 +276,7 @@ fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
 fn prepare_compact_parts(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
-) -> Result<CompactParts, CompactSkipReason> {
+) -> Result<PreparedCompactParts, CompactSkipReason> {
     if messages.is_empty() {
         return Err(CompactSkipReason::Empty);
     }
@@ -296,13 +294,13 @@ fn prepare_compact_parts(
     let retained_messages = messages[keep_start..].to_vec();
     let pre_tokens = estimate_request_tokens(messages, system_prompt);
     let messages_removed = removed_visible_messages(&prefix);
-    Ok((
+    Ok(PreparedCompactParts {
         prefix,
         prepared_input,
         retained_messages,
         pre_tokens,
         messages_removed,
-    ))
+    })
 }
 
 fn request_messages(
@@ -335,9 +333,6 @@ fn finish_compact_output(
     render_options: &CompactSummaryRenderOptions,
 ) -> Result<CompactResult, CompactError> {
     let parsed = parse_compact_output(raw_output)?;
-    if let Some(violation) = parse::compact_contract_violation(&parsed) {
-        return Err(CompactParseError::new(violation).into());
-    }
     Ok(finish_compact_summary(
         assemble::sanitize_compact_summary(&parsed.summary),
         retained_messages,

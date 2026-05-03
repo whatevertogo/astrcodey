@@ -66,14 +66,6 @@ pub fn parse_compact_output(content: &str) -> Result<ParsedCompactOutput, Compac
     Ok(ParsedCompactOutput { summary })
 }
 
-/// 额外 contract 检查的扩展点。
-///
-/// 当前九段标题已经在 `parse_compact_output` 内校验，保留这个函数是为了让
-/// compact pipeline 的“parse -> contract violation -> sanitize”阶段保持稳定。
-pub(crate) fn compact_contract_violation(_parsed: &ParsedCompactOutput) -> Option<String> {
-    None
-}
-
 /// 从任意 compact-ish 文本里提取可放回上下文的摘要。
 ///
 /// 这是 assembler 的宽容路径：用于格式化已有 summary 或 deterministic fallback，
