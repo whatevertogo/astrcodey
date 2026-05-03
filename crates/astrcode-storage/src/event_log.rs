@@ -106,6 +106,27 @@ impl EventLog {
         Ok(events)
     }
 
+    /// Replay events whose assigned seq is greater than `seq`.
+    ///
+    /// This is used when recovering from a snapshot: only the events that
+    /// occurred after the snapshot point need to be replayed, not the whole log.
+    pub async fn replay_after(&self, seq: u64) -> Result<Vec<Event>, StorageError> {
+        let file = File::open(&self.path)?;
+        let reader = BufReader::new(file);
+        let mut events = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            let event: Event = serde_json::from_str(&line)?;
+            if event.seq.is_some_and(|event_seq| event_seq > seq) {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
     /// Count total events.
     pub async fn count(&self) -> Result<usize, StorageError> {
         let next_seq = self

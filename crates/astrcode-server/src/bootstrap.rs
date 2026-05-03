@@ -310,7 +310,7 @@ fn non_empty(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn prompt_fingerprint(text: &str) -> String {
+pub(crate) fn prompt_fingerprint(text: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);

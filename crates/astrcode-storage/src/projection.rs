@@ -114,15 +114,20 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::CompactionStarted => {
             model.phase = Phase::Compacting;
         },
-        EventPayload::CompactionApplied {
-            messages_removed,
-            context_messages,
-        } => {
-            let drain_end = (*messages_removed).min(model.messages.len());
-            model.messages.drain(..drain_end);
-            model.context_messages = context_messages.clone();
+        EventPayload::CompactBoundaryCreated { .. } => {
+            model.phase = Phase::Idle;
         },
-        EventPayload::CompactionCompleted { .. } => {
+        EventPayload::SessionContinuedFromCompaction {
+            context_messages,
+            retained_messages,
+            ..
+        } => {
+            // A compact continuation child session is rebuilt from the compacted
+            // parent state. The compacted summary/context is preserved in
+            // `context_messages`, while only the retained transcript becomes the
+            // new visible `messages` list.
+            model.context_messages = context_messages.clone();
+            model.messages = retained_messages.clone();
             model.phase = Phase::Idle;
         },
         EventPayload::AgentRunStarted => {

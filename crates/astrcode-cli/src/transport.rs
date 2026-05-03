@@ -43,8 +43,8 @@ impl InProcessTransport {
                 },
             };
 
-            // 创建命令处理器，循环接收并处理客户端命令
-            let mut handler = CommandHandler::new(runtime, tx);
+            // 创建命令 actor，循环接收并处理客户端命令
+            let handler = CommandHandler::spawn_actor(runtime, tx);
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Err(e) = handler.handle(cmd).await {
                     // handler 内部已将错误事件广播给客户端，此处只做日志记录

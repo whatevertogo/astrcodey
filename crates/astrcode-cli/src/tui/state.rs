@@ -681,22 +681,8 @@ impl TuiState {
                     Some("compaction".into()),
                 );
             },
-            EventPayload::CompactionApplied { .. } => {},
-            EventPayload::CompactionCompleted {
-                pre_tokens,
-                post_tokens,
-                ..
-            } => {
-                if let Some(message) = self.find_message_mut("compaction") {
-                    message.body.set_text(format!(
-                        "Compaction finished: {} -> {} tokens",
-                        pre_tokens, post_tokens
-                    ));
-                    message.is_streaming = false;
-                }
-                self.status = "Ready".into();
-                self.mark_dirty();
-            },
+            EventPayload::CompactBoundaryCreated { .. }
+            | EventPayload::SessionContinuedFromCompaction { .. } => {},
             EventPayload::AgentRunStarted => {
                 self.is_streaming = true;
                 self.status = "Agent running".into();

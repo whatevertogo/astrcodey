@@ -83,6 +83,9 @@ pub struct CompactSessionResponse {
     pub accepted: bool,
     /// compact 是否被延后。
     pub deferred: bool,
+    /// compact continuation 创建的子会话 ID。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_session_id: Option<String>,
     /// 说明文本。
     pub message: String,
 }
@@ -249,6 +252,12 @@ pub enum ConversationDeltaDto {
     },
     /// 服务端检测到 receiver lag，客户端应重新拉全量 snapshot。
     RehydrateRequired,
+    /// 当前会话已经 continuation 到新的子会话。
+    SessionContinued {
+        parent_session_id: String,
+        new_session_id: String,
+        parent_cursor: ConversationCursorDto,
+    },
     /// 工具输出流增量。
     ToolOutput {
         call_id: String,

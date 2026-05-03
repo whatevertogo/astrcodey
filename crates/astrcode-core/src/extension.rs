@@ -187,8 +187,6 @@ pub struct PostToolUseInput {
 pub enum CompactTrigger {
     /// 自动阈值触发的 compact。
     AutoThreshold,
-    /// Provider 返回 prompt-too-long 后触发的重试 compact。
-    PromptTooLongRetry,
     /// 用户手动执行 compact 命令。
     ManualCommand,
 }

@@ -16,7 +16,9 @@ use astrcode_context::{
 };
 use astrcode_core::{
     config::ModelSelection,
-    extension::{CompactTrigger, ExtensionError, ExtensionEvent, PostCompactInput, PreCompactInput},
+    extension::{
+        CompactTrigger, ExtensionError, ExtensionEvent, PostCompactInput, PreCompactInput,
+    },
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
     tool::ToolDefinition,
 };
@@ -68,7 +70,6 @@ pub(crate) async fn dispatch_post_compact(
 pub(crate) fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
     match trigger {
         CompactTrigger::AutoThreshold => "auto_threshold",
-        CompactTrigger::PromptTooLongRetry => "prompt_too_long_retry",
         CompactTrigger::ManualCommand => "manual_command",
     }
 }

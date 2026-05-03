@@ -6,11 +6,12 @@ use astrcode_core::{
     event::{Event, EventPayload},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::ToolDefinition,
+    types::new_message_id,
 };
 use astrcode_extensions::{runner::ExtensionRunner, runtime::ExtensionRuntime};
 use astrcode_protocol::{
     events::ClientNotification,
-    http::{ConversationSnapshotResponseDto, CreateSessionResponseDto},
+    http::{CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto},
 };
 use astrcode_server::{bootstrap::ServerRuntime, http::router, session::SessionManager};
 use astrcode_storage::in_memory::InMemoryEventStore;
@@ -52,6 +53,8 @@ impl LlmProvider for ImmediateLlm {
 
 struct PendingLlm;
 
+struct SummaryLlm;
+
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
     async fn generate(
@@ -65,6 +68,59 @@ impl LlmProvider for PendingLlm {
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
             max_input_tokens: 1024,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for SummaryLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::ContentDelta {
+            delta: r#"<summary>
+1. Primary Request and Intent:
+   Compacted conversation summary
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - (none)
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   compact command
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+                .into(),
+        });
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
             max_output_tokens: 1024,
         }
     }
@@ -185,6 +241,88 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     )
     .await;
     assert_eq!(after.blocks.len(), 2);
+}
+
+#[tokio::test]
+async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
+    let runtime = runtime(Arc::new(SummaryLlm));
+    let (event_tx, _) = broadcast::channel(64);
+    let app = router(Arc::clone(&runtime), event_tx);
+    let session_id = create_session(app.clone()).await;
+
+    for text in ["one", "two", "three"] {
+        runtime
+            .session_manager
+            .append_event(Event::new(
+                session_id.clone(),
+                None,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: text.into(),
+                },
+            ))
+            .await
+            .unwrap();
+        runtime
+            .session_manager
+            .append_event(Event::new(
+                session_id.clone(),
+                None,
+                EventPayload::AssistantMessageCompleted {
+                    message_id: new_message_id(),
+                    text: format!("answer {text}"),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = post_json(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/compact"),
+        r#"{}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    let child_id = body.new_session_id.expect("compact should create a child");
+    let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
+    assert!(sse.contains(&child_id));
+
+    let parent = runtime
+        .session_manager
+        .read_model(&session_id)
+        .await
+        .unwrap();
+    assert!(parent.context_messages.is_empty());
+    assert_eq!(parent.messages.len(), 6);
+
+    let child = runtime.session_manager.read_model(&child_id).await.unwrap();
+    assert_eq!(
+        child.parent_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert!(!child.context_messages.is_empty());
+
+    let snapshot = get_json::<ConversationSnapshotResponseDto>(
+        app,
+        &format!("/api/sessions/{child_id}/conversation"),
+    )
+    .await;
+    assert_eq!(snapshot.session_id, child_id);
+    assert_eq!(snapshot.cursor.value, child.cursor());
 }
 
 async fn create_session(app: Router) -> String {

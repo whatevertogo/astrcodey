@@ -5,7 +5,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::compaction::{CompactError, CompactSkipReason, CompactSummaryRenderOptions};
+use astrcode_context::compaction::{
+    CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
+};
 use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
@@ -20,16 +22,28 @@ use astrcode_protocol::{
     events::{ClientNotification, MessageDto, SessionListItem, SessionSnapshot},
 };
 use astrcode_tools::registry::ToolRegistry;
-use tokio::{sync::broadcast, task::JoinHandle};
+use tokio::{
+    sync::{broadcast, mpsc, oneshot},
+    task::JoinHandle,
+};
 
 use crate::{
-    agent::{Agent, AgentServices, drive_agent},
-    agent::compact::{
-        CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        compact_with_forked_provider, dispatch_post_compact,
+    agent::{
+        Agent, AgentError, AgentServices, AgentSignal, AgentTurnOutput,
+        compact::{
+            CompactHookContext, collect_compact_instructions, compact_trigger_name,
+            compact_with_forked_provider, dispatch_post_compact,
+        },
+        drive_agent,
     },
-    bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
-    session::{compaction_applied_payload, compaction_completed_payload},
+    bootstrap::{
+        ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot,
+        prompt_fingerprint,
+    },
+    session::{
+        CompactContinuationAppendInput, CompactContinuationCreateInput,
+        append_compact_continuation_events, create_compact_continuation_session,
+    },
 };
 
 struct AgentTurnInput {
@@ -40,6 +54,12 @@ struct AgentTurnInput {
     system_prompt: String,
     history: Vec<LlmMessage>,
     text: String,
+    actor_tx: mpsc::UnboundedSender<CommandMessage>,
+}
+
+#[derive(Clone)]
+pub struct CommandHandle {
+    tx: mpsc::UnboundedSender<CommandMessage>,
 }
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
@@ -55,6 +75,7 @@ pub struct CommandHandler {
     session_tool_registries: HashMap<SessionId, Arc<ToolRegistry>>,
     /// 当前正在执行的回合，按 session 隔离。
     active_turns: HashMap<SessionId, ActiveTurn>,
+    actor_tx: mpsc::UnboundedSender<CommandMessage>,
 }
 
 /// 正在执行的回合信息，持有对应的 tokio 任务句柄。
@@ -63,6 +84,127 @@ struct ActiveTurn {
     turn_id: TurnId,
     /// 后台任务的 JoinHandle，可用于取消（abort）回合
     handle: JoinHandle<()>,
+    working_dir: String,
+    model_id: String,
+    system_prompt: String,
+    tool_registry: Arc<ToolRegistry>,
+    switch_active_on_continuation: bool,
+}
+
+struct PendingCompactContinuation {
+    parent_session_id: SessionId,
+    working_dir: String,
+    model_id: String,
+    system_prompt: String,
+    tool_registry: Arc<ToolRegistry>,
+    trigger: CompactTrigger,
+    compaction: CompactResult,
+    switch_active: bool,
+}
+
+impl CommandHandle {
+    pub async fn handle(&self, command: ClientCommand) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::ClientCommand { command, reply })
+            .map_err(|_| "command actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "command actor dropped response".to_string())?
+    }
+
+    pub async fn create_session(&self, working_dir: String) -> Result<SessionId, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::CreateSession { working_dir, reply })
+            .map_err(|_| "command actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "command actor dropped response".to_string())?
+    }
+
+    pub async fn submit_prompt_for_session(
+        &self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<TurnId, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::SubmitPromptForSession {
+                session_id,
+                text,
+                reply,
+            })
+            .map_err(|_| "command actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "command actor dropped response".to_string())?
+    }
+
+    pub async fn compact_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionId>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::CompactSession { session_id, reply })
+            .map_err(|_| "command actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "command actor dropped response".to_string())?
+    }
+
+    pub async fn abort_session(&self, session_id: SessionId) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::AbortSession { session_id, reply })
+            .map_err(|_| "command actor is unavailable".to_string())?;
+        rx.await
+            .map_err(|_| "command actor dropped response".to_string())?
+    }
+}
+
+enum CommandMessage {
+    ClientCommand {
+        command: ClientCommand,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    CreateSession {
+        working_dir: String,
+        reply: oneshot::Sender<Result<SessionId, String>>,
+    },
+    SubmitPromptForSession {
+        session_id: SessionId,
+        text: String,
+        reply: oneshot::Sender<Result<TurnId, String>>,
+    },
+    CompactSession {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<Option<SessionId>, String>>,
+    },
+    AbortSession {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    AgentEvent {
+        session_id: SessionId,
+        turn_id: TurnId,
+        payload: EventPayload,
+    },
+    AgentTurnFinished {
+        session_id: SessionId,
+        turn_id: TurnId,
+        output: AgentTurnOutput,
+    },
+    AgentTurnFailed {
+        session_id: SessionId,
+        turn_id: TurnId,
+        error: AgentError,
+        emitted_error: bool,
+    },
+    AgentAutoCompact {
+        session_id: SessionId,
+        turn_id: TurnId,
+        trigger: CompactTrigger,
+        compaction: CompactResult,
+        reply: oneshot::Sender<Result<SessionId, String>>,
+    },
 }
 
 impl CommandHandler {
@@ -71,9 +213,10 @@ impl CommandHandler {
     /// # 参数
     /// - `runtime`: 服务器运行时服务集合
     /// - `event_tx`: 事件广播发送端
-    pub fn new(
+    fn new(
         runtime: Arc<ServerRuntime>,
         event_tx: broadcast::Sender<ClientNotification>,
+        actor_tx: mpsc::UnboundedSender<CommandMessage>,
     ) -> Self {
         Self {
             runtime,
@@ -81,6 +224,88 @@ impl CommandHandler {
             active_session_id: None,
             session_tool_registries: HashMap::new(),
             active_turns: HashMap::new(),
+            actor_tx,
+        }
+    }
+
+    pub fn spawn_actor(
+        runtime: Arc<ServerRuntime>,
+        event_tx: broadcast::Sender<ClientNotification>,
+    ) -> CommandHandle {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut handler = Self::new(runtime, event_tx, tx.clone());
+        tokio::spawn(async move {
+            handler.run(rx).await;
+        });
+        CommandHandle { tx }
+    }
+
+    async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<CommandMessage>) {
+        while let Some(message) = rx.recv().await {
+            self.handle_message(message).await;
+        }
+    }
+
+    async fn handle_message(&mut self, message: CommandMessage) {
+        match message {
+            CommandMessage::ClientCommand { command, reply } => {
+                let _ = reply.send(self.handle(command).await);
+            },
+            CommandMessage::CreateSession { working_dir, reply } => {
+                let _ = reply.send(self.create_session(working_dir).await);
+            },
+            CommandMessage::SubmitPromptForSession {
+                session_id,
+                text,
+                reply,
+            } => {
+                let _ = reply.send(self.submit_prompt_for_session(session_id, text).await);
+            },
+            CommandMessage::CompactSession { session_id, reply } => {
+                let _ = reply.send(self.compact_session(&session_id).await);
+            },
+            CommandMessage::AbortSession { session_id, reply } => {
+                let _ = reply.send(self.abort_session(&session_id).await);
+            },
+            CommandMessage::AgentEvent {
+                session_id,
+                turn_id,
+                payload,
+            } => {
+                if self.active_turn_matches(&session_id, &turn_id) {
+                    let _ = self
+                        .record_and_broadcast(&session_id, Some(&turn_id), payload)
+                        .await;
+                }
+            },
+            CommandMessage::AgentTurnFinished {
+                session_id,
+                turn_id,
+                output,
+            } => {
+                self.finish_agent_turn(session_id, turn_id, output).await;
+            },
+            CommandMessage::AgentTurnFailed {
+                session_id,
+                turn_id,
+                error,
+                emitted_error,
+            } => {
+                self.fail_agent_turn(session_id, turn_id, error, emitted_error)
+                    .await;
+            },
+            CommandMessage::AgentAutoCompact {
+                session_id,
+                turn_id,
+                trigger,
+                compaction,
+                reply,
+            } => {
+                let result = self
+                    .continue_active_turn_from_compaction(session_id, turn_id, trigger, compaction)
+                    .await;
+                let _ = reply.send(result);
+            },
         }
     }
 
@@ -89,8 +314,6 @@ impl CommandHandler {
     /// 支持的命令包括：创建会话、提交提示词、列出会话、中止回合、
     /// 恢复/切换会话、删除会话等。
     pub async fn handle(&mut self, cmd: ClientCommand) -> Result<(), String> {
-        self.clear_finished_turns();
-
         match cmd {
             ClientCommand::CreateSession { working_dir } => {
                 let _ = self.create_session(working_dir).await;
@@ -245,7 +468,6 @@ impl CommandHandler {
         sid: SessionId,
         text: String,
     ) -> Result<TurnId, String> {
-        self.clear_finished_turns();
         if self.active_turns.contains_key(&sid) {
             self.send_error(40900, "A turn is already running");
             return Err("A turn is already running".into());
@@ -264,6 +486,7 @@ impl CommandHandler {
             .map_err(|e| format!("read session {sid}: {e}"))?;
         let history = state.provider_messages();
         let working_dir = state.working_dir;
+        let model_id = state.model_id;
         let system_prompt = state.system_prompt;
         let tool_registry = self.ensure_tool_registry(&sid, &working_dir).await;
         let system_prompt = match system_prompt {
@@ -289,14 +512,16 @@ impl CommandHandler {
         self.record_and_broadcast(&sid, Some(&turn_id), EventPayload::AgentRunStarted)
             .await?;
 
+        let switch_active_on_continuation = self.active_session_id.as_ref() == Some(&sid);
         let handle = self.spawn_agent_turn(AgentTurnInput {
             sid: sid.clone(),
             turn_id: turn_id.clone(),
-            working_dir,
-            tool_registry,
-            system_prompt,
+            working_dir: working_dir.clone(),
+            tool_registry: Arc::clone(&tool_registry),
+            system_prompt: system_prompt.clone(),
             history,
             text,
+            actor_tx: self.actor_tx.clone(),
         });
         self.active_turns.insert(
             sid.clone(),
@@ -304,6 +529,11 @@ impl CommandHandler {
                 session_id: sid,
                 turn_id: turn_id.clone(),
                 handle,
+                working_dir,
+                model_id,
+                system_prompt,
+                tool_registry,
+                switch_active_on_continuation,
             },
         );
         Ok(turn_id)
@@ -357,11 +587,11 @@ impl CommandHandler {
             self.send_error(40400, "No active session");
             return Ok(());
         };
-        self.compact_session(&sid).await
+        self.compact_session(&sid).await.map(|_| ())
     }
 
     /// 手动压缩指定会话。
-    pub async fn compact_session(&mut self, sid: &SessionId) -> Result<(), String> {
+    pub async fn compact_session(&mut self, sid: &SessionId) -> Result<Option<SessionId>, String> {
         if self.active_turns.contains_key(sid) {
             self.send_error(40900, "Cannot compact while a turn is running");
             return Err("Cannot compact while a turn is running".into());
@@ -392,7 +622,7 @@ impl CommandHandler {
             Ok(instructions) => instructions,
             Err(error) => {
                 self.send_error(-32603, &format!("Compaction failed: {error}"));
-                return Ok(());
+                return Ok(None);
             },
         };
         let snapshot_path = match self
@@ -416,7 +646,7 @@ impl CommandHandler {
                     -32603,
                     &format!("Compaction failed: could not write transcript snapshot: {error}"),
                 );
-                return Ok(());
+                return Ok(None);
             },
         };
         let render_options = CompactSummaryRenderOptions {
@@ -438,11 +668,11 @@ impl CommandHandler {
                 CompactSkipReason::Empty | CompactSkipReason::NothingToCompact,
             )) => {
                 self.send_error(40000, "Nothing to compact");
-                return Ok(());
+                return Ok(None);
             },
             Err(error) => {
                 self.send_error(-32603, &format!("Compaction failed: {error}"));
-                return Ok(());
+                return Ok(None);
             },
         };
 
@@ -461,22 +691,29 @@ impl CommandHandler {
         .await
         {
             self.send_error(-32603, &format!("Compaction failed: {error}"));
-            return Ok(());
+            return Ok(None);
         }
 
-        self.record_and_broadcast(sid, None, EventPayload::CompactionStarted)
+        let system_prompt = match &state.system_prompt {
+            Some(system_prompt) => system_prompt.clone(),
+            None => {
+                self.configure_session_prompt(sid, &state.working_dir, &tool_registry, None)
+                    .await?
+            },
+        };
+        let child_session_id = self
+            .create_compact_continuation_child(PendingCompactContinuation {
+                parent_session_id: sid.clone(),
+                working_dir: state.working_dir.clone(),
+                model_id: state.model_id.clone(),
+                system_prompt,
+                tool_registry,
+                trigger: CompactTrigger::ManualCommand,
+                compaction,
+                switch_active: true,
+            })
             .await?;
-        self.record_and_broadcast(sid, None, compaction_applied_payload(&compaction))
-            .await?;
-        self.record_and_broadcast(sid, None, compaction_completed_payload(&compaction))
-            .await?;
-        Ok(())
-    }
-
-    /// 清理已完成的活跃回合引用，在每次处理新命令前调用。
-    fn clear_finished_turns(&mut self) {
-        self.active_turns
-            .retain(|_, active_turn| !active_turn.handle.is_finished());
+        Ok(Some(child_session_id))
     }
 
     /// 恢复或切换到指定会话，从磁盘重放事件并构建快照发送给客户端。
@@ -638,7 +875,6 @@ impl CommandHandler {
     /// 确保事件实时广播给客户端。Agent 完成后发送回合完成事件。
     fn spawn_agent_turn(&self, input: AgentTurnInput) -> JoinHandle<()> {
         let runtime = self.runtime.clone();
-        let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
             let AgentTurnInput {
@@ -649,7 +885,9 @@ impl CommandHandler {
                 system_prompt,
                 history,
                 text,
+                actor_tx,
             } = input;
+            let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
 
             let agent = Agent::new(
                 sid.clone(),
@@ -665,77 +903,72 @@ impl CommandHandler {
                 },
             );
 
-            let (output, emitted_error) = drive_agent(&agent, &text, history, |payload| {
-                let runtime = runtime.clone();
-                let event_tx = event_tx.clone();
-                let sid = sid.clone();
+            let (output, emitted_error) = drive_agent(&agent, &text, history, |signal| {
+                let actor_tx = actor_tx.clone();
+                let current_session_id = Arc::clone(&current_session_id);
                 let turn_id = turn_id.clone();
                 async move {
-                    let _ =
-                        record_and_broadcast(&runtime, &event_tx, &sid, Some(&turn_id), payload)
-                            .await;
+                    match signal {
+                        AgentSignal::Event(payload) => {
+                            let session_id = current_session_id.lock().await.clone();
+                            let _ = actor_tx.send(CommandMessage::AgentEvent {
+                                session_id,
+                                turn_id,
+                                payload,
+                            });
+                        },
+                        AgentSignal::AutoCompact {
+                            trigger,
+                            compaction,
+                            reply,
+                        } => {
+                            let session_id = current_session_id.lock().await.clone();
+                            let (actor_reply, actor_rx) = oneshot::channel();
+                            let result = if actor_tx
+                                .send(CommandMessage::AgentAutoCompact {
+                                    session_id,
+                                    turn_id,
+                                    trigger,
+                                    compaction,
+                                    reply: actor_reply,
+                                })
+                                .is_err()
+                            {
+                                Err("command actor is unavailable".to_string())
+                            } else {
+                                match actor_rx.await {
+                                    Ok(result) => result,
+                                    Err(_) => {
+                                        Err("command actor dropped auto compact response".into())
+                                    },
+                                }
+                            };
+                            if let Ok(child_session_id) = &result {
+                                *current_session_id.lock().await = child_session_id.clone();
+                            }
+                            let _ = reply.send(result);
+                        },
+                    }
                 }
             })
             .await;
+            let final_session_id = current_session_id.lock().await.clone();
 
             match output {
                 Ok(output) => {
-                    let _ = record_and_broadcast(
-                        &runtime,
-                        &event_tx,
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::TurnCompleted {
-                            finish_reason: output.finish_reason.clone(),
-                        },
-                    )
-                    .await;
-                    let _ = record_and_broadcast(
-                        &runtime,
-                        &event_tx,
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::AgentRunCompleted {
-                            reason: output.finish_reason,
-                        },
-                    )
-                    .await;
+                    let _ = actor_tx.send(CommandMessage::AgentTurnFinished {
+                        session_id: final_session_id,
+                        turn_id,
+                        output,
+                    });
                 },
-                Err(e) => {
-                    if !emitted_error {
-                        let _ = record_and_broadcast(
-                            &runtime,
-                            &event_tx,
-                            &sid,
-                            Some(&turn_id),
-                            EventPayload::ErrorOccurred {
-                                code: -32603,
-                                message: e.to_string(),
-                                recoverable: false,
-                            },
-                        )
-                        .await;
-                    }
-                    let _ = record_and_broadcast(
-                        &runtime,
-                        &event_tx,
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::TurnCompleted {
-                            finish_reason: "error".into(),
-                        },
-                    )
-                    .await;
-                    let _ = record_and_broadcast(
-                        &runtime,
-                        &event_tx,
-                        &sid,
-                        Some(&turn_id),
-                        EventPayload::AgentRunCompleted {
-                            reason: "error".into(),
-                        },
-                    )
-                    .await;
+                Err(error) => {
+                    let _ = actor_tx.send(CommandMessage::AgentTurnFailed {
+                        session_id: final_session_id,
+                        turn_id,
+                        error,
+                        emitted_error,
+                    });
                 },
             }
         })
@@ -749,6 +982,203 @@ impl CommandHandler {
         payload: EventPayload,
     ) -> Result<Event, String> {
         record_and_broadcast(&self.runtime, &self.event_tx, session_id, turn_id, payload).await
+    }
+
+    async fn create_compact_continuation_child(
+        &mut self,
+        input: PendingCompactContinuation,
+    ) -> Result<SessionId, String> {
+        let working_dir = input.working_dir.clone();
+        let model_id = input.model_id.clone();
+        let system_prompt = input.system_prompt.clone();
+        let parent_session_id = input.parent_session_id.clone();
+        let is_manual_compact = input.trigger == CompactTrigger::ManualCommand;
+        let continuation = create_compact_continuation_session(
+            &self.runtime.session_manager,
+            CompactContinuationCreateInput {
+                parent_session_id: input.parent_session_id,
+                working_dir: input.working_dir,
+                model_id: input.model_id,
+            },
+        )
+        .await?;
+        let child_session_id = continuation.child_session_id.clone();
+        self.session_tool_registries
+            .insert(child_session_id.clone(), Arc::clone(&input.tool_registry));
+        let _ = self.event_tx.send(ClientNotification::Event(
+            continuation.child_started.clone(),
+        ));
+
+        let ext_ctx = ServerExtensionContext::new(
+            child_session_id.clone(),
+            working_dir,
+            ModelSelection {
+                profile_name: String::new(),
+                model: model_id,
+                provider_kind: String::new(),
+            },
+        );
+        self.runtime
+            .extension_runner
+            .dispatch(ExtensionEvent::SessionStart, &ext_ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let events = append_compact_continuation_events(
+            &self.runtime.session_manager,
+            CompactContinuationAppendInput {
+                session: continuation,
+                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
+                system_prompt,
+                trigger_name: compact_trigger_name(input.trigger).into(),
+                compaction: input.compaction,
+            },
+        )
+        .await?;
+        if is_manual_compact {
+            // Auto compact emits this from the agent loop at the real compact
+            // point. Manual compact has no agent loop, so emit it here after
+            // failure/skip paths are behind us and before the boundary event.
+            self.record_and_broadcast(&parent_session_id, None, EventPayload::CompactionStarted)
+                .await?;
+        }
+        for event in events.appended_events {
+            let _ = self.event_tx.send(ClientNotification::Event(event));
+        }
+        if input.switch_active {
+            self.active_session_id = Some(child_session_id.clone());
+        }
+        let child_state = self
+            .runtime
+            .session_manager
+            .read_model(&child_session_id)
+            .await
+            .map_err(|e| format!("read session {child_session_id}: {e}"))?;
+        let _ = self.event_tx.send(ClientNotification::SessionResumed {
+            session_id: child_session_id.clone(),
+            snapshot: session_snapshot(&child_state),
+        });
+        Ok(child_session_id)
+    }
+
+    async fn continue_active_turn_from_compaction(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        trigger: CompactTrigger,
+        compaction: CompactResult,
+    ) -> Result<SessionId, String> {
+        let Some(mut active_turn) = self.active_turns.remove(&session_id) else {
+            return Err("stale auto compact transition".into());
+        };
+        if active_turn.turn_id != turn_id {
+            self.active_turns.insert(session_id, active_turn);
+            return Err("stale auto compact transition".into());
+        }
+
+        let input = PendingCompactContinuation {
+            parent_session_id: session_id.clone(),
+            working_dir: active_turn.working_dir.clone(),
+            model_id: active_turn.model_id.clone(),
+            system_prompt: active_turn.system_prompt.clone(),
+            tool_registry: Arc::clone(&active_turn.tool_registry),
+            trigger,
+            compaction,
+            switch_active: active_turn.switch_active_on_continuation,
+        };
+
+        match self.create_compact_continuation_child(input).await {
+            Ok(child_session_id) => {
+                active_turn.session_id = child_session_id.clone();
+                self.active_turns
+                    .insert(child_session_id.clone(), active_turn);
+                Ok(child_session_id)
+            },
+            Err(error) => {
+                self.active_turns.insert(session_id, active_turn);
+                Err(error)
+            },
+        }
+    }
+
+    fn active_turn_matches(&self, session_id: &SessionId, turn_id: &TurnId) -> bool {
+        self.active_turns
+            .get(session_id)
+            .is_some_and(|active_turn| &active_turn.turn_id == turn_id)
+    }
+
+    async fn finish_agent_turn(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        output: AgentTurnOutput,
+    ) {
+        if !self.active_turn_matches(&session_id, &turn_id) {
+            return;
+        }
+        self.active_turns.remove(&session_id);
+        let _ = self
+            .record_and_broadcast(
+                &session_id,
+                Some(&turn_id),
+                EventPayload::TurnCompleted {
+                    finish_reason: output.finish_reason.clone(),
+                },
+            )
+            .await;
+        let _ = self
+            .record_and_broadcast(
+                &session_id,
+                Some(&turn_id),
+                EventPayload::AgentRunCompleted {
+                    reason: output.finish_reason,
+                },
+            )
+            .await;
+    }
+
+    async fn fail_agent_turn(
+        &mut self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        error: AgentError,
+        emitted_error: bool,
+    ) {
+        if !self.active_turn_matches(&session_id, &turn_id) {
+            return;
+        }
+        self.active_turns.remove(&session_id);
+        if !emitted_error {
+            let _ = self
+                .record_and_broadcast(
+                    &session_id,
+                    Some(&turn_id),
+                    EventPayload::ErrorOccurred {
+                        code: -32603,
+                        message: error.to_string(),
+                        recoverable: false,
+                    },
+                )
+                .await;
+        }
+        let _ = self
+            .record_and_broadcast(
+                &session_id,
+                Some(&turn_id),
+                EventPayload::TurnCompleted {
+                    finish_reason: "error".into(),
+                },
+            )
+            .await;
+        let _ = self
+            .record_and_broadcast(
+                &session_id,
+                Some(&turn_id),
+                EventPayload::AgentRunCompleted {
+                    reason: "error".into(),
+                },
+            )
+            .await;
     }
 
     /// 通过广播通道发送错误通知给客户端。
@@ -784,6 +1214,16 @@ async fn record_and_broadcast(
 
     let _ = event_tx.send(ClientNotification::Event(event.clone()));
     Ok(event)
+}
+
+fn session_snapshot(state: &astrcode_core::storage::SessionReadModel) -> SessionSnapshot {
+    SessionSnapshot {
+        session_id: state.session_id.clone(),
+        cursor: state.cursor(),
+        messages: state.messages.iter().map(message_to_dto).collect(),
+        model_id: state.model_id.clone(),
+        working_dir: state.working_dir.clone(),
+    }
 }
 
 /// 将 LLM 消息转换为传输层 DTO，用于会话快照。
@@ -822,13 +1262,13 @@ mod tests {
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
     };
-    use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+    use astrcode_protocol::events::ClientNotification;
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::session::{
-        SessionManager, compaction_applied_payload, compaction_completed_payload,
+        SessionManager, compact_boundary_payload, session_continued_from_compaction_payload,
     };
 
     struct MockLlm;
@@ -1000,16 +1440,20 @@ mod tests {
         }
     }
 
-    async fn drain_until_compaction_completed(
+    async fn drain_until_compact_boundary(
         event_rx: &mut broadcast::Receiver<ClientNotification>,
-    ) {
+    ) -> SessionId {
         loop {
             let notification = recv_event(event_rx).await;
             let ClientNotification::Event(event) = notification else {
                 continue;
             };
-            if matches!(event.payload, EventPayload::CompactionCompleted { .. }) {
-                return;
+            if let EventPayload::CompactBoundaryCreated {
+                continued_session_id,
+                ..
+            } = event.payload
+            {
+                return continued_session_id;
             }
         }
     }
@@ -1050,24 +1494,30 @@ mod tests {
             transcript_path: Some("compact.jsonl".into()),
         };
 
-        let applied = compaction_applied_payload(&compaction);
-        let completed = compaction_completed_payload(&compaction);
+        let boundary = compact_boundary_payload("manual_command", &compaction, "child".into());
+        let continued =
+            session_continued_from_compaction_payload("parent".into(), "7".into(), &compaction);
 
         assert!(matches!(
-            applied,
-            EventPayload::CompactionApplied {
-                messages_removed: 2,
-                context_messages
-            } if context_messages.len() == 1
+            boundary,
+            EventPayload::CompactBoundaryCreated {
+                continued_session_id,
+                transcript_path: Some(path),
+                ..
+            } if continued_session_id == "child" && path == "compact.jsonl"
         ));
         assert!(matches!(
-            completed,
-            EventPayload::CompactionCompleted {
-                pre_tokens: 100,
-                post_tokens: 20,
-                summary,
-                transcript_path: Some(path),
-            } if summary == "summary" && path == "compact.jsonl"
+            continued,
+            EventPayload::SessionContinuedFromCompaction {
+                parent_session_id,
+                parent_cursor,
+                context_messages,
+                retained_messages,
+                ..
+            } if parent_session_id == "parent"
+                && parent_cursor == "7"
+                && context_messages.len() == 1
+                && retained_messages.len() == 1
         ));
     }
 
@@ -1108,14 +1558,9 @@ mod tests {
     async fn create_session_configures_system_prompt() {
         let runtime = test_runtime();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-        handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
+        let sid = handler.create_session(".".into()).await.unwrap();
 
         let mut saw_configured = false;
         for _ in 0..2 {
@@ -1129,7 +1574,6 @@ mod tests {
         }
         assert!(saw_configured);
 
-        let sid = handler.active_session_id.clone().unwrap();
         let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(
             state
@@ -1144,34 +1588,22 @@ mod tests {
     async fn submit_prompt_reuses_session_system_prompt() {
         let runtime = test_runtime();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-        handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
-        let sid = handler.active_session_id.clone().unwrap();
+        let sid = handler.create_session(".".into()).await.unwrap();
         let initial_prompt = {
             let state = runtime.session_manager.read_model(&sid).await.unwrap();
             state.system_prompt.clone()
         };
 
         handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "one".into(),
-                attachments: vec![],
-            })
+            .submit_prompt_for_session(sid.clone(), "one".into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
         handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "two".into(),
-                attachments: vec![],
-            })
+            .submit_prompt_for_session(sid.clone(), "two".into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -1181,7 +1613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_prompt_backfills_legacy_session_system_prompt() {
+    async fn submit_prompt_configures_missing_session_system_prompt() {
         let runtime = test_runtime();
         let start_event = runtime
             .session_manager
@@ -1190,14 +1622,10 @@ mod tests {
             .unwrap();
         let sid = start_event.session_id.clone();
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
-        handler.active_session_id = Some(sid.clone());
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
         handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "hello".into(),
-                attachments: vec![],
-            })
+            .submit_prompt_for_session(sid.clone(), "hello".into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -1214,19 +1642,11 @@ mod tests {
     #[tokio::test]
     async fn submit_prompt_uses_one_turn_id_for_turn_events() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-        let mut handler = CommandHandler::new(test_runtime(), event_tx);
+        let handler = CommandHandler::spawn_actor(test_runtime(), event_tx);
 
+        let sid = handler.create_session(".".into()).await.unwrap();
         handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
-        handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "hi".into(),
-                attachments: vec![],
-            })
+            .submit_prompt_for_session(sid, "hi".into())
             .await
             .unwrap();
         let (finish_reason, turn_ids) = collect_turn_ids_until_completed(&mut event_rx).await;
@@ -1247,29 +1667,19 @@ mod tests {
     #[tokio::test]
     async fn submit_prompt_rejects_second_running_turn() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-        let mut handler =
-            CommandHandler::new(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+        let handler =
+            CommandHandler::spawn_actor(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
 
+        let sid = handler.create_session(".".into()).await.unwrap();
         handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
+            .submit_prompt_for_session(sid.clone(), "first".into())
             .await
             .unwrap();
-        handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "first".into(),
-                attachments: vec![],
-            })
+        let error = handler
+            .submit_prompt_for_session(sid.clone(), "second".into())
             .await
-            .unwrap();
-        handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "second".into(),
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
+            .unwrap_err();
+        assert!(error.contains("already running"));
 
         let mut saw_busy = false;
         while let Ok(notification) = event_rx.try_recv() {
@@ -1280,34 +1690,98 @@ mod tests {
         }
         assert!(saw_busy, "second prompt should be rejected while turn runs");
 
-        handler.handle(ClientCommand::Abort).await.unwrap();
+        handler.abort_session(sid).await.unwrap();
     }
 
     #[tokio::test]
     async fn abort_stops_active_turn_and_records_completion() {
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-        let mut handler =
-            CommandHandler::new(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+        let handler =
+            CommandHandler::spawn_actor(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
 
+        let sid = handler.create_session(".".into()).await.unwrap();
         handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
+            .submit_prompt_for_session(sid.clone(), "keep running".into())
             .await
             .unwrap();
-        handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "keep running".into(),
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        assert!(!handler.active_turns.is_empty());
 
-        handler.handle(ClientCommand::Abort).await.unwrap();
+        handler.abort_session(sid).await.unwrap();
 
-        assert!(handler.active_turns.is_empty());
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
+    }
+
+    #[tokio::test]
+    async fn compact_session_rejects_running_turn_without_compaction_started() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+        let handler =
+            CommandHandler::spawn_actor(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+
+        let sid = handler.create_session(".".into()).await.unwrap();
+        handler
+            .submit_prompt_for_session(sid.clone(), "keep running".into())
+            .await
+            .unwrap();
+        while event_rx.try_recv().is_ok() {}
+
+        let error = handler.compact_session(sid.clone()).await.unwrap_err();
+        assert_eq!(error, "Cannot compact while a turn is running");
+
+        let mut saw_conflict = false;
+        while let Ok(notification) = event_rx.try_recv() {
+            match notification {
+                ClientNotification::Error { code, .. } => {
+                    saw_conflict |= code == 40900;
+                },
+                ClientNotification::Event(event) => {
+                    assert!(
+                        !matches!(event.payload, EventPayload::CompactionStarted),
+                        "rejected compact must not leave clients in compacting state"
+                    );
+                },
+                _ => {},
+            }
+        }
+        assert!(saw_conflict);
+
+        handler.abort_session(sid).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_agent_finish_after_abort_is_ignored() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+        let handler =
+            CommandHandler::spawn_actor(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
+
+        let sid = handler.create_session(".".into()).await.unwrap();
+        let turn_id = handler
+            .submit_prompt_for_session(sid.clone(), "keep running".into())
+            .await
+            .unwrap();
+        handler.abort_session(sid.clone()).await.unwrap();
+        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
+
+        handler
+            .tx
+            .send(CommandMessage::AgentTurnFinished {
+                session_id: sid,
+                turn_id,
+                output: AgentTurnOutput {
+                    text: "late".into(),
+                    finish_reason: "stop".into(),
+                    tool_results: vec![],
+                    auto_compaction: None,
+                },
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        while let Ok(notification) = event_rx.try_recv() {
+            if let ClientNotification::Event(event) = notification {
+                if matches!(event.payload, EventPayload::TurnCompleted { .. }) {
+                    panic!("stale AgentTurnFinished should not emit a second completion");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1315,46 +1789,35 @@ mod tests {
         let settings = astrcode_context::settings::ContextWindowSettings::default();
         let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-        handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
+        let parent_id = handler.create_session(".".into()).await.unwrap();
         for text in ["one", "two", "three"] {
             handler
-                .handle(ClientCommand::SubmitPrompt {
-                    text: text.into(),
-                    attachments: vec![],
-                })
+                .submit_prompt_for_session(parent_id.clone(), text.into())
                 .await
                 .unwrap();
             assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
         }
 
-        handler.handle(ClientCommand::Compact).await.unwrap();
+        let child_id = handler
+            .compact_session(parent_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
+        assert_eq!(child_id, continued_session_id);
 
-        let mut saw_applied = false;
-        let mut saw_completed = false;
-        while !saw_completed {
-            let notification = recv_event(&mut event_rx).await;
-            let ClientNotification::Event(event) = notification else {
-                continue;
-            };
-            match event.payload {
-                EventPayload::CompactionApplied { .. } => {
-                    saw_applied = true;
-                },
-                EventPayload::CompactionCompleted { .. } => saw_completed = true,
-                _ => {},
-            }
-        }
-        assert!(saw_applied);
+        let parent_state = runtime
+            .session_manager
+            .read_model(&parent_id)
+            .await
+            .unwrap();
+        assert!(parent_state.context_messages.is_empty());
+        assert!(!parent_state.messages.is_empty());
 
-        let sid = handler.active_session_id.clone().unwrap();
-        let state = runtime.session_manager.read_model(&sid).await.unwrap();
+        let state = runtime.session_manager.read_model(&child_id).await.unwrap();
+        assert_eq!(state.parent_session_id.as_deref(), Some(parent_id.as_str()));
         assert!(!state.context_messages.is_empty());
         assert!(state.provider_messages().iter().any(|message| {
             message_to_dto(message)
@@ -1373,45 +1836,55 @@ mod tests {
         let settings = astrcode_context::settings::ContextWindowSettings::default();
         let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-        handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
+        let first_session_id = handler.create_session(".".into()).await.unwrap();
         for text in ["one", "two", "three", "four"] {
             handler
-                .handle(ClientCommand::SubmitPrompt {
-                    text: text.into(),
-                    attachments: vec![],
-                })
+                .submit_prompt_for_session(first_session_id.clone(), text.into())
                 .await
                 .unwrap();
             assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
         }
 
-        handler.handle(ClientCommand::Compact).await.unwrap();
-        drain_until_compaction_completed(&mut event_rx).await;
-        let sid = handler.active_session_id.clone().unwrap();
+        let first_child_id = handler
+            .compact_session(first_session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_child_id,
+            drain_until_compact_boundary(&mut event_rx).await
+        );
         let first_summary = {
-            let state = runtime.session_manager.read_model(&sid).await.unwrap();
+            let state = runtime
+                .session_manager
+                .read_model(&first_child_id)
+                .await
+                .unwrap();
             message_to_dto(&state.context_messages[0]).content
         };
 
         handler
-            .handle(ClientCommand::SubmitPrompt {
-                text: "five".into(),
-                attachments: vec![],
-            })
+            .submit_prompt_for_session(first_child_id.clone(), "five".into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
-        handler.handle(ClientCommand::Compact).await.unwrap();
-        drain_until_compaction_completed(&mut event_rx).await;
+        let second_child_id = handler
+            .compact_session(first_child_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second_child_id,
+            drain_until_compact_boundary(&mut event_rx).await
+        );
 
-        let state = runtime.session_manager.read_model(&sid).await.unwrap();
+        let state = runtime
+            .session_manager
+            .read_model(&second_child_id)
+            .await
+            .unwrap();
         let second_summary = message_to_dto(&state.context_messages[0]).content;
         assert!(
             second_summary.contains("Compacted conversation summary"),
@@ -1424,32 +1897,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_compact_switches_active_session_to_continuation_child() {
+        let settings = astrcode_context::settings::ContextWindowSettings {
+            compact_threshold_percent: 0.0,
+            ..Default::default()
+        };
+        let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
+
+        let parent_id = handler.create_session(".".into()).await.unwrap();
+        for index in 0..3 {
+            runtime
+                .session_manager
+                .append_event(Event::new(
+                    parent_id.clone(),
+                    None,
+                    EventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: format!("old user {index} {}", "x ".repeat(20)),
+                    },
+                ))
+                .await
+                .unwrap();
+            runtime
+                .session_manager
+                .append_event(Event::new(
+                    parent_id.clone(),
+                    None,
+                    EventPayload::AssistantMessageCompleted {
+                        message_id: new_message_id(),
+                        text: format!("old answer {index} {}", "y ".repeat(20)),
+                    },
+                ))
+                .await
+                .unwrap();
+        }
+
+        handler
+            .submit_prompt_for_session(parent_id.clone(), "current".into())
+            .await
+            .unwrap();
+        let mut compaction_started_count = 0;
+        let mut child_id = None;
+        let mut turn_completed_session = None;
+        loop {
+            let notification = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                .await
+                .expect("event should arrive")
+                .expect("event channel should remain open");
+            let ClientNotification::Event(event) = notification else {
+                continue;
+            };
+            match event.payload {
+                EventPayload::CompactionStarted => {
+                    compaction_started_count += 1;
+                    assert_eq!(event.session_id, parent_id);
+                },
+                EventPayload::CompactBoundaryCreated {
+                    continued_session_id,
+                    ..
+                } => {
+                    assert!(
+                        turn_completed_session.is_none(),
+                        "compact boundary should be created before turn completion"
+                    );
+                    assert_eq!(event.session_id, parent_id);
+                    child_id = Some(continued_session_id);
+                },
+                EventPayload::TurnCompleted { finish_reason } => {
+                    assert_eq!(finish_reason, "stop");
+                    turn_completed_session = Some(event.session_id);
+                    if child_id.is_some() {
+                        break;
+                    }
+                },
+                _ => {},
+            }
+        }
+        assert_eq!(compaction_started_count, 1);
+        let child_id = child_id.expect("compact boundary should create a child session");
+        assert_eq!(turn_completed_session.as_deref(), Some(child_id.as_str()));
+
+        let parent = runtime
+            .session_manager
+            .read_model(&parent_id)
+            .await
+            .unwrap();
+        assert!(parent.context_messages.is_empty());
+        let child = runtime.session_manager.read_model(&child_id).await.unwrap();
+        assert_eq!(child.parent_session_id.as_deref(), Some(parent_id.as_str()));
+        assert!(!child.context_messages.is_empty());
+        assert!(child.messages.iter().any(|message| {
+            message_to_dto(message)
+                .content
+                .contains("Compacted conversation summary")
+        }));
+    }
+
+    #[tokio::test]
     async fn compact_command_does_not_fallback_when_summary_is_invalid() {
         let runtime = test_runtime_with_llm(Arc::new(InvalidSummaryLlm));
         let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-        let mut handler = CommandHandler::new(Arc::clone(&runtime), event_tx);
+        let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-        handler
-            .handle(ClientCommand::CreateSession {
-                working_dir: ".".into(),
-            })
-            .await
-            .unwrap();
+        let sid = handler.create_session(".".into()).await.unwrap();
         for text in ["one", "two", "three"] {
             handler
-                .handle(ClientCommand::SubmitPrompt {
-                    text: text.into(),
-                    attachments: vec![],
-                })
+                .submit_prompt_for_session(sid.clone(), text.into())
                 .await
                 .unwrap();
             assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
         }
+        while event_rx.try_recv().is_ok() {}
 
-        handler.handle(ClientCommand::Compact).await.unwrap();
+        assert!(
+            handler
+                .compact_session(sid.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
 
-        let sid = handler.active_session_id.clone().unwrap();
         let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(state.context_messages.is_empty());
+
+        while let Ok(notification) = event_rx.try_recv() {
+            if let ClientNotification::Event(event) = notification {
+                assert!(
+                    !matches!(event.payload, EventPayload::CompactionStarted),
+                    "failed compact must not leave clients in compacting state"
+                );
+            }
+        }
     }
 }

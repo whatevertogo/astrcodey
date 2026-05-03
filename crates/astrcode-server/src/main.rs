@@ -33,7 +33,7 @@ async fn main() {
     write_initialize_response();
 
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
-    let mut handler = CommandHandler::new(runtime, event_tx.clone());
+    let handler = CommandHandler::spawn_actor(runtime, event_tx.clone());
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();

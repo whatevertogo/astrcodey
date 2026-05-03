@@ -1,5 +1,4 @@
-// Agent loop 测试模块 — 通过 #[path] 注入 agent_loop.rs 作为子模块。
-// 使用 use super::* 访问 agent_loop 模块的所有类型。
+// Agent loop 测试模块。
 
 use std::{
     sync::{
@@ -216,11 +215,6 @@ struct OverflowThenOkLlm {
     captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
 }
 
-struct InvalidCompactThenOkLlm {
-    call_count: AtomicUsize,
-    captured_messages: Arc<Mutex<Vec<LlmMessage>>>,
-}
-
 struct AutoCompactCapturingLlm {
     call_count: AtomicUsize,
     captured_compact_messages: Arc<Mutex<Vec<LlmMessage>>>,
@@ -277,50 +271,6 @@ impl LlmProvider for OverflowThenOkLlm {
    - (none)
 </summary>"#
                         .into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
-            },
-            _ => {
-                *self.captured_messages.lock().unwrap() = messages;
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "recovered".into(),
-                });
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: "stop".into(),
-                });
-            },
-        }
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 1024,
-            max_output_tokens: 1024,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmProvider for InvalidCompactThenOkLlm {
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::unbounded_channel();
-        match call_count {
-            0 => {
-                let _ = tx.send(LlmEvent::Error {
-                    message: "maximum context length exceeded".into(),
-                });
-            },
-            1..=3 => {
-                let _ = tx.send(LlmEvent::ContentDelta {
-                    delta: "not a valid compact response".into(),
                 });
                 let _ = tx.send(LlmEvent::Done {
                     finish_reason: "stop".into(),
@@ -992,7 +942,10 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
 
     let mut saw_requested = false;
     let mut saw_completed_after_requested = false;
-    while let Ok(payload) = event_rx.try_recv() {
+    while let Ok(signal) = event_rx.try_recv() {
+        let AgentSignal::Event(payload) = signal else {
+            continue;
+        };
         match payload {
             EventPayload::ToolCallRequested { .. } => {
                 saw_requested = true;
@@ -1151,6 +1104,18 @@ async fn auto_compact_uses_forked_runner_with_tools() {
         .unwrap();
 
     assert_eq!(output.text, "ok");
+    let continuation = output
+        .auto_compaction
+        .expect("auto compact should return a continuation plan");
+    assert_eq!(continuation.trigger, CompactTrigger::AutoThreshold);
+    assert!(message_text_contains(
+        &continuation.compaction.context_messages,
+        "<compact_summary>"
+    ));
+    assert!(message_text_contains(
+        &continuation.compaction.retained_messages,
+        "ok"
+    ));
     assert_eq!(llm.call_count.load(Ordering::SeqCst), 2);
     let compact_messages = captured_compact_messages.lock().unwrap();
     assert!(message_text_contains(
@@ -1216,7 +1181,7 @@ async fn compact_tool_call_is_not_executed() {
 }
 
 #[tokio::test]
-async fn prompt_too_long_compacts_and_retries_once() {
+async fn prompt_too_long_returns_recoverable_error_without_same_session_compact() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let llm = Arc::new(OverflowThenOkLlm {
         call_count: AtomicUsize::new(0),
@@ -1243,74 +1208,29 @@ async fn prompt_too_long_compacts_and_retries_once() {
     }
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-    let output = agent
+    let error = match agent
         .process_prompt("current", history, Some(event_tx))
         .await
-        .unwrap();
+    {
+        Ok(_) => panic!("prompt-too-long should stop the turn"),
+        Err(error) => error,
+    };
 
-    assert_eq!(output.text, "recovered");
-    assert_eq!(llm.call_count.load(Ordering::SeqCst), 3);
     assert!(
-        captured_messages
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|message| message_text_contains(
-                std::slice::from_ref(message),
-                "<compact_summary>"
-            ))
+        error
+            .to_string()
+            .contains("maximum context length exceeded")
     );
-    let mut saw_compaction = false;
-    let mut saw_error = false;
-    while let Ok(payload) = event_rx.try_recv() {
-        match payload {
-            EventPayload::CompactionCompleted { .. } => saw_compaction = true,
-            EventPayload::ErrorOccurred { .. } => saw_error = true,
-            _ => {},
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 1);
+    assert!(captured_messages.lock().unwrap().is_empty());
+    let mut saw_recoverable_error = false;
+    while let Ok(signal) = event_rx.try_recv() {
+        let AgentSignal::Event(payload) = signal else {
+            continue;
+        };
+        if let EventPayload::ErrorOccurred { recoverable, .. } = payload {
+            saw_recoverable_error = recoverable;
         }
     }
-    assert!(saw_compaction);
-    assert!(!saw_error);
-}
-
-#[tokio::test]
-async fn prompt_too_long_uses_deterministic_fallback_when_compact_contract_fails() {
-    let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let llm = Arc::new(InvalidCompactThenOkLlm {
-        call_count: AtomicUsize::new(0),
-        captured_messages: Arc::clone(&captured_messages),
-    });
-    let agent = Agent::new(
-        "overflow-fallback-session".into(),
-        ".".into(),
-        String::new(),
-        "mock".into(),
-        test_services(
-            llm.clone(),
-            Arc::new(ToolRegistry::new()),
-            Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-            )),
-        ),
-    );
-    let mut history = Vec::new();
-    for index in 0..6 {
-        history.push(LlmMessage::user(format!("old user {index}")));
-        history.push(LlmMessage::assistant(format!("old answer {index}")));
-    }
-
-    let output = agent
-        .process_prompt("current", history, None)
-        .await
-        .unwrap();
-
-    assert_eq!(output.text, "recovered");
-    assert_eq!(llm.call_count.load(Ordering::SeqCst), 5);
-    let sent = captured_messages.lock().unwrap();
-    assert!(message_text_contains(&sent, "<compact_summary>"));
-    assert!(message_text_contains(
-        &sent,
-        "Deterministic fallback summary"
-    ));
+    assert!(saw_recoverable_error);
 }

@@ -127,7 +127,7 @@ pub struct CompactSnapshotInput {
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
 /// server 映射到具体传输协议。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionReadModel {
     /// 会话唯一标识。
     pub session_id: SessionId,
@@ -195,7 +195,7 @@ impl SessionReadModel {
 }
 
 /// 会话列表摘要读模型。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSummary {
     /// 会话唯一标识。
     pub session_id: SessionId,
@@ -232,7 +232,7 @@ impl From<SessionReadModel> for SessionSummary {
 }
 
 /// conversation hydration 的内部全量快照。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConversationReadModel {
     /// 当前会话读模型。
     pub session: SessionReadModel,
@@ -273,4 +273,32 @@ pub enum StorageError {
     /// 锁操作错误。
     #[error("Lock error: {0}")]
     LockError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::LlmMessage;
+
+    #[test]
+    fn session_read_model_serializes_round_trip() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.working_dir = "D:/work/project".into();
+        model.model_id = "mock-model".into();
+        model.messages.push(LlmMessage::user("hello"));
+        model.context_messages.push(LlmMessage::system("system"));
+        model.latest_seq = Some(7);
+
+        let encoded = serde_json::to_string(&model).unwrap();
+        let decoded: SessionReadModel = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, model);
+    }
+
+    #[test]
+    fn session_read_model_cursor_defaults_to_zero() {
+        let model = SessionReadModel::empty("session-test".into());
+
+        assert_eq!(model.cursor(), "0");
+    }
 }

@@ -176,22 +176,14 @@ pub enum EventPayload {
 
     /// 上下文压缩已开始。
     ///
-    /// 这是 live 状态事件，不持久化；恢复时只依赖 durable 的
-    /// [`EventPayload::CompactionApplied`] 和 [`EventPayload::CompactionCompleted`]。
+    /// 这是 live 状态事件，不持久化；恢复时只依赖 durable 的 compact
+    /// boundary / continuation 事件。
     CompactionStarted,
 
-    /// 上下文压缩结果已应用到会话读模型。
-    ///
-    /// 这是 storage projection 需要的持久事实，只包含更新 projection 的最小字段。
-    CompactionApplied {
-        /// 压缩移除的可见消息数量。
-        messages_removed: usize,
-        /// 后续 provider 可见、但不进入普通 transcript 的上下文消息。
-        context_messages: Vec<LlmMessage>,
-    },
-
-    /// 上下文压缩已完成。
-    CompactionCompleted {
+    /// compact 在父会话中创建了 continuation 边界。
+    CompactBoundaryCreated {
+        /// compact 触发来源，例如 `manual_command`。
+        trigger: String,
         /// 压缩前的 token 数量。
         pre_tokens: usize,
         /// 压缩后的 token 数量。
@@ -201,6 +193,25 @@ pub enum EventPayload {
         /// compact 前 transcript snapshot 的可读路径。
         #[serde(skip_serializing_if = "Option::is_none")]
         transcript_path: Option<String>,
+        /// 接续对话的子会话 ID。
+        continued_session_id: SessionId,
+    },
+
+    /// 子会话从父会话的 compact 边界继续。
+    SessionContinuedFromCompaction {
+        /// 父会话 ID。
+        parent_session_id: SessionId,
+        /// 父会话 compact 前的 durable cursor。
+        parent_cursor: Cursor,
+        /// 压缩生成的摘要文本。
+        summary: String,
+        /// compact 前 transcript snapshot 的可读路径。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+        /// 注入 provider 的隐藏上下文消息。
+        context_messages: Vec<LlmMessage>,
+        /// compact 后保留在可见 transcript 中的近期消息。
+        retained_messages: Vec<LlmMessage>,
     },
 
     /// 发生错误。
@@ -356,47 +367,67 @@ mod tests {
             "CompactionStarted is live UI state only"
         );
         assert!(
-            EventPayload::CompactionApplied {
-                messages_removed: 1,
-                context_messages: vec![LlmMessage::system("summary")],
+            EventPayload::CompactBoundaryCreated {
+                trigger: "manual_command".into(),
+                pre_tokens: 10,
+                post_tokens: 3,
+                summary: "summary".into(),
+                transcript_path: None,
+                continued_session_id: "child".into(),
             }
             .is_durable(),
-            "CompactionApplied is the durable projection fact"
+            "CompactBoundaryCreated is the durable parent-session audit fact"
         );
-    }
-
-    #[test]
-    fn compaction_applied_serializes_as_typed_event() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::CompactionApplied {
-                messages_removed: 1,
+        assert!(
+            EventPayload::SessionContinuedFromCompaction {
+                parent_session_id: "parent".into(),
+                parent_cursor: "2".into(),
+                summary: "summary".into(),
+                transcript_path: None,
                 context_messages: vec![LlmMessage::system("summary")],
-            },
+                retained_messages: vec![LlmMessage::user("recent")],
+            }
+            .is_durable(),
+            "SessionContinuedFromCompaction is the durable child-session projection fact"
         );
-
-        let json = serde_json::to_value(event).unwrap();
-
-        assert_eq!(json["type"], "compaction_applied");
-        assert_eq!(json["messages_removed"], 1);
-        assert!(json["context_messages"].is_array());
     }
 
     #[test]
-    fn compaction_completed_carries_transcript_path() {
-        let payload = EventPayload::CompactionCompleted {
-            pre_tokens: 10,
-            post_tokens: 3,
+    fn compact_boundary_created_serializes_continuation_target() {
+        let payload = EventPayload::CompactBoundaryCreated {
+            trigger: "manual_command".into(),
+            pre_tokens: 100,
+            post_tokens: 20,
             summary: "summary".into(),
             transcript_path: Some("compact.jsonl".into()),
+            continued_session_id: "child-session".into(),
         };
 
         let value = serde_json::to_value(&payload).unwrap();
         let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
 
-        assert_eq!(value["type"], "compaction_completed");
-        assert_eq!(value["transcript_path"], "compact.jsonl");
+        assert_eq!(value["type"], "compact_boundary_created");
+        assert_eq!(value["continued_session_id"], "child-session");
+        assert_eq!(round_trip, payload);
+    }
+
+    #[test]
+    fn session_continued_from_compaction_serializes_context() {
+        let payload = EventPayload::SessionContinuedFromCompaction {
+            parent_session_id: "parent-session".into(),
+            parent_cursor: "7".into(),
+            summary: "summary".into(),
+            transcript_path: Some("compact.jsonl".into()),
+            context_messages: vec![LlmMessage::system("hidden summary")],
+            retained_messages: vec![LlmMessage::user("recent")],
+        };
+
+        let value = serde_json::to_value(&payload).unwrap();
+        let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(value["type"], "session_continued_from_compaction");
+        assert_eq!(value["parent_session_id"], "parent-session");
+        assert_eq!(value["parent_cursor"], "7");
         assert_eq!(round_trip, payload);
     }
 

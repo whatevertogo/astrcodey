@@ -149,9 +149,13 @@ impl EventStore for InMemoryEventStore {
 
     async fn checkpoint(
         &self,
-        _session_id: &SessionId,
+        session_id: &SessionId,
         _cursor: &Cursor,
     ) -> Result<(), StorageError> {
+        // In-memory storage does not persist checkpoint state. We still read
+        // the session model to validate the session exists and to keep the
+        // semantics of checkpoint as a no-op that can fail for invalid sessions.
+        self.session_read_model(session_id).await?;
         Ok(())
     }
 

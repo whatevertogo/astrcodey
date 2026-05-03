@@ -15,13 +15,19 @@ use astrcode_extensions::{
     runner::ExtensionRunner,
     runtime::{SpawnRequest, SpawnResult},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
-use crate::{
-    agent::{Agent, AgentServices, drive_agent, tool_name_matches_allowlist},
-    bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot},
+use super::{
+    CompactContinuationAppendInput, CompactContinuationCreateInput, SessionManager,
+    append_compact_continuation_events, create_compact_continuation_session,
 };
-use super::SessionManager;
+use crate::{
+    agent::{
+        Agent, AgentServices, AgentSignal, compact::compact_trigger_name, drive_agent,
+        tool_name_matches_allowlist,
+    },
+    bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot, prompt_fingerprint},
+};
 
 
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
@@ -130,11 +136,11 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let agent = Agent::new(
             child_sid.clone(),
             request.working_dir.clone(),
-            system_prompt,
-            model_id,
+            system_prompt.clone(),
+            model_id.clone(),
             AgentServices {
                 llm: Arc::clone(&self.llm),
-                tool_registry,
+                tool_registry: Arc::clone(&tool_registry),
                 extension_runner: Arc::clone(&self.extension_runner),
                 context_assembler: Arc::clone(&self.context_assembler),
                 session_manager: Arc::clone(&self.session_manager),
@@ -142,28 +148,80 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         )
         .with_tool_allowlist(request.allowed_tools);
 
-        let cs = child_sid.clone();
+        let current_child_sid = Arc::new(Mutex::new(child_sid.clone()));
+        let final_child_sid_ref = Arc::clone(&current_child_sid);
         let cti = child_turn_id.clone();
         let sm = Arc::clone(&self.session_manager);
         let pf = progress.clone();
+        let wd = request.working_dir.clone();
+        let sp = system_prompt.clone();
+        let mid = model_id.clone();
         let (output, emitted_error) =
-            drive_agent(&agent, &user_prompt, Vec::new(), move |payload| {
+            drive_agent(&agent, &user_prompt, Vec::new(), move |signal| {
                 let sm = sm.clone();
-                let cs = cs.clone();
+                let current_child_sid = Arc::clone(&current_child_sid);
                 let cti = cti.clone();
                 let p = pf.clone();
+                let wd = wd.clone();
+                let sp = sp.clone();
+                let mid = mid.clone();
                 async move {
-                    let _ = append_child_payload(&sm, &cs, &cti, payload.clone()).await;
-                    p.forward(&payload);
+                    match signal {
+                        AgentSignal::Event(payload) => {
+                            let sid = current_child_sid.lock().await.clone();
+                            let _ = append_child_payload(&sm, &sid, &cti, payload.clone()).await;
+                            p.forward(&payload);
+                        },
+                        AgentSignal::AutoCompact {
+                            trigger,
+                            compaction,
+                            reply,
+                        } => {
+                            let parent_sid = current_child_sid.lock().await.clone();
+                            let result = async {
+                                let continuation = create_compact_continuation_session(
+                                    &sm,
+                                    CompactContinuationCreateInput {
+                                        parent_session_id: parent_sid,
+                                        working_dir: wd,
+                                        model_id: mid,
+                                    },
+                                )
+                                .await?;
+                                append_compact_continuation_events(
+                                    &sm,
+                                    CompactContinuationAppendInput {
+                                        session: continuation,
+                                        system_prompt_fingerprint: prompt_fingerprint(&sp),
+                                        system_prompt: sp,
+                                        trigger_name: compact_trigger_name(trigger).into(),
+                                        compaction,
+                                    },
+                                )
+                                .await
+                                .map(|events| events.child_session_id)
+                            }
+                            .await;
+                            if let Ok(child_sid) = &result {
+                                p.emit(
+                                    ToolOutputStream::Stdout,
+                                    format!("child agent continued: {child_sid}\n"),
+                                );
+                                *current_child_sid.lock().await = child_sid.clone();
+                            }
+                            let _ = reply.send(result);
+                        },
+                    }
                 }
             })
             .await;
+        let final_child_sid = final_child_sid_ref.lock().await.clone();
 
         match output {
             Ok(output) => {
                 append_child_payload(
                     self.session_manager.as_ref(),
-                    &child_sid,
+                    &final_child_sid,
                     &child_turn_id,
                     EventPayload::TurnCompleted {
                         finish_reason: output.finish_reason.clone(),
@@ -176,7 +234,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 );
                 Ok(SpawnResult {
                     content: output.text,
-                    child_session_id: child_sid,
+                    child_session_id: final_child_sid,
                 })
             },
             Err(e) => Ok(SpawnResult {
@@ -184,7 +242,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     if !emitted_error {
                         append_child_payload(
                             self.session_manager.as_ref(),
-                            &child_sid,
+                            &final_child_sid,
                             &child_turn_id,
                             EventPayload::ErrorOccurred {
                                 code: -32603,
@@ -196,7 +254,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     }
                     append_child_payload(
                         self.session_manager.as_ref(),
-                        &child_sid,
+                        &final_child_sid,
                         &child_turn_id,
                         EventPayload::TurnCompleted {
                             finish_reason: "error".into(),
@@ -209,7 +267,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     );
                     format!("child agent error: {e}")
                 },
-                child_session_id: child_sid,
+                child_session_id: final_child_sid,
             }),
         }
     }
@@ -354,4 +412,189 @@ fn one_line_summary(text: &str) -> String {
         summary.push('…');
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use astrcode_context::manager::LlmContextAssembler;
+    use astrcode_core::{
+        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+        tool::ToolDefinition,
+    };
+    use astrcode_extensions::{
+        runner::ExtensionRunner,
+        runtime::{ExtensionRuntime, SessionSpawner, SpawnRequest},
+    };
+    use astrcode_storage::in_memory::InMemoryEventStore;
+
+    use super::*;
+
+    struct CompactThenLeafLlm {
+        call_count: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CompactThenLeafLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            // The sequence drives one nested compact:
+            // call 0 asks for a missing tool so the next provider context
+            // crosses the compact threshold; call 1 is the forked compact
+            // summary and intentionally invalid so fallback summary rendering
+            // is deterministic; later calls prove events land on the leaf.
+            let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::unbounded_channel();
+            match call {
+                0 => {
+                    let _ = tx.send(LlmEvent::ToolCallStart {
+                        call_id: "missing-tool-call".into(),
+                        name: "missingTool".into(),
+                        arguments: "{}".into(),
+                    });
+                    let _ = tx.send(LlmEvent::Done {
+                        finish_reason: "tool_calls".into(),
+                    });
+                },
+                1 => {
+                    let _ = tx.send(LlmEvent::ContentDelta {
+                        delta: "invalid compact summary; deterministic fallback should run".into(),
+                    });
+                    let _ = tx.send(LlmEvent::Done {
+                        finish_reason: "stop".into(),
+                    });
+                },
+                _ => {
+                    let _ = tx.send(LlmEvent::ContentDelta {
+                        delta: "leaf ok".into(),
+                    });
+                    let _ = tx.send(LlmEvent::Done {
+                        finish_reason: "stop".into(),
+                    });
+                },
+            }
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 200000,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    fn test_spawner(
+        session_manager: Arc<SessionManager>,
+        llm: Arc<CompactThenLeafLlm>,
+    ) -> ServerSessionSpawner {
+        let settings = astrcode_context::settings::ContextWindowSettings {
+            compact_threshold_percent: 0.0,
+            ..Default::default()
+        };
+        ServerSessionSpawner {
+            session_manager,
+            llm,
+            context_assembler: Arc::new(LlmContextAssembler::new(settings)),
+            extension_runner: Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(ExtensionRuntime::new()),
+            )),
+            read_timeout_secs: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawned_session_auto_compact_returns_leaf_child() {
+        let session_manager = Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new())));
+        let parent = session_manager
+            .create(".", "mock", 2048, None)
+            .await
+            .unwrap();
+        let llm = Arc::new(CompactThenLeafLlm {
+            call_count: AtomicUsize::new(0),
+        });
+        let spawner = test_spawner(Arc::clone(&session_manager), Arc::clone(&llm));
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+
+        let result = spawner
+            .spawn(
+                &parent.session_id,
+                SpawnRequest {
+                    name: "nested".into(),
+                    system_prompt: "nested extra prompt".into(),
+                    user_prompt: "current nested prompt".into(),
+                    working_dir: ".".into(),
+                    allowed_tools: vec![],
+                    model_preference: Some("mock".into()),
+                    tool_call_id: Some("tool-call-1".into()),
+                    event_tx: Some(progress_tx),
+                },
+            )
+            .await
+            .unwrap();
+
+        let leaf = session_manager
+            .read_model(&result.child_session_id)
+            .await
+            .unwrap();
+        let previous_child_id = leaf
+            .parent_session_id
+            .clone()
+            .expect("leaf should continue from a previous spawned child");
+        assert_ne!(previous_child_id, result.child_session_id);
+        assert_eq!(result.content, "leaf ok");
+        assert!(llm.call_count.load(Ordering::SeqCst) >= 3);
+
+        let previous = session_manager
+            .read_model(&previous_child_id)
+            .await
+            .unwrap();
+        let mut ancestor_id = previous_child_id.clone();
+        loop {
+            let ancestor = session_manager.read_model(&ancestor_id).await.unwrap();
+            if ancestor.parent_session_id.as_deref() == Some(parent.session_id.as_str()) {
+                break;
+            }
+            ancestor_id = ancestor
+                .parent_session_id
+                .expect("continuation chain should stay linked to the root parent");
+        }
+        assert!(
+            previous.messages.iter().all(|message| {
+                !message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("leaf ok")))
+            }),
+            "events after continuation should not be appended to the previous child"
+        );
+        assert!(
+            leaf.messages.iter().any(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("leaf ok")))
+            }),
+            "events after continuation should be appended to the leaf child"
+        );
+
+        let mut saw_continued_progress = false;
+        while let Ok(payload) = progress_rx.try_recv() {
+            if let EventPayload::ToolOutputDelta { delta, .. } = payload {
+                saw_continued_progress |= delta.contains("child agent continued");
+            }
+        }
+        assert!(saw_continued_progress);
+    }
 }

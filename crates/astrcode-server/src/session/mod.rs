@@ -6,12 +6,11 @@
 mod payload;
 pub(crate) mod spawner;
 
-pub(crate) use payload::{compaction_applied_payload, compaction_completed_payload};
-
 use std::{collections::HashMap, sync::Arc};
 
+use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
-    event::Event,
+    event::{Event, EventPayload},
     storage::{
         CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
         StorageError,
@@ -19,6 +18,7 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_protocol::events::ClientNotification;
+pub(crate) use payload::{compact_boundary_payload, session_continued_from_compaction_payload};
 use tokio::sync::{RwLock, broadcast};
 
 /// 活跃会话句柄。
@@ -123,6 +123,18 @@ impl SessionManager {
         Ok(self.store.latest_cursor(session_id).await?)
     }
 
+    /// 为当前 projection cursor 写入恢复 checkpoint。
+    ///
+    /// 只有当传入 cursor 与当前 recovered projection cursor 匹配时，才会
+    /// 生成持久化快照。这样可以避免写入过时的恢复点。
+    pub async fn checkpoint(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<(), SessionError> {
+        Ok(self.store.checkpoint(session_id, cursor).await?)
+    }
+
     /// 写入 compact 前 transcript snapshot。
     pub async fn write_compact_snapshot(
         &self,
@@ -156,6 +168,139 @@ impl SessionManager {
         self.store.delete_session(session_id).await?;
         Ok(())
     }
+}
+
+/// compact continuation child 的创建输入。
+pub(crate) struct CompactContinuationCreateInput {
+    pub(crate) parent_session_id: SessionId,
+    pub(crate) working_dir: String,
+    pub(crate) model_id: String,
+}
+
+/// 已创建但尚未追加 continuation 事件的 child session。
+pub(crate) struct CompactContinuationSession {
+    pub(crate) parent_session_id: SessionId,
+    pub(crate) parent_cursor: Cursor,
+    pub(crate) child_session_id: SessionId,
+    pub(crate) child_started: Event,
+}
+
+/// compact continuation durable events 的追加输入。
+pub(crate) struct CompactContinuationAppendInput {
+    pub(crate) session: CompactContinuationSession,
+    pub(crate) system_prompt: String,
+    pub(crate) system_prompt_fingerprint: String,
+    pub(crate) trigger_name: String,
+    pub(crate) compaction: CompactResult,
+}
+
+/// compact continuation 写入后产生的事件。
+pub(crate) struct CompactContinuationEvents {
+    pub(crate) child_session_id: SessionId,
+    pub(crate) appended_events: Vec<Event>,
+}
+
+/// 只负责创建 compact continuation child。
+///
+/// 这里不广播、不切换 active session、不发送 SessionResumed，也不追加
+/// continuation events；这些副作用由
+/// CommandHandler 或 ServerSessionSpawner 这样的 owner 自己决定。
+pub(crate) async fn create_compact_continuation_session(
+    session_manager: &SessionManager,
+    input: CompactContinuationCreateInput,
+) -> Result<CompactContinuationSession, String> {
+    let parent_cursor = session_manager
+        .latest_cursor(&input.parent_session_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "0".into());
+    let child_started = session_manager
+        .create(
+            &input.working_dir,
+            &input.model_id,
+            2048,
+            Some(input.parent_session_id.as_str()),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let child_session_id = child_started.session_id.clone();
+
+    Ok(CompactContinuationSession {
+        parent_session_id: input.parent_session_id,
+        parent_cursor,
+        child_session_id,
+        child_started,
+    })
+}
+
+/// 只负责向已创建的 continuation child 追加 durable continuation events。
+///
+/// Parent 和 child 分属不同 event log，v1 不提供跨 session 事务。
+/// 调用方应把这里的失败视为可重试的半持久状态：child session 可能已经
+/// 存在，或者已经写入了部分 child-side setup events。
+pub(crate) async fn append_compact_continuation_events(
+    session_manager: &SessionManager,
+    input: CompactContinuationAppendInput,
+) -> Result<CompactContinuationEvents, String> {
+    let child_session_id = input.session.child_session_id.clone();
+    let mut appended_events = Vec::with_capacity(3);
+    appended_events.push(
+        session_manager
+            .append_event(Event::new(
+                child_session_id.clone(),
+                None,
+                EventPayload::SystemPromptConfigured {
+                    text: input.system_prompt,
+                    fingerprint: input.system_prompt_fingerprint,
+                },
+            ))
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+    appended_events.push(
+        session_manager
+            .append_event(Event::new(
+                input.session.parent_session_id.clone(),
+                None,
+                compact_boundary_payload(
+                    input.trigger_name,
+                    &input.compaction,
+                    child_session_id.clone(),
+                ),
+            ))
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+    appended_events.push(
+        session_manager
+            .append_event(Event::new(
+                child_session_id.clone(),
+                None,
+                session_continued_from_compaction_payload(
+                    input.session.parent_session_id,
+                    input.session.parent_cursor,
+                    &input.compaction,
+                ),
+            ))
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+
+    if let Some(cursor) = session_manager
+        .latest_cursor(&child_session_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        session_manager
+            .checkpoint(&child_session_id, &cursor)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(CompactContinuationEvents {
+        child_session_id,
+        appended_events,
+    })
 }
 
 /// 会话操作中可能出现的错误类型。

@@ -34,14 +34,17 @@ use astrcode_extensions::{
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
 };
 use astrcode_tools::registry::ToolRegistry;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 
 use crate::{
     agent::compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
         compact_with_forked_provider, dispatch_post_compact,
     },
-    session::{SessionManager, compaction_applied_payload, compaction_completed_payload},
+    session::SessionManager,
 };
 
 /// 并行执行工具调用时的最大并发数。
@@ -49,16 +52,16 @@ const MAX_PARALLEL_TOOL_CALLS: usize = 5;
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
-/// `on_event` 在每个事件到达时被调用（包含 select 阶段和 drain 阶段）。
+/// `on_signal` 在每个事件或控制信号到达时被调用（包含 select 阶段和 drain 阶段）。
 /// 返回 `(output, emitted_error)`。
 pub(crate) async fn drive_agent<F, Fut>(
     agent: &Agent,
     user_text: &str,
     history: Vec<LlmMessage>,
-    mut on_event: F,
+    mut on_signal: F,
 ) -> (Result<AgentTurnOutput, AgentError>, bool)
 where
-    F: FnMut(EventPayload) -> Fut,
+    F: FnMut(AgentSignal) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -72,11 +75,11 @@ where
             result = &mut agent_future => break result,
             payload = event_rx.recv(), if !events_closed => {
                 match payload {
-                    Some(payload) => {
-                        if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                    Some(signal) => {
+                        if matches!(signal, AgentSignal::Event(EventPayload::ErrorOccurred { .. })) {
                             emitted_error = true;
                         }
-                        on_event(payload).await;
+                        on_signal(signal).await;
                     },
                     None => events_closed = true,
                 }
@@ -84,14 +87,32 @@ where
         }
     };
 
-    while let Some(payload) = event_rx.recv().await {
-        if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+    while let Some(signal) = event_rx.recv().await {
+        if matches!(
+            signal,
+            AgentSignal::Event(EventPayload::ErrorOccurred { .. })
+        ) {
             emitted_error = true;
         }
-        on_event(payload).await;
+        on_signal(signal).await;
     }
 
     (output, emitted_error)
+}
+
+pub(crate) enum AgentSignal {
+    Event(EventPayload),
+    AutoCompact {
+        trigger: CompactTrigger,
+        compaction: CompactResult,
+        reply: oneshot::Sender<Result<SessionId, String>>,
+    },
+}
+
+fn send_event(event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>, payload: EventPayload) {
+    if let Some(tx) = event_tx {
+        let _ = tx.send(AgentSignal::Event(payload));
+    }
 }
 
 /// Agent — a transient turn processor.
@@ -177,11 +198,11 @@ impl Agent {
     ///
     /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
     /// 由 handler 层包装会话/回合元数据后决定持久化策略。
-    pub async fn process_prompt(
+    pub(crate) async fn process_prompt(
         &self,
         user_text: &str,
         history: Vec<LlmMessage>,
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<AgentTurnOutput, AgentError> {
         // 构建扩展上下文，填充工具定义供扩展钩子查询
         let mut ext_ctx = self.build_ext_ctx();
@@ -223,14 +244,23 @@ impl Agent {
         // 累积本轮 Agent 的最终文本输出和所有工具执行结果
         let mut final_text = String::new();
         let mut all_tool_results: Vec<ToolResult> = Vec::new();
-        let mut did_overflow_retry_this_turn = false;
+        let return_auto_compaction = event_tx.is_none();
+        let mut auto_compaction: Option<AgentCompactContinuation> = None;
 
         // ── Agent 主循环 ──
         // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
         loop {
-            let (system_messages, prepared_context) = self
-                .prepare_provider_context(&mut messages, &tools, &event_tx, &ext_ctx)
+            let (system_messages, prepared_context, compacted) = self
+                .prepare_provider_context(&mut messages, &tools, &ext_ctx, &event_tx)
                 .await?;
+            if return_auto_compaction {
+                if let Some(compaction) = compacted {
+                    auto_compaction = Some(AgentCompactContinuation {
+                        trigger: CompactTrigger::AutoThreshold,
+                        compaction,
+                    });
+                }
+            }
 
             // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
             let send_messages = self
@@ -252,25 +282,28 @@ impl Agent {
             // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
             // 避免消息在工具执行前就被标记为已完成。
             let mut completed_text: Option<String> = None;
-            let mut retry_provider_request = false;
 
             {
                 // 消费 LLM 事件流，处理文本增量和工具调用增量
                 while let Some(event) = rx.recv().await {
                     match event {
                         LlmEvent::ContentDelta { delta } => {
-                            if let Some(tx) = &event_tx {
-                                if !message_started {
-                                    let _ = tx.send(EventPayload::AssistantMessageStarted {
+                            if !message_started {
+                                send_event(
+                                    &event_tx,
+                                    EventPayload::AssistantMessageStarted {
                                         message_id: message_id.clone(),
-                                    });
-                                    message_started = true;
-                                }
-                                let _ = tx.send(EventPayload::AssistantTextDelta {
+                                    },
+                                );
+                                message_started = true;
+                            }
+                            send_event(
+                                &event_tx,
+                                EventPayload::AssistantTextDelta {
                                     message_id: message_id.clone(),
                                     delta: delta.clone(),
-                                });
-                            }
+                                },
+                            );
                             current_text.push_str(&delta);
                         },
                         LlmEvent::ToolCallStart {
@@ -278,17 +311,21 @@ impl Agent {
                             name,
                             arguments,
                         } => {
-                            if let Some(tx) = &event_tx {
-                                let _ = tx.send(EventPayload::ToolCallStarted {
+                            send_event(
+                                &event_tx,
+                                EventPayload::ToolCallStarted {
                                     call_id: call_id.clone(),
                                     tool_name: name.clone(),
-                                });
-                                if !arguments.is_empty() {
-                                    let _ = tx.send(EventPayload::ToolCallArgumentsDelta {
+                                },
+                            );
+                            if !arguments.is_empty() {
+                                send_event(
+                                    &event_tx,
+                                    EventPayload::ToolCallArgumentsDelta {
                                         call_id: call_id.clone(),
                                         delta: arguments.clone(),
-                                    });
-                                }
+                                    },
+                                );
                             }
                             tool_calls.push(PendingToolCall {
                                 call_id,
@@ -300,10 +337,10 @@ impl Agent {
                             if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
                                 tc.arguments.push_str(&delta);
                             }
-                            if let Some(tx) = &event_tx {
-                                let _ = tx
-                                    .send(EventPayload::ToolCallArgumentsDelta { call_id, delta });
-                            }
+                            send_event(
+                                &event_tx,
+                                EventPayload::ToolCallArgumentsDelta { call_id, delta },
+                            );
                         },
                         LlmEvent::Done { finish_reason } => {
                             if !current_text.is_empty() {
@@ -317,12 +354,13 @@ impl Agent {
                                 // 无工具调用：消息在此处完成并直接返回
                                 if let (Some(text), true) = (completed_text.take(), message_started)
                                 {
-                                    if let Some(tx) = &event_tx {
-                                        let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                                    send_event(
+                                        &event_tx,
+                                        EventPayload::AssistantMessageCompleted {
                                             message_id: message_id.clone(),
                                             text,
-                                        });
-                                    }
+                                        },
+                                    );
                                 }
                                 self.extension_runner
                                     .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
@@ -331,53 +369,23 @@ impl Agent {
                                     text: final_text,
                                     finish_reason,
                                     tool_results: all_tool_results,
+                                    auto_compaction: auto_compaction.map(|continuation| {
+                                        continuation.with_retained_messages(&messages)
+                                    }),
                                 });
                             }
                             break;
                         },
                         LlmEvent::Error { message } => {
-                            if is_prompt_too_long_message(&message) && !did_overflow_retry_this_turn
-                            {
-                                did_overflow_retry_this_turn = true;
-                                let (system_messages, visible_messages): (Vec<_>, Vec<_>) =
-                                    messages
-                                        .iter()
-                                        .cloned()
-                                        .partition(|message| message.role == LlmRole::System);
-                                let overflow_compaction = self
-                                    .compact_for_overflow_retry(
-                                        visible_messages,
-                                        Some(&self.system_prompt),
-                                        &tools,
-                                    )
-                                    .await;
-                                let prepared = match overflow_compaction {
-                                    Ok(prepared) => prepared,
-                                    Err(error) => {
-                                        return self.end_turn_with_error(&ext_ctx, error).await;
-                                    },
-                                };
-                                if let Some(prepared) = prepared {
-                                    let compaction = prepared.compaction.expect(
-                                        "compact_provider_messages should include compaction",
-                                    );
-                                    if let Some(tx) = &event_tx {
-                                        let _ = tx.send(EventPayload::CompactionStarted);
-                                        let _ = tx.send(compaction_applied_payload(&compaction));
-                                        let _ = tx.send(compaction_completed_payload(&compaction));
-                                    }
-                                    messages = [system_messages, prepared.messages].concat();
-                                    retry_provider_request = true;
-                                    break;
-                                }
-                            }
-                            if let Some(tx) = &event_tx {
-                                let _ = tx.send(EventPayload::ErrorOccurred {
+                            let recoverable = is_prompt_too_long_message(&message);
+                            send_event(
+                                &event_tx,
+                                EventPayload::ErrorOccurred {
                                     code: -32603,
                                     message: message.clone(),
-                                    recoverable: false,
-                                });
-                            }
+                                    recoverable,
+                                },
+                            );
                             self.extension_runner
                                 .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
                                 .await?;
@@ -386,10 +394,6 @@ impl Agent {
                     }
                 }
             }
-            if retry_provider_request {
-                continue;
-            }
-
             {
                 // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
                 self.dispatch_after_provider_response(&ext_ctx).await?;
@@ -422,12 +426,13 @@ impl Agent {
                 // 保证 completed 事件在所有 tool_call 事件之后。
                 if let Some(text) = completed_text.take() {
                     if message_started {
-                        if let Some(tx) = &event_tx {
-                            let _ = tx.send(EventPayload::AssistantMessageCompleted {
+                        send_event(
+                            &event_tx,
+                            EventPayload::AssistantMessageCompleted {
                                 message_id: message_id.clone(),
                                 text,
-                            });
-                        }
+                            },
+                        );
                     }
                 }
             }
@@ -437,14 +442,14 @@ impl Agent {
     /// 准备本次 provider request 的上下文窗口。
     ///
     /// 这个阶段会在达到阈值时执行自动 compact，并在 compact 成功后更新
-    /// `messages`，同时发送 compact 相关事件。
+    /// 本轮内存 `messages`；持久 session continuation 由 handler 统一执行。
     async fn prepare_provider_context(
         &self,
         messages: &mut Vec<LlmMessage>,
         tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
         ext_ctx: &ServerExtensionContext,
-    ) -> Result<(Vec<LlmMessage>, PreparedContext), AgentError> {
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    ) -> Result<(Vec<LlmMessage>, PreparedContext, Option<CompactResult>), AgentError> {
         let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
             .iter()
             .cloned()
@@ -458,6 +463,7 @@ impl Agent {
         let should_auto_compact = self.context_assembler.auto_compact_enabled()
             && token_should_compact(self.context_assembler.prompt_snapshot(&prepare_input));
         let prepared_context = if should_auto_compact {
+            send_event(event_tx, EventPayload::CompactionStarted);
             let compact_instructions = match self
                 .compact_instructions(CompactTrigger::AutoThreshold, compact_message_count, tools)
                 .await
@@ -513,15 +519,37 @@ impl Agent {
             {
                 return self.end_turn_with_error(ext_ctx, error).await;
             }
-            if let Some(tx) = event_tx {
-                let _ = tx.send(EventPayload::CompactionStarted);
-                let _ = tx.send(compaction_applied_payload(compaction));
-                let _ = tx.send(compaction_completed_payload(compaction));
+            let compacted = compaction.clone();
+            if event_tx.is_some() {
+                self.request_auto_compact_transition(event_tx, compacted.clone())
+                    .await?;
             }
             *messages = [system_messages.clone(), prepared_context.messages.clone()].concat();
+            return Ok((system_messages, prepared_context, Some(compacted)));
         }
 
-        Ok((system_messages, prepared_context))
+        Ok((system_messages, prepared_context, None))
+    }
+
+    async fn request_auto_compact_transition(
+        &self,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+        compaction: CompactResult,
+    ) -> Result<(), AgentError> {
+        let Some(tx) = event_tx else {
+            return Ok(());
+        };
+        let (reply, rx) = oneshot::channel();
+        tx.send(AgentSignal::AutoCompact {
+            trigger: CompactTrigger::AutoThreshold,
+            compaction,
+            reply,
+        })
+        .map_err(|_| AgentError::Llm("auto compact transition channel closed".into()))?;
+        rx.await
+            .map_err(|_| AgentError::Llm("auto compact transition was dropped".into()))?
+            .map(|_| ())
+            .map_err(AgentError::Llm)
     }
 
     /// 运行 `BeforeProviderRequest` hook，并返回最终要发送给 provider 的消息。
@@ -558,7 +586,7 @@ impl Agent {
         &self,
         send_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
         ext_ctx: &ServerExtensionContext,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, AgentError> {
         match self.llm.generate(send_messages, tools.to_vec()).await {
@@ -566,13 +594,14 @@ impl Agent {
             Err(e) => {
                 // LLM 调用级别失败（网络/认证等），需要通知客户端，
                 // 否则外部消费者无法感知此错误（流中错误通过 LlmEvent::Error 已有处理）
-                if let Some(tx) = event_tx {
-                    let _ = tx.send(EventPayload::ErrorOccurred {
+                send_event(
+                    event_tx,
+                    EventPayload::ErrorOccurred {
                         code: -32603,
                         message: e.to_string(),
                         recoverable: false,
-                    });
-                }
+                    },
+                );
                 self.end_turn_with_error(ext_ctx, e).await
             },
         }
@@ -591,63 +620,6 @@ impl Agent {
             return self.end_turn_with_error(ext_ctx, e).await;
         }
         Ok(())
-    }
-
-    /// prompt-too-long 后执行一次强制 compact，并返回可重试的上下文。
-    async fn compact_for_overflow_retry(
-        &self,
-        visible_messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> Result<Option<PreparedContext>, AgentError> {
-        let message_count = visible_messages.len();
-        let compact_instructions = self
-            .compact_instructions(CompactTrigger::PromptTooLongRetry, message_count, tools)
-            .await?;
-        let transcript_path = self
-            .write_compact_snapshot(
-                CompactTrigger::PromptTooLongRetry,
-                visible_messages.clone(),
-                system_prompt,
-            )
-            .await;
-        let render_options = CompactSummaryRenderOptions {
-            transcript_path: transcript_path.clone(),
-        };
-        let prepared = match compact_with_forked_provider(
-            Arc::clone(&self.llm),
-            tools.to_vec(),
-            &visible_messages,
-            system_prompt,
-            self.context_assembler.settings(),
-            &compact_instructions,
-            &render_options,
-        )
-        .await
-        {
-            Ok(compaction) => Some(prepared_context_from_compaction(compaction)),
-            Err(_) => compact_messages_with_render_options(
-                &visible_messages,
-                system_prompt,
-                &CompactSummaryRenderOptions { transcript_path },
-            )
-            .ok()
-            .map(prepared_context_from_compaction),
-        };
-
-        if let Some(prepared) = &prepared {
-            if let Some(compaction) = &prepared.compaction {
-                self.notify_post_compact(
-                    CompactTrigger::PromptTooLongRetry,
-                    message_count,
-                    tools,
-                    compaction,
-                )
-                .await?;
-            }
-        }
-
-        Ok(prepared)
     }
 
     /// 写入 compact 前的 transcript snapshot，失败时只记录警告并继续。
@@ -789,7 +761,7 @@ impl Agent {
         &self,
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<Vec<PreparedToolCall>, AgentError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
@@ -885,7 +857,7 @@ impl Agent {
         &self,
         prepared: &[PreparedToolCall],
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<BTreeMap<usize, ToolResult>, AgentError> {
         let mut results = BTreeMap::new();
         let mut parallel_batch = Vec::new();
@@ -943,7 +915,7 @@ impl Agent {
         &self,
         batch: &mut Vec<ExecutableToolCall>,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
         results: &mut BTreeMap<usize, ToolResult>,
     ) -> Result<(), AgentError> {
         if batch.is_empty() {
@@ -980,7 +952,7 @@ impl Agent {
         join_set: &mut JoinSet<(usize, ToolResult)>,
         call: ExecutableToolCall,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
         let session_id = self.session_id.clone();
@@ -1050,12 +1022,15 @@ impl Agent {
                 }
             }
 
-            if let Some(tx) = input.event_tx {
-                let _ = tx.send(EventPayload::ToolCallCompleted {
-                    call_id: call.call_id.clone(),
-                    tool_name: call.name.clone(),
-                    result: result.clone(),
-                });
+            if input.event_tx.is_some() {
+                send_event(
+                    input.event_tx,
+                    EventPayload::ToolCallCompleted {
+                        call_id: call.call_id.clone(),
+                        tool_name: call.name.clone(),
+                        result: result.clone(),
+                    },
+                );
             }
             input.messages.push(LlmMessage {
                 role: LlmRole::Tool,
@@ -1081,6 +1056,43 @@ pub struct AgentTurnOutput {
     pub finish_reason: String,
     /// 本回合中所有工具调用的结果
     pub tool_results: Vec<ToolResult>,
+    /// 本回合 auto compact 生成的 continuation 计划。
+    pub auto_compaction: Option<AgentCompactContinuation>,
+}
+
+/// Agent loop 发现 auto compact 后交给 command owner 执行的 continuation 计划。
+pub struct AgentCompactContinuation {
+    /// compact 触发来源。
+    pub trigger: CompactTrigger,
+    /// compact 结果；`retained_messages` 会在回合结束时刷新为下一会话可见尾部。
+    pub compaction: CompactResult,
+}
+
+impl AgentCompactContinuation {
+    fn with_retained_messages(mut self, messages: &[LlmMessage]) -> Self {
+        self.compaction.retained_messages =
+            retained_messages_after_compaction(messages, &self.compaction.context_messages);
+        self
+    }
+}
+
+fn retained_messages_after_compaction(
+    messages: &[LlmMessage],
+    context_messages: &[LlmMessage],
+) -> Vec<LlmMessage> {
+    let without_session_prompt = if matches!(messages.first(), Some(message) if message.role == LlmRole::System)
+    {
+        &messages[1..]
+    } else {
+        messages
+    };
+    without_session_prompt
+        .strip_prefix(context_messages)
+        .unwrap_or(without_session_prompt)
+        .iter()
+        .filter(|message| message.role != LlmRole::System)
+        .cloned()
+        .collect()
 }
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
@@ -1108,7 +1120,7 @@ struct CommitToolResults<'a> {
     tools: &'a [ToolDefinition],
     messages: &'a mut Vec<LlmMessage>,
     all_tool_results: &'a mut Vec<ToolResult>,
-    event_tx: &'a Option<mpsc::UnboundedSender<EventPayload>>,
+    event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
 }
 
 pub(crate) enum PreparedToolOutcome {
@@ -1138,17 +1150,18 @@ impl PreparedToolCall {
 
 /// 向客户端报告工具调用已经通过预处理并准备执行。
 pub(crate) fn send_tool_requested(
-    event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+    event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
     tc: &PendingToolCall,
     arguments: &serde_json::Value,
 ) {
-    if let Some(tx) = event_tx {
-        let _ = tx.send(EventPayload::ToolCallRequested {
+    send_event(
+        event_tx,
+        EventPayload::ToolCallRequested {
             call_id: tc.call_id.clone(),
             tool_name: tc.name.clone(),
             arguments: arguments.clone(),
-        });
-    }
+        },
+    );
 }
 
 /// 将本轮 assistant 产生的工具调用整理成 LLM 历史消息。
@@ -1174,17 +1187,30 @@ pub(crate) async fn execute_tool_call(
     working_dir: String,
     model_id: String,
     tools: Vec<ToolDefinition>,
-    event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     call: ExecutableToolCall,
 ) -> (usize, ToolResult) {
     let started_at = Instant::now();
+    let tool_event_bridge = event_tx.as_ref().map(|agent_tx| {
+        let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
+        let agent_tx = agent_tx.clone();
+        let handle = tokio::spawn(async move {
+            while let Some(payload) = tool_rx.recv().await {
+                let _ = agent_tx.send(AgentSignal::Event(payload));
+            }
+        });
+        (tool_tx, handle)
+    });
+    let tool_event_tx = tool_event_bridge
+        .as_ref()
+        .map(|(tool_tx, _)| tool_tx.clone());
     let tool_ctx = ToolExecutionContext {
         session_id,
         working_dir,
         model_id,
         available_tools: tools,
         tool_call_id: Some(call.call_id.clone()),
-        event_tx,
+        event_tx: tool_event_tx,
     };
 
     let mut result = match tool_registry
@@ -1208,6 +1234,12 @@ pub(crate) async fn execute_tool_call(
             }
         },
     };
+    // Release the tool-side sender before awaiting the bridge; otherwise the
+    // bridge keeps waiting for more tool progress events and this call hangs.
+    drop(tool_ctx);
+    if let Some((_, bridge)) = tool_event_bridge {
+        let _ = bridge.await;
+    }
 
     if result.call_id.is_empty() {
         result.call_id = call.call_id.clone();

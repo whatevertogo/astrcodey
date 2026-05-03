@@ -33,7 +33,7 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, stream};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 
 use crate::{bootstrap::ServerRuntime, handler::CommandHandler};
 
@@ -41,7 +41,7 @@ use crate::{bootstrap::ServerRuntime, handler::CommandHandler};
 #[derive(Clone)]
 pub struct HttpState {
     runtime: Arc<ServerRuntime>,
-    handler: Arc<Mutex<CommandHandler>>,
+    handler: crate::handler::CommandHandle,
     event_tx: broadcast::Sender<ClientNotification>,
 }
 
@@ -50,10 +50,10 @@ pub fn router(
     runtime: Arc<ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
 ) -> Router {
-    let handler = CommandHandler::new(Arc::clone(&runtime), event_tx.clone());
+    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx.clone());
     let state = HttpState {
         runtime,
-        handler: Arc::new(Mutex::new(handler)),
+        handler,
         event_tx,
     };
 
@@ -72,13 +72,7 @@ async fn create_session(
     State(state): State<HttpState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Response {
-    match state
-        .handler
-        .lock()
-        .await
-        .create_session(request.working_dir)
-        .await
-    {
+    match state.handler.create_session(request.working_dir).await {
         Ok(session_id) => Json(CreateSessionResponseDto { session_id }).into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", error),
     }
@@ -116,8 +110,6 @@ async fn submit_prompt(
 ) -> Response {
     let result = state
         .handler
-        .lock()
-        .await
         .submit_prompt_for_session(session_id.clone(), request.text)
         .await;
     match result {
@@ -139,16 +131,11 @@ async fn compact_session(
     Path(session_id): Path<SessionId>,
     Json(_request): Json<CompactSessionRequest>,
 ) -> Response {
-    match state
-        .handler
-        .lock()
-        .await
-        .compact_session(&session_id)
-        .await
-    {
-        Ok(()) => Json(CompactSessionResponse {
+    match state.handler.compact_session(session_id).await {
+        Ok(new_session_id) => Json(CompactSessionResponse {
             accepted: true,
             deferred: false,
+            new_session_id,
             message: "compact accepted".into(),
         })
         .into_response(),
@@ -163,7 +150,7 @@ async fn abort_session(
     State(state): State<HttpState>,
     Path(session_id): Path<SessionId>,
 ) -> Response {
-    match state.handler.lock().await.abort_session(&session_id).await {
+    match state.handler.abort_session(session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) if error.contains("No active turn") => {
             error_response(StatusCode::NOT_FOUND, "no_active_turn", error)
@@ -347,7 +334,16 @@ fn event_to_delta(event: &Event) -> Option<ConversationDeltaDto> {
                 message: message.clone(),
             },
         }),
-        EventPayload::CompactionApplied { .. } => None,
+        EventPayload::CompactBoundaryCreated {
+            continued_session_id,
+            ..
+        } => Some(ConversationDeltaDto::SessionContinued {
+            parent_session_id: event.session_id.clone(),
+            new_session_id: continued_session_id.clone(),
+            parent_cursor: ConversationCursorDto {
+                value: event.seq.unwrap_or_default().to_string(),
+            },
+        }),
         _ => Some(ConversationDeltaDto::UpdateControlState {
             control: control_from_phase(projected_phase(&event.payload)),
         }),
