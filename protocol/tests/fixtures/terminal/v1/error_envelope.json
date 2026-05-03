@@ -1,9 +1,0 @@
-{
-  "code": "auth_expired",
-  "message": "token 已过期，请重新 exchange",
-  "rehydrateRequired": false,
-  "details": {
-    "origin": "http://127.0.0.1:5529",
-    "status": 401
-  }
-}
