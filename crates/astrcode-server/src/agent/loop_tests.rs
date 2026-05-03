@@ -753,7 +753,7 @@ async fn parallel_tools_in_same_batch_overlap() {
         }),
     ]);
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -774,7 +774,7 @@ async fn parallel_tools_in_same_batch_overlap() {
 
     timeout(
         Duration::from_secs(2),
-        agent.process_prompt("run tools", vec![], None),
+        agent_loop.process_prompt("run tools", vec![], None),
     )
     .await
     .expect("parallel tools should not deadlock")
@@ -805,7 +805,7 @@ async fn sequential_tool_splits_parallel_batches() {
         }),
     ]);
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -824,7 +824,7 @@ async fn sequential_tool_splits_parallel_batches() {
         ),
     );
 
-    agent
+    agent_loop
         .process_prompt("run tools", vec![], None)
         .await
         .unwrap();
@@ -851,7 +851,7 @@ async fn parallel_results_are_committed_in_model_order() {
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -870,7 +870,7 @@ async fn parallel_results_are_committed_in_model_order() {
         ),
     );
 
-    agent
+    agent_loop
         .process_prompt("run tools", vec![], None)
         .await
         .unwrap();
@@ -897,7 +897,7 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
         .unwrap();
     let session_id = start.session_id.clone();
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         session_id.clone(),
         ".".into(),
         String::new(),
@@ -918,7 +918,7 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
         },
     );
 
-    agent
+    agent_loop
         .process_prompt("run large tool", vec![], None)
         .await
         .unwrap();
@@ -954,7 +954,7 @@ async fn read_file_tool_result_is_not_persisted_again() {
     })]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -973,7 +973,7 @@ async fn read_file_tool_result_is_not_persisted_again() {
         ),
     );
 
-    agent
+    agent_loop
         .process_prompt("read large file", vec![], None)
         .await
         .unwrap();
@@ -1021,7 +1021,7 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
         ("call-5", "medium5"),
     ];
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         start.session_id,
         ".".into(),
         String::new(),
@@ -1042,7 +1042,7 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
         },
     );
 
-    agent
+    agent_loop
         .process_prompt("run many medium tools", vec![], None)
         .await
         .unwrap();
@@ -1072,7 +1072,7 @@ async fn parallel_failure_does_not_drop_sibling_result() {
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1091,7 +1091,7 @@ async fn parallel_failure_does_not_drop_sibling_result() {
         ),
     );
 
-    agent
+    agent_loop
         .process_prompt("run tools", vec![], None)
         .await
         .unwrap();
@@ -1118,7 +1118,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
         .register(Arc::new(BlockingPreToolExtension))
         .await;
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1133,7 +1133,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
     );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let output = agent
+    let output = agent_loop
         .process_prompt("run dangerous command", vec![], Some(event_tx))
         .await
         .unwrap();
@@ -1167,7 +1167,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
 #[tokio::test]
 async fn session_system_prompt_is_sent_to_llm() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "session-1".into(),
         ".".into(),
         "test system prompt".to_string(),
@@ -1184,7 +1184,7 @@ async fn session_system_prompt_is_sent_to_llm() {
         ),
     );
 
-    let output = agent.process_prompt("hello", vec![], None).await.unwrap();
+    let output = agent_loop.process_prompt("hello", vec![], None).await.unwrap();
 
     assert_eq!(output.text, "ok");
     let messages = captured_messages.lock().unwrap();
@@ -1222,7 +1222,7 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
         }))
         .await;
 
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "provider-hook-session".into(),
         std::env::temp_dir()
             .join("astrcode-provider-hook-chain")
@@ -1243,7 +1243,7 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
         ),
     );
 
-    let output = agent.process_prompt("hello", vec![], None).await.unwrap();
+    let output = agent_loop.process_prompt("hello", vec![], None).await.unwrap();
     let messages = captured_messages.lock().unwrap();
 
     assert_eq!(output.text, "ok");
@@ -1272,7 +1272,7 @@ async fn auto_compact_uses_forked_runner_with_tools() {
             post_seen: Arc::clone(&compact_post_seen),
         }))
         .await;
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "auto-compact-tools-session".into(),
         ".".into(),
         "main system prompt".into(),
@@ -1299,7 +1299,7 @@ async fn auto_compact_uses_forked_runner_with_tools() {
         )));
     }
 
-    let output = agent
+    let output = agent_loop
         .process_prompt("current", history, None)
         .await
         .unwrap();
@@ -1343,7 +1343,7 @@ async fn compact_tool_call_is_not_executed() {
     let llm = Arc::new(CompactToolCallThenOkLlm {
         call_count: AtomicUsize::new(0),
     });
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "compact-tool-call-session".into(),
         ".".into(),
         String::new(),
@@ -1371,7 +1371,7 @@ async fn compact_tool_call_is_not_executed() {
         )));
     }
 
-    let output = agent
+    let output = agent_loop
         .process_prompt("current", history, None)
         .await
         .unwrap();
@@ -1388,7 +1388,7 @@ async fn prompt_too_long_returns_recoverable_error_without_same_session_compact(
         call_count: AtomicUsize::new(0),
         captured_messages: Arc::clone(&captured_messages),
     });
-    let agent = Agent::new(
+    let agent_loop = AgentLoop::new(
         "overflow-session".into(),
         ".".into(),
         String::new(),
@@ -1409,7 +1409,7 @@ async fn prompt_too_long_returns_recoverable_error_without_same_session_compact(
     }
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-    let error = match agent
+    let error = match agent_loop
         .process_prompt("current", history, Some(event_tx))
         .await
     {

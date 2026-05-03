@@ -59,7 +59,7 @@ const MAX_PARALLEL_TOOL_CALLS: usize = 5;
 /// `on_signal` 在每个事件或控制信号到达时被调用（包含 select 阶段和 drain 阶段）。
 /// 返回 `(output, emitted_error)`。
 pub(crate) async fn drive_agent<F, Fut>(
-    agent: &Agent,
+    agent: &AgentLoop,
     user_text: &str,
     history: Vec<LlmMessage>,
     mut on_signal: F,
@@ -124,7 +124,7 @@ fn send_event(event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>, payload: Ev
 /// Created from a session projection, processes one turn, emits event payloads,
 /// and is discarded. Durable event persistence stays in the handler; compact
 /// transcript snapshots are written through the injected session manager.
-pub struct Agent {
+pub struct AgentLoop {
     /// 所属会话的唯一标识。
     session_id: SessionId,
     /// 当前工作目录，用于工具执行时的相对路径解析。
@@ -156,8 +156,8 @@ pub struct AgentServices {
     pub session_manager: Arc<SessionManager>,
 }
 
-impl Agent {
-    /// 创建一个新的 Agent 实例。
+impl AgentLoop {
+    /// 创建一个新的 AgentLoop 实例。
     ///
     /// # 参数
     /// - `session_id`: 所属会话的唯一标识

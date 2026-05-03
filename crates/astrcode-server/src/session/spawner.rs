@@ -23,7 +23,7 @@ use super::{
 };
 use crate::{
     agent::{
-        Agent, AgentServices, AgentSignal, compact::compact_trigger_name, drive_agent,
+        AgentLoop, AgentServices, AgentSignal, compact::compact_trigger_name, drive_agent,
         tool_name_matches_allowlist,
     },
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot, prompt_fingerprint},
@@ -133,7 +133,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             format!("child agent '{child_name}' started: {child_sid} using {model_id}\n"),
         );
 
-        let agent = Agent::new(
+        let agent = AgentLoop::new(
             child_sid.clone(),
             request.working_dir.clone(),
             system_prompt.clone(),

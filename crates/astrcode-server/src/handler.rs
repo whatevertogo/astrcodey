@@ -29,7 +29,7 @@ use tokio::{
 
 use crate::{
     agent::{
-        Agent, AgentError, AgentServices, AgentSignal, AgentTurnOutput,
+        AgentLoop, AgentError, AgentServices, AgentSignal, AgentTurnOutput,
         compact::{
             CompactHookContext, collect_compact_instructions, compact_trigger_name,
             compact_with_forked_provider, dispatch_post_compact,
@@ -889,7 +889,7 @@ impl CommandHandler {
             } = input;
             let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
 
-            let agent = Agent::new(
+            let agent = AgentLoop::new(
                 sid.clone(),
                 working_dir,
                 system_prompt,
