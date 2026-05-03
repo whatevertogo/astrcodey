@@ -920,7 +920,7 @@ mod tests {
 
     fn sample_tool() -> ToolDefinition {
         ToolDefinition {
-            name: "readFile".into(),
+            name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1060,7 +1060,7 @@ mod tests {
                     "type": "function_call",
                     "id": "item_1",
                     "call_id": "call_1",
-                    "name": "readFile"
+                    "name": "read"
                 }
             }),
             &tx,
@@ -1102,7 +1102,7 @@ mod tests {
             &serde_json::json!({
                 "event": "response.function_call_arguments.done",
                 "item_id": "item_1",
-                "name": "readFile",
+                "name": "read",
                 "arguments": "{\"path\":\"Cargo.toml\"}"
             }),
             &tx,
@@ -1113,7 +1113,7 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             LlmEvent::ToolCallStart { call_id, name, .. }
-                if call_id == "item_1" && name == "readFile"
+                if call_id == "item_1" && name == "read"
         )));
         assert!(events.iter().any(|event| matches!(
             event,

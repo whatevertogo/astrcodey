@@ -6,10 +6,11 @@ use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
         CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
-        StorageError,
+        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::{Cursor, SessionId},
 };
+use astrcode_support::tool_results::{slice_tool_result, tool_result_file_name};
 use tokio::sync::Mutex;
 
 use crate::projection;
@@ -25,6 +26,7 @@ pub struct InMemoryEventStore {
 struct InMemorySession {
     events: Vec<Event>,
     projection: SessionReadModel,
+    tool_results: HashMap<String, String>,
 }
 
 impl InMemoryEventStore {
@@ -70,6 +72,7 @@ impl EventStore for InMemoryEventStore {
             InMemorySession {
                 events: vec![event.clone()],
                 projection,
+                tool_results: HashMap::new(),
             },
         );
         Ok(event)
@@ -175,4 +178,82 @@ impl EventStore for InMemoryEventStore {
     ) -> Result<Option<String>, StorageError> {
         Ok(None)
     }
+
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        for suffix in 0..1000 {
+            let path = format_memory_tool_result_path(
+                session_id,
+                &artifact.tool_name,
+                &artifact.call_id,
+                suffix,
+            );
+            match session.tool_results.get(&path) {
+                Some(existing) if existing == &artifact.content => {
+                    return Ok(ToolResultArtifactRef {
+                        bytes: artifact.content.len(),
+                        path: Some(path),
+                    });
+                },
+                Some(_) => continue,
+                None => {
+                    session
+                        .tool_results
+                        .insert(path.clone(), artifact.content.clone());
+                    return Ok(ToolResultArtifactRef {
+                        bytes: artifact.content.len(),
+                        path: Some(path),
+                    });
+                },
+            }
+        }
+        Err(StorageError::InvalidId(
+            "too many tool result artifact filename collisions".into(),
+        ))
+    }
+
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        let expected_prefix = format!("memory://{session_id}/tool-results/");
+        if !path.starts_with(&expected_prefix) {
+            return Err(StorageError::InvalidId(
+                "tool result path belongs to a different session".into(),
+            ));
+        }
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let content = session
+            .tool_results
+            .get(path)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        Ok(slice_tool_result(path, content, char_offset, max_chars))
+    }
+}
+
+fn format_memory_tool_result_path(
+    session_id: &str,
+    tool_name: &str,
+    call_id: &str,
+    suffix: usize,
+) -> String {
+    let file_name = tool_result_file_name(tool_name, call_id);
+    if suffix == 0 {
+        return format!("memory://{session_id}/tool-results/{file_name}");
+    }
+    let stem = file_name.trim_end_matches(".txt");
+    format!("memory://{session_id}/tool-results/{stem}-{suffix}.txt")
 }

@@ -25,7 +25,7 @@ const MAX_IDENTITY_SIZE: usize = 4096;
 
 const FEW_SHOT: &str = concat!(
     "示例：修改代码前，先检查相关文件并收集上下文。\n",
-    "如果只知道文件名模式或 glob，用 `findFiles` 发现候选路径；需要在已知路径内搜索内容时，用带 \
+    "如果只知道文件名模式或 glob，用 `find` 发现候选路径；需要在已知路径内搜索内容时，用带 \
      `pattern` 和 `path` 的 `grep`；",
     "需要目录检查或运行命令时，用 `shell`。\n\n",
     "User：修复这个仓库里的失败行为。\n",

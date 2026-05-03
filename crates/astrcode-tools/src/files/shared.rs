@@ -334,10 +334,7 @@ pub(super) fn not_found(ctx: &ToolExecutionContext, started_at: Instant, p: &Pat
 pub(super) fn directory(ctx: &ToolExecutionContext, started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
         call_id: tool_call_id(ctx),
-        content: format!(
-            "Is a directory: {} — use findFiles or shell ls",
-            p.display()
-        ),
+        content: format!("Is a directory: {} — use find or shell ls", p.display()),
         is_error: false,
         error: None,
         metadata: BTreeMap::from([

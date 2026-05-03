@@ -9,12 +9,12 @@
 //! - [`ToolResult`]：工具执行结果
 //! - [`ToolExecutionContext`]：每次工具调用的上下文
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::event::EventPayload;
+use crate::{event::EventPayload, storage::ToolResultArtifactReader};
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ pub enum ToolOrigin {
 /// 工具定义，作为函数调用 schema 发送给 LLM。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    /// 唯一工具名称（如 "readFile"、"shell"）。
+    /// 唯一工具名称（如 "read"、"shell"）。
     pub name: String,
     /// 工具功能的人类可读描述。
     pub description: String,
@@ -97,7 +97,7 @@ pub enum ExecutionMode {
 ///
 /// 由 Agent 在每次工具调用开始时创建，携带工具（尤其是扩展工具）
 /// 所需的当前会话状态。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolExecutionContext {
     /// 当前会话 ID。
     pub session_id: String,
@@ -111,6 +111,25 @@ pub struct ToolExecutionContext {
     pub tool_call_id: Option<String>,
     /// 当前回合事件发送器，用于工具发出非持久化进度事件。
     pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    /// 当前 session 的工具结果 artifact 读取能力。
+    pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
+}
+
+impl std::fmt::Debug for ToolExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutionContext")
+            .field("session_id", &self.session_id)
+            .field("working_dir", &self.working_dir)
+            .field("model_id", &self.model_id)
+            .field("available_tools", &self.available_tools)
+            .field("tool_call_id", &self.tool_call_id)
+            .field("event_tx", &self.event_tx.as_ref().map(|_| "<event_tx>"))
+            .field(
+                "tool_result_reader",
+                &self.tool_result_reader.as_ref().map(|_| "<reader>"),
+            )
+            .finish()
+    }
 }
 
 /// `Tool` trait——所有工具（内置和扩展注册）都必须实现此接口。

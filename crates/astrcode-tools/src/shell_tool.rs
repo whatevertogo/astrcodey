@@ -33,6 +33,9 @@ pub struct ShellTool {
 struct ShellArgs {
     /// 要执行的 shell 命令
     command: String,
+    /// 命令意图，供审计和 UI 摘要使用，不影响执行
+    #[serde(default)]
+    intent: Option<String>,
     /// 命令的工作目录（可选，默认为工具的 working_dir）
     #[serde(default)]
     cwd: Option<PathBuf>,
@@ -50,7 +53,8 @@ impl Tool for ShellTool {
             name: "shell".into(),
             description: format!(
                 "Execute a shell command with the default shell ({}). Returns stdout, stderr, and \
-                 exit code. Timeout: 120s.",
+                 exit code. Prefer file tools for reading, searching, and editing files; use \
+                 shell for commands that need the OS or project toolchain. Timeout: 120s.",
                 shell.name
             ),
             origin: ToolOrigin::Builtin,
@@ -58,6 +62,10 @@ impl Tool for ShellTool {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
+                    "intent": {
+                        "type": "string",
+                        "description": "Short active-voice reason for running this command, useful for audit and progress display."
+                    },
                     "cwd": {
                         "type": "string",
                         "description": "Working directory for this command. Prefer this over shell-level cd."
@@ -153,6 +161,9 @@ impl Tool for ShellTool {
 
         let mut meta = BTreeMap::new();
         meta.insert("command".into(), serde_json::json!(args.command));
+        if let Some(intent) = args.intent.filter(|intent| !intent.trim().is_empty()) {
+            meta.insert("intent".into(), serde_json::json!(intent));
+        }
         meta.insert("exitCode".into(), serde_json::json!(exit));
         meta.insert("shell".into(), serde_json::json!(shell.name));
         meta.insert("shellPath".into(), serde_json::json!(shell.path));
@@ -284,6 +295,7 @@ mod tests {
             available_tools: vec![],
             tool_call_id: None,
             event_tx: None,
+            tool_result_reader: None,
         }
     }
 
@@ -350,7 +362,8 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({
-                    "command": command_with_stderr()
+                    "command": command_with_stderr(),
+                    "intent": "Check stdout and stderr capture"
                 }),
                 &ctx,
             )
@@ -362,6 +375,10 @@ mod tests {
         assert!(result.content.contains("out"));
         assert!(result.content.contains("err"));
         assert_eq!(result.metadata["streamed"], serde_json::json!(true));
+        assert_eq!(
+            result.metadata["intent"],
+            serde_json::json!("Check stdout and stderr capture")
+        );
 
         let mut saw_stdout = false;
         let mut saw_stderr = false;

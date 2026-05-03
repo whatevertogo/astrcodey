@@ -21,6 +21,9 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_support::tool_results::{
+    DEFAULT_TOOL_RESULT_INLINE_LIMIT, MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+};
 use tokio::{
     sync::{Barrier, mpsc},
     time::{sleep, timeout},
@@ -29,17 +32,17 @@ use tokio::{
 use super::*;
 
 #[test]
-fn claude_tool_aliases_match_local_tool_names() {
+fn tool_allowlist_matches_canonical_names_case_insensitively() {
     let allowed = HashSet::from([
-        String::from("Read"),
-        String::from("Grep"),
-        String::from("Bash"),
+        String::from("read"),
+        String::from("GREP"),
+        String::from("shell"),
     ]);
 
-    assert!(tool_name_matches_allowlist(&allowed, "readFile"));
+    assert!(tool_name_matches_allowlist(&allowed, "read"));
     assert!(tool_name_matches_allowlist(&allowed, "grep"));
     assert!(tool_name_matches_allowlist(&allowed, "shell"));
-    assert!(!tool_name_matches_allowlist(&allowed, "writeFile"));
+    assert!(!tool_name_matches_allowlist(&allowed, "write"));
 }
 
 struct BlockingPreToolExtension;
@@ -589,6 +592,26 @@ impl Tool for FailingTool {
     }
 }
 
+struct LargeResultTool {
+    name: &'static str,
+    content: String,
+}
+
+#[async_trait::async_trait]
+impl Tool for LargeResultTool {
+    fn definition(&self) -> ToolDefinition {
+        test_tool_definition(self.name)
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(success_tool_result(&self.content))
+    }
+}
+
 fn test_tool_definition(name: &str) -> ToolDefinition {
     ToolDefinition {
         name: name.into(),
@@ -857,6 +880,184 @@ async fn parallel_results_are_committed_in_model_order() {
         tool_result_contents(&messages),
         vec![String::from("slow"), String::from("fast")]
     );
+}
+
+#[tokio::test]
+async fn large_tool_result_is_persisted_before_next_llm_call() {
+    let large_content = "A".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+    let tool_registry = test_registry(vec![Arc::new(LargeResultTool {
+        name: "large",
+        content: large_content.clone(),
+    })]);
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let session_manager = Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new())));
+    let start = session_manager
+        .create(".", "mock", 2048, None)
+        .await
+        .unwrap();
+    let session_id = start.session_id.clone();
+
+    let agent = Agent::new(
+        session_id.clone(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        AgentServices {
+            llm: Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "large")],
+                captured_messages: Arc::clone(&captured_messages),
+            }),
+            tool_registry,
+            extension_runner: Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+            context_assembler: test_context_assembler(),
+            session_manager: Arc::clone(&session_manager),
+        },
+    );
+
+    agent
+        .process_prompt("run large tool", vec![], None)
+        .await
+        .unwrap();
+
+    let path = {
+        let messages = captured_messages.lock().unwrap();
+        let contents = tool_result_contents(&messages);
+        assert_eq!(contents.len(), 1);
+        assert!(contents[0].contains("read"));
+        assert!(contents[0].contains("path"));
+        assert!(contents[0].contains("Preview"));
+        assert!(!contents[0].contains(&large_content));
+        contents[0]
+            .split('"')
+            .find(|part| part.starts_with("memory://"))
+            .expect("summary should include a tool result path")
+            .to_string()
+    };
+
+    let slice = session_manager
+        .read_tool_result_artifact_by_path(&session_id, &path, 0, large_content.len())
+        .await
+        .unwrap();
+    assert_eq!(slice.content, large_content);
+}
+
+#[tokio::test]
+async fn read_file_tool_result_is_not_persisted_again() {
+    let large_content = "R".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+    let tool_registry = test_registry(vec![Arc::new(LargeResultTool {
+        name: "read",
+        content: large_content.clone(),
+    })]);
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+
+    let agent = Agent::new(
+        "session-1".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "read")],
+                captured_messages: Arc::clone(&captured_messages),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
+    );
+
+    agent
+        .process_prompt("read large file", vec![], None)
+        .await
+        .unwrap();
+
+    let messages = captured_messages.lock().unwrap();
+    assert_eq!(tool_result_contents(&messages), vec![large_content]);
+}
+
+#[tokio::test]
+async fn aggregate_tool_result_budget_persists_largest_inline_result() {
+    let item = "M".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT - 1_000);
+    let tool_registry = test_registry(vec![
+        Arc::new(LargeResultTool {
+            name: "medium1",
+            content: item.clone(),
+        }),
+        Arc::new(LargeResultTool {
+            name: "medium2",
+            content: item.clone(),
+        }),
+        Arc::new(LargeResultTool {
+            name: "medium3",
+            content: item.clone(),
+        }),
+        Arc::new(LargeResultTool {
+            name: "medium4",
+            content: item.clone(),
+        }),
+        Arc::new(LargeResultTool {
+            name: "medium5",
+            content: item,
+        }),
+    ]);
+    let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let session_manager = Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new())));
+    let start = session_manager
+        .create(".", "mock", 2048, None)
+        .await
+        .unwrap();
+    let calls = vec![
+        ("call-1", "medium1"),
+        ("call-2", "medium2"),
+        ("call-3", "medium3"),
+        ("call-4", "medium4"),
+        ("call-5", "medium5"),
+    ];
+
+    let agent = Agent::new(
+        start.session_id,
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        AgentServices {
+            llm: Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls,
+                captured_messages: Arc::clone(&captured_messages),
+            }),
+            tool_registry,
+            extension_runner: Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+            context_assembler: test_context_assembler(),
+            session_manager,
+        },
+    );
+
+    agent
+        .process_prompt("run many medium tools", vec![], None)
+        .await
+        .unwrap();
+
+    let messages = captured_messages.lock().unwrap();
+    let contents = tool_result_contents(&messages);
+    assert_eq!(contents.len(), 5);
+    assert_eq!(
+        contents
+            .iter()
+            .filter(|content| content.contains("Tool result was persisted"))
+            .count(),
+        1
+    );
+    assert!(contents.iter().map(String::len).sum::<usize>() <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS);
 }
 
 #[tokio::test]

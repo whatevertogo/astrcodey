@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
-use astrcode_core::tool::*;
+use astrcode_core::{storage::StorageError, tool::*};
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
@@ -8,7 +8,9 @@ use super::shared::{
     DEFAULT_MAX_CHARS, binary, directory, error_result, image_media_type, is_binary, not_found,
     read_image_file, slice_chars, tool_call_id,
 };
-// ─── readFile ────────────────────────────────────────────────────────────
+
+const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
+// ─── read ────────────────────────────────────────────────────────────────
 
 /// 文件读取工具，读取已知路径的文件内容并返回带行号的文本。
 ///
@@ -18,7 +20,7 @@ pub struct ReadFileTool {
     pub working_dir: PathBuf,
 }
 
-/// readFile 工具的参数。
+/// read 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReadFileArgs {
@@ -41,13 +43,14 @@ struct ReadFileArgs {
 
 #[async_trait::async_trait]
 impl Tool for ReadFileTool {
-    /// 返回 readFile 工具的定义，包含参数 schema。
+    /// 返回 read 工具的定义，包含参数 schema。
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "readFile".into(),
-            description: "Read a known file's contents. Use after a path is identified by the \
-                          user, findFiles, or grep. This is not a directory listing or content \
-                          search tool. Supports line offset/limit and returns line-numbered text."
+            name: "read".into(),
+            description: "Read a known file's contents. When a previous tool result says it was \
+                          persisted, pass the saved path here to read it. This is not a directory \
+                          listing or content search tool. File paths are limited to the working \
+                          directory or the current session's tool-result artifact directory."
                 .into(),
             origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
@@ -55,12 +58,12 @@ impl Tool for ReadFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to a file that is already known."
+                        "description": "Absolute or relative path to a known file, including a persisted tool-result path shown by an earlier tool result."
                     },
                     "maxChars": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum characters to return (default 20000)."
+                        "description": "Maximum characters to return (default 20000; persisted tool results are capped at 60000)."
                     },
                     "charOffset": {
                         "type": "integer",
@@ -95,10 +98,15 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: ReadFileArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid readFile args: {e}")))?;
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
         // 拒绝工作目录外的路径，防止 LLM 构造 ../ 等路径遍历读取敏感文件
         if !is_path_within(&path, &self.working_dir) {
+            if let Some(result) =
+                read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
+            {
+                return Ok(result);
+            }
             return Ok(error_result(
                 ctx,
                 started_at,
@@ -183,4 +191,65 @@ impl Tool for ReadFileTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+}
+
+async fn read_persisted_tool_result_path(
+    ctx: &ToolExecutionContext,
+    started_at: Instant,
+    path: &std::path::Path,
+    args: &ReadFileArgs,
+) -> Result<Option<ToolResult>, ToolError> {
+    let Some(reader) = ctx.tool_result_reader.as_ref() else {
+        return Ok(None);
+    };
+    let char_offset = args.char_offset.unwrap_or(0);
+    let max_chars = args
+        .max_chars
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .min(MAX_TOOL_RESULT_READ_CHARS);
+    let path = path.display().to_string();
+    let slice = match reader
+        .read_tool_result_artifact_by_path(&ctx.session_id, &path, char_offset, max_chars)
+        .await
+    {
+        Ok(slice) => slice,
+        Err(StorageError::InvalidId(_) | StorageError::Unsupported(_)) => return Ok(None),
+        Err(StorageError::NotFound(_)) => {
+            return Ok(Some(error_result(
+                ctx,
+                started_at,
+                format!("tool result path not found: {path}"),
+                BTreeMap::from([
+                    ("path".into(), serde_json::json!(path)),
+                    ("source".into(), serde_json::json!("toolResultArtifact")),
+                ]),
+            )));
+        },
+        Err(error) => return Err(ToolError::Execution(format!("read tool result: {error}"))),
+    };
+
+    let mut meta = BTreeMap::new();
+    meta.insert("path".into(), serde_json::json!(slice.path));
+    meta.insert("source".into(), serde_json::json!("toolResultArtifact"));
+    meta.insert("bytes".into(), serde_json::json!(slice.bytes));
+    meta.insert("charOffset".into(), serde_json::json!(slice.char_offset));
+    meta.insert(
+        "returnedChars".into(),
+        serde_json::json!(slice.returned_chars),
+    );
+    meta.insert("maxChars".into(), serde_json::json!(max_chars));
+    meta.insert("hasMore".into(), serde_json::json!(slice.has_more));
+    meta.insert("truncated".into(), serde_json::json!(slice.has_more));
+    if let Some(next_char_offset) = slice.next_char_offset {
+        meta.insert("nextCharOffset".into(), serde_json::json!(next_char_offset));
+    }
+
+    Ok(Some(ToolResult {
+        call_id: tool_call_id(ctx),
+        content: slice.content,
+        is_error: false,
+        error: None,
+        metadata: meta,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }))
 }

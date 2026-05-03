@@ -25,13 +25,17 @@ use astrcode_core::{
     event::EventPayload,
     extension::{CompactTrigger, ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    storage::CompactSnapshotInput,
+    storage::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactReader},
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolResult},
     types::*,
 };
 use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
+};
+use astrcode_support::tool_results::{
+    MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary,
+    should_persist_tool_result, tool_result_inline_limit, tool_result_preview,
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{
@@ -887,11 +891,15 @@ impl Agent {
                     .await?;
                     let (index, result) = execute_tool_call(
                         Arc::clone(&self.tool_registry),
-                        self.session_id.clone(),
-                        self.working_dir.clone(),
-                        self.model_id.clone(),
-                        tools.to_vec(),
-                        event_tx.clone(),
+                        ToolCallRuntimeContext {
+                            session_id: self.session_id.clone(),
+                            working_dir: self.working_dir.clone(),
+                            model_id: self.model_id.clone(),
+                            tools: tools.to_vec(),
+                            tool_result_reader: Some(Arc::clone(&self.session_manager)
+                                as Arc<dyn ToolResultArtifactReader>),
+                            event_tx: event_tx.clone(),
+                        },
                         call.to_executable(),
                     )
                     .await;
@@ -959,15 +967,20 @@ impl Agent {
         let working_dir = self.working_dir.clone();
         let model_id = self.model_id.clone();
         let tools = tools.to_vec();
+        let tool_result_reader =
+            Some(Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>);
 
         join_set.spawn(async move {
             execute_tool_call(
                 tool_registry,
-                session_id,
-                working_dir,
-                model_id,
-                tools,
-                event_tx,
+                ToolCallRuntimeContext {
+                    session_id,
+                    working_dir,
+                    model_id,
+                    tools,
+                    tool_result_reader,
+                    event_tx,
+                },
                 call,
             )
             .await
@@ -984,6 +997,7 @@ impl Agent {
         &self,
         mut input: CommitToolResults<'_>,
     ) -> Result<(), AgentError> {
+        let mut pending_results = Vec::with_capacity(input.prepared.len());
         for call in input.prepared {
             let mut result = input
                 .results
@@ -1022,26 +1036,141 @@ impl Agent {
                 }
             }
 
+            pending_results.push(PendingCommittedToolResult {
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
+                result,
+            });
+        }
+
+        for pending in &mut pending_results {
+            self.persist_large_tool_result(
+                &pending.tool_name,
+                &pending.call_id,
+                &mut pending.result,
+            )
+            .await?;
+        }
+        self.enforce_tool_result_message_budget(&mut pending_results)
+            .await?;
+
+        for pending in pending_results {
             if input.event_tx.is_some() {
                 send_event(
                     input.event_tx,
                     EventPayload::ToolCallCompleted {
-                        call_id: call.call_id.clone(),
-                        tool_name: call.name.clone(),
-                        result: result.clone(),
+                        call_id: pending.call_id.clone(),
+                        tool_name: pending.tool_name.clone(),
+                        result: pending.result.clone(),
                     },
                 );
             }
             input.messages.push(LlmMessage {
                 role: LlmRole::Tool,
                 content: vec![LlmContent::ToolResult {
-                    tool_call_id: call.call_id.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
+                    tool_call_id: pending.call_id,
+                    content: pending.result.content.clone(),
+                    is_error: pending.result.is_error,
                 }],
-                name: Some(call.name.clone()),
+                name: Some(pending.tool_name),
             });
-            input.all_tool_results.push(result);
+            input.all_tool_results.push(pending.result);
+        }
+
+        Ok(())
+    }
+
+    async fn persist_large_tool_result(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+        result: &mut ToolResult,
+    ) -> Result<(), AgentError> {
+        let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
+            return Ok(());
+        };
+        if !should_persist_tool_result(&result.content, inline_limit) {
+            return Ok(());
+        }
+        self.persist_tool_result(tool_name, call_id, result).await
+    }
+
+    async fn persist_tool_result(
+        &self,
+        tool_name: &str,
+        call_id: &str,
+        result: &mut ToolResult,
+    ) -> Result<(), AgentError> {
+        if result.metadata.contains_key("persistedToolResult") {
+            return Ok(());
+        }
+        let original_content = result.content.clone();
+        let reference = self
+            .session_manager
+            .write_tool_result_artifact(
+                &self.session_id,
+                ToolResultArtifactInput {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    content: original_content.clone(),
+                },
+            )
+            .await
+            .map_err(|error| AgentError::Llm(format!("persist tool result: {error}")))?;
+        let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
+        result.metadata.insert(
+            "persistedToolResult".into(),
+            serde_json::json!({
+                "bytes": reference.bytes,
+                "path": reference.path.clone(),
+            }),
+        );
+        result.content = persisted_tool_result_summary(&reference, &preview);
+        if result.is_error {
+            result.error = Some(result.content.clone());
+        }
+        Ok(())
+    }
+
+    async fn enforce_tool_result_message_budget(
+        &self,
+        pending_results: &mut [PendingCommittedToolResult],
+    ) -> Result<(), AgentError> {
+        let mut total: usize = pending_results
+            .iter()
+            .map(|pending| pending.result.content.len())
+            .sum();
+        if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
+            return Ok(());
+        }
+
+        let mut candidates: Vec<usize> = pending_results
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| {
+                let can_persist = tool_result_inline_limit(&pending.tool_name).is_some()
+                    && !pending.result.metadata.contains_key("persistedToolResult");
+                can_persist.then_some(index)
+            })
+            .collect();
+        candidates.sort_by(|left, right| {
+            pending_results[*right]
+                .result
+                .content
+                .len()
+                .cmp(&pending_results[*left].result.content.len())
+        });
+
+        for index in candidates {
+            if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
+                break;
+            }
+            let pending = &mut pending_results[index];
+            let before = pending.result.content.len();
+            self.persist_tool_result(&pending.tool_name, &pending.call_id, &mut pending.result)
+                .await?;
+            let after = pending.result.content.len();
+            total = total.saturating_sub(before).saturating_add(after);
         }
 
         Ok(())
@@ -1123,6 +1252,12 @@ struct CommitToolResults<'a> {
     event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
 }
 
+struct PendingCommittedToolResult {
+    call_id: String,
+    tool_name: String,
+    result: ToolResult,
+}
+
 pub(crate) enum PreparedToolOutcome {
     Ready,
     Blocked(ToolResult),
@@ -1134,6 +1269,15 @@ pub(crate) struct ExecutableToolCall {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
+}
+
+pub(crate) struct ToolCallRuntimeContext {
+    session_id: String,
+    working_dir: String,
+    model_id: String,
+    tools: Vec<ToolDefinition>,
+    tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
+    event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
 }
 
 impl PreparedToolCall {
@@ -1183,15 +1327,11 @@ pub(crate) fn assistant_tool_call_message(prepared: &[PreparedToolCall]) -> LlmM
 /// 执行单个工具调用，并把异常统一转成工具错误结果。
 pub(crate) async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
-    session_id: String,
-    working_dir: String,
-    model_id: String,
-    tools: Vec<ToolDefinition>,
-    event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+    runtime: ToolCallRuntimeContext,
     call: ExecutableToolCall,
 ) -> (usize, ToolResult) {
     let started_at = Instant::now();
-    let tool_event_bridge = event_tx.as_ref().map(|agent_tx| {
+    let tool_event_bridge = runtime.event_tx.as_ref().map(|agent_tx| {
         let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
         let agent_tx = agent_tx.clone();
         let handle = tokio::spawn(async move {
@@ -1205,12 +1345,13 @@ pub(crate) async fn execute_tool_call(
         .as_ref()
         .map(|(tool_tx, _)| tool_tx.clone());
     let tool_ctx = ToolExecutionContext {
-        session_id,
-        working_dir,
-        model_id,
-        available_tools: tools,
+        session_id: runtime.session_id,
+        working_dir: runtime.working_dir,
+        model_id: runtime.model_id,
+        available_tools: runtime.tools,
         tool_call_id: Some(call.call_id.clone()),
         event_tx: tool_event_tx,
+        tool_result_reader: runtime.tool_result_reader,
     };
 
     let mut result = match tool_registry
@@ -1292,28 +1433,11 @@ impl From<astrcode_core::llm::LlmError> for AgentError {
     }
 }
 
-/// 检查工具名是否匹配白名单，支持 Claude 风格的别名映射。
-/// 例如白名单中有 "Read"，则 "readFile" 也能匹配。
+/// 检查工具名是否匹配白名单。
 pub(crate) fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: &str) -> bool {
-    allowed.iter().any(|allowed_name| {
-        allowed_name == tool_name
-            || claude_tool_alias(allowed_name)
-                .is_some_and(|alias| alias.eq_ignore_ascii_case(tool_name))
-    })
-}
-
-/// 将简短的工具名映射为 Claude 风格的实际工具名。
-/// 例如 "read" → "readFile"，"bash" → "shell"。
-fn claude_tool_alias(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "read" => Some("readFile"),
-        "write" => Some("writeFile"),
-        "edit" | "multiedit" => Some("editFile"),
-        "grep" => Some("grep"),
-        "glob" => Some("findFiles"),
-        "bash" => Some("shell"),
-        _ => None,
-    }
+    allowed
+        .iter()
+        .any(|allowed_name| allowed_name.eq_ignore_ascii_case(tool_name))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────

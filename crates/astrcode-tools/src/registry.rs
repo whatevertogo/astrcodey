@@ -118,7 +118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_expose_apply_patch_after_parser_is_wired() {
+    fn builtins_expose_patch_after_parser_is_wired() {
         let mut registry = ToolRegistry::new();
         for tool in builtin_tools(std::path::PathBuf::from("."), 30) {
             registry.register(tool);
@@ -130,8 +130,8 @@ mod tests {
             .map(|definition| definition.name)
             .collect::<Vec<_>>();
 
-        assert!(names.iter().any(|name| name == "apply_patch"));
-        assert!(names.iter().any(|name| name == "editFile"));
+        assert!(names.iter().any(|name| name == "patch"));
+        assert!(names.iter().any(|name| name == "edit"));
         assert!(names.iter().any(|name| name == "shell"));
     }
 

@@ -9,11 +9,14 @@ use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
         CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
-        StorageError,
+        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::{Cursor, ProjectHash, SessionId, validate_session_id},
 };
-use astrcode_support::hostpaths;
+use astrcode_support::{
+    hostpaths,
+    tool_results::{slice_tool_result, write_tool_result_file},
+};
 use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -370,6 +373,47 @@ impl EventStore for FileSystemSessionRepository {
 
         Ok(Some(path.to_string_lossy().to_string()))
     }
+
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        validate_session_id(session_id).map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        let _meta = self.get_or_open_meta(session_id).await?;
+
+        let dir = self.session_dir(session_id).join("tool-results");
+        Ok(write_tool_result_file(&dir, &artifact, session_id)?)
+    }
+
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        validate_session_id(session_id).map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        let _meta = self.get_or_open_meta(session_id).await?;
+
+        let path = PathBuf::from(path);
+        let artifact_dir = self.session_dir(session_id).join("tool-results");
+        if !hostpaths::is_path_within(&path, &artifact_dir) {
+            return Err(StorageError::InvalidId(
+                "tool result path is outside this session artifact directory".into(),
+            ));
+        }
+        if !path.exists() {
+            return Err(StorageError::NotFound(session_id.clone()));
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        Ok(slice_tool_result(
+            &path.to_string_lossy(),
+            &content,
+            char_offset,
+            max_chars,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +459,91 @@ mod tests {
         assert!(content.contains("\"trigger\":\"manual_command\""));
         assert!(content.contains("\"type\":\"message\""));
         assert!(path.contains("compact-snapshots"));
+    }
+
+    #[tokio::test]
+    async fn tool_result_artifact_writes_under_session_dir_and_reads_slice() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().join("sessions");
+        let repo = test_repo(base_path.clone());
+        let session_id = "session-test".to_string();
+        repo.create_session(&session_id, ".", "mock", None)
+            .await
+            .unwrap();
+
+        let reference = repo
+            .write_tool_result_artifact(
+                &session_id,
+                ToolResultArtifactInput {
+                    call_id: "call-1".into(),
+                    tool_name: "shell".into(),
+                    content: "abcdef".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let path = reference.path.as_ref().expect("filesystem path");
+        assert!(path.contains("tool-results"));
+        assert!(path.contains("session-test"));
+        assert!(std::path::Path::new(path).starts_with(base_path.join(&session_id)));
+
+        let slice = repo
+            .read_tool_result_artifact_by_path(&session_id, path, 2, 3)
+            .await
+            .unwrap();
+        assert_eq!(slice.content, "cde");
+        assert_eq!(slice.next_char_offset, Some(5));
+        assert!(slice.has_more);
+    }
+
+    #[tokio::test]
+    async fn tool_result_artifact_reuses_same_content_and_keeps_collisions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(temp_dir.path().join("sessions"));
+        let session_id = "session-test".to_string();
+        repo.create_session(&session_id, ".", "mock", None)
+            .await
+            .unwrap();
+
+        let input = ToolResultArtifactInput {
+            call_id: "call-1".into(),
+            tool_name: "shell".into(),
+            content: "abcdef".into(),
+        };
+        let first = repo
+            .write_tool_result_artifact(&session_id, input.clone())
+            .await
+            .unwrap();
+        let second = repo
+            .write_tool_result_artifact(&session_id, input)
+            .await
+            .unwrap();
+        assert_eq!(first.path, second.path);
+
+        let third = repo
+            .write_tool_result_artifact(
+                &session_id,
+                ToolResultArtifactInput {
+                    call_id: "call-1".into(),
+                    tool_name: "shell".into(),
+                    content: "changed".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let first_path = first.path.as_ref().expect("first path");
+        let third_path = third.path.as_ref().expect("third path");
+        assert_ne!(first_path, third_path);
+        assert_eq!(
+            tokio::fs::read_to_string(first_path).await.unwrap(),
+            "abcdef"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(third_path).await.unwrap(),
+            "changed"
+        );
     }
 
     #[tokio::test]

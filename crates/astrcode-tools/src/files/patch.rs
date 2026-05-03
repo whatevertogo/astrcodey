@@ -10,18 +10,18 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::shared::{is_unc_path, tool_call_id};
-// ─── applyPatch ──────────────────────────────────────────────────────────
+// ─── patch ───────────────────────────────────────────────────────────────
 
 /// 统一差异补丁应用工具，支持多文件协调变更、文件创建和删除。
 ///
 /// 适用于需要同时修改多个文件或进行远距离 hunk 编辑的场景；
-/// 单文件的精确替换优先使用 `EditFileTool`。
+/// 单文件的精确替换优先使用 edit。
 pub struct ApplyPatchTool {
     /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
-/// applyPatch 工具的参数。
+/// patch 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplyPatchArgs {
@@ -115,9 +115,9 @@ struct TextDocument {
 impl Tool for ApplyPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "apply_patch".into(),
+            name: "patch".into(),
             description: "Apply a unified diff patch for coordinated multi-file changes, distant \
-                          hunks, file creation, or deletion. Use editFile for a single exact \
+                          hunks, file creation, or deletion. Use edit for a single exact \
                           replacement."
                 .into(),
             origin: ToolOrigin::Builtin,
@@ -144,14 +144,14 @@ impl Tool for ApplyPatchTool {
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: ApplyPatchArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid apply_patch args: {e}")))?;
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid patch args: {e}")))?;
         if args.patch.trim().is_empty() {
-            return Ok(apply_patch_error(ctx, started_at, "patch cannot be empty"));
+            return Ok(patch_error(ctx, started_at, "patch cannot be empty"));
         }
 
         let file_patches = match parse_patch(&args.patch) {
             Ok(file_patches) => file_patches,
-            Err(error) => return Ok(apply_patch_error(ctx, started_at, &error)),
+            Err(error) => return Ok(patch_error(ctx, started_at, &error)),
         };
 
         let total_files = file_patches.len();
@@ -165,13 +165,13 @@ impl Tool for ApplyPatchTool {
         let first_error = results.iter().find_map(|result| result.error.clone());
         let ok = failed == 0;
         let content = if ok {
-            format!("apply_patch: {applied}/{total_files} files changed successfully")
+            format!("patch: {applied}/{total_files} files changed successfully")
         } else if applied == 0 {
-            format!("apply_patch: all {total_files} file(s) failed to apply")
+            format!("patch: all {total_files} file(s) failed to apply")
         } else {
             format!(
-                "apply_patch: {applied}/{total_files} files changed, {failed} failed (partial \
-                 changes committed)"
+                "patch: {applied}/{total_files} files changed, {failed} failed (partial changes \
+                 committed)"
             )
         };
 
@@ -184,7 +184,7 @@ impl Tool for ApplyPatchTool {
             } else {
                 first_error.or(Some(format!("{failed} file(s) failed to apply")))
             },
-            metadata: build_apply_patch_metadata(&results, applied, failed),
+            metadata: build_patch_metadata(&results, applied, failed),
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
@@ -386,7 +386,7 @@ fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
     };
     let target_path = resolve_path(working_dir, Path::new(&target_path_str));
 
-    // applyPatch 同样需要路径遍历防护：diff 中的路径可能包含 ../ 逃逸
+    // patch 同样需要路径遍历防护：diff 中的路径可能包含 ../ 逃逸
     if !is_path_within(&target_path, working_dir) {
         return failed_file_change(
             change_type,
@@ -723,8 +723,8 @@ fn hunk_line_counts(hunk: &Hunk) -> (usize, usize) {
         })
 }
 
-/// 构建 applyPatch 工具返回的 metadata，包含每个文件的变更详情和汇总统计。
-fn build_apply_patch_metadata(
+/// 构建 patch 工具返回的 metadata，包含每个文件的变更详情和汇总统计。
+fn build_patch_metadata(
     results: &[FileChange],
     applied: usize,
     failed: usize,
@@ -752,8 +752,8 @@ fn build_apply_patch_metadata(
     ])
 }
 
-/// 构造一个 applyPatch 错误结果（无文件变更）。
-fn apply_patch_error(ctx: &ToolExecutionContext, started_at: Instant, error: &str) -> ToolResult {
+/// 构造一个 patch 错误结果（无文件变更）。
+fn patch_error(ctx: &ToolExecutionContext, started_at: Instant, error: &str) -> ToolResult {
     ToolResult {
         call_id: tool_call_id(ctx),
         content: String::new(),

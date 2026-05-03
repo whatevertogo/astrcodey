@@ -1,6 +1,6 @@
 CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
-- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or any other tool.
+- Do NOT use read, shell, grep, find, edit, write, or any other tool.
 - You already have all the context you need in the conversation messages.
 - Tool calls will be rejected and will waste the compact turn.
 - Your entire response must be plain text: exactly one <summary> block.

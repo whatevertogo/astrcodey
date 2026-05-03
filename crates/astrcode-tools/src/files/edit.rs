@@ -5,7 +5,7 @@ use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
 use super::shared::{clean_quotes, error_result, find_unique_occurrence, tool_call_id};
-// ─── editFile ────────────────────────────────────────────────────────────
+// ─── edit ────────────────────────────────────────────────────────────────
 
 /// 文件精确编辑工具，对已有文件执行窄范围的字符串替换。
 ///
@@ -15,7 +15,7 @@ pub struct EditFileTool {
     pub working_dir: PathBuf,
 }
 
-/// editFile 工具的参数。
+/// edit 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EditFileArgs {
@@ -54,7 +54,7 @@ struct EditOperation {
 impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "editFile".into(),
+            name: "edit".into(),
             description: "Apply one or more narrow exact string replacements inside an existing \
                           file. oldStr must appear exactly once unless replaceAll is true. Use \
                           edits for atomic multiEdit-style changes."
@@ -121,7 +121,7 @@ impl Tool for EditFileTool {
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: EditFileArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid editFile args: {e}")))?;
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
         if !is_path_within(&path, &self.working_dir) {
             return Ok(error_result(

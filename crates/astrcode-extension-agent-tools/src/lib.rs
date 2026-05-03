@@ -254,7 +254,7 @@ mod tests {
             id: String::from("code-reviewer"),
             name: String::from("code-reviewer"),
             description: String::from("Use for behavior-focused code review"),
-            tools: vec![String::from("Read"), String::from("Grep")],
+            tools: vec![String::from("read"), String::from("grep")],
             model: Some(String::from("opus")),
             body: String::from("Review carefully."),
         }];
@@ -263,7 +263,7 @@ mod tests {
 
         assert!(output.contains("code-reviewer"));
         assert!(output.contains("Use for behavior-focused code review"));
-        assert!(output.contains("tools: Read, Grep"));
+        assert!(output.contains("tools: read, grep"));
         assert!(output.contains("model: opus"));
     }
 

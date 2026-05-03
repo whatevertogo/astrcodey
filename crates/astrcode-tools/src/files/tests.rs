@@ -1,6 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use astrcode_core::tool::*;
+use astrcode_core::{
+    storage::{StorageError, ToolResultArtifactReader, ToolResultArtifactSlice},
+    tool::*,
+    types::SessionId,
+};
 use serde_json::Value;
 
 use super::{shared::MAX_INLINE_IMAGE_BASE64_BYTES, *};
@@ -13,6 +20,7 @@ fn empty_ctx() -> ToolExecutionContext {
         available_tools: vec![],
         tool_call_id: None,
         event_tx: None,
+        tool_result_reader: None,
     }
 }
 
@@ -20,6 +28,52 @@ fn ctx_with_call_id(call_id: &str) -> ToolExecutionContext {
     ToolExecutionContext {
         tool_call_id: Some(call_id.into()),
         ..empty_ctx()
+    }
+}
+
+struct FixedToolResultReader {
+    path: String,
+}
+
+#[async_trait::async_trait]
+impl ToolResultArtifactReader for FixedToolResultReader {
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        assert_eq!(session_id, "session-1");
+        assert_eq!(path, self.path);
+        assert_eq!(char_offset, 2);
+        assert!(max_chars <= 60_000);
+        Ok(ToolResultArtifactSlice {
+            path: self.path.clone(),
+            bytes: 6,
+            char_offset,
+            returned_chars: 3,
+            next_char_offset: Some(5),
+            has_more: true,
+            content: "cde".into(),
+        })
+    }
+}
+
+struct RejectingToolResultReader;
+
+#[async_trait::async_trait]
+impl ToolResultArtifactReader for RejectingToolResultReader {
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        _session_id: &SessionId,
+        _path: &str,
+        _char_offset: usize,
+        _max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        Err(StorageError::InvalidId(
+            "tool result path belongs to a different session".into(),
+        ))
     }
 }
 
@@ -82,24 +136,24 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
     let definitions = tool_descriptions();
     let find_files = definitions
         .iter()
-        .find(|definition| definition.name == "findFiles")
-        .expect("findFiles definition should exist");
+        .find(|definition| definition.name == "find")
+        .expect("find definition should exist");
     let grep = definitions
         .iter()
         .find(|definition| definition.name == "grep")
         .expect("grep definition should exist");
     let read_file = definitions
         .iter()
-        .find(|definition| definition.name == "readFile")
-        .expect("readFile definition should exist");
+        .find(|definition| definition.name == "read")
+        .expect("read definition should exist");
     let write_file = definitions
         .iter()
-        .find(|definition| definition.name == "writeFile")
-        .expect("writeFile definition should exist");
+        .find(|definition| definition.name == "write")
+        .expect("write definition should exist");
     let edit_file = definitions
         .iter()
-        .find(|definition| definition.name == "editFile")
-        .expect("editFile definition should exist");
+        .find(|definition| definition.name == "edit")
+        .expect("edit definition should exist");
 
     assert!(find_files.description.contains("file paths only"));
     assert!(grep.description.contains("Search file contents"));
@@ -132,7 +186,7 @@ async fn read_file_reports_text_pagination_metadata() {
             &ctx_with_call_id("read-page"),
         )
         .await
-        .expect("readFile should execute");
+        .expect("read should execute");
 
     assert_eq!(result.call_id, "read-page");
     assert!(!result.is_error, "{result:?}");
@@ -145,6 +199,79 @@ async fn read_file_reports_text_pagination_metadata() {
     assert_eq!(result.metadata["hasMore"], serde_json::json!(true));
     assert_eq!(result.metadata["truncated"], serde_json::json!(true));
     assert_eq!(result.metadata["nextOffset"], serde_json::json!(1));
+}
+
+#[tokio::test]
+async fn read_file_reads_persisted_tool_result_path() {
+    let artifact_path = std::env::temp_dir()
+        .join("session")
+        .join("tool-results")
+        .join("shell-call-1.txt");
+    let artifact_path = artifact_path.display().to_string();
+    let tool = ReadFileTool {
+        working_dir: PathBuf::from("."),
+    };
+    let ctx = ToolExecutionContext {
+        session_id: "session-1".into(),
+        tool_call_id: Some("read-result".into()),
+        tool_result_reader: Some(Arc::new(FixedToolResultReader {
+            path: artifact_path.clone(),
+        })),
+        ..empty_ctx()
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": artifact_path.clone(),
+                "charOffset": 2,
+                "maxChars": 3
+            }),
+            &ctx,
+        )
+        .await
+        .expect("read should read persisted result");
+
+    assert_eq!(result.call_id, "read-result");
+    assert_eq!(result.content, "cde");
+    assert_eq!(result.metadata["path"], serde_json::json!(artifact_path));
+    assert_eq!(
+        result.metadata["source"],
+        serde_json::json!("toolResultArtifact")
+    );
+    assert_eq!(result.metadata["hasMore"], serde_json::json!(true));
+    assert_eq!(result.metadata["nextCharOffset"], serde_json::json!(5));
+}
+
+#[tokio::test]
+async fn read_file_does_not_read_other_session_tool_result_path() {
+    let artifact_path = std::env::temp_dir()
+        .join("other-session")
+        .join("tool-results")
+        .join("shell-call-1.txt");
+    let tool = ReadFileTool {
+        working_dir: PathBuf::from("."),
+    };
+    let ctx = ToolExecutionContext {
+        session_id: "session-1".into(),
+        tool_call_id: Some("read-result".into()),
+        tool_result_reader: Some(Arc::new(RejectingToolResultReader)),
+        ..empty_ctx()
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": artifact_path.display().to_string()
+            }),
+            &ctx,
+        )
+        .await
+        .expect("read should return a normal tool error");
+
+    assert!(result.is_error);
+    assert!(result.content.contains("escapes working directory"));
+    assert!(!result.content.contains("different session"));
 }
 
 #[tokio::test]
@@ -164,7 +291,7 @@ async fn read_file_returns_inline_image_payload() {
     let result = tool
         .execute(serde_json::json!({ "path": "pixel.png" }), &empty_ctx())
         .await
-        .expect("readFile should execute");
+        .expect("read should execute");
 
     assert!(!result.is_error, "{result:?}");
     let payload: Value =
@@ -190,7 +317,7 @@ async fn read_file_rejects_oversize_image_payload() {
     let result = tool
         .execute(serde_json::json!({ "path": "large.png" }), &empty_ctx())
         .await
-        .expect("readFile should execute");
+        .expect("read should execute");
 
     assert!(result.is_error);
     assert_eq!(result.metadata["fileType"], serde_json::json!("image"));
@@ -211,7 +338,7 @@ async fn read_file_marks_binary_files_without_reading_text() {
     let result = tool
         .execute(serde_json::json!({ "path": "data.bin" }), &empty_ctx())
         .await
-        .expect("readFile should execute");
+        .expect("read should execute");
 
     assert!(!result.is_error);
     assert_eq!(result.metadata["binary"], serde_json::json!(true));
@@ -238,7 +365,7 @@ async fn edit_file_applies_multiple_edits_atomically() {
             &empty_ctx(),
         )
         .await
-        .expect("editFile should execute");
+        .expect("edit should execute");
 
     assert!(!result.is_error, "{result:?}");
     assert_eq!(result.metadata["operationCount"], serde_json::json!(2));
@@ -301,7 +428,7 @@ async fn find_files_respects_gitignore_hidden_and_brace_glob() {
             &empty_ctx(),
         )
         .await
-        .expect("findFiles should execute");
+        .expect("find should execute");
 
     assert!(!result.is_error, "{result:?}");
     assert!(result.content.contains("visible.json"));
@@ -326,7 +453,7 @@ async fn find_files_reports_truncation_and_blocks_root_escape() {
             &empty_ctx(),
         )
         .await
-        .expect("findFiles should execute");
+        .expect("find should execute");
 
     assert_eq!(result.metadata["count"], serde_json::json!(2));
     assert_eq!(result.metadata["totalMatches"], serde_json::json!(3));
@@ -342,12 +469,34 @@ async fn find_files_reports_truncation_and_blocks_root_escape() {
             &empty_ctx(),
         )
         .await
-        .expect("findFiles should return a structured error");
+        .expect("find should return a structured error");
     assert!(escaped.is_error);
     assert_eq!(
         escaped.metadata["pathEscapesWorkingDir"],
         serde_json::json!(true)
     );
+}
+
+#[tokio::test]
+async fn find_files_default_limit_keeps_path_lists_compact() {
+    let temp = unique_temp_dir("find-files-default-limit");
+    for index in 0..101 {
+        std::fs::write(temp.path().join(format!("{index:03}.rs")), "").expect("seed file");
+    }
+    let tool = FindFilesTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(serde_json::json!({ "pattern": "*.rs" }), &empty_ctx())
+        .await
+        .expect("find should execute");
+
+    assert_eq!(result.metadata["count"], serde_json::json!(100));
+    assert_eq!(result.metadata["maxResults"], serde_json::json!(100));
+    assert_eq!(result.metadata["totalMatches"], serde_json::json!(101));
+    assert_eq!(result.metadata["nextOffset"], serde_json::json!(100));
+    assert_eq!(result.metadata["hasMore"], serde_json::json!(true));
 }
 
 #[tokio::test]
@@ -370,7 +519,7 @@ async fn find_files_supports_offset_pagination() {
             &empty_ctx(),
         )
         .await
-        .expect("findFiles should execute");
+        .expect("find should execute");
 
     assert_eq!(result.content.lines().count(), 1);
     assert_eq!(result.metadata["count"], serde_json::json!(1));
@@ -428,6 +577,7 @@ async fn grep_limits_files_and_count_modes() {
         .expect("grep should execute");
     assert_eq!(files.content.lines().count(), 2);
     assert_eq!(files.metadata["returned"], serde_json::json!(2));
+    assert_eq!(files.metadata["nextOffset"], serde_json::json!(2));
     assert_eq!(files.metadata["hasMore"], serde_json::json!(true));
 
     let counts = tool
@@ -443,7 +593,30 @@ async fn grep_limits_files_and_count_modes() {
         .expect("grep should execute");
     assert_eq!(counts.content.lines().count(), 1);
     assert_eq!(counts.metadata["returned"], serde_json::json!(1));
+    assert_eq!(counts.metadata["nextOffset"], serde_json::json!(1));
     assert_eq!(counts.metadata["hasMore"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn grep_invalid_regex_points_to_literal_mode() {
+    let temp = unique_temp_dir("grep-invalid-regex");
+    std::fs::write(temp.path().join("lib.rs"), "#[cfg(test)]\n").expect("seed file");
+    let tool = GrepTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let error = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "["
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect_err("invalid regex should fail");
+
+    assert!(error.to_string().contains("literal"));
+    assert!(error.to_string().contains("true"));
 }
 
 #[tokio::test]
@@ -492,7 +665,7 @@ async fn grep_multiline_matches_across_line_breaks() {
             serde_json::json!({
                 "pattern": "fn start\\(\\) \\{.*finish\\(\\);",
                 "outputMode": "content",
-                "-U": "true"
+                "multiline": true
             }),
             &empty_ctx(),
         )
@@ -507,7 +680,7 @@ async fn grep_multiline_matches_across_line_breaks() {
 }
 
 #[tokio::test]
-async fn apply_patch_creates_new_file() {
+async fn patch_creates_new_file() {
     let temp = unique_temp_dir("patch-create");
     let tool = ApplyPatchTool {
         working_dir: temp.path().to_path_buf(),
@@ -518,14 +691,14 @@ async fn apply_patch_creates_new_file() {
     let result = tool
         .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
         .await
-        .expect("apply_patch should execute");
+        .expect("patch should execute");
 
     assert!(!result.is_error, "{result:?}");
     assert!(temp.path().join("hello.rs").exists());
 }
 
 #[tokio::test]
-async fn apply_patch_updates_existing_file() {
+async fn patch_updates_existing_file() {
     let temp = unique_temp_dir("patch-update");
     let file = temp.path().join("test.rs");
     std::fs::write(&file, "fn foo() {\n    old();\n}\n").expect("seed write");
@@ -538,7 +711,7 @@ async fn apply_patch_updates_existing_file() {
     let result = tool
         .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
         .await
-        .expect("apply_patch should execute");
+        .expect("patch should execute");
 
     assert!(!result.is_error, "{result:?}");
     let content = std::fs::read_to_string(file).expect("updated file should be readable");
@@ -547,7 +720,7 @@ async fn apply_patch_updates_existing_file() {
 }
 
 #[tokio::test]
-async fn apply_patch_preserves_crlf_line_endings() {
+async fn patch_preserves_crlf_line_endings() {
     let temp = unique_temp_dir("patch-crlf");
     let file = temp.path().join("windows.rs");
     std::fs::write(&file, "fn foo() {\r\n    old();\r\n}\r\n").expect("seed write");
@@ -561,7 +734,7 @@ async fn apply_patch_preserves_crlf_line_endings() {
     let result = tool
         .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
         .await
-        .expect("apply_patch should execute");
+        .expect("patch should execute");
 
     assert!(!result.is_error, "{result:?}");
     let content = std::fs::read_to_string(file).expect("updated file should be readable");
@@ -569,7 +742,7 @@ async fn apply_patch_preserves_crlf_line_endings() {
 }
 
 #[tokio::test]
-async fn apply_patch_rejects_delete_when_content_differs() {
+async fn patch_rejects_delete_when_content_differs() {
     let temp = unique_temp_dir("patch-delete-mismatch");
     let file = temp.path().join("old.txt");
     std::fs::write(&file, "line one\nline changed\n").expect("seed write");
@@ -581,36 +754,8 @@ async fn apply_patch_rejects_delete_when_content_differs() {
     let result = tool
         .execute(serde_json::json!({ "patch": patch }), &empty_ctx())
         .await
-        .expect("apply_patch should execute");
+        .expect("patch should execute");
 
     assert!(result.is_error);
     assert!(file.exists());
-}
-
-#[tokio::test]
-async fn grep_accepts_adapter_style_aliases() {
-    let temp = unique_temp_dir("grep-aliases");
-    std::fs::write(temp.path().join("lib.rs"), "before\nTARGET\nmatch target\n")
-        .expect("seed write");
-    let tool = GrepTool {
-        working_dir: temp.path().to_path_buf(),
-    };
-
-    let result = tool
-        .execute(
-            serde_json::json!({
-                "pattern": "target",
-                "output_mode": "content",
-                "-i": "true",
-                "-B": "1",
-                "head_limit": "1"
-            }),
-            &empty_ctx(),
-        )
-        .await
-        .expect("grep should execute");
-
-    assert!(!result.is_error, "{result:?}");
-    assert!(result.content.contains("before"));
-    assert!(result.content.contains("TARGET"));
 }

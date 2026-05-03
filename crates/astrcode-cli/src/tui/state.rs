@@ -987,15 +987,15 @@ mod tests {
             &mut state,
             EventPayload::ToolCallCompleted {
                 call_id: "call-1".into(),
-                tool_name: "findFiles".into(),
-                result: tool_result("glob failed", true),
+                tool_name: "find".into(),
+                result: tool_result("find failed", true),
             },
         );
 
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].role, MessageRole::Error);
-        assert_eq!(state.messages[0].label, "Glob");
-        assert!(state.messages[0].body.plain_text().contains("glob failed"));
+        assert_eq!(state.messages[0].label, "Find");
+        assert!(state.messages[0].body.plain_text().contains("find failed"));
     }
 
     #[test]

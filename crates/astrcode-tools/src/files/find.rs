@@ -9,7 +9,9 @@ use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
 use super::shared::{FileCollectOptions, collect_candidate_files, error_result, tool_call_id};
-// ─── findFiles ───────────────────────────────────────────────────────────
+// ─── find ────────────────────────────────────────────────────────────────
+
+const DEFAULT_FIND_FILES_MAX_RESULTS: usize = 100;
 
 /// 文件查找工具，按 glob 模式搜索文件路径（不搜索内容）。
 ///
@@ -19,7 +21,7 @@ pub struct FindFilesTool {
     pub working_dir: PathBuf,
 }
 
-/// findFiles 工具的参数。
+/// find 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FindFilesArgs {
@@ -51,9 +53,9 @@ fn default_true() -> bool {
 impl Tool for FindFilesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "findFiles".into(),
+            name: "find".into(),
             description: "Find candidate file paths by glob pattern. This searches file paths \
-                          only, not file contents. Use grep for content search and readFile to \
+                          only, not file contents. Use grep for content search and read to \
                           inspect a known result."
                 .into(),
             origin: ToolOrigin::Builtin,
@@ -71,7 +73,7 @@ impl Tool for FindFilesTool {
                     "maxResults": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum number of paths to return (default 500)."
+                        "description": "Maximum number of paths to return (default 100)."
                     },
                     "offset": {
                         "type": "integer",
@@ -104,7 +106,7 @@ impl Tool for FindFilesTool {
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: FindFilesArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid findFiles args: {e}")))?;
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid find args: {e}")))?;
         let root = args
             .root
             .as_deref()
@@ -121,7 +123,7 @@ impl Tool for FindFilesTool {
                 ]),
             ));
         }
-        let max_results = args.max_results.unwrap_or(500);
+        let max_results = args.max_results.unwrap_or(DEFAULT_FIND_FILES_MAX_RESULTS);
         let mut results = collect_candidate_files(
             &self.working_dir,
             &root,
@@ -133,7 +135,7 @@ impl Tool for FindFilesTool {
                 skip_git_dir: true,
             },
         )
-        .map_err(|e| ToolError::Execution(format!("findFiles: {e}")))?;
+        .map_err(|e| ToolError::Execution(format!("find: {e}")))?;
         results.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
         let total = results.len();
         let offset = args.offset.unwrap_or(0).min(total);

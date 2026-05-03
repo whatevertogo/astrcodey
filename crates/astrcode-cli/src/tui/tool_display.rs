@@ -80,12 +80,12 @@ pub fn completed_render_spec(tool_name: &str, spec: RenderSpec, result: &ToolRes
 fn tool_label(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
     let action = match tool_name {
         "shell" => "Bash",
-        "readFile" => "Read",
-        "writeFile" => "Write",
-        "editFile" => "Edit",
-        "findFiles" => "Glob",
+        "read" => "Read",
+        "write" => "Write",
+        "edit" => "Edit",
+        "find" => "Find",
         "grep" => "Search",
-        "apply_patch" | "applyPatch" => "Patch",
+        "patch" => "Patch",
         "agent" => "Task",
         other => other,
     };
@@ -158,12 +158,10 @@ fn result_body(tool_name: &str, result: &ToolResult) -> String {
     }
 
     match tool_name {
-        "readFile" => format!("⎿ read {} line(s)", content.lines().count().max(1)),
-        "findFiles" => prefixed_lines("matched files", content, 8),
+        "read" => format!("⎿ read {} line(s)", content.lines().count().max(1)),
+        "find" => prefixed_lines("matched files", content, 8),
         "grep" => prefixed_lines("matches", content, 10),
-        "writeFile" | "editFile" | "apply_patch" | "applyPatch" => {
-            prefixed_lines("result", content, 12)
-        },
+        "write" | "edit" | "patch" => prefixed_lines("result", content, 12),
         _ => prefixed_lines("output", content, 16),
     }
 }
@@ -172,13 +170,9 @@ fn tool_primary_target(tool_name: &str, arguments: Option<&serde_json::Value>) -
     let args = arguments?;
     match tool_name {
         "shell" => args["command"].as_str().map(|value| format!("$ {value}")),
-        "readFile" | "writeFile" | "editFile" => args["path"]
+        "read" | "write" | "edit" => args["path"].as_str().map(str::to_string),
+        "find" => args["pattern"]
             .as_str()
-            .or_else(|| args["file_path"].as_str())
-            .map(str::to_string),
-        "findFiles" => args["pattern"]
-            .as_str()
-            .or_else(|| args["glob"].as_str())
             .map(|pattern| format!("pattern: {pattern}")),
         "grep" => {
             let pattern = args["pattern"]
@@ -196,7 +190,7 @@ fn tool_primary_target(tool_name: &str, arguments: Option<&serde_json::Value>) -
                 (false, false) => Some(format!("{pattern} in {path}")),
             }
         },
-        "apply_patch" | "applyPatch" => Some("workspace patch".into()),
+        "patch" => Some("workspace patch".into()),
         _ => None,
     }
 }
@@ -306,7 +300,7 @@ mod tests {
             "Bash(git status --short)"
         );
         assert_eq!(
-            requested("readFile", &json!({ "path": "src/main.rs" })).label,
+            requested("read", &json!({ "path": "src/main.rs" })).label,
             "Read(src/main.rs)"
         );
         assert_eq!(
@@ -314,11 +308,11 @@ mod tests {
             "Search(needle in src)"
         );
         assert_eq!(
-            requested("findFiles", &json!({ "pattern": "*.rs" })).label,
-            "Glob(pattern: *.rs)"
+            requested("find", &json!({ "pattern": "*.rs" })).label,
+            "Find(pattern: *.rs)"
         );
         assert_eq!(
-            requested("editFile", &json!({ "file_path": "src/lib.rs" })).label,
+            requested("edit", &json!({ "path": "src/lib.rs" })).label,
             "Edit(src/lib.rs)"
         );
         assert_eq!(

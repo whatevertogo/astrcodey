@@ -12,7 +12,6 @@ use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
 use serde::Deserialize;
-use serde_json::{Map, Value};
 
 use super::shared::{collect_grep_files, error_result, tool_call_id, trunc};
 // ─── grep ────────────────────────────────────────────────────────────────
@@ -41,13 +40,13 @@ struct GrepArgs {
     #[serde(default)]
     recursive: Option<bool>,
     /// 是否大小写不敏感
-    #[serde(default, alias = "case_insensitive")]
+    #[serde(default)]
     case_insensitive: bool,
     /// 是否启用跨行匹配
     #[serde(default)]
     multiline: bool,
     /// 最大匹配数/文件数（默认 250）
-    #[serde(default, alias = "max_matches")]
+    #[serde(default)]
     max_matches: Option<usize>,
     /// 跳过的匹配数量（用于分页）
     #[serde(default)]
@@ -56,16 +55,16 @@ struct GrepArgs {
     #[serde(default)]
     glob: Option<String>,
     /// 文件类型过滤，如 `rust`、`typescript`
-    #[serde(default, alias = "file_type")]
+    #[serde(default)]
     file_type: Option<String>,
     /// 匹配行前的上下文行数
-    #[serde(default, alias = "before_context")]
+    #[serde(default)]
     before_context: Option<usize>,
     /// 匹配行后的上下文行数
-    #[serde(default, alias = "after_context")]
+    #[serde(default)]
     after_context: Option<usize>,
     /// 输出模式
-    #[serde(default, alias = "output_mode")]
+    #[serde(default)]
     output_mode: GrepOutputMode,
 }
 
@@ -116,7 +115,7 @@ impl Tool for GrepTool {
             name: "grep".into(),
             description: "Search file contents with regex or literal text. Defaults to \
                           outputMode=files_with_matches; use outputMode=content when matching \
-                          lines are needed. Use findFiles for path glob search."
+                          lines are needed. Use find for path glob search."
                 .into(),
             origin: ToolOrigin::Builtin,
             parameters: serde_json::json!({
@@ -186,14 +185,14 @@ impl Tool for GrepTool {
         ExecutionMode::Parallel
     }
 
-    /// 执行内容搜索：标准化参数 → 编译正则 → 遍历文件 → 收集匹配 → 格式化输出。
+    /// 执行内容搜索：解析参数 → 编译正则 → 遍历文件 → 收集匹配 → 格式化输出。
     async fn execute(
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
-        let args: GrepArgs = serde_json::from_value(normalize_grep_args(args))
+        let args: GrepArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
         let mut matcher_builder = RegexMatcherBuilder::new();
         matcher_builder
@@ -205,7 +204,14 @@ impl Tool for GrepTool {
         } else {
             matcher_builder.build(&args.pattern)
         }
-        .map_err(|e| ToolError::Execution(format!("regex: {e}")))?;
+        .map_err(|e| {
+            let hint = if args.literal {
+                String::new()
+            } else {
+                "; if you meant exact text, set literal to true".into()
+            };
+            ToolError::Execution(format!("regex: {e}{hint}"))
+        })?;
         let root = args
             .path
             .as_deref()
@@ -256,6 +262,8 @@ impl Tool for GrepTool {
         meta.insert("literal".into(), serde_json::json!(args.literal));
         meta.insert("multiline".into(), serde_json::json!(args.multiline));
         meta.insert("returned".into(), serde_json::json!(matches.len()));
+        meta.insert("offset".into(), serde_json::json!(offset));
+        meta.insert("maxMatches".into(), serde_json::json!(max_matches));
         meta.insert("hasMore".into(), serde_json::json!(state.has_more));
         meta.insert(
             "skippedFiles".into(),
@@ -266,6 +274,12 @@ impl Tool for GrepTool {
             "outputMode".into(),
             serde_json::json!(args.output_mode.as_str()),
         );
+        if state.has_more {
+            meta.insert(
+                "nextOffset".into(),
+                serde_json::json!(offset.saturating_add(matches.len())),
+            );
+        }
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
             content: matches.join("\n"),
@@ -274,94 +288,6 @@ impl Tool for GrepTool {
             metadata: meta,
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
-    }
-}
-
-/// 标准化 grep 参数：将各种别名（如 `-i`、`-A`、`head_limit`）映射到规范字段名，
-/// 并将字符串形式的布尔值/数字转换为正确的 JSON 类型。
-fn normalize_grep_args(mut args: Value) -> Value {
-    let Some(object) = args.as_object_mut() else {
-        return args;
-    };
-
-    move_alias(object, "output_mode", "outputMode");
-    move_alias(object, "type", "fileType");
-    move_alias(object, "file_type", "fileType");
-    move_alias(object, "head_limit", "maxMatches");
-    move_alias(object, "max_matches", "maxMatches");
-    move_alias(object, "-A", "afterContext");
-    move_alias(object, "-B", "beforeContext");
-    move_alias(object, "-i", "caseInsensitive");
-    move_alias(object, "-U", "multiline");
-    move_alias(object, "--multiline", "multiline");
-    move_alias(object, "case_insensitive", "caseInsensitive");
-    move_alias(object, "before_context", "beforeContext");
-    move_alias(object, "after_context", "afterContext");
-
-    if let Some(context) = object.remove("-C").or_else(|| object.remove("context")) {
-        object
-            .entry("beforeContext".to_string())
-            .or_insert_with(|| context.clone());
-        object.entry("afterContext".to_string()).or_insert(context);
-    }
-
-    normalize_bool_field(object, "literal");
-    normalize_bool_field(object, "recursive");
-    normalize_bool_field(object, "caseInsensitive");
-    normalize_bool_field(object, "multiline");
-    normalize_usize_field(object, "maxMatches");
-    normalize_usize_field(object, "offset");
-    normalize_usize_field(object, "beforeContext");
-    normalize_usize_field(object, "afterContext");
-
-    args
-}
-
-/// 将别名键移动到规范键（如果规范键已存在则删除别名键）。
-fn move_alias(object: &mut Map<String, Value>, from: &str, to: &str) {
-    if object.contains_key(to) {
-        object.remove(from);
-        return;
-    }
-    if let Some(value) = object.remove(from) {
-        object.insert(to.to_string(), value);
-    }
-}
-
-/// 将字符串形式的布尔值（"true"/"1"/"yes"/"on" 等）转换为 JSON bool。
-fn normalize_bool_field(object: &mut Map<String, Value>, key: &str) {
-    let Some(value) = object.get_mut(key) else {
-        return;
-    };
-    let Some(text) = value.as_str() else {
-        return;
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => *value = Value::Bool(true),
-        "false" | "0" | "no" | "off" => *value = Value::Bool(false),
-        _ => {},
-    }
-}
-
-/// 将字符串形式的数字转换为 JSON 数字，对 maxMatches 为 0 的情况重置为默认值 250。
-fn normalize_usize_field(object: &mut Map<String, Value>, key: &str) {
-    let Some(value) = object.get_mut(key) else {
-        return;
-    };
-    if value.as_u64() == Some(0) && key == "maxMatches" {
-        *value = serde_json::json!(250);
-        return;
-    }
-    let Some(text) = value.as_str() else {
-        return;
-    };
-    let Ok(parsed) = text.trim().parse::<usize>() else {
-        return;
-    };
-    if key == "maxMatches" && parsed == 0 {
-        *value = serde_json::json!(250);
-    } else {
-        *value = serde_json::json!(parsed);
     }
 }
 

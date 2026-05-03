@@ -1,8 +1,8 @@
 //! Agent 发现与解析 — 兼容 Claude Code 的 Markdown / YAML frontmatter 格式。
 //!
 //! 支持两种工具列表格式：
-//! - Claude CSV 工具格式 (`tools: Read, Grep`)
-//! - YAML 列表格式 (`tools: ["Read", "Grep"]`)
+//! - CSV 工具格式 (`tools: read, grep`)
+//! - YAML 列表格式 (`tools: ["read", "grep"]`)
 //!
 //! 扫描目录顺序：
 //! - `~/.astrcode/agents/`、`.astrcode/agents/`
@@ -213,13 +213,13 @@ fn parse_tools(m: &serde_yaml::Mapping) -> Vec<String> {
         return Vec::new();
     };
     match v {
-        // CSV 格式: "Read, Grep, Bash"
+        // CSV 格式: "read, grep, shell"
         serde_yaml::Value::String(s) => s
             .split(',')
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect(),
-        // YAML 列表格式: ["Read", "Grep", "Bash"]
+        // YAML 列表格式: ["read", "grep", "shell"]
         serde_yaml::Value::Sequence(seq) => seq
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
@@ -307,11 +307,11 @@ mod tests {
         let md = r#"---
 name: test-agent
 description: A test agent
-tools: Read, Grep, Bash
+tools: read, grep, shell
 ---
 Body text."#;
         let agent = parse("test.md", md).unwrap();
-        assert_eq!(agent.tools, vec!["Read", "Grep", "Bash"]);
+        assert_eq!(agent.tools, vec!["read", "grep", "shell"]);
     }
 
     #[test]
@@ -319,11 +319,11 @@ Body text."#;
         let md = r#"---
 name: test-agent
 description: A test agent
-tools: ["Read", "Grep", "Bash"]
+tools: ["read", "grep", "shell"]
 ---
 Body text."#;
         let agent = parse("test.md", md).unwrap();
-        assert_eq!(agent.tools, vec!["Read", "Grep", "Bash"]);
+        assert_eq!(agent.tools, vec!["read", "grep", "shell"]);
     }
 
 

@@ -5,17 +5,17 @@ use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
 use super::shared::{error_result, tool_call_id};
-// ─── writeFile ───────────────────────────────────────────────────────────
+// ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
 ///
-/// 当已知完整的目标内容时使用此工具；对于小范围编辑，优先使用 `EditFileTool`。
+/// 当已知完整的目标内容时使用此工具；对于小范围编辑，优先使用 edit。
 pub struct WriteFileTool {
     /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
-/// writeFile 工具的参数。
+/// write 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteFileArgs {
@@ -32,9 +32,9 @@ struct WriteFileArgs {
 impl Tool for WriteFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
-            name: "writeFile".into(),
+            name: "write".into(),
             description: "Create a UTF-8 text file or fully replace an existing file when the \
-                          complete final content is known. Prefer editFile for narrow edits to \
+                          complete final content is known. Prefer edit for narrow edits to \
                           existing files."
                 .into(),
             origin: ToolOrigin::Builtin,
@@ -70,7 +70,7 @@ impl Tool for WriteFileTool {
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: WriteFileArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid writeFile args: {e}")))?;
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid write args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
         if !is_path_within(&path, &self.working_dir) {
             return Ok(error_result(

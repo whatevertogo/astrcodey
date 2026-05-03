@@ -13,7 +13,8 @@ use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
         CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
-        StorageError,
+        StorageError, ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
+        ToolResultArtifactSlice,
     },
     types::*,
 };
@@ -147,6 +148,18 @@ impl SessionManager {
             .await?)
     }
 
+    /// 写入当前 session 的大工具结果 artifact。
+    pub async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, SessionError> {
+        Ok(self
+            .store
+            .write_tool_result_artifact(session_id, artifact)
+            .await?)
+    }
+
     /// Get active session by ID.
     pub async fn get(&self, session_id: &SessionId) -> Option<Arc<Session>> {
         self.active.read().await.get(session_id).cloned()
@@ -167,6 +180,21 @@ impl SessionManager {
         self.active.write().await.remove(session_id);
         self.store.delete_session(session_id).await?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolResultArtifactReader for SessionManager {
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        self.store
+            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .await
     }
 }
 

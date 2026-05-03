@@ -276,6 +276,7 @@ async fn duplicate_extension_tools_keep_first_registration() {
         available_tools: vec![],
         tool_call_id: None,
         event_tx: None,
+        tool_result_reader: None,
     };
     let result = tool_registry
         .execute("sharedTool", serde_json::json!({}), &ctx)
@@ -315,6 +316,7 @@ async fn extension_tools_are_adapted_into_tool_registry() {
         available_tools: vec![],
         tool_call_id: None,
         event_tx: None,
+        tool_result_reader: None,
     };
     let result = tool_registry
         .execute(

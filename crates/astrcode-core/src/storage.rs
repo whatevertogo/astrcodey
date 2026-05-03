@@ -103,6 +103,48 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Option<String>, StorageError> {
         Ok(None)
     }
+
+    /// 写入当前 session 关联的工具结果 artifact。
+    ///
+    /// 这类 artifact 不进入 JSONL event log，而是与 session 目录同生命周期保存。
+    async fn write_tool_result_artifact(
+        &self,
+        _session_id: &SessionId,
+        _artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        Err(StorageError::Unsupported(
+            "tool result artifact storage is not supported".into(),
+        ))
+    }
+
+    /// 读取当前 session 关联工具结果 artifact 路径的一段文本。
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        _session_id: &SessionId,
+        _path: &str,
+        _char_offset: usize,
+        _max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        Err(StorageError::Unsupported(
+            "tool result artifact storage is not supported".into(),
+        ))
+    }
+}
+
+/// 工具结果 artifact 读取能力。
+///
+/// 该 trait 是工具上下文暴露给 `read` 的最小能力面，避免把完整
+/// `EventStore` 暴露给普通工具。
+#[async_trait::async_trait]
+pub trait ToolResultArtifactReader: Send + Sync {
+    /// 读取当前 session 中指定 artifact 路径的一段文本。
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError>;
 }
 
 /// compact 前 transcript snapshot 的存储输入。
@@ -121,6 +163,45 @@ pub struct CompactSnapshotInput {
     pub system_prompt: Option<String>,
     /// compact 前的 provider 可见消息，不包含单独记录的 system prompt。
     pub provider_messages: Vec<LlmMessage>,
+}
+
+/// 工具结果 artifact 写入输入。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultArtifactInput {
+    /// 工具调用 ID。
+    pub call_id: String,
+    /// 工具名称。
+    pub tool_name: String,
+    /// 原始工具输出正文。
+    pub content: String,
+}
+
+/// 已持久化工具结果的引用。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResultArtifactRef {
+    /// 原始正文 UTF-8 字节数。
+    pub bytes: usize,
+    /// 可展示给 `read` 使用的存储路径；内存存储可用虚拟路径。
+    pub path: Option<String>,
+}
+
+/// 工具结果 artifact 的分页读取结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResultArtifactSlice {
+    /// artifact 路径。
+    pub path: String,
+    /// artifact 原始 UTF-8 字节数。
+    pub bytes: usize,
+    /// 本次读取的字符偏移。
+    pub char_offset: usize,
+    /// 本次返回的字符数。
+    pub returned_chars: usize,
+    /// 下一次读取的字符偏移；没有更多内容时为空。
+    pub next_char_offset: Option<usize>,
+    /// 是否还有更多内容。
+    pub has_more: bool,
+    /// 本次读取的正文片段。
+    pub content: String,
 }
 
 /// 会话事件流的内部读模型。
@@ -273,6 +354,9 @@ pub enum StorageError {
     /// 锁操作错误。
     #[error("Lock error: {0}")]
     LockError(String),
+    /// 当前存储实现不支持该能力。
+    #[error("Unsupported storage operation: {0}")]
+    Unsupported(String),
 }
 
 #[cfg(test)]
