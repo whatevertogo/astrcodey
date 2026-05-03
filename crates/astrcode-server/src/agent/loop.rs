@@ -37,12 +37,11 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
 use crate::{
-    compact_hooks::{
+    agent::compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        dispatch_post_compact,
+        compact_with_forked_provider, dispatch_post_compact,
     },
-    forked_provider::compact_with_forked_provider,
-    session::{SessionManager, compaction_applied_payload},
+    session::{SessionManager, compaction_applied_payload, compaction_completed_payload},
 };
 
 /// 并行执行工具调用时的最大并发数。
@@ -365,11 +364,7 @@ impl Agent {
                                     if let Some(tx) = &event_tx {
                                         let _ = tx.send(EventPayload::CompactionStarted);
                                         let _ = tx.send(compaction_applied_payload(&compaction));
-                                        let _ = tx.send(EventPayload::CompactionCompleted {
-                                            pre_tokens: compaction.pre_tokens,
-                                            post_tokens: compaction.post_tokens,
-                                            summary: compaction.summary,
-                                        });
+                                        let _ = tx.send(compaction_completed_payload(&compaction));
                                     }
                                     messages = [system_messages, prepared.messages].concat();
                                     retry_provider_request = true;
@@ -521,11 +516,7 @@ impl Agent {
             if let Some(tx) = event_tx {
                 let _ = tx.send(EventPayload::CompactionStarted);
                 let _ = tx.send(compaction_applied_payload(compaction));
-                let _ = tx.send(EventPayload::CompactionCompleted {
-                    pre_tokens: compaction.pre_tokens,
-                    post_tokens: compaction.post_tokens,
-                    summary: compaction.summary.clone(),
-                });
+                let _ = tx.send(compaction_completed_payload(compaction));
             }
             *messages = [system_messages.clone(), prepared_context.messages.clone()].concat();
         }
@@ -1296,5 +1287,5 @@ fn claude_tool_alias(name: &str) -> Option<&'static str> {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[path = "agent_loop_tests.rs"]
+#[path = "loop_tests.rs"]
 mod tests;

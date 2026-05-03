@@ -8,6 +8,7 @@
 pub mod commands;
 pub mod events;
 pub mod framing;
+pub mod http;
 pub mod snapshot;
 pub mod ui;
 pub mod version;

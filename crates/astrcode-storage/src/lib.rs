@@ -4,7 +4,9 @@
 
 pub mod config_store;
 pub mod event_log;
+#[cfg(feature = "testing")]
+pub mod in_memory;
 pub mod lock;
-pub mod noop;
+mod projection;
 pub mod session_repo;
 pub mod snapshot;

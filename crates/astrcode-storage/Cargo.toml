@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Session persistence: JSONL event log, snapshots, file locking, config storage"
 
+[features]
+# 启用纯内存事件存储实现，用于集成测试和测试辅助启动路径。
+# 不应在生产构建中启用。
+testing = []
+
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
@@ -16,4 +21,6 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 fs2 = "0.4"
+
+[dev-dependencies]
 tempfile = "3"

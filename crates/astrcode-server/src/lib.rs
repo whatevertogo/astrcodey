@@ -3,14 +3,13 @@
 //! Session manager, agent loop, JSON-RPC transport handler,
 //! config service, and multi-session concurrency.
 
-pub mod agent_loop;
-pub mod agent {
-    pub use crate::agent_loop::{Agent, AgentServices, AgentTurnOutput};
+pub mod agent;
+/// Backward-compat alias so existing `use crate::agent_loop::*` paths keep working.
+pub mod agent_loop {
+    pub use crate::agent::{Agent, AgentError, AgentServices, AgentTurnOutput};
 }
 pub mod bootstrap;
-pub(crate) mod compact_hooks;
-pub(crate) mod forked_provider;
 pub mod handler;
+pub mod http;
 pub mod session;
-pub(crate) mod session_spawner;
 pub mod transport;

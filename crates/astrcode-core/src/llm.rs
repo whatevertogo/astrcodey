@@ -38,7 +38,7 @@ impl LlmRole {
 }
 
 /// LLM 消息的内容——可以是文本、图片、工具调用或工具结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LlmContent {
     /// 纯文本内容。
@@ -71,7 +71,7 @@ pub enum LlmContent {
 }
 
 /// LLM 对话中的一条消息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmMessage {
     /// 消息角色。
     pub role: LlmRole,

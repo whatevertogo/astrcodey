@@ -681,6 +681,7 @@ impl TuiState {
                     Some("compaction".into()),
                 );
             },
+            EventPayload::CompactionApplied { .. } => {},
             EventPayload::CompactionCompleted {
                 pre_tokens,
                 post_tokens,

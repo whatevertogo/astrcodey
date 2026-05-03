@@ -18,10 +18,11 @@ use astrcode_extensions::{
 use tokio::sync::mpsc;
 
 use crate::{
-    agent_loop::{Agent, AgentServices, drive_agent, tool_name_matches_allowlist},
+    agent::{Agent, AgentServices, drive_agent, tool_name_matches_allowlist},
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot},
-    session::SessionManager,
 };
+use super::SessionManager;
+
 
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
 ///
@@ -48,14 +49,11 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let model_id = match request.model_preference.clone() {
             Some(model) => model,
             None => {
-                let parent_session = self
-                    .session_manager
-                    .get(&parent_session_id.to_string())
+                self.session_manager
+                    .read_model(&parent_session_id.to_string())
                     .await
-                    .ok_or_else(|| format!("parent session {parent_session_id} not found"))?;
-                let parent_model_id = parent_session.state.read().await.model_id.clone();
-                drop(parent_session);
-                parent_model_id
+                    .map_err(|e| format!("parent session {parent_session_id} not found: {e}"))?
+                    .model_id
             },
         };
 

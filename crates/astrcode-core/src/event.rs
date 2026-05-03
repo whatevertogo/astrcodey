@@ -8,7 +8,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{tool::ToolResult, types::*};
+use crate::{llm::LlmMessage, tool::ToolResult, types::*};
 
 /// 会话的执行阶段。
 ///
@@ -175,7 +175,20 @@ pub enum EventPayload {
     },
 
     /// 上下文压缩已开始。
+    ///
+    /// 这是 live 状态事件，不持久化；恢复时只依赖 durable 的
+    /// [`EventPayload::CompactionApplied`] 和 [`EventPayload::CompactionCompleted`]。
     CompactionStarted,
+
+    /// 上下文压缩结果已应用到会话读模型。
+    ///
+    /// 这是 storage projection 需要的持久事实，只包含更新 projection 的最小字段。
+    CompactionApplied {
+        /// 压缩移除的可见消息数量。
+        messages_removed: usize,
+        /// 后续 provider 可见、但不进入普通 transcript 的上下文消息。
+        context_messages: Vec<LlmMessage>,
+    },
 
     /// 上下文压缩已完成。
     CompactionCompleted {
@@ -185,6 +198,9 @@ pub enum EventPayload {
         post_tokens: usize,
         /// 压缩生成的摘要文本。
         summary: String,
+        /// compact 前 transcript snapshot 的可读路径。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
     },
 
     /// 发生错误。
@@ -335,6 +351,53 @@ mod tests {
             }
             .is_durable()
         );
+        assert!(
+            !EventPayload::CompactionStarted.is_durable(),
+            "CompactionStarted is live UI state only"
+        );
+        assert!(
+            EventPayload::CompactionApplied {
+                messages_removed: 1,
+                context_messages: vec![LlmMessage::system("summary")],
+            }
+            .is_durable(),
+            "CompactionApplied is the durable projection fact"
+        );
+    }
+
+    #[test]
+    fn compaction_applied_serializes_as_typed_event() {
+        let event = Event::new(
+            "session-1".into(),
+            None,
+            EventPayload::CompactionApplied {
+                messages_removed: 1,
+                context_messages: vec![LlmMessage::system("summary")],
+            },
+        );
+
+        let json = serde_json::to_value(event).unwrap();
+
+        assert_eq!(json["type"], "compaction_applied");
+        assert_eq!(json["messages_removed"], 1);
+        assert!(json["context_messages"].is_array());
+    }
+
+    #[test]
+    fn compaction_completed_carries_transcript_path() {
+        let payload = EventPayload::CompactionCompleted {
+            pre_tokens: 10,
+            post_tokens: 3,
+            summary: "summary".into(),
+            transcript_path: Some("compact.jsonl".into()),
+        };
+
+        let value = serde_json::to_value(&payload).unwrap();
+        let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
+
+        assert_eq!(value["type"], "compaction_completed");
+        assert_eq!(value["transcript_path"], "compact.jsonl");
+        assert_eq!(round_trip, payload);
     }
 
     #[test]

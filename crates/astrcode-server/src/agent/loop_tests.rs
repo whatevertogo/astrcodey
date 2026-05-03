@@ -21,7 +21,7 @@ use astrcode_core::{
     },
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_storage::noop::NoopEventStore;
+use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::{
     sync::{Barrier, mpsc},
     time::{sleep, timeout},
@@ -686,7 +686,7 @@ where
         tool_registry,
         extension_runner,
         context_assembler: test_context_assembler(),
-        session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
+        session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
     }
 }
 

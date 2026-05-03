@@ -5,10 +5,16 @@
 //! - [`SessionInfo`]：会话元数据
 //! - [`StorageError`]：存储操作错误类型
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{event::Event, llm::LlmMessage, types::*};
+use crate::{
+    event::{Event, Phase},
+    llm::LlmMessage,
+    types::*,
+};
 
 /// 会话事件存储 trait。
 ///
@@ -37,6 +43,30 @@ pub trait EventStore: Send + Sync {
 
     /// 从头开始重放会话的所有事件。
     async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError>;
+
+    /// 返回当前会话读模型。
+    ///
+    /// 读模型是事件日志的同步投影缓存，必须能够从事件日志重建；调用方不能把
+    /// 它当作事实源或线缆协议类型。
+    async fn session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReadModel, StorageError>;
+
+    /// 返回所有会话摘要，供列表类接口使用。
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
+
+    /// 返回当前 conversation 的全量快照读模型。
+    ///
+    /// v1 语义是 full snapshot；cursor 仅表示该快照对应的最新 durable seq，
+    /// 不表示“从此 cursor 开始增量查询”。
+    async fn conversation_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<ConversationReadModel, StorageError>;
+
+    /// 返回当前会话最新 durable cursor。
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError>;
 
     /// 从指定的游标位置开始重放事件。
     async fn replay_from(
@@ -91,6 +121,121 @@ pub struct CompactSnapshotInput {
     pub system_prompt: Option<String>,
     /// compact 前的 provider 可见消息，不包含单独记录的 system prompt。
     pub provider_messages: Vec<LlmMessage>,
+}
+
+/// 会话事件流的内部读模型。
+///
+/// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
+/// server 映射到具体传输协议。
+#[derive(Debug, Clone)]
+pub struct SessionReadModel {
+    /// 会话唯一标识。
+    pub session_id: SessionId,
+    /// 普通对话消息历史。
+    pub messages: Vec<LlmMessage>,
+    /// provider 可见但不展示给普通 transcript 的上下文消息。
+    pub context_messages: Vec<LlmMessage>,
+    /// 会话工作目录。
+    pub working_dir: String,
+    /// 模型标识。
+    pub model_id: String,
+    /// 当前执行阶段。
+    pub phase: Phase,
+    /// 会话级 system prompt。
+    pub system_prompt: Option<String>,
+    /// 尚未完成的工具调用。
+    pub pending_tool_calls: HashSet<ToolCallId>,
+    /// 创建时间（ISO 8601）。
+    pub created_at: String,
+    /// 更新时间（ISO 8601）。
+    pub updated_at: String,
+    /// 父会话 ID。
+    pub parent_session_id: Option<SessionId>,
+    /// 最新 durable 事件 seq。
+    pub latest_seq: Option<u64>,
+}
+
+impl SessionReadModel {
+    /// 创建空读模型。
+    pub fn empty(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            messages: Vec::new(),
+            context_messages: Vec::new(),
+            working_dir: String::new(),
+            model_id: String::new(),
+            phase: Phase::Idle,
+            system_prompt: None,
+            pending_tool_calls: HashSet::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            parent_session_id: None,
+            latest_seq: None,
+        }
+    }
+
+    /// 返回 provider 可见消息。
+    pub fn provider_messages(&self) -> Vec<LlmMessage> {
+        let mut messages = Vec::with_capacity(
+            self.context_messages
+                .len()
+                .saturating_add(self.messages.len()),
+        );
+        messages.extend(self.context_messages.clone());
+        messages.extend(self.messages.clone());
+        messages
+    }
+
+    /// 当前快照 cursor。
+    pub fn cursor(&self) -> Cursor {
+        self.latest_seq
+            .map(|seq| seq.to_string())
+            .unwrap_or_else(|| "0".into())
+    }
+}
+
+/// 会话列表摘要读模型。
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    /// 会话唯一标识。
+    pub session_id: SessionId,
+    /// 创建时间（ISO 8601）。
+    pub created_at: String,
+    /// 更新时间（ISO 8601）。
+    pub updated_at: String,
+    /// 工作目录。
+    pub working_dir: String,
+    /// 模型标识。
+    pub model_id: String,
+    /// 父会话 ID。
+    pub parent_session_id: Option<SessionId>,
+    /// 当前执行阶段。
+    pub phase: Phase,
+    /// 最新 durable cursor。
+    pub latest_cursor: Cursor,
+}
+
+impl From<SessionReadModel> for SessionSummary {
+    fn from(model: SessionReadModel) -> Self {
+        let latest_cursor = model.cursor();
+        Self {
+            session_id: model.session_id,
+            created_at: model.created_at,
+            updated_at: model.updated_at,
+            working_dir: model.working_dir,
+            model_id: model.model_id,
+            parent_session_id: model.parent_session_id,
+            phase: model.phase,
+            latest_cursor,
+        }
+    }
+}
+
+/// conversation hydration 的内部全量快照。
+#[derive(Debug, Clone)]
+pub struct ConversationReadModel {
+    /// 当前会话读模型。
+    pub session: SessionReadModel,
 }
 
 /// 会话元数据，用于列表展示。

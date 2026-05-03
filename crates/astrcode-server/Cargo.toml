@@ -8,6 +8,15 @@ description = "Backend server: session manager, agent loop, JSON-RPC handler, co
 name = "astrcode-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "astrcode-http-server"
+path = "src/http_main.rs"
+
+[features]
+# 启用测试辅助路径：内存事件存储 + bootstrap_with 的测试起动模式。
+# 仅应用于集成测试，不应进入生产二进制。
+testing = ["astrcode-storage/testing"]
+
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
@@ -29,3 +38,13 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 astrcode-log = { path = "../astrcode-log" }
 notify = "7"
+axum = "0.7"
+futures-util = "0.3"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+# 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
+# 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。
+astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
+

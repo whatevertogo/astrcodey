@@ -23,14 +23,13 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::broadcast, task::JoinHandle};
 
 use crate::{
-    agent_loop::{Agent, AgentServices, drive_agent},
-    bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
-    compact_hooks::{
+    agent::{Agent, AgentServices, drive_agent},
+    agent::compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        dispatch_post_compact,
+        compact_with_forked_provider, dispatch_post_compact,
     },
-    forked_provider::compact_with_forked_provider,
-    session::compaction_applied_payload,
+    bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
+    session::{compaction_applied_payload, compaction_completed_payload},
 };
 
 struct AgentTurnInput {
@@ -54,8 +53,8 @@ pub struct CommandHandler {
     active_session_id: Option<SessionId>,
     /// 每个会话在创建/恢复时固定下来的工具表快照。
     session_tool_registries: HashMap<SessionId, Arc<ToolRegistry>>,
-    /// 当前正在执行的回合（如有）
-    active_turn: Option<ActiveTurn>,
+    /// 当前正在执行的回合，按 session 隔离。
+    active_turns: HashMap<SessionId, ActiveTurn>,
 }
 
 /// 正在执行的回合信息，持有对应的 tokio 任务句柄。
@@ -81,7 +80,7 @@ impl CommandHandler {
             event_tx,
             active_session_id: None,
             session_tool_registries: HashMap::new(),
-            active_turn: None,
+            active_turns: HashMap::new(),
         }
     }
 
@@ -90,11 +89,11 @@ impl CommandHandler {
     /// 支持的命令包括：创建会话、提交提示词、列出会话、中止回合、
     /// 恢复/切换会话、删除会话等。
     pub async fn handle(&mut self, cmd: ClientCommand) -> Result<(), String> {
-        self.clear_finished_turn();
+        self.clear_finished_turns();
 
         match cmd {
             ClientCommand::CreateSession { working_dir } => {
-                self.create_session(working_dir).await;
+                let _ = self.create_session(working_dir).await;
             },
 
             ClientCommand::SubmitPrompt { text, .. } => {
@@ -102,45 +101,19 @@ impl CommandHandler {
             },
 
             ClientCommand::ListSessions => {
-                let sids = self
+                let items: Vec<_> = self
                     .runtime
                     .session_manager
-                    .list()
+                    .list_summaries()
                     .await
-                    .unwrap_or_default();
-                let active = self.runtime.session_manager.active().await;
-                let items: Vec<_> = sids
+                    .unwrap_or_default()
                     .into_iter()
-                    .map(|sid| {
-                        // 尝试从内存中获取已加载 session 的真实状态
-                        if let Some(session) = active.get(&sid) {
-                            // try_read 避免在 list 操作中长时间持锁
-                            if let Ok(st) = session.state.try_read() {
-                                SessionListItem {
-                                    session_id: sid,
-                                    created_at: st.created_at.clone(),
-                                    last_active_at: String::new(),
-                                    working_dir: st.working_dir.clone(),
-                                    parent_session_id: None,
-                                }
-                            } else {
-                                SessionListItem {
-                                    session_id: sid,
-                                    created_at: String::new(),
-                                    last_active_at: String::new(),
-                                    working_dir: String::new(),
-                                    parent_session_id: None,
-                                }
-                            }
-                        } else {
-                            SessionListItem {
-                                session_id: sid,
-                                created_at: String::new(),
-                                last_active_at: String::new(),
-                                working_dir: String::new(),
-                                parent_session_id: None,
-                            }
-                        }
+                    .map(|summary| SessionListItem {
+                        session_id: summary.session_id,
+                        created_at: summary.created_at,
+                        last_active_at: summary.updated_at,
+                        working_dir: summary.working_dir,
+                        parent_session_id: summary.parent_session_id,
                     })
                     .collect();
                 let _ = self
@@ -202,7 +175,7 @@ impl CommandHandler {
     }
 
     /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具和 system prompt 快照。
-    async fn create_session(&mut self, working_dir: String) {
+    pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, String> {
         let model_id = self.runtime.effective.llm.model_id.clone();
         match self
             .runtime
@@ -229,18 +202,24 @@ impl CommandHandler {
                     .await
                 {
                     self.send_error(-32603, &e.to_string());
-                    return;
+                    return Err(e.to_string());
                 }
 
                 match self
                     .initialize_session_prompt(&event.session_id, &working_dir)
                     .await
                 {
-                    Ok(_) => {},
-                    Err(e) => self.send_error(-32603, &e),
+                    Ok(_) => Ok(event.session_id),
+                    Err(e) => {
+                        self.send_error(-32603, &e);
+                        Err(e)
+                    },
                 }
             },
-            Err(e) => self.send_error(-32603, &e.to_string()),
+            Err(e) => {
+                self.send_error(-32603, &e.to_string());
+                Err(e.to_string())
+            },
         }
     }
 
@@ -249,21 +228,40 @@ impl CommandHandler {
     /// 如果已有回合在运行则拒绝（返回 40900 错误）。
     /// 成功提交后，回合在独立的 tokio 任务中异步执行。
     async fn submit_prompt(&mut self, text: String) -> Result<(), String> {
-        if self.active_turn.is_some() {
+        let sid = self.ensure_session().await?;
+        match self.submit_prompt_for_session(sid, text).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.contains("already running") => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// 向指定会话提交用户提示词。
+    ///
+    /// HTTP 调用必须走这个显式 session 入口；stdio 的 active session 只是一层
+    /// convenience adapter。
+    pub async fn submit_prompt_for_session(
+        &mut self,
+        sid: SessionId,
+        text: String,
+    ) -> Result<TurnId, String> {
+        self.clear_finished_turns();
+        if self.active_turns.contains_key(&sid) {
             self.send_error(40900, "A turn is already running");
-            return Ok(());
+            return Err("A turn is already running".into());
         }
 
-        let sid = self.ensure_session().await?;
-
-        let session = self
+        self.runtime
+            .session_manager
+            .resume(&sid)
+            .await
+            .map_err(|e| format!("Session {sid} not found: {e}"))?;
+        let state = self
             .runtime
             .session_manager
-            .get(&sid)
+            .read_model(&sid)
             .await
-            .ok_or_else(|| format!("Session {sid} vanished"))?;
-
-        let state = session.state.read().await.clone();
+            .map_err(|e| format!("read session {sid}: {e}"))?;
         let history = state.provider_messages();
         let working_dir = state.working_dir;
         let system_prompt = state.system_prompt;
@@ -300,19 +298,31 @@ impl CommandHandler {
             history,
             text,
         });
-        self.active_turn = Some(ActiveTurn {
-            session_id: sid,
-            turn_id,
-            handle,
-        });
-        Ok(())
+        self.active_turns.insert(
+            sid.clone(),
+            ActiveTurn {
+                session_id: sid,
+                turn_id: turn_id.clone(),
+                handle,
+            },
+        );
+        Ok(turn_id)
     }
 
     /// 中止当前活跃的回合，取消后台任务并记录完成事件。
     async fn abort_active_turn(&mut self) -> Result<(), String> {
-        let Some(active_turn) = self.active_turn.take() else {
+        let Some(sid) = self.active_session_id.clone() else {
             self.send_error(40400, "No active turn");
             return Ok(());
+        };
+        self.abort_session(&sid).await
+    }
+
+    /// 中止指定会话的活跃回合。
+    pub async fn abort_session(&mut self, session_id: &SessionId) -> Result<(), String> {
+        let Some(active_turn) = self.active_turns.remove(session_id) else {
+            self.send_error(40400, "No active turn");
+            return Err("No active turn".into());
         };
 
         if !active_turn.handle.is_finished() {
@@ -343,29 +353,33 @@ impl CommandHandler {
     }
 
     async fn compact_active_session(&mut self) -> Result<(), String> {
-        if self.active_turn.is_some() {
-            self.send_error(40900, "Cannot compact while a turn is running");
-            return Ok(());
-        }
-
         let Some(sid) = self.active_session_id.clone() else {
             self.send_error(40400, "No active session");
             return Ok(());
         };
-        let session = self
+        self.compact_session(&sid).await
+    }
+
+    /// 手动压缩指定会话。
+    pub async fn compact_session(&mut self, sid: &SessionId) -> Result<(), String> {
+        if self.active_turns.contains_key(sid) {
+            self.send_error(40900, "Cannot compact while a turn is running");
+            return Err("Cannot compact while a turn is running".into());
+        }
+
+        let state = self
             .runtime
             .session_manager
-            .get(&sid)
+            .read_model(sid)
             .await
-            .ok_or_else(|| format!("Session {sid} vanished"))?;
-        let state = session.state.read().await.clone();
-        let tool_registry = self.ensure_tool_registry(&sid, &state.working_dir).await;
+            .map_err(|e| format!("read session {sid}: {e}"))?;
+        let tool_registry = self.ensure_tool_registry(sid, &state.working_dir).await;
         let provider_messages = state.provider_messages();
         let tools = tool_registry.list_definitions();
         let compact_instructions = match collect_compact_instructions(
             &self.runtime.extension_runner,
             CompactHookContext {
-                session_id: &sid,
+                session_id: sid,
                 working_dir: &state.working_dir,
                 model_id: &state.model_id,
                 tools: &tools,
@@ -385,7 +399,7 @@ impl CommandHandler {
             .runtime
             .session_manager
             .write_compact_snapshot(
-                &sid,
+                sid,
                 CompactSnapshotInput {
                     trigger: compact_trigger_name(CompactTrigger::ManualCommand).into(),
                     model_id: state.model_id.clone(),
@@ -435,7 +449,7 @@ impl CommandHandler {
         if let Err(error) = dispatch_post_compact(
             &self.runtime.extension_runner,
             CompactHookContext {
-                session_id: &sid,
+                session_id: sid,
                 working_dir: &state.working_dir,
                 model_id: &state.model_id,
                 tools: &tools,
@@ -450,49 +464,41 @@ impl CommandHandler {
             return Ok(());
         }
 
-        self.record_and_broadcast(&sid, None, EventPayload::CompactionStarted)
+        self.record_and_broadcast(sid, None, EventPayload::CompactionStarted)
             .await?;
-        self.record_and_broadcast(&sid, None, compaction_applied_payload(&compaction))
+        self.record_and_broadcast(sid, None, compaction_applied_payload(&compaction))
             .await?;
-        self.record_and_broadcast(
-            &sid,
-            None,
-            EventPayload::CompactionCompleted {
-                pre_tokens: compaction.pre_tokens,
-                post_tokens: compaction.post_tokens,
-                summary: compaction.summary,
-            },
-        )
-        .await?;
+        self.record_and_broadcast(sid, None, compaction_completed_payload(&compaction))
+            .await?;
         Ok(())
     }
 
     /// 清理已完成的活跃回合引用，在每次处理新命令前调用。
-    fn clear_finished_turn(&mut self) {
-        if self
-            .active_turn
-            .as_ref()
-            .is_some_and(|active_turn| active_turn.handle.is_finished())
-        {
-            self.active_turn = None;
-        }
+    fn clear_finished_turns(&mut self) {
+        self.active_turns
+            .retain(|_, active_turn| !active_turn.handle.is_finished());
     }
 
     /// 恢复或切换到指定会话，从磁盘重放事件并构建快照发送给客户端。
     async fn resume_session(&mut self, session_id: SessionId) {
         match self.runtime.session_manager.resume(&session_id).await {
-            Ok(session) => {
-                let state = session.state.read().await;
+            Ok(_) => {
+                let state = match self.runtime.session_manager.read_model(&session_id).await {
+                    Ok(state) => state,
+                    Err(e) => {
+                        self.send_error(40401, &format!("Session not found: {e}"));
+                        return;
+                    },
+                };
                 let working_dir = state.working_dir.clone();
                 let needs_prompt = state.system_prompt.is_none();
                 let snapshot = SessionSnapshot {
                     session_id: session_id.clone(),
-                    cursor: String::new(),
+                    cursor: state.cursor(),
                     messages: state.messages.iter().map(message_to_dto).collect(),
                     model_id: state.model_id.clone(),
                     working_dir: working_dir.clone(),
                 };
-                drop(state);
 
                 let tool_registry = self.ensure_tool_registry(&session_id, &working_dir).await;
                 if needs_prompt {
@@ -809,7 +815,7 @@ fn content_to_text(content: &LlmContent) -> String {
 mod tests {
     use std::{future, sync::Arc, time::Duration};
 
-    use astrcode_context::manager::LlmContextAssembler;
+    use astrcode_context::{compaction::CompactResult, manager::LlmContextAssembler};
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
         event::EventPayload,
@@ -817,11 +823,13 @@ mod tests {
         tool::ToolDefinition,
     };
     use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
-    use astrcode_storage::noop::NoopEventStore;
+    use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::session::{COMPACTION_APPLIED_EVENT, SessionManager};
+    use crate::session::{
+        SessionManager, compaction_applied_payload, compaction_completed_payload,
+    };
 
     struct MockLlm;
 
@@ -930,7 +938,7 @@ mod tests {
         context_settings: astrcode_context::settings::ContextWindowSettings,
     ) -> Arc<ServerRuntime> {
         Arc::new(ServerRuntime {
-            session_manager: Arc::new(SessionManager::new(Arc::new(NoopEventStore::new()))),
+            session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
             llm_provider,
             context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
@@ -1030,6 +1038,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn compact_payload_helpers_split_projection_and_audit_fields() {
+        let compaction = CompactResult {
+            pre_tokens: 100,
+            post_tokens: 20,
+            summary: "summary".into(),
+            messages_removed: 2,
+            context_messages: vec![LlmMessage::system("hidden context")],
+            retained_messages: vec![LlmMessage::user("retained")],
+            transcript_path: Some("compact.jsonl".into()),
+        };
+
+        let applied = compaction_applied_payload(&compaction);
+        let completed = compaction_completed_payload(&compaction);
+
+        assert!(matches!(
+            applied,
+            EventPayload::CompactionApplied {
+                messages_removed: 2,
+                context_messages
+            } if context_messages.len() == 1
+        ));
+        assert!(matches!(
+            completed,
+            EventPayload::CompactionCompleted {
+                pre_tokens: 100,
+                post_tokens: 20,
+                summary,
+                transcript_path: Some(path),
+            } if summary == "summary" && path == "compact.jsonl"
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_and_broadcast_updates_projection_before_broadcast() {
+        let runtime = test_runtime();
+        let start_event = runtime
+            .session_manager
+            .create(".", "mock-model", 2048, None)
+            .await
+            .unwrap();
+        let sid = start_event.session_id.clone();
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+
+        record_and_broadcast(
+            &runtime,
+            &event_tx,
+            &sid,
+            None,
+            EventPayload::SystemPromptConfigured {
+                text: "ordered prompt".into(),
+                fingerprint: "fingerprint".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let ClientNotification::Event(event) = recv_event(&mut event_rx).await else {
+            panic!("expected event notification");
+        };
+        assert!(event.seq.is_some());
+
+        let model = runtime.session_manager.read_model(&sid).await.unwrap();
+        assert_eq!(model.system_prompt.as_deref(), Some("ordered prompt"));
+    }
+
     #[tokio::test]
     async fn create_session_configures_system_prompt() {
         let runtime = test_runtime();
@@ -1056,8 +1130,7 @@ mod tests {
         assert!(saw_configured);
 
         let sid = handler.active_session_id.clone().unwrap();
-        let session = runtime.session_manager.get(&sid).await.unwrap();
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(
             state
                 .system_prompt
@@ -1081,8 +1154,7 @@ mod tests {
             .unwrap();
         let sid = handler.active_session_id.clone().unwrap();
         let initial_prompt = {
-            let session = runtime.session_manager.get(&sid).await.unwrap();
-            let state = session.state.read().await;
+            let state = runtime.session_manager.read_model(&sid).await.unwrap();
             state.system_prompt.clone()
         };
 
@@ -1104,8 +1176,7 @@ mod tests {
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
-        let session = runtime.session_manager.get(&sid).await.unwrap();
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert_eq!(state.system_prompt, initial_prompt);
     }
 
@@ -1131,8 +1202,7 @@ mod tests {
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
-        let session = runtime.session_manager.get(&sid).await.unwrap();
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(
             state
                 .system_prompt
@@ -1232,11 +1302,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(handler.active_turn.is_some());
+        assert!(!handler.active_turns.is_empty());
 
         handler.handle(ClientCommand::Abort).await.unwrap();
 
-        assert!(handler.active_turn.is_none());
+        assert!(handler.active_turns.is_empty());
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
     }
 
@@ -1274,7 +1344,7 @@ mod tests {
                 continue;
             };
             match event.payload {
-                EventPayload::Custom { name, .. } if name == COMPACTION_APPLIED_EVENT => {
+                EventPayload::CompactionApplied { .. } => {
                     saw_applied = true;
                 },
                 EventPayload::CompactionCompleted { .. } => saw_completed = true,
@@ -1284,8 +1354,7 @@ mod tests {
         assert!(saw_applied);
 
         let sid = handler.active_session_id.clone().unwrap();
-        let session = runtime.session_manager.get(&sid).await.unwrap();
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(!state.context_messages.is_empty());
         assert!(state.provider_messages().iter().any(|message| {
             message_to_dto(message)
@@ -1326,9 +1395,8 @@ mod tests {
         handler.handle(ClientCommand::Compact).await.unwrap();
         drain_until_compaction_completed(&mut event_rx).await;
         let sid = handler.active_session_id.clone().unwrap();
-        let session = runtime.session_manager.get(&sid).await.unwrap();
         let first_summary = {
-            let state = session.state.read().await;
+            let state = runtime.session_manager.read_model(&sid).await.unwrap();
             message_to_dto(&state.context_messages[0]).content
         };
 
@@ -1343,7 +1411,7 @@ mod tests {
         handler.handle(ClientCommand::Compact).await.unwrap();
         drain_until_compaction_completed(&mut event_rx).await;
 
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         let second_summary = message_to_dto(&state.context_messages[0]).content;
         assert!(
             second_summary.contains("Compacted conversation summary"),
@@ -1381,8 +1449,7 @@ mod tests {
         handler.handle(ClientCommand::Compact).await.unwrap();
 
         let sid = handler.active_session_id.clone().unwrap();
-        let session = runtime.session_manager.get(&sid).await.unwrap();
-        let state = session.state.read().await;
+        let state = runtime.session_manager.read_model(&sid).await.unwrap();
         assert!(state.context_messages.is_empty());
     }
 }

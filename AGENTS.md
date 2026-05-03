@@ -5,13 +5,11 @@
 ## 修改前
 
 - 先读所属模块、调用点、测试和现有命名风格。
-- 修根因，不修表象。
 - 默认不要新增文件、trait、DTO、依赖、配置项或公开 API。
-- 不确定时继续读代码，不要脑补抽象。
 
 ## 架构边界
 
-PROJECT_ARCHITECTURE.md 描述了 astrcode 的目标架构和设计原则。
+./PROJECT_ARCHITECTURE.md 描述了 astrcode 的目标架构和设计原则。
 
 ## DTO 规则
 
@@ -64,13 +62,11 @@ cargo test --all-features
 
 ## 重要
 
-必须遵守：没有遇见bug不准写测试，非复杂逻辑不写测试
-项目代码都在crates里面，外置代码不必理会
+  必须遵守：
+- 没有遇见bug不准写测试，非复杂逻辑不写测试
+- 项目代码都在crates里面，外置代码不必理会
+- 集成测试单开一个tests/文件夹存放，单元测试写在下面
 
-
-## TUI style conventions
-
-See `codex-rs/tui/styles.md`.
 
 ## TUI code conventions
 
