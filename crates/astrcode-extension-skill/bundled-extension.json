@@ -1,0 +1,37 @@
+{
+  "id": "astrcode-skill",
+  "name": "Skill Tool",
+  "version": "0.1.0",
+  "description": "Claude-style skill discovery and on-demand skill loading",
+  "astrcode_version": "0.1.0",
+  "subscriptions": [
+    {
+      "event": "prompt_build",
+      "mode": "blocking",
+      "priority": 0
+    }
+  ],
+  "tools": [
+    {
+      "name": "Skill",
+      "description": "Load a named skill's full instructions and resource paths on demand.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "skill": {
+            "type": "string",
+            "description": "The exact skill name from the Skills section."
+          },
+          "args": {
+            "type": "string",
+            "description": "Optional free-form arguments for the skill."
+          }
+        },
+        "required": [
+          "skill"
+        ]
+      }
+    }
+  ]
+}

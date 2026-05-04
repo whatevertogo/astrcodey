@@ -28,19 +28,6 @@ pub struct CreateSessionResponseDto {
 pub struct PromptRequest {
     /// 用户输入文本。
     pub text: String,
-    /// 预留给 skill 调用的冻结协议形状，v1 不接生产链路。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_invocation: Option<PromptSkillInvocation>,
-}
-
-/// skill prompt 调用的冻结线缆形状。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptSkillInvocation {
-    /// skill 标识。
-    pub skill_id: String,
-    /// skill 原始用户 prompt。
-    pub user_prompt: String,
 }
 
 /// prompt 提交结果。

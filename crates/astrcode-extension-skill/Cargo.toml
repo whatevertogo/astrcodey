@@ -1,0 +1,20 @@
+[package]
+name = "astrcode-extension-skill"
+version = "0.1.0"
+edition = "2021"
+description = "Claude-style skill discovery and Skill tool extension"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

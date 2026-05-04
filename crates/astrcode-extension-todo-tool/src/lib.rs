@@ -639,13 +639,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_matches_rust_tool_definition() {
+    fn bundled_manifest_matches_rust_tool_definition() {
         let manifest: Value =
-            serde_json::from_str(include_str!("../extension.json")).expect("manifest json");
+            serde_json::from_str(include_str!("../bundled-extension.json")).expect("manifest json");
         let tool = manifest["tools"][0].clone();
         let definition = todo_write_tool_definition();
 
         assert_eq!(manifest["id"], "astrcode-todo-tool");
+        assert!(manifest.get("library").is_none());
         assert_eq!(manifest["tools"].as_array().unwrap().len(), 1);
         assert_eq!(tool["name"], definition.name);
         assert_eq!(tool["description"], definition.description);

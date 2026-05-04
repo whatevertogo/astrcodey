@@ -29,8 +29,6 @@ pub mod read_file;
 pub mod session_plan;
 /// Shell 命令执行工具：流式 stdout/stderr
 pub mod shell;
-/// 技能工具：按需加载 skill 指令
-pub mod skill_tool;
 /// 执行期 task 快照写入工具：维护当前 owner 的工作清单
 pub mod task_write;
 /// 外部工具搜索：按需展开 MCP/plugin 工具 schema
