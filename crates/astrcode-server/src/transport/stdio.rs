@@ -9,7 +9,7 @@ use astrcode_protocol::{
     commands::ClientCommand,
     events::ClientNotification,
     framing::{
-        PROTOCOL_VERSION, JsonRpcMessage, command_from_jsonrpc_request, error_message,
+        JsonRpcMessage, PROTOCOL_VERSION, command_from_jsonrpc_request, error_message,
         from_jsonl_line, notification_to_jsonrpc_message, to_jsonl_line,
     },
     version::{InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo},
@@ -64,10 +64,9 @@ impl StdioTransport {
                     continue;
                 };
                 if message.method.as_deref() == Some("initialize") {
-                    let request = message
-                        .params
-                        .clone()
-                        .and_then(|params| serde_json::from_value::<InitializeRequest>(params).ok());
+                    let request = message.params.clone().and_then(|params| {
+                        serde_json::from_value::<InitializeRequest>(params).ok()
+                    });
                     if let Some(request) = request {
                         if tx
                             .send(StdioMessage::Initialize {

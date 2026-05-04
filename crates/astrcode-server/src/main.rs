@@ -11,13 +11,14 @@ use std::sync::Arc;
 
 use astrcode_protocol::{
     events::ClientNotification,
-    framing::{notification_to_jsonrpc_message, to_jsonl_line},
-    framing::PROTOCOL_VERSION,
+    framing::{PROTOCOL_VERSION, notification_to_jsonrpc_message, to_jsonl_line},
     version::negotiate_version,
 };
 use astrcode_server::{
     handler::CommandHandler,
-    transport::{ServerTransport, StdioTransport, write_initialize_error, write_initialize_response},
+    transport::{
+        ServerTransport, StdioTransport, write_initialize_error, write_initialize_response,
+    },
 };
 
 #[tokio::main]
@@ -48,7 +49,10 @@ async fn main() {
         write_initialize_error(
             request_id,
             -32000,
-            &format!("Unsupported protocol version {}", initialize.protocol_version),
+            &format!(
+                "Unsupported protocol version {}",
+                initialize.protocol_version
+            ),
         );
         std::process::exit(1);
     };

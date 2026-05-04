@@ -154,9 +154,7 @@ impl StdioClientTransport {
         if let Some(error) = response.error {
             return Err(TransportError::Server(error.message));
         }
-        let result = response
-            .result
-            .ok_or(TransportError::UnexpectedResponse)?;
+        let result = response.result.ok_or(TransportError::UnexpectedResponse)?;
         let response = serde_json::from_value::<InitializeResponse>(result)?;
         if response.accepted_version != PROTOCOL_VERSION {
             return Err(TransportError::Connection(format!(
