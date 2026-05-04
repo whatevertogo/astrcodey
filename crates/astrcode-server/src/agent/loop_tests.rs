@@ -224,6 +224,11 @@ struct AutoCompactCapturingLlm {
     captured_compact_tools: Arc<Mutex<Vec<ToolDefinition>>>,
 }
 
+struct CompactAwareOkLlm {
+    call_count: AtomicUsize,
+    compact_calls: AtomicUsize,
+}
+
 struct CompactToolCallThenOkLlm {
     call_count: AtomicUsize,
 }
@@ -312,6 +317,37 @@ impl LlmProvider for AutoCompactCapturingLlm {
         if call_count == 0 {
             *self.captured_compact_messages.lock().unwrap() = messages;
             *self.captured_compact_tools.lock().unwrap() = tools;
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: valid_compact_summary().into(),
+            });
+        } else {
+            let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
+        }
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CompactAwareOkLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if message_text_contains(&messages, "Do not call tools") {
+            self.compact_calls.fetch_add(1, Ordering::SeqCst);
             let _ = tx.send(LlmEvent::ContentDelta {
                 delta: valid_compact_summary().into(),
             });
@@ -660,6 +696,7 @@ where
         extension_runner,
         context_assembler: test_context_assembler(),
         session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
+        auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
     }
 }
 
@@ -915,6 +952,7 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
             )),
             context_assembler: test_context_assembler(),
             session_manager: Arc::clone(&session_manager),
+            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
         },
     );
 
@@ -1039,6 +1077,7 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
             )),
             context_assembler: test_context_assembler(),
             session_manager,
+            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
         },
     );
 
@@ -1184,7 +1223,10 @@ async fn session_system_prompt_is_sent_to_llm() {
         ),
     );
 
-    let output = agent_loop.process_prompt("hello", vec![], None).await.unwrap();
+    let output = agent_loop
+        .process_prompt("hello", vec![], None)
+        .await
+        .unwrap();
 
     assert_eq!(output.text, "ok");
     let messages = captured_messages.lock().unwrap();
@@ -1243,7 +1285,10 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
         ),
     );
 
-    let output = agent_loop.process_prompt("hello", vec![], None).await.unwrap();
+    let output = agent_loop
+        .process_prompt("hello", vec![], None)
+        .await
+        .unwrap();
     let messages = captured_messages.lock().unwrap();
 
     assert_eq!(output.text, "ok");
@@ -1335,6 +1380,63 @@ async fn auto_compact_uses_forked_runner_with_tools() {
     assert!(compact_tools.iter().any(|tool| tool.name == "shell"));
     assert!(compact_pre_seen.load(Ordering::SeqCst));
     assert!(compact_post_seen.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
+    let llm = Arc::new(CompactAwareOkLlm {
+        call_count: AtomicUsize::new(0),
+        compact_calls: AtomicUsize::new(0),
+    });
+    let session_id = "auto-compact-fused-session".to_string();
+    let auto_compact_failures = Arc::new(AutoCompactFailureTracker::default());
+    for _ in 0..MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES {
+        auto_compact_failures.record_provider_failure(&session_id);
+    }
+    let context_assembler = Arc::new(astrcode_context::manager::LlmContextAssembler::new(
+        astrcode_context::settings::ContextWindowSettings {
+            compact_threshold_percent: 0.0,
+            ..Default::default()
+        },
+    ));
+    let agent_loop = AgentLoop::new(
+        session_id,
+        ".".into(),
+        "main system prompt".into(),
+        "mock".into(),
+        AgentServices {
+            llm: llm.clone(),
+            tool_registry: Arc::new(ToolRegistry::new()),
+            extension_runner: Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+            context_assembler,
+            session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
+            auto_compact_failures,
+        },
+    );
+    let mut history = Vec::new();
+    for index in 0..10 {
+        history.push(LlmMessage::user(format!(
+            "old user {index} {}",
+            "x ".repeat(20)
+        )));
+        history.push(LlmMessage::assistant(format!(
+            "old answer {index} {}",
+            "y ".repeat(20)
+        )));
+    }
+
+    let output = agent_loop
+        .process_prompt("current", history, None)
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "ok");
+    assert!(output.auto_compaction.is_some());
+    assert_eq!(llm.compact_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

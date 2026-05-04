@@ -76,6 +76,18 @@ pub fn estimate_text_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4).max(1)
 }
 
+/// 按同一套粗略 token 估算裁剪文本，并追加调用方指定的截断标记。
+pub fn truncate_text_to_tokens(content: &str, max_tokens: usize, marker: &str) -> String {
+    if estimate_text_tokens(content) <= max_tokens {
+        return content.to_string();
+    }
+    let max_chars = max_tokens.saturating_mul(4);
+    let content_budget = max_chars.saturating_sub(marker.chars().count());
+    let mut truncated = content.chars().take(content_budget).collect::<String>();
+    truncated.push_str(marker);
+    truncated
+}
+
 fn estimate_content_tokens(content: &LlmContent) -> usize {
     match content {
         LlmContent::Text { text } => estimate_text_tokens(text),

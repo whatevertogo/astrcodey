@@ -45,6 +45,16 @@ pub fn sessions_dir(project_hash: &str) -> PathBuf {
     project_dir(project_hash).join("sessions")
 }
 
+/// 获取某个会话目录：`~/.astrcode/projects/<hash>/sessions/<session>/`。
+pub fn session_dir(project_hash: &str, session_id: &str) -> PathBuf {
+    sessions_dir(project_hash).join(session_id)
+}
+
+/// 获取某个会话的计划目录：`~/.astrcode/projects/<hash>/sessions/<session>/plan/`。
+pub fn session_plan_dir(project_hash: &str, session_id: &str) -> PathBuf {
+    session_dir(project_hash, session_id).join("plan")
+}
+
 /// 获取运行时目录：`~/.astrcode/runtime/`。
 pub fn runtime_dir() -> PathBuf {
     astrcode_dir().join("runtime")

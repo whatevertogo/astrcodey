@@ -8,3 +8,4 @@ description = "LLM context window management: token estimation and summary compa
 astrcode-core = { path = "../astrcode-core" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }

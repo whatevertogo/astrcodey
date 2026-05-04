@@ -23,8 +23,8 @@ use super::{
 };
 use crate::{
     agent::{
-        AgentLoop, AgentServices, AgentSignal, compact::compact_trigger_name, drive_agent,
-        tool_name_matches_allowlist,
+        AgentLoop, AgentServices, AgentSignal, AutoCompactFailureTracker,
+        compact::compact_trigger_name, drive_agent, tool_name_matches_allowlist,
     },
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot, prompt_fingerprint},
 };
@@ -38,6 +38,7 @@ pub(crate) struct ServerSessionSpawner {
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
+    pub(crate) auto_compact_failures: Arc<AutoCompactFailureTracker>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     pub(crate) read_timeout_secs: u64,
 }
@@ -144,6 +145,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 extension_runner: Arc::clone(&self.extension_runner),
                 context_assembler: Arc::clone(&self.context_assembler),
                 session_manager: Arc::clone(&self.session_manager),
+                auto_compact_failures: Arc::clone(&self.auto_compact_failures),
             },
         )
         .with_tool_allowlist(request.allowed_tools);
@@ -156,6 +158,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let wd = request.working_dir.clone();
         let sp = system_prompt.clone();
         let mid = model_id.clone();
+        let auto_compact_failures = Arc::clone(&self.auto_compact_failures);
         let (output, emitted_error) =
             drive_agent(&agent, &user_prompt, Vec::new(), move |signal| {
                 let sm = sm.clone();
@@ -165,6 +168,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 let wd = wd.clone();
                 let sp = sp.clone();
                 let mid = mid.clone();
+                let auto_compact_failures = Arc::clone(&auto_compact_failures);
                 async move {
                     match signal {
                         AgentSignal::Event(payload) => {
@@ -182,7 +186,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                                 let continuation = create_compact_continuation_session(
                                     &sm,
                                     CompactContinuationCreateInput {
-                                        parent_session_id: parent_sid,
+                                        parent_session_id: parent_sid.clone(),
                                         working_dir: wd,
                                         model_id: mid,
                                     },
@@ -203,6 +207,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                             }
                             .await;
                             if let Ok(child_sid) = &result {
+                                auto_compact_failures.transfer_session(&parent_sid, child_sid);
                                 p.emit(
                                     ToolOutputStream::Stdout,
                                     format!("child agent continued: {child_sid}\n"),
@@ -506,6 +511,7 @@ mod tests {
             session_manager,
             llm,
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
+            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             extension_runner: Arc::new(ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(ExtensionRuntime::new()),

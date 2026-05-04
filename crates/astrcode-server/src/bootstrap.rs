@@ -22,7 +22,10 @@ use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 
-use crate::session::{SessionManager, spawner::ServerSessionSpawner};
+use crate::{
+    agent::AutoCompactFailureTracker,
+    session::{SessionManager, spawner::ServerSessionSpawner},
+};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -37,6 +40,8 @@ pub struct ServerRuntime {
     pub llm_provider: Arc<dyn LlmProvider>,
     /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
+    /// Auto compact provider 连续失败熔断状态。
+    pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
     /// 已解析的最终配置（只读快照）
@@ -115,6 +120,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 3. 初始化上下文组装器。
     let context_settings = ContextWindowSettings::default();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
+    let auto_compact_failures = Arc::new(AutoCompactFailureTracker::default());
 
     // 4. 确定当前项目工作目录。
     //
@@ -181,6 +187,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager: Arc::clone(&session_manager),
         llm: Arc::clone(&llm_provider),
         context_assembler: Arc::clone(&context_assembler),
+        auto_compact_failures: Arc::clone(&auto_compact_failures),
         extension_runner: Arc::clone(&extension_runner),
         read_timeout_secs: effective.llm.read_timeout_secs,
     }));
@@ -194,6 +201,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager,
         llm_provider,
         context_assembler,
+        auto_compact_failures,
         extension_runner,
         effective,
     })

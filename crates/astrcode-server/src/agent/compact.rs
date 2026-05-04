@@ -6,7 +6,10 @@
 //!
 //! 设计约束：这个模块不持有任何会话状态，所有参数通过调用方传入。
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 use astrcode_context::{
     compaction::{
@@ -21,8 +24,60 @@ use astrcode_core::{
     },
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
     tool::ToolDefinition,
+    types::SessionId,
 };
 use astrcode_extensions::{context::ServerExtensionContext, runner::ExtensionRunner};
+
+pub const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES: usize = 3;
+
+/// Runtime-local fuse for repeated provider-backed auto compact failures.
+///
+/// The count follows compact continuation children so one failing session line
+/// does not pay for the same broken summary request every turn.
+#[derive(Debug, Default)]
+pub struct AutoCompactFailureTracker {
+    counts: Mutex<HashMap<SessionId, usize>>,
+}
+
+impl AutoCompactFailureTracker {
+    pub(crate) fn should_skip_provider(&self, session_id: &SessionId) -> bool {
+        self.consecutive_failures(session_id) >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+    }
+
+    pub(crate) fn consecutive_failures(&self, session_id: &SessionId) -> usize {
+        *self.counts().get(session_id).unwrap_or(&0)
+    }
+
+    pub(crate) fn record_provider_success(&self, session_id: &SessionId) {
+        self.counts().remove(session_id);
+    }
+
+    pub(crate) fn record_provider_failure(&self, session_id: &SessionId) -> usize {
+        let mut counts = self.counts();
+        let count = counts.entry(session_id.clone()).or_insert(0);
+        *count = count.saturating_add(1);
+        *count
+    }
+
+    pub(crate) fn transfer_session(
+        &self,
+        parent_session_id: &SessionId,
+        child_session_id: &SessionId,
+    ) {
+        let mut counts = self.counts();
+        if let Some(count) = counts.remove(parent_session_id) {
+            if count > 0 {
+                counts.insert(child_session_id.clone(), count);
+            }
+        }
+    }
+
+    fn counts(&self) -> MutexGuard<'_, HashMap<SessionId, usize>> {
+        self.counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 // ─── Hook 上下文 ─────────────────────────────────────────────────────────
 
@@ -263,4 +318,23 @@ pub(crate) async fn compact_with_forked_provider(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_compact_failure_tracker_transfers_continuation_count() {
+        let tracker = AutoCompactFailureTracker::default();
+        let parent = "parent-session".to_string();
+        let child = "child-session".to_string();
+
+        tracker.record_provider_failure(&parent);
+        tracker.record_provider_failure(&parent);
+        tracker.transfer_session(&parent, &child);
+
+        assert_eq!(tracker.consecutive_failures(&parent), 0);
+        assert_eq!(tracker.consecutive_failures(&child), 2);
+    }
 }

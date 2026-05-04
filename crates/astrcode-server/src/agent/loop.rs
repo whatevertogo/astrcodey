@@ -14,7 +14,7 @@ use std::{
 
 use astrcode_context::{
     compaction::{
-        CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
+        CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
         compact_messages_with_render_options, is_prompt_too_long_message,
     },
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
@@ -44,9 +44,13 @@ use tokio::{
 };
 
 use crate::{
-    agent::compact::{
-        CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        compact_with_forked_provider, dispatch_post_compact,
+    agent::{
+        AutoCompactFailureTracker,
+        compact::{
+            CompactHookContext, MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, collect_compact_instructions,
+            compact_trigger_name, compact_with_forked_provider, dispatch_post_compact,
+        },
+        post_compact::enrich_post_compact_context,
     },
     session::SessionManager,
 };
@@ -129,7 +133,7 @@ pub struct AgentLoop {
     session_id: SessionId,
     /// 当前工作目录，用于工具执行时的相对路径解析。
     working_dir: String,
-    /// 当前使用的模型标识（如 "gpt-4o"）。
+    /// 当前使用的模型标识（如 "gpt-5.5"）。
     model_id: String,
     /// LLM 提供者，负责与语言模型通信。
     llm: Arc<dyn LlmProvider>,
@@ -143,6 +147,8 @@ pub struct AgentLoop {
     context_assembler: Arc<LlmContextAssembler>,
     /// 会话管理器，用于写 compact 前 transcript snapshot。
     session_manager: Arc<SessionManager>,
+    /// Auto compact provider 失败熔断器，跨 turn/continuation 共享。
+    auto_compact_failures: Arc<AutoCompactFailureTracker>,
     /// 工具白名单。设置后仅允许调用列表中的工具，用于子会话等受限场景。
     tool_allowlist: Option<HashSet<String>>,
 }
@@ -154,6 +160,7 @@ pub struct AgentServices {
     pub extension_runner: Arc<ExtensionRunner>,
     pub context_assembler: Arc<LlmContextAssembler>,
     pub session_manager: Arc<SessionManager>,
+    pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
 }
 
 impl AgentLoop {
@@ -182,6 +189,7 @@ impl AgentLoop {
             extension_runner: services.extension_runner,
             context_assembler: services.context_assembler,
             session_manager: services.session_manager,
+            auto_compact_failures: services.auto_compact_failures,
             tool_allowlist: None,
         }
     }
@@ -485,24 +493,77 @@ impl AgentLoop {
                 )
                 .await;
             let render_options = CompactSummaryRenderOptions { transcript_path };
-            match compact_with_forked_provider(
-                Arc::clone(&self.llm),
-                tools.to_vec(),
-                &prepare_input.messages,
-                prepare_input.system_prompt,
-                self.context_assembler.settings(),
-                &compact_instructions,
-                &render_options,
-            )
-            .await
+            let provider_compaction = if self
+                .auto_compact_failures
+                .should_skip_provider(&self.session_id)
             {
-                Ok(compaction) => prepared_context_from_compaction(compaction),
-                Err(_) => match compact_messages_with_render_options(
+                None
+            } else {
+                Some(
+                    match compact_with_forked_provider(
+                        Arc::clone(&self.llm),
+                        tools.to_vec(),
+                        &prepare_input.messages,
+                        prepare_input.system_prompt,
+                        self.context_assembler.settings(),
+                        &compact_instructions,
+                        &render_options,
+                    )
+                    .await
+                    {
+                        Ok(compaction) => {
+                            self.auto_compact_failures
+                                .record_provider_success(&self.session_id);
+                            Ok(compaction)
+                        },
+                        Err(error) => {
+                            if counts_as_auto_compact_provider_failure(&error) {
+                                let failures = self
+                                    .auto_compact_failures
+                                    .record_provider_failure(&self.session_id);
+                                tracing::warn!(
+                                    session_id = %self.session_id,
+                                    failures,
+                                    max_failures = MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
+                                    error = %error,
+                                    "provider-backed auto compact failed; using deterministic fallback"
+                                );
+                            }
+                            Err(error)
+                        },
+                    },
+                )
+            };
+            match provider_compaction {
+                Some(Ok(mut compaction)) => {
+                    enrich_post_compact_context(
+                        &mut compaction,
+                        &self.session_id,
+                        &prepare_input.messages,
+                        &self.working_dir,
+                        Some(&self.system_prompt),
+                        tools,
+                    )
+                    .await;
+                    prepared_context_from_compaction(compaction)
+                },
+                Some(Err(_)) | None => match compact_messages_with_render_options(
                     &prepare_input.messages,
                     prepare_input.system_prompt,
                     &render_options,
                 ) {
-                    Ok(compaction) => prepared_context_from_compaction(compaction),
+                    Ok(mut compaction) => {
+                        enrich_post_compact_context(
+                            &mut compaction,
+                            &self.session_id,
+                            &prepare_input.messages,
+                            &self.working_dir,
+                            Some(&self.system_prompt),
+                            tools,
+                        )
+                        .await;
+                        prepared_context_from_compaction(compaction)
+                    },
                     Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
                         self.context_assembler.prepare_messages(prepare_input)
                     },
@@ -1413,6 +1474,13 @@ fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContex
         messages,
         compaction: Some(compaction),
     }
+}
+
+fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
+    !matches!(
+        error,
+        CompactError::Skip(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact)
+    )
 }
 
 /// Agent 处理过程中可能出现的错误类型。

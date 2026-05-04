@@ -1,11 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
 
 use astrcode_context::{manager::LlmContextAssembler, settings::ContextWindowSettings};
 use astrcode_core::{
     config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::ToolDefinition,
+    tool::{ToolDefinition, ToolResult},
     types::new_message_id,
 };
 use astrcode_extensions::{runner::ExtensionRunner, runtime::ExtensionRuntime};
@@ -249,6 +249,43 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
     let (event_tx, _) = broadcast::channel(64);
     let app = router(Arc::clone(&runtime), event_tx);
     let session_id = create_session(app.clone()).await;
+    let read_fixture = "target/post-compact-read-fixture.txt";
+    fs::create_dir_all("target").unwrap();
+    fs::write(read_fixture, "pub fn compact_restore_fixture() {}").unwrap();
+
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            session_id.clone(),
+            None,
+            EventPayload::ToolCallRequested {
+                call_id: "read-call-1".into(),
+                tool_name: "read".into(),
+                arguments: serde_json::json!({ "path": read_fixture }),
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            session_id.clone(),
+            None,
+            EventPayload::ToolCallCompleted {
+                call_id: "read-call-1".into(),
+                tool_name: "read".into(),
+                result: ToolResult {
+                    call_id: "read-call-1".into(),
+                    content: "pub fn compact_restore_fixture() {}".into(),
+                    is_error: false,
+                    error: None,
+                    metadata: BTreeMap::new(),
+                    duration_ms: None,
+                },
+            },
+        ))
+        .await
+        .unwrap();
 
     for text in ["one", "two", "three"] {
         runtime
@@ -307,7 +344,7 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
         .await
         .unwrap();
     assert!(parent.context_messages.is_empty());
-    assert_eq!(parent.messages.len(), 6);
+    assert_eq!(parent.messages.len(), 8);
 
     let child = runtime.session_manager.read_model(&child_id).await.unwrap();
     assert_eq!(
@@ -315,6 +352,19 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
         Some(session_id.as_str())
     );
     assert!(!child.context_messages.is_empty());
+    let restored_context = child
+        .context_messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            astrcode_core::llm::LlmContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(restored_context.contains("<post_compact_context>"));
+    assert!(restored_context.contains(read_fixture));
+    assert!(restored_context.contains("compact_restore_fixture"));
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app,
@@ -323,6 +373,7 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
     .await;
     assert_eq!(snapshot.session_id, child_id);
     assert_eq!(snapshot.cursor.value, child.cursor());
+    let _ = fs::remove_file(read_fixture);
 }
 
 async fn create_session(app: Router) -> String {
@@ -395,6 +446,9 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
         llm_provider,
         context_assembler: Arc::new(LlmContextAssembler::new(ContextWindowSettings::default())),
+        auto_compact_failures: Arc::new(
+            astrcode_server::agent::AutoCompactFailureTracker::default(),
+        ),
         extension_runner: Arc::new(ExtensionRunner::new(
             Duration::from_secs(1),
             Arc::new(ExtensionRuntime::new()),

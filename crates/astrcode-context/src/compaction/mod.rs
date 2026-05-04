@@ -19,15 +19,18 @@ use crate::{
 
 const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";
 const COMPACT_SUMMARY_END: &str = "</compact_summary>";
+const MAX_PTL_RETRIES: usize = 3;
 
 mod assemble;
 mod parse;
 mod plan;
+mod post_compact;
 mod prompt;
 
 pub use assemble::{CompactSummaryEnvelope, CompactSummaryRenderOptions, format_compact_summary};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
+pub use post_compact::{PostCompactFile, PostCompactNote, recent_read_paths};
 
 /// 压缩操作的结果。
 ///
@@ -48,6 +51,22 @@ pub struct CompactResult {
     pub retained_messages: Vec<LlmMessage>,
     /// compact 前 transcript snapshot 的可读路径。
     pub transcript_path: Option<String>,
+}
+
+impl CompactResult {
+    /// 追加 compact 后恢复的运行时上下文。
+    ///
+    /// 调用方只提供已经收集好的文件和运行时备注；是否生成 message、如何渲染
+    /// `<post_compact_context>`、以及如何加入 hidden context 由 compact 模块掌握。
+    pub fn append_post_compact_context(
+        &mut self,
+        files: Vec<PostCompactFile>,
+        notes: Vec<PostCompactNote>,
+    ) {
+        if let Some(message) = post_compact::post_compact_context_message(files, notes) {
+            self.context_messages.push(message);
+        }
+    }
 }
 
 struct PreparedCompactParts {
@@ -169,12 +188,19 @@ where
 {
     let parts = prepare_compact_parts(messages, system_prompt)?;
     let mut repair_feedback: Option<String> = None;
+    let mut ptl_rounds_dropped = 0usize;
+    let mut repair_attempts = 0u8;
     let max_attempts = settings.compact_max_retry_attempts.max(1);
     let mut last_error: Option<CompactError> = None;
 
-    for _ in 0..max_attempts {
+    while repair_attempts < max_attempts {
+        let Some(prepared_input) =
+            compact_input_for_ptl_retry(&parts.prepared_input, ptl_rounds_dropped)
+        else {
+            break;
+        };
         let compact_messages = request_messages(
-            &parts.prepared_input,
+            &prepared_input,
             system_prompt,
             settings,
             repair_feedback.as_deref(),
@@ -182,11 +208,23 @@ where
         );
         let output = match request_text(compact_messages).await {
             Ok(output) => output,
+            Err(error) if should_retry_prompt_too_long(&error) => {
+                let Some(next_drop) =
+                    next_ptl_retry_drop(&parts.prepared_input, ptl_rounds_dropped)
+                else {
+                    last_error = Some(error);
+                    break;
+                };
+                ptl_rounds_dropped = next_drop;
+                last_error = Some(error);
+                continue;
+            },
             Err(error) => {
                 last_error = Some(error);
                 break;
             },
         };
+        repair_attempts += 1;
         match finish_compact_output(
             &output,
             parts.retained_messages.clone(),
@@ -212,6 +250,11 @@ where
     }))
 }
 
+fn should_retry_prompt_too_long(error: &CompactError) -> bool {
+    matches!(error, CompactError::Llm(LlmError::PromptTooLong(_)))
+        || is_prompt_too_long_message(&error.to_string())
+}
+
 pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
     assemble::parse_compact_summary_message(content)
 }
@@ -228,9 +271,9 @@ pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
         })
 }
 
-/// 预留给更宽泛的 synthetic context 判断；目前只有 compact summary。
+/// 预留给更宽泛的 synthetic context 判断。
 pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
-    is_compact_summary_message(message)
+    is_compact_summary_message(message) || post_compact::is_post_compact_context_message(message)
 }
 
 /// 粗略识别 provider 返回的上下文过长错误。
@@ -322,6 +365,46 @@ fn request_messages(
         custom_instructions,
     )));
     messages
+}
+
+fn compact_input_for_ptl_retry(
+    prepared_input: &PreparedCompactInput,
+    rounds_dropped: usize,
+) -> Option<PreparedCompactInput> {
+    if rounds_dropped == 0 {
+        return Some(prepared_input.clone());
+    }
+    let ranges = api_round_ranges(&prepared_input.messages);
+    let start = ranges.get(rounds_dropped)?.start;
+    Some(PreparedCompactInput {
+        messages: prepared_input.messages[start..].to_vec(),
+        prompt_mode: prepared_input.prompt_mode.clone(),
+    })
+}
+
+fn next_ptl_retry_drop(
+    prepared_input: &PreparedCompactInput,
+    current_rounds_dropped: usize,
+) -> Option<usize> {
+    let next = current_rounds_dropped.saturating_add(1);
+    let round_count = api_round_ranges(&prepared_input.messages).len();
+    (next <= MAX_PTL_RETRIES && next < round_count).then_some(next)
+}
+
+fn api_round_ranges(messages: &[LlmMessage]) -> Vec<std::ops::Range<usize>> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (index, message) in messages.iter().enumerate().skip(1) {
+        if message.role == LlmRole::User {
+            ranges.push(start..index);
+            start = index;
+        }
+    }
+    ranges.push(start..messages.len());
+    ranges
 }
 
 fn finish_compact_output(
@@ -757,6 +840,68 @@ scratchpad that should be ignored
         assert!(summary_request.contains("<summary>"));
         assert!(summary_request.contains("preserve compact instruction"));
         assert!(!summary_request.contains("Current runtime system prompt"));
+    }
+
+    #[tokio::test]
+    async fn compact_prompt_too_long_drops_oldest_api_round_and_retries() {
+        let settings = ContextWindowSettings::default();
+        let messages = vec![
+            LlmMessage::user("round one user"),
+            LlmMessage::assistant("round one assistant"),
+            LlmMessage::user("round two user"),
+            LlmMessage::assistant("round two assistant"),
+            LlmMessage::user("round three user"),
+            LlmMessage::assistant("round three assistant"),
+            LlmMessage::user("current user"),
+        ];
+        let attempts = Arc::new(Mutex::new(0usize));
+        let requests = Arc::new(Mutex::new(Vec::<Vec<LlmMessage>>::new()));
+        let attempts_for_request = Arc::clone(&attempts);
+        let requests_for_request = Arc::clone(&requests);
+
+        let result = compact_messages_with_request(
+            &messages,
+            None,
+            &settings,
+            &[],
+            &CompactSummaryRenderOptions::default(),
+            move |request| {
+                requests_for_request.lock().unwrap().push(request);
+                let attempts = Arc::clone(&attempts_for_request);
+                async move {
+                    let mut attempts = attempts.lock().unwrap();
+                    *attempts += 1;
+                    if *attempts == 1 {
+                        Err(
+                            LlmError::PromptTooLong("compact request exceeded context".into())
+                                .into(),
+                        )
+                    } else {
+                        Ok(valid_compact_summary().to_string())
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.messages_removed, 5);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| { visible_message_text(message).contains("round one user") })
+        );
+        assert!(!requests[1].iter().any(|message| {
+            visible_message_text(message).contains("round one user")
+                || visible_message_text(message).contains("round one assistant")
+        }));
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| { visible_message_text(message).contains("round two user") })
+        );
     }
 
     #[tokio::test]

@@ -29,12 +29,13 @@ use tokio::{
 
 use crate::{
     agent::{
-        AgentLoop, AgentError, AgentServices, AgentSignal, AgentTurnOutput,
+        AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput,
         compact::{
             CompactHookContext, collect_compact_instructions, compact_trigger_name,
             compact_with_forked_provider, dispatch_post_compact,
         },
         drive_agent,
+        post_compact::enrich_post_compact_context,
     },
     bootstrap::{
         ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot,
@@ -652,7 +653,7 @@ impl CommandHandler {
         let render_options = CompactSummaryRenderOptions {
             transcript_path: snapshot_path,
         };
-        let compaction = match compact_with_forked_provider(
+        let mut compaction = match compact_with_forked_provider(
             Arc::clone(&self.runtime.llm_provider),
             tools.clone(),
             &provider_messages,
@@ -675,6 +676,15 @@ impl CommandHandler {
                 return Ok(None);
             },
         };
+        enrich_post_compact_context(
+            &mut compaction,
+            sid,
+            &provider_messages,
+            &state.working_dir,
+            state.system_prompt.as_deref(),
+            &tools,
+        )
+        .await;
 
         if let Err(error) = dispatch_post_compact(
             &self.runtime.extension_runner,
@@ -900,6 +910,7 @@ impl CommandHandler {
                     extension_runner: runtime.extension_runner.clone(),
                     context_assembler: runtime.context_assembler.clone(),
                     session_manager: runtime.session_manager.clone(),
+                    auto_compact_failures: runtime.auto_compact_failures.clone(),
                 },
             );
 
@@ -1044,6 +1055,11 @@ impl CommandHandler {
         }
         for event in events.appended_events {
             let _ = self.event_tx.send(ClientNotification::Event(event));
+        }
+        if input.trigger == CompactTrigger::AutoThreshold {
+            self.runtime
+                .auto_compact_failures
+                .transfer_session(&parent_session_id, &child_session_id);
         }
         if input.switch_active {
             self.active_session_id = Some(child_session_id.clone());
@@ -1381,6 +1397,7 @@ mod tests {
             session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
             llm_provider,
             context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
+            auto_compact_failures: Arc::new(crate::agent::AutoCompactFailureTracker::default()),
             extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
