@@ -1,3 +1,3 @@
-
-1. 重构handler
-2. 优化prompt系统设计
+1. skill
+2. mcp
+3. 优化一下cli前端
