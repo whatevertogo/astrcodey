@@ -532,7 +532,8 @@ The summary should preserve the compact contract and omit this scratchpad later.
             LlmMessage::assistant("answer"),
             LlmMessage::user("recent"),
         ];
-        let result = compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
+        let result =
+            compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
 
         assert_eq!(result.messages_removed, 3);
         assert_eq!(result.retained_messages.len(), 2);
@@ -551,7 +552,8 @@ The summary should preserve the compact contract and omit this scratchpad later.
             LlmMessage::assistant("answer"),
             LlmMessage::user("recent real"),
         ];
-        let result = compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
+        let result =
+            compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
 
         assert_eq!(result.retained_messages.len(), 2);
         assert_eq!(result.messages_removed, 1);
@@ -820,5 +822,4 @@ scratchpad that should be ignored
                 .any(|message| { visible_message_text(message).contains("round two user") })
         );
     }
-
 }
