@@ -26,6 +26,8 @@ pub const SKILL_TOOL_NAME: &str = "Skill";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const MAX_INDEX_CHARS: usize = 8_000;
 const MAX_DESCRIPTION_CHARS: usize = 250;
+const SKILL_NAME_TAG: &str = "skill-name";
+const SKILL_ARGS_TAG: &str = "skill-args";
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(SkillExtension)
@@ -160,14 +162,16 @@ struct SkillToolArgs {
 fn skill_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SKILL_TOOL_NAME.into(),
-        description: "Load a named skill's full instructions and resource paths on demand.".into(),
+        description: "Execute a named skill by loading its instructions into the main \
+                      conversation."
+            .into(),
         parameters: json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
                 "skill": {
                     "type": "string",
-                    "description": "The exact skill name from the Skills section."
+                    "description": "The skill name, for example \"commit\", \"review\", or \"/commit\"."
                 },
                 "args": {
                     "type": "string",
@@ -489,8 +493,9 @@ fn format_skills_for_model(skills: &[SkillDefinition]) -> String {
     }
 
     let mut output = String::from(
-        "Available skills. When a skill matches the task, call the Skill tool with the exact \
-         skill name before continuing.\n",
+        "When a task matches one of these skills, calling the Skill tool with the exact skill \
+         name is required before continuing. Users may also refer to skills as slash commands, \
+         such as /commit.\n",
     );
     for skill in skills {
         let display = skill
@@ -512,7 +517,15 @@ fn format_skills_for_model(skills: &[SkillDefinition]) -> String {
 
 fn render_skill_content(skill: &SkillDefinition, args: Option<&str>, session_id: &str) -> String {
     let mut sections = Vec::new();
-    sections.push(format!("Loaded skill: {}", skill.id));
+    sections.push(format!("<{SKILL_NAME_TAG}>{}</{SKILL_NAME_TAG}>", skill.id));
+    if let Some(args) = args.filter(|args| !args.trim().is_empty()) {
+        sections.push(format!(
+            "<{SKILL_ARGS_TAG}>{}</{SKILL_ARGS_TAG}>",
+            args.trim()
+        ));
+    }
+
+    sections.push(format!("Skill: {}", skill.id));
     sections.push(format!("Description: {}", skill.description.trim()));
 
     if let Some(args) = args.filter(|args| !args.trim().is_empty()) {
@@ -523,10 +536,7 @@ fn render_skill_content(skill: &SkillDefinition, args: Option<&str>, session_id:
     sections.push(format!("Base directory for this skill: {skill_root}"));
 
     let mut guide = skill.guide.clone();
-    guide = guide.replace("${CLAUDE_SKILL_DIR}", &skill_root);
-    guide = guide.replace("${ASTRCODE_SKILL_DIR}", &skill_root);
-    guide = guide.replace("${CLAUDE_SESSION_ID}", session_id);
-    guide = guide.replace("${ASTRCODE_SESSION_ID}", session_id);
+    guide = substitute_skill_variables(&guide, &skill_root, session_id);
     sections.push(guide.trim().to_string());
 
     if !skill.allowed_tools.is_empty() {
@@ -547,6 +557,14 @@ fn render_skill_content(skill: &SkillDefinition, args: Option<&str>, session_id:
     }
 
     sections.join("\n\n")
+}
+
+fn substitute_skill_variables(guide: &str, skill_root: &str, session_id: &str) -> String {
+    let mut content = guide.replace("${SKILL_DIR}", skill_root);
+    content = content.replace("${SESSION_ID}", session_id);
+    content = content.replace("${CLAUDE_SKILL_DIR}", skill_root);
+    content = content.replace("${CLAUDE_SESSION_ID}", session_id);
+    content
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -695,8 +713,8 @@ mod tests {
         let skill_dir = write_skill(
             &workspace.join(".claude").join("skills"),
             "review",
-            "---\ndescription: Review code.\nallowed-tools: [read, grep]\n---\nRead \
-             ${ASTRCODE_SKILL_DIR} for ${ASTRCODE_SESSION_ID}.",
+            "---\ndescription: Review code.\nallowed-tools: [read, grep]\n---\nRead ${SKILL_DIR} \
+             for ${SESSION_ID}.",
         );
         fs::create_dir_all(skill_dir.join("references")).expect("asset dir");
         fs::write(skill_dir.join("references").join("rules.md"), "rules").expect("asset");
@@ -708,11 +726,28 @@ mod tests {
         );
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Loaded skill: review"));
+        assert!(result.content.contains("<skill-name>review</skill-name>"));
+        assert!(
+            result
+                .content
+                .contains("<skill-args>src/lib.rs</skill-args>")
+        );
+        assert!(result.content.contains("Skill: review"));
         assert!(result.content.contains("Invocation arguments: src/lib.rs"));
         assert!(result.content.contains("session-123"));
         assert!(result.content.contains("Skill-declared tools: read, grep"));
         assert!(result.content.contains("- references/rules.md"));
+    }
+
+    #[test]
+    fn skill_variable_substitution_accepts_neutral_and_claude_aliases() {
+        let output = substitute_skill_variables(
+            "${SKILL_DIR} ${SESSION_ID} ${CLAUDE_SKILL_DIR} ${CLAUDE_SESSION_ID}",
+            "/tmp/skill",
+            "session-1",
+        );
+
+        assert_eq!(output, "/tmp/skill session-1 /tmp/skill session-1");
     }
 
     #[test]
@@ -727,7 +762,8 @@ mod tests {
 
         let index = format_skills_for_model(&[skill]);
 
-        assert!(index.contains("call the Skill tool"));
+        assert!(index.contains("calling the Skill tool"));
+        assert!(index.contains("/commit"));
         assert!(index.contains("- commit: Commit changes."));
     }
 
@@ -855,6 +891,6 @@ mod tests {
             .expect("skill tool");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Loaded skill: commit"));
+        assert!(result.content.contains("Skill: commit"));
     }
 }

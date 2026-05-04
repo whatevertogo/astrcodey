@@ -14,14 +14,14 @@
   "tools": [
     {
       "name": "Skill",
-      "description": "Load a named skill's full instructions and resource paths on demand.",
+      "description": "Execute a named skill by loading its instructions into the main conversation.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "skill": {
             "type": "string",
-            "description": "The exact skill name from the Skills section."
+            "description": "The skill name, for example \"commit\", \"review\", or \"/commit\"."
           },
           "args": {
             "type": "string",
