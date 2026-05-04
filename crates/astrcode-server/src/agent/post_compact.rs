@@ -241,8 +241,7 @@ fn tool_origin_name(origin: ToolOrigin) -> &'static str {
         ToolOrigin::Builtin => "builtin",
         ToolOrigin::Bundled => "bundled",
         ToolOrigin::Extension => "extension",
-        ToolOrigin::Sdk => "sdk",
-        ToolOrigin::Mcp => "mcp",
+        ToolOrigin::Sdk => "sdk"
     }
 }
 

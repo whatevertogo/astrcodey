@@ -27,9 +27,7 @@ pub enum ToolOrigin {
     /// Tools contributed by user or project extensions.
     Extension,
     /// Tools registered by a future SDK surface.
-    Sdk,
-    /// Tools adapted from future MCP integrations.
-    Mcp,
+    Sdk
 }
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
