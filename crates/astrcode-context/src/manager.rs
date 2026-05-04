@@ -1,10 +1,7 @@
-use astrcode_core::llm::{LlmMessage, LlmProvider, ModelLimits};
+use astrcode_core::llm::{LlmMessage, ModelLimits};
 
 use crate::{
-    compaction::{
-        CompactError, CompactResult, CompactSkipReason, compact_messages_with_provider,
-        compact_messages_with_render_options,
-    },
+    compaction::{CompactResult, CompactSkipReason, compact_messages_with_render_options},
     settings::ContextWindowSettings,
     token_usage::{build_prompt_snapshot, should_compact},
 };
@@ -93,45 +90,6 @@ impl LlmContextAssembler {
             input.system_prompt,
             input.model_limits.clone(),
         )
-    }
-
-    /// 准备 provider 可见消息；达到阈值时优先使用 provider-backed compact。
-    pub async fn prepare_messages_with_provider(
-        &self,
-        input: ContextPrepareInput<'_>,
-        provider: &dyn LlmProvider,
-    ) -> Result<PreparedContext, CompactError> {
-        let mut messages = input.messages;
-        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
-        let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
-            let prepared = match compact_messages_with_provider(
-                provider,
-                &messages,
-                input.system_prompt,
-                &self.settings,
-            )
-            .await
-            {
-                Ok(compaction) => prepared_context_from_compaction(compaction),
-                Err(_) => {
-                    let fallback_compaction = compact_messages_with_render_options(
-                        &messages,
-                        input.system_prompt,
-                        &Default::default(),
-                    )?;
-                    prepared_context_from_compaction(fallback_compaction)
-                },
-            };
-            messages = prepared.messages;
-            prepared.compaction
-        } else {
-            None
-        };
-
-        Ok(PreparedContext {
-            messages,
-            compaction,
-        })
     }
 
     fn snapshot(

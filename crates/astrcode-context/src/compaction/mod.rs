@@ -10,7 +10,7 @@
 
 use std::future::Future;
 
-use astrcode_core::llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole};
+use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
 
 use crate::{
     settings::ContextWindowSettings,
@@ -122,21 +122,6 @@ impl From<LlmError> for CompactError {
     }
 }
 
-/// 不调用 LLM 的 compact fallback。
-///
-/// 自动 compact 路径需要保证普通对话不会因为摘要模型格式错误而完全阻断；
-/// 这个 fallback 只保留低保真但合法的九段结构。
-pub fn compact_messages(
-    messages: &[LlmMessage],
-    system_prompt: Option<&str>,
-) -> Result<CompactResult, CompactSkipReason> {
-    compact_messages_with_render_options(
-        messages,
-        system_prompt,
-        &CompactSummaryRenderOptions::default(),
-    )
-}
-
 /// 不调用 LLM 的 compact fallback，并使用指定的 summary 渲染选项。
 pub fn compact_messages_with_render_options(
     messages: &[LlmMessage],
@@ -153,24 +138,6 @@ pub fn compact_messages_with_render_options(
         system_prompt,
         render_options,
     ))
-}
-
-/// 使用 provider 直接生成 compact summary 的兼容入口。
-pub async fn compact_messages_with_provider(
-    provider: &dyn LlmProvider,
-    messages: &[LlmMessage],
-    system_prompt: Option<&str>,
-    settings: &ContextWindowSettings,
-) -> Result<CompactResult, CompactError> {
-    compact_messages_with_request(
-        messages,
-        system_prompt,
-        settings,
-        &[],
-        &CompactSummaryRenderOptions::default(),
-        |request_messages| collect_compact_output(provider, request_messages),
-    )
-    .await
 }
 
 /// 使用调用方提供的文本请求函数生成 compact summary。
@@ -515,61 +482,11 @@ fn truncate_summary_line(text: &str) -> String {
     format!("{}...", text[..end].trim())
 }
 
-async fn collect_compact_output(
-    provider: &dyn LlmProvider,
-    messages: Vec<LlmMessage>,
-) -> Result<String, CompactError> {
-    let mut rx = provider.generate(messages, Vec::new()).await?;
-    let mut output = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            LlmEvent::ContentDelta { delta } => output.push_str(&delta),
-            LlmEvent::Done { .. } => break,
-            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message).into()),
-            LlmEvent::ToolCallStart { .. } | LlmEvent::ToolCallDelta { .. } => {},
-        }
-    }
-    Ok(output)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use astrcode_core::llm::ModelLimits;
-    use tokio::sync::mpsc;
-
     use super::*;
-
-    struct CapturingCompactProvider {
-        messages: Arc<Mutex<Vec<LlmMessage>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for CapturingCompactProvider {
-        async fn generate(
-            &self,
-            messages: Vec<LlmMessage>,
-            _tools: Vec<astrcode_core::tool::ToolDefinition>,
-        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-            *self.messages.lock().unwrap() = messages;
-            let (tx, rx) = mpsc::unbounded_channel();
-            let _ = tx.send(LlmEvent::ContentDelta {
-                delta: valid_compact_summary().into(),
-            });
-            let _ = tx.send(LlmEvent::Done {
-                finish_reason: "stop".into(),
-            });
-            Ok(rx)
-        }
-
-        fn model_limits(&self) -> ModelLimits {
-            ModelLimits {
-                max_input_tokens: 1024,
-                max_output_tokens: 1024,
-            }
-        }
-    }
 
     fn valid_compact_summary() -> &'static str {
         r#"<analysis>
@@ -615,7 +532,7 @@ The summary should preserve the compact contract and omit this scratchpad later.
             LlmMessage::assistant("answer"),
             LlmMessage::user("recent"),
         ];
-        let result = compact_messages(&messages, None).unwrap();
+        let result = compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
 
         assert_eq!(result.messages_removed, 3);
         assert_eq!(result.retained_messages.len(), 2);
@@ -634,7 +551,7 @@ The summary should preserve the compact contract and omit this scratchpad later.
             LlmMessage::assistant("answer"),
             LlmMessage::user("recent real"),
         ];
-        let result = compact_messages(&messages, None).unwrap();
+        let result = compact_messages_with_render_options(&messages, None, &Default::default()).unwrap();
 
         assert_eq!(result.retained_messages.len(), 2);
         assert_eq!(result.messages_removed, 1);
@@ -904,35 +821,4 @@ scratchpad that should be ignored
         );
     }
 
-    #[tokio::test]
-    async fn provider_compact_uses_incremental_prompt_when_previous_summary_exists() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let provider = CapturingCompactProvider {
-            messages: Arc::clone(&captured),
-        };
-        let messages = vec![
-            LlmMessage::user(assemble::compact_summary_message_text(
-                "prior compact summary",
-                &CompactSummaryRenderOptions::default(),
-            )),
-            LlmMessage::user("old real"),
-            LlmMessage::assistant("answer"),
-            LlmMessage::user("recent real"),
-        ];
-
-        let result = compact_messages_with_provider(
-            &provider,
-            &messages,
-            None,
-            &ContextWindowSettings::default(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.messages_removed, 1);
-        let sent = captured.lock().unwrap();
-        let summary_request = visible_message_text(sent.last().unwrap());
-        assert!(summary_request.contains("## Incremental Mode"));
-        assert!(summary_request.contains("prior compact summary"));
-    }
 }

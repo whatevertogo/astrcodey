@@ -135,7 +135,6 @@ name = "astrcode-context"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
- "async-trait",
  "serde_json",
  "tokio",
 ]
