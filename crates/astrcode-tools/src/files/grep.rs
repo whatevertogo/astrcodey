@@ -118,6 +118,7 @@ impl Tool for GrepTool {
                           lines are needed. Use find for path glob search."
                 .into(),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -181,10 +182,6 @@ impl Tool for GrepTool {
             }),
         }
     }
-    fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Parallel
-    }
-
     /// 执行内容搜索：解析参数 → 编译正则 → 遍历文件 → 收集匹配 → 格式化输出。
     async fn execute(
         &self,

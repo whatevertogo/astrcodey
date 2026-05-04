@@ -7,7 +7,7 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         HookSubscription,
     },
-    tool::{ToolDefinition, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
     types::project_hash_from_path,
 };
 use astrcode_support::hostpaths;
@@ -109,7 +109,7 @@ impl Extension for TodoToolExtension {
         let store = ProgressListStore::new(progress_store_root(&ctx.session_id, working_dir));
         Ok(match handle_todo_write(arguments, &store) {
             Ok(result) => result,
-            Err(error) => text_result(error.clone(), true, metadata([("error", json!(error))])),
+            Err(error) => ToolResult::text(error.clone(), true, tool_metadata([("error", json!(error))])),
         })
     }
 }
@@ -368,10 +368,10 @@ fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<Tool
         );
     }
 
-    Ok(text_result(
+    Ok(ToolResult::text(
         content,
         false,
-        metadata([
+        tool_metadata([
             ("oldTodos", json!(outcome.old_todos)),
             ("newTodos", json!(outcome.new_todos)),
             (
@@ -477,29 +477,8 @@ fn todo_write_tool_definition() -> ToolDefinition {
             "required": ["todos"]
         }),
         origin: ToolOrigin::Bundled,
+        execution_mode: ExecutionMode::Sequential,
     }
-}
-
-fn text_result(
-    content: String,
-    is_error: bool,
-    metadata: BTreeMap<String, serde_json::Value>,
-) -> ToolResult {
-    ToolResult {
-        call_id: String::new(),
-        content: content.clone(),
-        is_error,
-        error: is_error.then_some(content),
-        metadata,
-        duration_ms: None,
-    }
-}
-
-fn metadata<const N: usize>(entries: [(&str, serde_json::Value); N]) -> BTreeMap<String, Value> {
-    entries
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect()
 }
 
 #[cfg(test)]

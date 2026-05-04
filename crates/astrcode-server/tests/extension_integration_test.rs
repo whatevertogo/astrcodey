@@ -8,7 +8,7 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         HookSubscription, PreToolUseInput,
     },
-    tool::{ToolDefinition, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use astrcode_extensions::{
     context::ServerExtensionContext,
@@ -126,6 +126,7 @@ impl Extension for EchoToolExtension {
                 }
             }),
             origin: ToolOrigin::Extension,
+            execution_mode: ExecutionMode::Sequential,
         }]
     }
 
@@ -187,6 +188,7 @@ impl Extension for FixedToolExtension {
                 "properties": {}
             }),
             origin: ToolOrigin::Extension,
+            execution_mode: ExecutionMode::Sequential,
         }]
     }
 

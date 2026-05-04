@@ -59,6 +59,7 @@ impl Tool for FindFilesTool {
                           inspect a known result."
                 .into(),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -94,10 +95,6 @@ impl Tool for FindFilesTool {
             }),
         }
     }
-    fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Parallel
-    }
-
     /// 执行文件查找：解析 glob 模式 → 遍历匹配 → 过滤隐藏/gitignore → 按时间排序。
     async fn execute(
         &self,

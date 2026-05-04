@@ -241,7 +241,7 @@ fn tool_origin_name(origin: ToolOrigin) -> &'static str {
         ToolOrigin::Builtin => "builtin",
         ToolOrigin::Bundled => "bundled",
         ToolOrigin::Extension => "extension",
-        ToolOrigin::Sdk => "sdk"
+        ToolOrigin::Sdk => "sdk",
     }
 }
 
@@ -400,6 +400,7 @@ mod tests {
             description: "read files".into(),
             parameters: json!({}),
             origin: ToolOrigin::Builtin,
+            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }];
         let mut compaction = CompactResult {
             pre_tokens: 100,

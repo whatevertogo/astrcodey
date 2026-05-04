@@ -16,9 +16,9 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         HookSubscription, PromptContributions,
     },
-    tool::{ToolDefinition, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
-use astrcode_support::hostpaths;
+use astrcode_support::{frontmatter, hostpaths};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -181,6 +181,7 @@ fn skill_tool_definition() -> ToolDefinition {
             "required": ["skill"]
         }),
         origin: ToolOrigin::Bundled,
+        execution_mode: ExecutionMode::Sequential,
     }
 }
 
@@ -188,12 +189,15 @@ fn handle_skill_tool(arguments: Value, working_dir: &str, session_id: &str) -> T
     let args = match serde_json::from_value::<SkillToolArgs>(arguments) {
         Ok(args) => args,
         Err(error) => {
-            return text_result(
-                String::new(),
-                true,
-                Some(format!("invalid Skill input: {error}")),
-                BTreeMap::new(),
-            );
+            let msg = format!("invalid Skill input: {error}");
+            return ToolResult {
+                call_id: String::new(),
+                content: String::new(),
+                is_error: true,
+                error: Some(msg),
+                metadata: BTreeMap::new(),
+                duration_ms: None,
+            };
         },
     };
 
@@ -207,50 +211,29 @@ fn handle_skill_tool(arguments: Value, working_dir: &str, session_id: &str) -> T
             .map(|skill| skill.id.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        return text_result(
-            String::new(),
-            true,
-            Some(format!(
-                "unknown skill '{}'. Available skills: {}",
-                normalize_skill_request(&args.skill),
-                available
-            )),
-            metadata([("availableSkills", json!(available))]),
+        let msg = format!(
+            "unknown skill '{}'. Available skills: {}",
+            normalize_skill_request(&args.skill),
+            available
         );
+        return ToolResult {
+            call_id: String::new(),
+            content: msg.clone(),
+            is_error: true,
+            error: Some(msg),
+            metadata: tool_metadata([("availableSkills", json!(available))]),
+            duration_ms: None,
+        };
     };
 
-    text_result(
+    ToolResult::text(
         render_skill_content(skill, args.args.as_deref(), session_id),
         false,
-        None,
-        metadata([
+        tool_metadata([
             ("skill", json!(skill.id)),
             ("source", json!(skill.source.label())),
         ]),
     )
-}
-
-fn text_result(
-    content: String,
-    is_error: bool,
-    error: Option<String>,
-    metadata: BTreeMap<String, Value>,
-) -> ToolResult {
-    ToolResult {
-        call_id: String::new(),
-        content,
-        is_error,
-        error,
-        metadata,
-        duration_ms: None,
-    }
-}
-
-fn metadata<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
-    entries
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect()
 }
 
 fn discover_skills(working_dir: &str) -> Vec<SkillDefinition> {
@@ -354,26 +337,26 @@ fn parse_skill_md(
     source: SkillSource,
 ) -> Option<SkillDefinition> {
     let normalized = normalize_skill_content(content);
-    let (frontmatter, body) = split_frontmatter(&normalized)?;
+    let (frontmatter, body) = frontmatter::split_frontmatter(&normalized)?;
     let raw = serde_yaml::from_str::<RawSkillFrontmatter>(frontmatter).ok()?;
     let guide = body.trim().to_string();
     if guide.is_empty() {
         return None;
     }
 
-    let description = string_value(raw.description.as_ref())
+    let description = frontmatter::yaml_string_value(raw.description.as_ref())
         .filter(|text| !text.trim().is_empty())
         .or_else(|| extract_description_from_markdown(&guide))?;
 
     Some(SkillDefinition {
         id: id.to_string(),
-        display_name: string_value(raw.name.as_ref()).filter(|name| name != id),
+        display_name: frontmatter::yaml_string_value(raw.name.as_ref()).filter(|name| name != id),
         description,
-        when_to_use: string_value(raw.when_to_use.as_ref()),
+        when_to_use: frontmatter::yaml_string_value(raw.when_to_use.as_ref()),
         guide,
         asset_files: collect_asset_files(&skill_root),
         skill_root,
-        allowed_tools: parse_allowed_tools(raw.allowed_tools.as_ref()),
+        allowed_tools: frontmatter::yaml_parse_tools_list(raw.allowed_tools.as_ref()),
         source,
     })
 }
@@ -383,56 +366,6 @@ fn normalize_skill_content(content: &str) -> String {
         .trim_start_matches('\u{feff}')
         .replace("\r\n", "\n")
         .replace('\r', "\n")
-}
-
-fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
-    if !content.starts_with("---\n") {
-        return None;
-    }
-
-    let rest = &content[4..];
-    for marker in ["\n---\n", "\n...\n"] {
-        if let Some(end) = rest.find(marker) {
-            return Some((&rest[..end], &rest[end + marker.len()..]));
-        }
-    }
-    for marker in ["\n---", "\n..."] {
-        if let Some(end) = rest.find(marker) {
-            if end + marker.len() == rest.len() {
-                return Some((&rest[..end], ""));
-            }
-        }
-    }
-    None
-}
-
-fn string_value(value: Option<&serde_yaml::Value>) -> Option<String> {
-    match value? {
-        serde_yaml::Value::String(text) => Some(text.trim().to_string()),
-        serde_yaml::Value::Number(number) => Some(number.to_string()),
-        serde_yaml::Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_allowed_tools(value: Option<&serde_yaml::Value>) -> Vec<String> {
-    match value {
-        Some(serde_yaml::Value::String(text)) => split_csv(text),
-        Some(serde_yaml::Value::Sequence(values)) => values
-            .iter()
-            .filter_map(|value| string_value(Some(value)))
-            .flat_map(|value| split_csv(&value))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn split_csv(text: &str) -> Vec<String> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|tool| !tool.is_empty())
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn extract_description_from_markdown(markdown: &str) -> Option<String> {

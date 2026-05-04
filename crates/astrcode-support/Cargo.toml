@@ -8,4 +8,5 @@ description = "Host environment utilities: path resolution, shell detection, too
 astrcode-core = { path = "../astrcode-core" }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_yaml = "0.9"
 dirs = "6"

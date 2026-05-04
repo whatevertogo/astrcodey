@@ -40,6 +40,7 @@ async fn runtime_queues_and_flushes_tools() {
         description: "test".into(),
         parameters: serde_json::json!({}),
         origin: astrcode_core::tool::ToolOrigin::Extension,
+        execution_mode: astrcode_core::tool::ExecutionMode::Sequential,
     };
     runtime.register_tool(def.clone());
     let tools = runtime.take_pending_tools();

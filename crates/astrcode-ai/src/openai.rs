@@ -138,6 +138,7 @@ impl OpenAiProvider {
         });
 
         if !tools.is_empty() {
+            body["parallel_tool_calls"] = serde_json::json!(true);
             body["tools"] = responses_tools_json(tools);
         }
         if let Some(t) = self.config.temperature {
@@ -891,7 +892,7 @@ impl Default for Utf8StreamDecoder {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::ToolOrigin;
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
 
     use super::*;
 
@@ -930,6 +931,7 @@ mod tests {
                 "required": ["path"]
             }),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
         }
     }
 
@@ -964,6 +966,14 @@ mod tests {
 
         assert!(body["prompt_cache_key"].as_str().is_some());
         assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn responses_request_enables_parallel_tool_calls_when_tools_exist() {
+        let provider = provider(OpenAiApiMode::Responses, false);
+        let body = provider.build_request_body(&[LlmMessage::user("hello")], &[sample_tool()]);
+
+        assert_eq!(body["parallel_tool_calls"], true);
     }
 
     #[test]

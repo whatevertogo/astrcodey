@@ -53,6 +53,7 @@ impl Tool for ReadFileTool {
                           directory or the current session's tool-result artifact directory."
                 .into(),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -86,10 +87,6 @@ impl Tool for ReadFileTool {
             }),
         }
     }
-    fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Parallel
-    }
-
     /// 执行文件读取：解析路径 → 安全校验 → 读取内容 → 按行编号格式化输出。
     async fn execute(
         &self,

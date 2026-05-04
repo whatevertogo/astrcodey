@@ -10,6 +10,8 @@
 
 use std::path::PathBuf;
 
+use astrcode_support::{frontmatter, hostpaths};
+
 /// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -71,7 +73,8 @@ pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
     let mut agents = builtin_agents();
 
     // 扫描用户主目录下的 Agent
-    if let Some(home) = home_dir() {
+    {
+        let home = hostpaths::resolve_home_dir();
         for d in &[
             home.join(".claude").join("agents"),
             home.join(".astrcode").join("agents"),
@@ -156,9 +159,9 @@ fn parse(path: &str, content: &str) -> Result<AgentConfig, String> {
     let text = text.trim_start_matches('\u{feff}');
 
     if path.ends_with(".md") || path.ends_with(".markdown") {
-        let (fm, body) =
-            split_frontmatter(text).map_err(|_| format!("{path}: missing YAML frontmatter"))?;
-        build(path, &fm, Some(&body))
+        let (fm, body) = frontmatter::split_frontmatter(text)
+            .ok_or_else(|| format!("{path}: missing YAML frontmatter"))?;
+        build(path, fm, Some(body))
     } else {
         build(path, text, None)
     }
@@ -178,22 +181,22 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         .and_then(|s| s.to_str())
         .unwrap_or("agent")
         .to_string();
-    let name = str_val(m, "name").unwrap_or(fallback);
+    let name = mapping_str(m, "name").unwrap_or(fallback);
     let id = normalize_id(&name);
 
-    let description =
-        str_val(m, "description").ok_or_else(|| format!("{path}: description is required"))?;
+    let description = mapping_str(m, "description")
+        .ok_or_else(|| format!("{path}: description is required"))?;
 
-    let tools = parse_tools(m);
+    let tools = frontmatter::yaml_parse_tools_list(m.get(&serde_yaml::Value::String("tools".into())));
     // "inherit" 和空字符串表示继承父级模型设置
-    let model = str_val(m, "model").filter(|s| s != "inherit" && !s.is_empty());
+    let model = mapping_str(m, "model").filter(|s| s != "inherit" && !s.is_empty());
 
     // 系统提示词优先级: markdown 正文 > systemPrompt 字段 > prompt 字段 > 空
     let body = markdown_body
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty())
-        .or_else(|| str_val(m, "systemPrompt"))
-        .or_else(|| str_val(m, "prompt"))
+        .or_else(|| mapping_str(m, "systemPrompt"))
+        .or_else(|| mapping_str(m, "prompt"))
         .unwrap_or_default();
 
     Ok(AgentConfig {
@@ -206,59 +209,10 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
     })
 }
 
-/// 解析 tools 字段，支持 CSV 字符串和 YAML 列表两种格式。
-fn parse_tools(m: &serde_yaml::Mapping) -> Vec<String> {
-    let key = serde_yaml::Value::String("tools".into());
-    let Some(v) = m.get(&key) else {
-        return Vec::new();
-    };
-    match v {
-        // CSV 格式: "read, grep, shell"
-        serde_yaml::Value::String(s) => s
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect(),
-        // YAML 列表格式: ["read", "grep", "shell"]
-        serde_yaml::Value::Sequence(seq) => seq
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// 从 YAML 映射中获取字符串值。
-fn str_val(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
+fn mapping_str(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
     let v = m.get(serde_yaml::Value::String(key.into()))?;
     v.as_str().map(String::from)
-}
-
-// ─── Frontmatter 分割 ───────────────────────────────────────────────
-
-/// 将 Markdown 内容分割为 YAML frontmatter 和正文。
-///
-/// frontmatter 以 `---` 开头和结尾，支持 `...` 作为结束标记。
-fn split_frontmatter(content: &str) -> Result<(String, String), ()> {
-    let mut lines = content.lines();
-    if lines.next() != Some("---") {
-        return Err(());
-    }
-    let rest: Vec<&str> = lines.collect();
-    for (i, line) in rest.iter().enumerate() {
-        // 结束标记必须是 `---` 或 `...`，且下一行不能以空格或制表符开头
-        // （避免将内容中的 `---` 误判为结束标记）
-        if (*line == "---" || *line == "...")
-            && rest
-                .get(i + 1)
-                .is_none_or(|next| !next.starts_with(' ') && !next.starts_with('\t'))
-        {
-            let fm = rest[..i].join("\n");
-            let body = rest[i + 1..].join("\n");
-            return Ok((fm, body));
-        }
-    }
-    Err(())
 }
 
 /// 将 Agent 名称标准化为 ID 格式。
@@ -278,14 +232,6 @@ fn normalize_id(name: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
-}
-
-/// 获取用户主目录，兼容 Unix ($HOME) 和 Windows (%USERPROFILE%)。
-fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
 }
 
 // ─── 测试 ───────────────────────────────────────────────────────────

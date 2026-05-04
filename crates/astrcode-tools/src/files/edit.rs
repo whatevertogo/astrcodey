@@ -60,6 +60,7 @@ impl Tool for EditFileTool {
                           edits for atomic multiEdit-style changes."
                 .into(),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Sequential,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

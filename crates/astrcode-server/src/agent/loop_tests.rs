@@ -1,6 +1,7 @@
 // Agent loop 测试模块。
 
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -446,6 +447,7 @@ impl Tool for PanicIfExecutedTool {
             description: "test shell".into(),
             parameters: serde_json::json!({"type": "object"}),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Sequential,
         }
     }
 
@@ -516,6 +518,52 @@ impl LlmProvider for ToolCallsThenFinalLlm {
     }
 }
 
+struct ToolSearchThenFinalLlm {
+    call_count: AtomicUsize,
+    captured_tool_names: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ToolSearchThenFinalLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.captured_tool_names
+            .lock()
+            .unwrap()
+            .push(tools.into_iter().map(|tool| tool.name).collect());
+        let call_count = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if call_count == 0 {
+            let _ = tx.send(LlmEvent::ToolCallStart {
+                call_id: "search-1".into(),
+                name: TOOL_SEARCH_TOOL_NAME.into(),
+                arguments: serde_json::json!({"query": "github"}).to_string(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            });
+        } else {
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "done".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 1024,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
 struct BarrierTool {
     name: &'static str,
     barrier: Arc<Barrier>,
@@ -566,6 +614,30 @@ impl Tool for DelayTool {
             sleep(Duration::from_millis(self.delay_ms)).await;
         }
         Ok(success_tool_result(self.name))
+    }
+}
+
+struct StaticResultTool {
+    definition: ToolDefinition,
+    result: ToolResult,
+}
+
+#[async_trait::async_trait]
+impl Tool for StaticResultTool {
+    fn definition(&self) -> ToolDefinition {
+        self.definition.clone()
+    }
+
+    fn execution_mode(&self) -> ExecutionMode {
+        self.definition.execution_mode
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.result.clone())
     }
 }
 
@@ -654,6 +726,7 @@ fn test_tool_definition(name: &str) -> ToolDefinition {
         description: format!("test tool {name}"),
         parameters: serde_json::json!({"type": "object"}),
         origin: ToolOrigin::Builtin,
+        execution_mode: ExecutionMode::Sequential,
     }
 }
 
@@ -816,6 +889,79 @@ async fn parallel_tools_in_same_batch_overlap() {
     .await
     .expect("parallel tools should not deadlock")
     .unwrap();
+}
+
+#[tokio::test]
+async fn tool_search_result_activates_mcp_tool_for_next_provider_request() {
+    let captured_tool_names = Arc::new(Mutex::new(Vec::new()));
+    let mcp_tool_name = "mcp__github__create_issue";
+    let tool_registry = test_registry(vec![
+        Arc::new(StaticResultTool {
+            definition: ToolDefinition {
+                name: TOOL_SEARCH_TOOL_NAME.into(),
+                description: "search mcp tools".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                origin: ToolOrigin::Bundled,
+                execution_mode: ExecutionMode::Parallel,
+            },
+            result: ToolResult {
+                call_id: String::new(),
+                content: "matched github issue tool".into(),
+                is_error: false,
+                error: None,
+                metadata: BTreeMap::from([(
+                    TOOL_SEARCH_METADATA_KEY.into(),
+                    serde_json::json!({
+                        "matches": [{
+                            "name": mcp_tool_name,
+                            "server": "github",
+                            "tool": "create_issue"
+                        }]
+                    }),
+                )]),
+                duration_ms: None,
+            },
+        }),
+        Arc::new(StaticResultTool {
+            definition: ToolDefinition {
+                name: mcp_tool_name.into(),
+                description: "create github issue".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                origin: ToolOrigin::Bundled,
+                execution_mode: ExecutionMode::Sequential,
+            },
+            result: success_tool_result("created"),
+        }),
+    ]);
+
+    let agent_loop = AgentLoop::new(
+        "session-1".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            Arc::new(ToolSearchThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                captured_tool_names: Arc::clone(&captured_tool_names),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
+    );
+
+    agent_loop
+        .process_prompt("search mcp", vec![], None)
+        .await
+        .unwrap();
+
+    let captured = captured_tool_names.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(captured[0].iter().any(|name| name == TOOL_SEARCH_TOOL_NAME));
+    assert!(!captured[0].iter().any(|name| name == mcp_tool_name));
+    assert!(captured[1].iter().any(|name| name == mcp_tool_name));
 }
 
 #[tokio::test]

@@ -58,6 +58,7 @@ impl Tool for ShellTool {
                 shell.name
             ),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Sequential,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

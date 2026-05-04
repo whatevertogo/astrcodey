@@ -45,6 +45,14 @@ pub trait Extension: Send + Sync {
         vec![]
     }
 
+    /// 可选：返回绑定到指定工作目录的工具列表。
+    ///
+    /// 默认复用静态 `tools()`，需要按项目配置动态发现工具的扩展可覆盖此方法。
+    async fn tools_for(&self, working_dir: &str) -> Vec<ToolDefinition> {
+        let _ = working_dir;
+        self.tools()
+    }
+
     /// 可选：执行 `tools()` 返回的某个工具。
     ///
     /// 默认实现返回 `NotFound` 错误，保持仅元数据的扩展有效。

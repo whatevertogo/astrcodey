@@ -35,7 +35,11 @@ impl ToolRegistry {
         let mut definitions = self
             .tools
             .values()
-            .map(|tool| tool.definition())
+            .map(|tool| {
+                let mut definition = tool.definition();
+                definition.execution_mode = tool.execution_mode();
+                definition
+            })
             .collect::<Vec<_>>();
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         definitions
@@ -70,7 +74,11 @@ impl ToolRegistry {
 
     /// 按名称查找工具定义，未找到返回 `None`。
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
-        self.tools.get(name).map(|t| t.definition())
+        self.tools.get(name).map(|tool| {
+            let mut definition = tool.definition();
+            definition.execution_mode = tool.execution_mode();
+            definition
+        })
     }
 
     /// Drain all registered tools into a Vec (consumes the registry).
@@ -151,6 +159,23 @@ mod tests {
     }
 
     #[test]
+    fn readonly_builtins_are_marked_parallel() {
+        let mut registry = ToolRegistry::new();
+        for tool in builtin_tools(std::path::PathBuf::from("."), 30) {
+            registry.register(tool);
+        }
+
+        for name in ["find", "grep", "read"] {
+            let definition = registry.find_definition(name).unwrap();
+            assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
+        }
+        for name in ["edit", "patch", "shell", "write"] {
+            let definition = registry.find_definition(name).unwrap();
+            assert_eq!(definition.execution_mode, ExecutionMode::Sequential);
+        }
+    }
+
+    #[test]
     fn list_definitions_is_sorted_by_tool_name() {
         struct NamedTool(&'static str);
 
@@ -162,6 +187,7 @@ mod tests {
                     description: String::new(),
                     parameters: serde_json::json!({"type": "object"}),
                     origin: astrcode_core::tool::ToolOrigin::Extension,
+                    execution_mode: ExecutionMode::Sequential,
                 }
             }
 
@@ -186,5 +212,41 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, ["alpha", "middle", "zeta"]);
+    }
+
+    #[test]
+    fn list_definitions_carries_tool_execution_mode() {
+        struct ParallelNamedTool;
+
+        #[async_trait::async_trait]
+        impl Tool for ParallelNamedTool {
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "parallel".into(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    origin: astrcode_core::tool::ToolOrigin::Builtin,
+                    execution_mode: ExecutionMode::Sequential,
+                }
+            }
+
+            fn execution_mode(&self) -> ExecutionMode {
+                ExecutionMode::Parallel
+            }
+
+            async fn execute(
+                &self,
+                _arguments: serde_json::Value,
+                _ctx: &ToolExecutionContext,
+            ) -> Result<ToolResult, ToolError> {
+                unreachable!("registry metadata test does not execute tools")
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ParallelNamedTool));
+
+        let definition = registry.find_definition("parallel").unwrap();
+        assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
     }
 }

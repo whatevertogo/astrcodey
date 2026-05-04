@@ -169,6 +169,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         .register(astrcode_extension_agent_tools::extension())
         .await;
     extension_runner
+        .register(astrcode_extension_mcp::extension())
+        .await;
+    extension_runner
         .register(astrcode_extension_skill::extension())
         .await;
     extension_runner
@@ -371,6 +374,7 @@ mod tests {
                 description: self.description.into(),
                 parameters: serde_json::json!({"type": "object"}),
                 origin: ToolOrigin::Extension,
+                execution_mode: astrcode_core::tool::ExecutionMode::Sequential,
             }]
         }
     }

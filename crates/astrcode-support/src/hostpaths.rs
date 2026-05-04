@@ -65,6 +65,11 @@ pub fn extensions_dir() -> PathBuf {
     astrcode_dir().join("extensions")
 }
 
+/// 获取全局 MCP 配置文件：`~/.astrcode/mcp.json`。
+pub fn mcp_config_path() -> PathBuf {
+    astrcode_dir().join("mcp.json")
+}
+
 /// 获取日志目录：`~/.astrcode/logs/`。
 pub fn logs_dir() -> PathBuf {
     astrcode_dir().join("logs")
@@ -82,6 +87,11 @@ pub fn project_extensions_dir(workspace: &str) -> PathBuf {
     PathBuf::from(workspace)
         .join(".astrcode")
         .join("extensions")
+}
+
+/// 获取项目级 MCP 配置文件：`<workspace>/.astrcode/mcp.json`。
+pub fn project_mcp_config_path(workspace: &str) -> PathBuf {
+    PathBuf::from(workspace).join(".astrcode").join("mcp.json")
 }
 
 /// 确保目录存在，如不存在则递归创建（包含父目录）。
@@ -163,6 +173,20 @@ mod tests {
     fn test_astrcode_dir() {
         let dir = astrcode_dir();
         assert!(dir.ends_with(".astrcode"));
+    }
+
+    #[test]
+    fn test_mcp_config_path() {
+        let path = mcp_config_path();
+
+        assert!(path.ends_with(Path::new(".astrcode").join("mcp.json")));
+    }
+
+    #[test]
+    fn test_project_mcp_config_path() {
+        let path = project_mcp_config_path("/workspace");
+
+        assert!(path.ends_with(Path::new(".astrcode").join("mcp.json")));
     }
 
     #[test]

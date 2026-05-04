@@ -379,10 +379,10 @@ impl ExtensionRunner {
 
     /// 从所有已注册的扩展收集可执行的工具适配器。
     pub async fn collect_tool_adapters(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
-        let exts = self.extensions.read().await;
+        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         for ext in exts.iter() {
-            for def in ext.tools() {
+            for def in ext.tools_for(working_dir).await {
                 tools.push(Arc::new(ExtensionTool {
                     extension: Arc::clone(ext),
                     definition: def,

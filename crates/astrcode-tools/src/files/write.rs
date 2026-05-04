@@ -38,6 +38,7 @@ impl Tool for WriteFileTool {
                           existing files."
                 .into(),
             origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Sequential,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

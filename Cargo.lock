@@ -159,10 +159,26 @@ name = "astrcode-extension-agent-tools"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
+ "astrcode-support",
  "async-trait",
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "astrcode-extension-mcp"
+version = "0.1.0"
+dependencies = [
+ "astrcode-core",
+ "astrcode-support",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -244,6 +260,7 @@ dependencies = [
  "astrcode-context",
  "astrcode-core",
  "astrcode-extension-agent-tools",
+ "astrcode-extension-mcp",
  "astrcode-extension-skill",
  "astrcode-extension-todo-tool",
  "astrcode-extensions",
@@ -292,6 +309,7 @@ dependencies = [
  "astrcode-core",
  "dirs",
  "serde",
+ "serde_yaml",
  "tokio",
 ]
 

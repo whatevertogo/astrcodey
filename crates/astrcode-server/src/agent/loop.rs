@@ -57,6 +57,9 @@ use crate::{
 
 /// 并行执行工具调用时的最大并发数。
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
+const MCP_TOOL_PREFIX: &str = "mcp__";
+const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
+const TOOL_SEARCH_METADATA_KEY: &str = "toolSearch";
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
@@ -218,10 +221,12 @@ impl AgentLoop {
     ) -> Result<AgentTurnOutput, AgentError> {
         // 构建扩展上下文，填充工具定义供扩展钩子查询
         let mut ext_ctx = self.build_ext_ctx();
-        let mut tools = self.tool_registry.list_definitions();
+        let mut all_tools = self.tool_registry.list_definitions();
         if let Some(allowed) = &self.tool_allowlist {
-            tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
+            all_tools.retain(|tool| tool_name_matches_allowlist(allowed, &tool.name));
         }
+        let mut active_mcp_tools = initially_active_mcp_tools(&all_tools, &self.tool_allowlist);
+        let mut tools = provider_visible_tools(&all_tools, &active_mcp_tools);
         let tool_map: std::collections::HashMap<_, _> =
             tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
         ext_ctx.set_tools(tool_map);
@@ -275,12 +280,15 @@ impl AgentLoop {
             }
 
             // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
+            let mut context_messages = prepared_context.messages;
+            append_deferred_mcp_tools_reminder(
+                &mut context_messages,
+                &all_tools,
+                &active_mcp_tools,
+            );
+
             let send_messages = self
-                .apply_before_provider_request_hook(
-                    system_messages,
-                    prepared_context.messages,
-                    &tools,
-                )
+                .apply_before_provider_request_hook(system_messages, context_messages, &tools)
                 .await?;
 
             let mut rx = self
@@ -424,15 +432,23 @@ impl AgentLoop {
                     .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
                     .await?;
                 // 3. 提交：PostToolUse 钩子 + 追加到对话历史
-                self.commit_tool_results(CommitToolResults {
-                    prepared: &prepared_tool_calls,
-                    results: tool_results,
-                    tools: &tools,
-                    messages: &mut messages,
-                    all_tool_results: &mut all_tool_results,
-                    event_tx: &event_tx,
-                })
-                .await?;
+                let discovered_tools = self
+                    .commit_tool_results(CommitToolResults {
+                        prepared: &prepared_tool_calls,
+                        results: tool_results,
+                        tools: &tools,
+                        messages: &mut messages,
+                        all_tool_results: &mut all_tool_results,
+                        event_tx: &event_tx,
+                    })
+                    .await?;
+                if activate_discovered_mcp_tools(
+                    &mut active_mcp_tools,
+                    &all_tools,
+                    discovered_tools,
+                ) {
+                    tools = provider_visible_tools(&all_tools, &active_mcp_tools);
+                }
 
                 // 工具调用全部执行完毕后才发送消息完成事件，
                 // 保证 completed 事件在所有 tool_call 事件之后。
@@ -861,6 +877,27 @@ impl AgentLoop {
                 continue;
             }
 
+            if !tool_is_visible(tools, &tc.name) {
+                let blocked_result = ToolResult {
+                    call_id: tc.call_id.clone(),
+                    content: format!("Tool '{}' has not been loaded for this request", tc.name),
+                    is_error: true,
+                    error: Some(format!("tool '{}' is not loaded", tc.name)),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                };
+                send_tool_requested(event_tx, tc, &args);
+                prepared.push(PreparedToolCall {
+                    index,
+                    call_id: tc.call_id.clone(),
+                    name: tc.name.clone(),
+                    tool_input: args,
+                    mode: ExecutionMode::Sequential,
+                    outcome: PreparedToolOutcome::Blocked(blocked_result),
+                });
+                continue;
+            }
+
             let mut pre_ctx = self.build_ext_ctx_with_tools(tools);
             pre_ctx.set_pre_tool_use_input(PreToolUseInput {
                 tool_name: tc.name.clone(),
@@ -1057,7 +1094,7 @@ impl AgentLoop {
     async fn commit_tool_results(
         &self,
         mut input: CommitToolResults<'_>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Vec<String>, AgentError> {
         let mut pending_results = Vec::with_capacity(input.prepared.len());
         for call in input.prepared {
             let mut result = input
@@ -1115,7 +1152,11 @@ impl AgentLoop {
         self.enforce_tool_result_message_budget(&mut pending_results)
             .await?;
 
+        let mut discovered_tools = Vec::new();
         for pending in pending_results {
+            if pending.tool_name == TOOL_SEARCH_TOOL_NAME {
+                discovered_tools.extend(discovered_mcp_tool_names(&pending.result));
+            }
             if input.event_tx.is_some() {
                 send_event(
                     input.event_tx,
@@ -1138,7 +1179,7 @@ impl AgentLoop {
             input.all_tool_results.push(pending.result);
         }
 
-        Ok(())
+        Ok(discovered_tools)
     }
 
     async fn persist_large_tool_result(
@@ -1481,6 +1522,104 @@ fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
         error,
         CompactError::Skip(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact)
     )
+}
+
+fn initially_active_mcp_tools(
+    tools: &[ToolDefinition],
+    allowlist: &Option<HashSet<String>>,
+) -> HashSet<String> {
+    let Some(allowed) = allowlist else {
+        return HashSet::new();
+    };
+    tools
+        .iter()
+        .filter(|tool| is_concrete_mcp_tool(&tool.name))
+        .filter(|tool| tool_name_matches_allowlist(allowed, &tool.name))
+        .map(|tool| tool.name.clone())
+        .collect()
+}
+
+fn provider_visible_tools(
+    tools: &[ToolDefinition],
+    active_mcp_tools: &HashSet<String>,
+) -> Vec<ToolDefinition> {
+    tools
+        .iter()
+        .filter(|tool| {
+            !is_concrete_mcp_tool(&tool.name)
+                || active_mcp_tools.contains(&tool.name)
+                || tool.name == TOOL_SEARCH_TOOL_NAME
+        })
+        .cloned()
+        .collect()
+}
+
+fn append_deferred_mcp_tools_reminder(
+    messages: &mut Vec<LlmMessage>,
+    tools: &[ToolDefinition],
+    active_mcp_tools: &HashSet<String>,
+) {
+    let deferred = tools
+        .iter()
+        .filter(|tool| is_concrete_mcp_tool(&tool.name))
+        .filter(|tool| !active_mcp_tools.contains(&tool.name))
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    if deferred.is_empty() || !tool_is_visible(tools, TOOL_SEARCH_TOOL_NAME) {
+        return;
+    }
+
+    let mut text = String::from(
+        "<available-deferred-mcp-tools>\nDeferred MCP tools are listed by name only. Use \
+         tool_search_tool to fetch full schemas before calling one of these tools.\n",
+    );
+    for name in deferred {
+        text.push_str(name);
+        text.push('\n');
+    }
+    text.push_str("</available-deferred-mcp-tools>");
+    messages.push(LlmMessage::system(text));
+}
+
+fn activate_discovered_mcp_tools(
+    active_mcp_tools: &mut HashSet<String>,
+    tools: &[ToolDefinition],
+    discovered: Vec<String>,
+) -> bool {
+    let available = tools
+        .iter()
+        .filter(|tool| is_concrete_mcp_tool(&tool.name))
+        .map(|tool| tool.name.as_str())
+        .collect::<HashSet<_>>();
+    let mut changed = false;
+    for name in discovered {
+        if available.contains(name.as_str()) {
+            changed |= active_mcp_tools.insert(name);
+        }
+    }
+    changed
+}
+
+fn discovered_mcp_tool_names(result: &ToolResult) -> Vec<String> {
+    result
+        .metadata
+        .get(TOOL_SEARCH_METADATA_KEY)
+        .and_then(|value| value.get("matches"))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|match_value| match_value.get("name").and_then(|value| value.as_str()))
+        .filter(|name| is_concrete_mcp_tool(name))
+        .map(str::to_string)
+        .collect()
+}
+
+fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
+    tools.iter().any(|tool| tool.name == name)
+}
+
+fn is_concrete_mcp_tool(name: &str) -> bool {
+    name.starts_with(MCP_TOOL_PREFIX) && name != TOOL_SEARCH_TOOL_NAME
 }
 
 /// Agent 处理过程中可能出现的错误类型。

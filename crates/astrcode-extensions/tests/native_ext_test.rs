@@ -273,6 +273,7 @@ unsafe extern "C" fn test_ffi_register_tool(
         parameters: serde_json::from_str(ffi::read_ffi_str(params_ptr, params_len))
             .unwrap_or(serde_json::json!({})),
         origin: astrcode_core::tool::ToolOrigin::Extension,
+        execution_mode: astrcode_core::tool::ExecutionMode::Sequential,
     });
 }
 

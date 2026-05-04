@@ -27,7 +27,7 @@ pub enum ToolOrigin {
     /// Tools contributed by user or project extensions.
     Extension,
     /// Tools registered by a future SDK surface.
-    Sdk
+    Sdk,
 }
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
@@ -41,6 +41,9 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
     /// 工具来源。来源只影响诊断、策略和优先级，不创建额外执行路径。
     pub origin: ToolOrigin,
+    /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
 }
 
 /// 工具执行结果。
@@ -83,9 +86,11 @@ pub enum ToolError {
 }
 
 /// 工具的执行模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
     /// 顺序执行——一次只执行一个工具。
+    #[default]
     Sequential,
     /// 并行执行——与其他并行模式工具同时执行。
     Parallel,
@@ -113,6 +118,36 @@ pub struct ToolExecutionContext {
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
 }
 
+/// Build a metadata map from key-value pairs.
+pub fn tool_metadata<const N: usize>(
+    entries: [(&str, serde_json::Value); N],
+) -> BTreeMap<String, serde_json::Value> {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+impl ToolResult {
+    /// Convenience constructor for a text ToolResult.
+    ///
+    /// When `is_error` is true, `error` is automatically set to a clone of `content`.
+    pub fn text(
+        content: String,
+        is_error: bool,
+        metadata: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            call_id: String::new(),
+            content: content.clone(),
+            is_error,
+            error: is_error.then_some(content),
+            metadata,
+            duration_ms: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for ToolExecutionContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolExecutionContext")
@@ -138,7 +173,7 @@ pub trait Tool: Send + Sync {
 
     /// 返回工具的执行模式偏好。
     fn execution_mode(&self) -> ExecutionMode {
-        ExecutionMode::Sequential
+        self.definition().execution_mode
     }
 
     /// 使用给定参数和调用上下文执行工具。
