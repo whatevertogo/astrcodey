@@ -864,7 +864,7 @@ impl Utf8StreamDecoder {
                 let valid_up_to = e.valid_up_to();
                 if valid_up_to > 0 {
                     let result = std::str::from_utf8(&self.buffer[..valid_up_to])
-                        .unwrap()
+                        .expect("valid_up_to guarantees valid UTF-8")
                         .to_string();
                     self.buffer = self.buffer[valid_up_to..].to_vec();
                     result

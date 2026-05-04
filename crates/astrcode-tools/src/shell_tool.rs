@@ -309,11 +309,12 @@ mod tests {
 
     fn command_with_delay() -> String {
         match resolve_shell().family {
-            ShellFamily::PowerShell => {
-                "Write-Output before; Start-Sleep -Seconds 5; Write-Output after".into()
-            },
-            ShellFamily::Cmd => "echo before & ping -n 6 127.0.0.1 > nul & echo after".into(),
-            ShellFamily::Posix | ShellFamily::Wsl => "echo before; sleep 5; echo after".into(),
+            ShellFamily::PowerShell => "[Console]::Out.WriteLine('before'); \
+                                        [Console]::Out.Flush(); Start-Sleep -Seconds 10; \
+                                        [Console]::Out.WriteLine('after')"
+                .into(),
+            ShellFamily::Cmd => "echo before & ping -n 11 127.0.0.1 > nul & echo after".into(),
+            ShellFamily::Posix | ShellFamily::Wsl => "echo before; sleep 10; echo after".into(),
         }
     }
 
@@ -409,7 +410,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "command": command_with_delay(),
-                    "timeout": 1
+                    "timeout": 3
                 }),
                 &empty_ctx(),
             )
