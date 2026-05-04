@@ -733,6 +733,7 @@ mod tests {
             assert_eq!(event, ExtensionEvent::PromptBuild);
             Ok(HookEffect::PromptContributions(PromptContributions {
                 system_prompts: vec!["system".to_string()],
+                additional_instructions: vec!["instruction".to_string()],
                 skills: vec!["skill".to_string()],
                 agents: vec!["agent".to_string()],
             }))
@@ -914,6 +915,7 @@ mod tests {
             .expect("collect contributions");
 
         assert_eq!(contributions.system_prompts, ["system"]);
+        assert_eq!(contributions.additional_instructions, ["instruction"]);
         assert_eq!(contributions.skills, ["skill"]);
         assert_eq!(contributions.agents, ["agent"]);
     }

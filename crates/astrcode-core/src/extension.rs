@@ -300,6 +300,9 @@ pub struct PromptContributions {
     /// 插件系统提示词。宿主会放在 system prompt 最前面，即模型可见工具声明之后。
     #[serde(default)]
     pub system_prompts: Vec<String>,
+    /// 追加到 Additional Instructions section 的运行时指令。
+    #[serde(default)]
+    pub additional_instructions: Vec<String>,
     /// Skills section 内容。
     #[serde(default)]
     pub skills: Vec<String>,
@@ -311,6 +314,8 @@ pub struct PromptContributions {
 impl PromptContributions {
     pub fn merge(&mut self, other: PromptContributions) {
         self.system_prompts.extend(other.system_prompts);
+        self.additional_instructions
+            .extend(other.additional_instructions);
         self.skills.extend(other.skills);
         self.agents.extend(other.agents);
     }

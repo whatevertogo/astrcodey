@@ -278,6 +278,12 @@ pub(crate) async fn build_system_prompt_snapshot(
             content: sp,
         });
     }
+    for instruction in contributions.additional_instructions {
+        extension_blocks.push(ExtensionPromptBlock {
+            section: ExtensionSection::AdditionalInstructions,
+            content: instruction,
+        });
+    }
     for s in contributions.skills {
         extension_blocks.push(ExtensionPromptBlock {
             section: ExtensionSection::Skills,

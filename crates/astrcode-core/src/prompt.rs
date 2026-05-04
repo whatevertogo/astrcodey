@@ -62,6 +62,7 @@ pub struct ExtensionPromptBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionSection {
     PlatformInstructions,
+    AdditionalInstructions,
     Skills,
     Agents,
 }

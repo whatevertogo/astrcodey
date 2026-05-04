@@ -11,7 +11,8 @@ use std::{
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookSubscription,
+        Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
+        HookSubscription, PromptContributions,
     },
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult},
 };
@@ -47,14 +48,24 @@ impl Extension for McpExtension {
     }
 
     fn hook_subscriptions(&self) -> Vec<HookSubscription> {
-        Vec::new()
+        vec![HookSubscription {
+            event: ExtensionEvent::PromptBuild,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
     }
 
     async fn on_event(
         &self,
-        _event: ExtensionEvent,
-        _ctx: &dyn ExtensionContext,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
     ) -> Result<HookEffect, ExtensionError> {
+        if event == ExtensionEvent::PromptBuild && ctx.find_tool(TOOL_SEARCH_TOOL_NAME).is_some() {
+            return Ok(HookEffect::PromptContributions(PromptContributions {
+                additional_instructions: vec![mcp_discovery_instructions().into()],
+                ..Default::default()
+            }));
+        }
         Ok(HookEffect::Allow)
     }
 
@@ -285,6 +296,15 @@ fn tool_search_tool_definition() -> ToolDefinition {
     }
 }
 
+fn mcp_discovery_instructions() -> &'static str {
+    "MCP discovery workflow:\n1. Check whether builtin tools already solve the task.\n2. If an \
+     external MCP tool is needed or a visible `mcp__...` tool has unclear parameters, call \
+     `tool_search_tool` first with part of the tool name or task purpose, for example `{ \
+     \"query\": \"webReader\" }` or `{ \"query\": \"github repo structure\" }`.\n3. Read the \
+     returned input schema before making the external tool call.\n4. Pick the matching concrete \
+     `mcp__...` tool and call it directly. Do not guess argument names when schema is available."
+}
+
 fn call_result(server: &str, tool: &str, result: CallToolResult) -> ToolResult {
     let content = protocol::render_call_content(&result);
     let mut metadata = metadata([("server", json!(server)), ("tool", json!(tool))]);
@@ -363,5 +383,14 @@ mod tests {
         assert_eq!(def.name, TOOL_SEARCH_TOOL_NAME);
         assert_eq!(def.origin, ToolOrigin::Bundled);
         assert_eq!(def.execution_mode, ExecutionMode::Parallel);
+    }
+
+    #[test]
+    fn mcp_discovery_instruction_is_additional_instruction_content() {
+        let instruction = mcp_discovery_instructions();
+
+        assert!(instruction.starts_with("MCP discovery workflow:"));
+        assert!(instruction.contains("`tool_search_tool`"));
+        assert!(!instruction.contains("[Example Workflow]"));
     }
 }
