@@ -427,15 +427,10 @@ impl AgentLoop {
                     .await?;
                 // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
                 messages.push(assistant_tool_call_message(&prepared_tool_calls));
-                // 2. 执行：按并行/串行模式调度工具
-                let tool_results = self
-                    .execute_prepared_tool_calls(&prepared_tool_calls, &tools, event_tx.clone())
-                    .await?;
-                // 3. 提交：PostToolUse 钩子 + 追加到对话历史
+                // 2. 执行 + 提交：每个并行/串行 barrier 完成后立即提交结果。
                 let discovered_tools = self
-                    .commit_tool_results(CommitToolResults {
+                    .execute_and_commit_tool_calls(ExecuteToolCalls {
                         prepared: &prepared_tool_calls,
-                        results: tool_results,
                         tools: &tools,
                         messages: &mut messages,
                         all_tool_results: &mut all_tool_results,
@@ -950,66 +945,158 @@ impl AgentLoop {
     /// 执行已预处理的工具调用。
     ///
     /// 按顺序遍历预处理结果，根据执行模式决定调度方式：
-    /// - **Blocked**：直接使用预处理阶段的阻止结果，并刷新并行批次。
-    /// - **Parallel**：加入并行批次，由 `flush_parallel_batch` 统一调度。
-    /// - **Sequential**：先刷新并行批次，再单独执行当前调用。
+    /// - **Blocked**：先提交已完成的并行批次，再提交预处理阶段的阻止结果。
+    /// - **Parallel**：加入当前并行批次，由 `flush_parallel_batch` 统一调度。
+    /// - **Sequential**：先提交当前并行批次，再单独执行并提交当前调用。
     ///
-    /// 最终返回按索引排序的工具结果映射。
-    async fn execute_prepared_tool_calls(
+    /// 每个 barrier 的结果都会先经过 PostToolUse、持久化和 budget 裁剪，再追加到
+    /// LLM 历史，避免后续慢工具阻塞已经完成的工具结果进入事件流。
+    async fn execute_and_commit_tool_calls(
         &self,
-        prepared: &[PreparedToolCall],
-        tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<BTreeMap<usize, ToolResult>, AgentError> {
-        let mut results = BTreeMap::new();
+        mut input: ExecuteToolCalls<'_>,
+    ) -> Result<Vec<String>, AgentError> {
+        let mut discovered_tools = Vec::new();
         let mut parallel_batch = Vec::new();
+        let mut parallel_batch_start = None;
 
-        for call in prepared {
-            match &call.outcome {
-                PreparedToolOutcome::Blocked(result) => {
-                    self.flush_parallel_batch(
-                        &mut parallel_batch,
-                        tools,
-                        event_tx.clone(),
-                        &mut results,
-                    )
-                    .await?;
-                    results.insert(call.index, result.clone());
+        for position in 0..input.prepared.len() {
+            let step = {
+                let call = &input.prepared[position];
+                match &call.outcome {
+                    PreparedToolOutcome::Blocked(result) => {
+                        ToolExecutionStep::Blocked(result.clone())
+                    },
+                    PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => {
+                        ToolExecutionStep::Parallel(call.to_executable())
+                    },
+                    PreparedToolOutcome::Ready => {
+                        ToolExecutionStep::Sequential(call.to_executable())
+                    },
+                }
+            };
+
+            match step {
+                ToolExecutionStep::Blocked(result) => {
+                    discovered_tools.extend(
+                        self.flush_and_commit_parallel_batch(
+                            &mut parallel_batch,
+                            &mut parallel_batch_start,
+                            &mut input,
+                        )
+                        .await?,
+                    );
+                    discovered_tools.extend(
+                        self.commit_single_tool_result(&mut input, position, result.clone())
+                            .await?,
+                    );
                 },
-                PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => {
-                    parallel_batch.push(call.to_executable());
+                ToolExecutionStep::Parallel(executable) => {
+                    if parallel_batch_start.is_none() {
+                        parallel_batch_start = Some(position);
+                    }
+                    parallel_batch.push(executable);
                 },
-                PreparedToolOutcome::Ready => {
-                    self.flush_parallel_batch(
-                        &mut parallel_batch,
-                        tools,
-                        event_tx.clone(),
-                        &mut results,
-                    )
-                    .await?;
+                ToolExecutionStep::Sequential(executable) => {
+                    discovered_tools.extend(
+                        self.flush_and_commit_parallel_batch(
+                            &mut parallel_batch,
+                            &mut parallel_batch_start,
+                            &mut input,
+                        )
+                        .await?,
+                    );
                     let (index, result) = execute_tool_call(
                         Arc::clone(&self.tool_registry),
                         ToolCallRuntimeContext {
                             session_id: self.session_id.clone(),
                             working_dir: self.working_dir.clone(),
                             model_id: self.model_id.clone(),
-                            tools: tools.to_vec(),
+                            tools: input.tools.to_vec(),
                             tool_result_reader: Some(Arc::clone(&self.session_manager)
                                 as Arc<dyn ToolResultArtifactReader>),
-                            event_tx: event_tx.clone(),
+                            event_tx: input.event_tx.clone(),
                         },
-                        call.to_executable(),
+                        executable,
                     )
                     .await;
+                    let mut results = BTreeMap::new();
                     results.insert(index, result);
+                    discovered_tools.extend(
+                        self.commit_tool_results(CommitToolResults {
+                            prepared: &input.prepared[position..position + 1],
+                            results,
+                            tools: input.tools,
+                            messages: input.messages,
+                            all_tool_results: input.all_tool_results,
+                            event_tx: input.event_tx,
+                        })
+                        .await?,
+                    );
                 },
             }
         }
 
-        self.flush_parallel_batch(&mut parallel_batch, tools, event_tx, &mut results)
-            .await?;
+        discovered_tools.extend(
+            self.flush_and_commit_parallel_batch(
+                &mut parallel_batch,
+                &mut parallel_batch_start,
+                &mut input,
+            )
+            .await?,
+        );
 
-        Ok(results)
+        Ok(discovered_tools)
+    }
+
+    async fn flush_and_commit_parallel_batch(
+        &self,
+        parallel_batch: &mut Vec<ExecutableToolCall>,
+        parallel_batch_start: &mut Option<usize>,
+        input: &mut ExecuteToolCalls<'_>,
+    ) -> Result<Vec<String>, AgentError> {
+        let Some(batch_start) = parallel_batch_start.take() else {
+            return Ok(Vec::new());
+        };
+        let batch_len = parallel_batch.len();
+        let batch_end = batch_start + batch_len;
+        let mut results = BTreeMap::new();
+
+        self.flush_parallel_batch(
+            parallel_batch,
+            input.tools,
+            input.event_tx.clone(),
+            &mut results,
+        )
+        .await?;
+
+        self.commit_tool_results(CommitToolResults {
+            prepared: &input.prepared[batch_start..batch_end],
+            results,
+            tools: input.tools,
+            messages: input.messages,
+            all_tool_results: input.all_tool_results,
+            event_tx: input.event_tx,
+        })
+        .await
+    }
+
+    async fn commit_single_tool_result(
+        &self,
+        input: &mut ExecuteToolCalls<'_>,
+        position: usize,
+        result: ToolResult,
+    ) -> Result<Vec<String>, AgentError> {
+        let mut results = BTreeMap::new();
+        results.insert(input.prepared[position].index, result);
+        self.commit_tool_results(CommitToolResults {
+            prepared: &input.prepared[position..position + 1],
+            results,
+            tools: input.tools,
+            messages: input.messages,
+            all_tool_results: input.all_tool_results,
+            event_tx: input.event_tx,
+        })
+        .await
     }
 
     /// 刷新并行工具调用批次。
@@ -1027,6 +1114,14 @@ impl AgentLoop {
         if batch.is_empty() {
             return Ok(());
         }
+
+        let batch_len = batch.len();
+        let batch_started_at = Instant::now();
+        tracing::debug!(
+            batch_len,
+            max_parallel = MAX_PARALLEL_TOOL_CALLS,
+            "flushing parallel tool batch"
+        );
 
         let mut pending = std::mem::take(batch).into_iter();
         let mut join_set = JoinSet::new();
@@ -1046,6 +1141,11 @@ impl AgentLoop {
             }
         }
 
+        tracing::debug!(
+            batch_len,
+            duration_ms = batch_started_at.elapsed().as_millis() as u64,
+            "parallel tool batch flushed"
+        );
         Ok(())
     }
 
@@ -1149,7 +1249,8 @@ impl AgentLoop {
             )
             .await?;
         }
-        self.enforce_tool_result_message_budget(&mut pending_results)
+        let committed_tool_result_chars = committed_tool_result_content_len(input.messages);
+        self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending_results)
             .await?;
 
         let mut discovered_tools = Vec::new();
@@ -1236,12 +1337,14 @@ impl AgentLoop {
 
     async fn enforce_tool_result_message_budget(
         &self,
+        committed_tool_result_chars: usize,
         pending_results: &mut [PendingCommittedToolResult],
     ) -> Result<(), AgentError> {
-        let mut total: usize = pending_results
-            .iter()
-            .map(|pending| pending.result.content.len())
-            .sum();
+        let mut total: usize = committed_tool_result_chars
+            + pending_results
+                .iter()
+                .map(|pending| pending.result.content.len())
+                .sum::<usize>();
         if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
             return Ok(());
         }
@@ -1345,6 +1448,14 @@ pub(crate) struct PreparedToolCall {
     pub(crate) outcome: PreparedToolOutcome,
 }
 
+struct ExecuteToolCalls<'a> {
+    prepared: &'a [PreparedToolCall],
+    tools: &'a [ToolDefinition],
+    messages: &'a mut Vec<LlmMessage>,
+    all_tool_results: &'a mut Vec<ToolResult>,
+    event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
+}
+
 struct CommitToolResults<'a> {
     prepared: &'a [PreparedToolCall],
     results: BTreeMap<usize, ToolResult>,
@@ -1358,6 +1469,12 @@ struct PendingCommittedToolResult {
     call_id: String,
     tool_name: String,
     result: ToolResult,
+}
+
+enum ToolExecutionStep {
+    Blocked(ToolResult),
+    Parallel(ExecutableToolCall),
+    Sequential(ExecutableToolCall),
 }
 
 pub(crate) enum PreparedToolOutcome {
@@ -1426,6 +1543,18 @@ pub(crate) fn assistant_tool_call_message(prepared: &[PreparedToolCall]) -> LlmM
     }
 }
 
+fn committed_tool_result_content_len(messages: &[LlmMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.role == LlmRole::Tool)
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            LlmContent::ToolResult { content, .. } => Some(content.len()),
+            _ => None,
+        })
+        .sum()
+}
+
 /// 执行单个工具调用，并把异常统一转成工具错误结果。
 pub(crate) async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
@@ -1433,6 +1562,8 @@ pub(crate) async fn execute_tool_call(
     call: ExecutableToolCall,
 ) -> (usize, ToolResult) {
     let started_at = Instant::now();
+    let tool_name = call.name.clone();
+    let call_id = call.call_id.clone();
     let tool_event_bridge = runtime.event_tx.as_ref().map(|agent_tx| {
         let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
         let agent_tx = agent_tx.clone();
@@ -1480,12 +1611,30 @@ pub(crate) async fn execute_tool_call(
     // Release the tool-side sender before awaiting the bridge; otherwise the
     // bridge keeps waiting for more tool progress events and this call hangs.
     drop(tool_ctx);
-    if let Some((_, bridge)) = tool_event_bridge {
+    if let Some((tool_tx, bridge)) = tool_event_bridge {
+        drop(tool_tx);
         let _ = bridge.await;
     }
 
     if result.call_id.is_empty() {
         result.call_id = call.call_id.clone();
+    }
+
+    if result.is_error {
+        tracing::warn!(
+            tool_name,
+            call_id,
+            duration_ms = result.duration_ms.unwrap_or_default(),
+            error = result.error.as_deref().unwrap_or("unknown error"),
+            "tool execution completed with error"
+        );
+    } else {
+        tracing::debug!(
+            tool_name,
+            call_id,
+            duration_ms = result.duration_ms.unwrap_or_default(),
+            "tool execution completed"
+        );
     }
 
     (call.index, result)

@@ -26,7 +26,7 @@ use astrcode_support::tool_results::{
     DEFAULT_TOOL_RESULT_INLINE_LIMIT, MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
 };
 use tokio::{
-    sync::{Barrier, mpsc},
+    sync::{Barrier, mpsc, watch},
     time::{sleep, timeout},
 };
 
@@ -617,6 +617,38 @@ impl Tool for DelayTool {
     }
 }
 
+struct WaitingTool {
+    name: &'static str,
+    started_tx: mpsc::UnboundedSender<()>,
+    release_rx: watch::Receiver<bool>,
+}
+
+#[async_trait::async_trait]
+impl Tool for WaitingTool {
+    fn definition(&self) -> ToolDefinition {
+        test_tool_definition(self.name)
+    }
+
+    fn execution_mode(&self) -> ExecutionMode {
+        ExecutionMode::Sequential
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        let _ = self.started_tx.send(());
+        let mut release_rx = self.release_rx.clone();
+        while !*release_rx.borrow() {
+            if release_rx.changed().await.is_err() {
+                break;
+            }
+        }
+        Ok(success_tool_result(self.name))
+    }
+}
+
 struct StaticResultTool {
     definition: ToolDefinition,
     result: ToolResult,
@@ -1016,6 +1048,82 @@ async fn sequential_tool_splits_parallel_batches() {
         !violation.load(Ordering::SeqCst),
         "parallel tool after a sequential tool must not start before the sequential barrier"
     );
+}
+
+#[tokio::test]
+async fn completed_parallel_batch_is_committed_before_later_sequential_tool_finishes() {
+    let (seq_started_tx, mut seq_started_rx) = mpsc::unbounded_channel();
+    let (release_seq_tx, release_seq_rx) = watch::channel(false);
+    let tool_registry = test_registry(vec![
+        Arc::new(DelayTool {
+            name: "before",
+            mode: ExecutionMode::Parallel,
+            delay_ms: 0,
+        }),
+        Arc::new(WaitingTool {
+            name: "seq",
+            started_tx: seq_started_tx,
+            release_rx: release_seq_rx,
+        }),
+    ]);
+
+    let agent_loop = AgentLoop::new(
+        "session-1".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            Arc::new(ToolCallsThenFinalLlm {
+                call_count: AtomicUsize::new(0),
+                calls: vec![("call-1", "before"), ("call-2", "seq")],
+                captured_messages: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tool_registry,
+            Arc::new(ExtensionRunner::new(
+                Duration::from_secs(1),
+                Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
+            )),
+        ),
+    );
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+    let turn = tokio::spawn(async move {
+        agent_loop
+            .process_prompt("run tools", vec![], Some(event_tx))
+            .await
+    });
+
+    let mut saw_before_completed = false;
+    while let Ok(Some(signal)) = timeout(Duration::from_secs(1), event_rx.recv()).await {
+        if let AgentSignal::Event(EventPayload::ToolCallCompleted { tool_name, .. }) = signal {
+            assert_ne!(
+                tool_name, "seq",
+                "sequential tool must still be blocked at this point"
+            );
+            if tool_name == "before" {
+                saw_before_completed = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_before_completed,
+        "completed parallel batch should be committed before a later sequential tool finishes"
+    );
+    assert!(
+        seq_started_rx.try_recv().is_ok(),
+        "sequential tool should already be waiting for release"
+    );
+
+    release_seq_tx
+        .send(true)
+        .expect("release receiver should still be alive");
+    timeout(Duration::from_secs(1), turn)
+        .await
+        .expect("turn should finish after sequential tool is released")
+        .expect("turn task should not panic")
+        .expect("turn should succeed");
 }
 
 #[tokio::test]

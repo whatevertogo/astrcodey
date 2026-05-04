@@ -3,8 +3,8 @@ use std::{future, sync::Arc, time::Duration};
 use astrcode_context::{compaction::CompactResult, manager::LlmContextAssembler};
 use astrcode_core::{
     config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
-    event::EventPayload,
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    event::{Event, EventPayload, Phase},
+    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::ToolDefinition,
 };
 use astrcode_protocol::events::ClientNotification;
@@ -404,6 +404,57 @@ async fn submit_prompt_uses_one_turn_id_for_turn_events() {
         turn_ids.iter().all(|turn_id| *turn_id == first),
         "all events in one prompt should share the same turn_id"
     );
+}
+
+#[tokio::test]
+async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
+    let runtime = test_runtime();
+    let start = runtime
+        .session_manager
+        .create(".", "mock", 2048, None)
+        .await
+        .unwrap();
+    let sid = start.session_id.clone();
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            sid.clone(),
+            Some("stale-turn".into()),
+            EventPayload::ToolCallRequested {
+                call_id: "call-1".into(),
+                tool_name: "todoWrite".into(),
+                arguments: serde_json::json!({}),
+            },
+        ))
+        .await
+        .unwrap();
+    let stale_state = runtime.session_manager.read_model(&sid).await.unwrap();
+    assert_eq!(stale_state.phase, Phase::CallingTool);
+    assert!(stale_state.pending_tool_calls.contains("call-1"));
+
+    let (event_tx, _) = broadcast::channel(16);
+    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let handler = CommandHandler::new(Arc::clone(&runtime), event_tx, actor_tx);
+
+    handler.repair_stale_pending_tool_calls(&sid).await.unwrap();
+
+    let state = runtime.session_manager.read_model(&sid).await.unwrap();
+    assert_eq!(state.phase, Phase::Idle);
+    assert!(state.pending_tool_calls.is_empty());
+    assert!(state.messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(
+                content,
+                LlmContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error
+                } if tool_call_id == "call-1"
+                    && *is_error
+                    && content.contains("interrupted before completion")
+            )
+        })
+    }));
 }
 
 #[tokio::test]

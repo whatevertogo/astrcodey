@@ -7,9 +7,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     config::ModelSelection,
-    event::{Event, EventPayload},
+    event::{Event, EventPayload, Phase},
     extension::ExtensionEvent,
-    llm::LlmMessage,
+    llm::{LlmContent, LlmMessage, LlmRole},
+    storage::SessionReadModel,
+    tool::ToolResult,
     types::{SessionId, TurnId, new_message_id, new_turn_id},
 };
 use astrcode_extensions::context::ServerExtensionContext;
@@ -49,6 +51,11 @@ struct AgentTurnInput {
     history: Vec<LlmMessage>,
     text: String,
     actor_tx: mpsc::UnboundedSender<CommandMessage>,
+}
+
+struct PendingRequestedToolCall {
+    call_id: String,
+    tool_name: String,
 }
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
@@ -273,6 +280,7 @@ impl CommandHandler {
             .resume(&sid)
             .await
             .map_err(|e| format!("Session {sid} not found: {e}"))?;
+        self.repair_stale_pending_tool_calls(&sid).await?;
         let state = self
             .runtime
             .session_manager
@@ -381,6 +389,10 @@ impl CommandHandler {
     async fn resume_session(&mut self, session_id: SessionId) {
         match self.runtime.session_manager.resume(&session_id).await {
             Ok(_) => {
+                if let Err(e) = self.repair_stale_pending_tool_calls(&session_id).await {
+                    self.send_error(-32603, &e);
+                    return;
+                }
                 let state = match self.runtime.session_manager.read_model(&session_id).await {
                     Ok(state) => state,
                     Err(e) => {
@@ -646,6 +658,52 @@ impl CommandHandler {
             .is_some_and(|active_turn| &active_turn.turn_id == turn_id)
     }
 
+    async fn repair_stale_pending_tool_calls(&self, session_id: &SessionId) -> Result<(), String> {
+        if self.active_turns.contains_key(session_id) {
+            return Ok(());
+        }
+
+        let state = self
+            .runtime
+            .session_manager
+            .read_model(session_id)
+            .await
+            .map_err(|e| format!("read session {session_id}: {e}"))?;
+        if state.phase != Phase::CallingTool || state.pending_tool_calls.is_empty() {
+            return Ok(());
+        }
+
+        for pending in pending_requested_tool_calls(&state) {
+            self.record_and_broadcast(
+                session_id,
+                None,
+                EventPayload::ToolCallCompleted {
+                    call_id: pending.call_id.clone(),
+                    tool_name: pending.tool_name,
+                    result: interrupted_tool_result(&pending.call_id),
+                },
+            )
+            .await?;
+        }
+        self.record_and_broadcast(
+            session_id,
+            None,
+            EventPayload::TurnCompleted {
+                finish_reason: "interrupted".into(),
+            },
+        )
+        .await?;
+        self.record_and_broadcast(
+            session_id,
+            None,
+            EventPayload::AgentRunCompleted {
+                reason: "interrupted".into(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn finish_agent_turn(
         &mut self,
         session_id: SessionId,
@@ -726,6 +784,42 @@ impl CommandHandler {
             code,
             message: message.into(),
         });
+    }
+}
+
+fn pending_requested_tool_calls(state: &SessionReadModel) -> Vec<PendingRequestedToolCall> {
+    let mut remaining = state.pending_tool_calls.clone();
+    let mut pending = Vec::new();
+
+    for message in &state.messages {
+        if message.role != LlmRole::Assistant {
+            continue;
+        }
+        for content in &message.content {
+            let LlmContent::ToolCall { call_id, name, .. } = content else {
+                continue;
+            };
+            if remaining.remove(call_id) {
+                pending.push(PendingRequestedToolCall {
+                    call_id: call_id.clone(),
+                    tool_name: name.clone(),
+                });
+            }
+        }
+    }
+
+    pending
+}
+
+fn interrupted_tool_result(call_id: &str) -> ToolResult {
+    let content = "Tool execution interrupted before completion".to_string();
+    ToolResult {
+        call_id: call_id.to_string(),
+        content: content.clone(),
+        is_error: true,
+        error: Some(content),
+        metadata: Default::default(),
+        duration_ms: None,
     }
 }
 

@@ -131,7 +131,7 @@ impl CommandHandler {
     /// # 参数
     /// - `runtime`: 服务器运行时服务集合
     /// - `event_tx`: 事件广播发送端
-    fn new(
+    pub(super) fn new(
         runtime: Arc<ServerRuntime>,
         event_tx: broadcast::Sender<ClientNotification>,
         actor_tx: mpsc::UnboundedSender<CommandMessage>,
