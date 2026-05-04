@@ -134,20 +134,22 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 5. 构建 session manager 和事件存储。
     //
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
-    // 正常启动按项目路径 hash 选择文件系统会话仓库。
+    // 正常启动按项目路径选择文件系统会话仓库。
     //
     // InMemoryEventStore 仅在 `testing` feature 启用时可用；生产二进制始终使用
     // FileSystemSessionRepository，与 opts.config_path 无关。
-    let project_hash = astrcode_core::types::project_hash_from_path(&cwd);
     #[cfg(feature = "testing")]
     let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
         Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new())
     } else {
-        Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new(project_hash))
+        Arc::new(
+            astrcode_storage::session_repo::FileSystemSessionRepository::for_project_path(&cwd),
+        )
     };
     #[cfg(not(feature = "testing"))]
-    let store: Arc<dyn astrcode_core::storage::EventStore> =
-        Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new(project_hash));
+    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(
+        astrcode_storage::session_repo::FileSystemSessionRepository::for_project_path(&cwd),
+    );
     let session_manager = Arc::new(SessionManager::new(store));
 
     // 6. 加载扩展并创建 extension runner。

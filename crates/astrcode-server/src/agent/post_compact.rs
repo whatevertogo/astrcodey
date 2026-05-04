@@ -16,9 +16,10 @@ use astrcode_context::{
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     tool::{ToolDefinition, ToolOrigin},
-    types::project_hash_from_path,
 };
-use astrcode_support::hostpaths::{is_path_within, resolve_path, session_plan_dir};
+use astrcode_support::hostpaths::{
+    is_path_within, resolve_path, session_plan_dir_for_project_path,
+};
 
 const PLAN_NOTE_MAX_CHARS: usize = 40_000;
 const SKILLS_TOKEN_BUDGET: usize = 25_000;
@@ -111,8 +112,7 @@ fn fresh_read_file(working_dir: &Path, requested_path: &str) -> Option<PostCompa
 }
 
 fn latest_plan_note(working_dir: &Path, session_id: &str) -> Option<PostCompactNote> {
-    let project_hash = project_hash_from_path(&working_dir.to_path_buf());
-    let plans_dir = session_plan_dir(&project_hash, session_id);
+    let plans_dir = session_plan_dir_for_project_path(working_dir, session_id);
     let mut plans = fs::read_dir(&plans_dir)
         .ok()?
         .filter_map(Result::ok)
@@ -380,7 +380,7 @@ mod tests {
         let home = temp.join("home");
         std::env::set_var("ASTRCODE_TEST_HOME", &home);
         let session_id = "session-post-compact-notes";
-        let plans = hostpaths::session_plan_dir(&project_hash_from_path(&temp), session_id);
+        let plans = hostpaths::session_plan_dir_for_project_path(&temp, session_id);
         fs::create_dir_all(&plans).unwrap();
         fs::write(plans.join("work.md"), "plan body").unwrap();
         let messages = vec![

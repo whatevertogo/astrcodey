@@ -8,7 +8,6 @@ use astrcode_core::{
         HookSubscription,
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
-    types::project_hash_from_path,
 };
 use astrcode_support::hostpaths;
 use serde::{Deserialize, Serialize};
@@ -27,10 +26,7 @@ const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
 /// Compute session-local progress todo storage root.
 pub fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
-    let hash = project_hash_from_path(&PathBuf::from(working_dir));
-    hostpaths::sessions_dir(&hash)
-        .join(session_id)
-        .join("todos")
+    hostpaths::session_dir_for_project_path(&PathBuf::from(working_dir), session_id).join("todos")
 }
 
 /// Return bundled todo extension.

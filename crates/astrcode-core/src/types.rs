@@ -6,9 +6,9 @@
 //! - 各种 ID 类型别名（[`SessionId`]、[`EventId`]、[`TurnId`] 等）
 //! - ID 验证函数 [`validate_session_id`]
 //! - ID 生成函数 [`new_session_id`]、[`new_event_id`] 等
-//! - 项目哈希计算函数 [`project_hash_from_path`]
+//! - 项目标识符派生函数 [`project_key_from_path`] 和 [`project_hash_from_path`]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// 会话的唯一标识符。
 ///
@@ -32,7 +32,10 @@ pub type ToolCallId = String;
 /// 对客户端不透明；服务器用于分页和恢复。
 pub type Cursor = String;
 
-/// 项目标识符，从工作目录路径派生。
+/// 项目标识符，从工作目录路径派生，可安全作为单个目录名。
+pub type ProjectKey = String;
+
+/// 旧版项目哈希标识符。
 pub type ProjectHash = String;
 
 /// 标识符验证错误类型。
@@ -90,16 +93,99 @@ pub fn new_message_id() -> MessageId {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// 从工作目录路径派生稳定的项目哈希值。
+/// 从工作目录路径派生可读的稳定项目标识符。
+///
+/// 目录名不能直接包含 Windows 路径中的 `:` 和 `\` 等字符，因此只对文件系统
+/// 不安全字符做百分号编码，尽量保留原始路径的可读性。
+pub fn project_key_from_path(path: &Path) -> ProjectKey {
+    let canonical = canonical_project_path(path);
+    let display_path = display_project_path(&canonical.to_string_lossy());
+    encode_project_path(&display_path)
+}
+
+/// 从工作目录路径派生旧版稳定项目哈希值。
 ///
 /// 使用 SHA-256 对规范化路径进行哈希，确保跨 Rust 版本和平台的稳定性。
-/// 截断为 16 个十六进制字符以提高可读性。
-pub fn project_hash_from_path(path: &PathBuf) -> ProjectHash {
+pub fn project_hash_from_path(path: &Path) -> ProjectHash {
     use sha2::{Digest, Sha256};
-    // 获取规范路径，失败时回退到原始路径
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    let canonical = canonical_project_path(path);
     let mut hasher = Sha256::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
-    // 取哈希前 8 字节（16 个十六进制字符）
     format!("{:016x}", hasher.finalize())
+}
+
+fn canonical_project_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn display_project_path(path: &str) -> String {
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    if let Some(path) = path.strip_prefix(r"\\?\") {
+        return path.to_string();
+    }
+    path.to_string()
+}
+
+fn encode_project_path(path: &str) -> String {
+    let mut encoded = String::new();
+    for ch in path.chars() {
+        if is_project_key_safe(ch) {
+            encoded.push(ch);
+        } else {
+            push_percent_encoded(&mut encoded, ch);
+        }
+    }
+    encoded
+}
+
+fn is_project_key_safe(ch: char) -> bool {
+    !ch.is_control()
+        && !matches!(
+            ch,
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '%'
+        )
+}
+
+fn push_percent_encoded(output: &mut String, ch: char) {
+    let mut buffer = [0_u8; 4];
+    for byte in ch.encode_utf8(&mut buffer).as_bytes() {
+        output.push_str(&format!("%{byte:02X}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_key_keeps_path_readable_while_encoding_separators() {
+        let key = project_key_from_path(Path::new(r"D:\work\astrcode"));
+
+        assert_eq!(key, "D%3A%5Cwork%5Castrcode");
+    }
+
+    #[test]
+    fn project_key_preserves_unicode_path_segments() {
+        let key = project_key_from_path(Path::new(r"D:\简历\astrcode%lab"));
+
+        assert!(key.contains("简历"));
+        assert!(key.contains("%25lab"));
+    }
+
+    #[test]
+    fn project_key_omits_windows_verbatim_prefix() {
+        let key = encode_project_path(&display_project_path(r"\\?\D:\work\astrcode"));
+
+        assert_eq!(key, "D%3A%5Cwork%5Castrcode");
+    }
+
+    #[test]
+    fn project_hash_stays_opaque_for_legacy_lookup() {
+        let hash = project_hash_from_path(Path::new(r"D:\work\astrcode"));
+
+        assert!(hash.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_ne!(hash, project_key_from_path(Path::new(r"D:\work\astrcode")));
+    }
 }

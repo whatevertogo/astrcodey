@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use astrcode_core::types::{project_hash_from_path, project_key_from_path};
+
 /// 解析用户主目录。
 ///
 /// 按以下优先级查找：
@@ -35,24 +37,54 @@ pub fn projects_dir() -> PathBuf {
     astrcode_dir().join("projects")
 }
 
-/// 获取特定项目的目录：`~/.astrcode/projects/<project_hash>/`。
-pub fn project_dir(project_hash: &str) -> PathBuf {
-    projects_dir().join(project_hash)
+/// 获取特定项目的目录：`~/.astrcode/projects/<project_key>/`。
+pub fn project_dir(project_key: &str) -> PathBuf {
+    projects_dir().join(project_key)
 }
 
-/// 获取某项目下的会话目录：`~/.astrcode/projects/<hash>/sessions/`。
-pub fn sessions_dir(project_hash: &str) -> PathBuf {
-    project_dir(project_hash).join("sessions")
+/// 获取某项目下的会话目录：`~/.astrcode/projects/<project_key>/sessions/`。
+pub fn sessions_dir(project_key: &str) -> PathBuf {
+    project_dir(project_key).join("sessions")
 }
 
-/// 获取某个会话目录：`~/.astrcode/projects/<hash>/sessions/<session>/`。
-pub fn session_dir(project_hash: &str, session_id: &str) -> PathBuf {
-    sessions_dir(project_hash).join(session_id)
+/// 获取某个会话目录：`~/.astrcode/projects/<project_key>/sessions/<session>/`。
+pub fn session_dir(project_key: &str, session_id: &str) -> PathBuf {
+    sessions_dir(project_key).join(session_id)
 }
 
-/// 获取某个会话的计划目录：`~/.astrcode/projects/<hash>/sessions/<session>/plan/`。
-pub fn session_plan_dir(project_hash: &str, session_id: &str) -> PathBuf {
-    session_dir(project_hash, session_id).join("plan")
+/// 获取某个会话的计划目录：`~/.astrcode/projects/<project_key>/sessions/<session>/plan/`。
+pub fn session_plan_dir(project_key: &str, session_id: &str) -> PathBuf {
+    session_dir(project_key, session_id).join("plan")
+}
+
+/// 根据真实项目路径获取当前可读 project key 的会话目录。
+pub fn sessions_dir_for_project_path(project_path: &Path) -> PathBuf {
+    sessions_dir(&project_key_from_path(project_path))
+}
+
+/// 根据真实项目路径获取旧版 hash project 的会话目录。
+pub fn legacy_sessions_dir_for_project_path(project_path: &Path) -> PathBuf {
+    sessions_dir(&project_hash_from_path(project_path))
+}
+
+/// 根据真实项目路径获取会话目录；旧 hash 会话存在时继续使用旧目录。
+pub fn session_dir_for_project_path(project_path: &Path, session_id: &str) -> PathBuf {
+    let current = sessions_dir_for_project_path(project_path).join(session_id);
+    if current.exists() {
+        return current;
+    }
+
+    let legacy = legacy_sessions_dir_for_project_path(project_path).join(session_id);
+    if legacy.exists() {
+        return legacy;
+    }
+
+    current
+}
+
+/// 根据真实项目路径获取某个会话的计划目录。
+pub fn session_plan_dir_for_project_path(project_path: &Path, session_id: &str) -> PathBuf {
+    session_dir_for_project_path(project_path, session_id).join("plan")
 }
 
 /// 获取运行时目录：`~/.astrcode/runtime/`。
@@ -187,6 +219,13 @@ mod tests {
         let path = project_mcp_config_path("/workspace");
 
         assert!(path.ends_with(Path::new(".astrcode").join("mcp.json")));
+    }
+
+    #[test]
+    fn project_path_sessions_use_readable_project_key() {
+        let path = sessions_dir_for_project_path(Path::new(r"D:\work\astrcode"));
+
+        assert!(path.ends_with(Path::new("D%3A%5Cwork%5Castrcode").join("sessions")));
     }
 
     #[test]

@@ -28,7 +28,8 @@ use crossterm::{
 use input::Action;
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
-    backend::{Backend, CrosstermBackend},
+    backend::{Backend, ClearType, CrosstermBackend},
+    layout::{Position, Rect},
     prelude::Widget,
     text::Text,
     widgets::Paragraph,
@@ -382,8 +383,7 @@ impl TerminalSession {
     }
 
     fn sync_resize(&mut self) -> io::Result<()> {
-        self.terminal.autoresize()?;
-        self.terminal.clear()
+        sync_inline_resize(&mut self.terminal)
     }
 
     fn composer_width(&self) -> usize {
@@ -401,6 +401,26 @@ impl TerminalSession {
     ) -> io::Result<()> {
         insert_scrollback_entry(&mut self.terminal, entry, theme)
     }
+}
+
+fn sync_inline_resize<B: Backend>(terminal: &mut Terminal<B>) -> io::Result<()> {
+    let old_area = terminal.get_frame().area();
+    clear_terminal_rows(terminal.backend_mut(), old_area)?;
+    terminal.autoresize()?;
+    terminal.clear()
+}
+
+fn clear_terminal_rows<B: Backend>(backend: &mut B, area: Rect) -> io::Result<()> {
+    let cursor = backend.get_cursor_position()?;
+    let screen = backend.size()?;
+    let top = area.top().min(screen.height);
+    let bottom = area.bottom().min(screen.height);
+    for y in top..bottom {
+        backend.set_cursor_position(Position { x: 0, y })?;
+        backend.clear_region(ClearType::CurrentLine)?;
+    }
+    backend.set_cursor_position(cursor)?;
+    backend.flush()
 }
 
 fn insert_scrollback_entry<B: Backend>(
@@ -508,5 +528,31 @@ mod tests {
         terminal
             .draw(|frame| render::render(&state, frame, &theme))
             .unwrap();
+    }
+
+    #[test]
+    fn resize_clears_stale_inline_viewport_rows() {
+        let theme = theme::Theme::detect();
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+            },
+        )
+        .unwrap();
+        let mut state = TuiState::new();
+        state.is_streaming = true;
+        state.status = "Agent running".into();
+
+        terminal
+            .draw(|frame| render::render(&state, frame, &theme))
+            .unwrap();
+        assert!(terminal.backend().to_string().contains("Agent running"));
+
+        terminal.backend_mut().resize(40, 12);
+        sync_inline_resize(&mut terminal).unwrap();
+
+        assert!(!terminal.backend().to_string().contains("Agent running"));
     }
 }
