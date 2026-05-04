@@ -109,7 +109,11 @@ impl Extension for TodoToolExtension {
         let store = ProgressListStore::new(progress_store_root(&ctx.session_id, working_dir));
         Ok(match handle_todo_write(arguments, &store) {
             Ok(result) => result,
-            Err(error) => ToolResult::text(error.clone(), true, tool_metadata([("error", json!(error))])),
+            Err(error) => ToolResult::text(
+                error.clone(),
+                true,
+                tool_metadata([("error", json!(error))]),
+            ),
         })
     }
 }

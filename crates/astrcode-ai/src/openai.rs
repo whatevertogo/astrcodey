@@ -163,7 +163,8 @@ impl OpenAiProvider {
 
         body["prompt_cache_key"] = serde_json::json!(self.prompt_cache_key(messages, tools));
         if let Some(retention) = self.config.prompt_cache_retention {
-            body["prompt_cache_retention"] = serde_json::json!(retention.as_wire_value());
+            body["prompt_cache_retention"] =
+                serde_json::json!(prompt_cache_retention_wire_value(self.api_mode, retention));
         }
     }
 
@@ -212,6 +213,17 @@ fn stable_hash_hex(parts: &[&str]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{hash:016x}")
+}
+
+fn prompt_cache_retention_wire_value(
+    api_mode: OpenAiApiMode,
+    retention: PromptCacheRetention,
+) -> &'static str {
+    match (api_mode, retention) {
+        (_, PromptCacheRetention::TwentyFourHours) => "24h",
+        (OpenAiApiMode::ChatCompletions, PromptCacheRetention::InMemory) => "in_memory",
+        (OpenAiApiMode::Responses, PromptCacheRetention::InMemory) => "in-memory",
+    }
 }
 
 // ─── 工具序列化 ────────────────────────────────────────────────────────
@@ -708,7 +720,7 @@ impl LlmAccumulator {
         tx: &mpsc::UnboundedSender<LlmEvent>,
     ) {
         trace_prompt_cache_usage(event);
-        let Some(event_type) = event["event"].as_str() else {
+        let Some(event_type) = event["type"].as_str() else {
             return;
         };
         match event_type {
@@ -905,15 +917,25 @@ mod tests {
     }
 
     fn provider(api_mode: OpenAiApiMode, supports_cache_key: bool) -> OpenAiProvider {
-        let config = LlmClientConfig {
-            base_url: "https://api.test/v1".into(),
-            api_key: "sk-test".into(),
-            supports_prompt_cache_key: supports_cache_key,
-            prompt_cache_retention: if supports_cache_key {
+        provider_with_retention(
+            api_mode,
+            if supports_cache_key {
                 Some(PromptCacheRetention::TwentyFourHours)
             } else {
                 None
             },
+        )
+    }
+
+    fn provider_with_retention(
+        api_mode: OpenAiApiMode,
+        retention: Option<PromptCacheRetention>,
+    ) -> OpenAiProvider {
+        let config = LlmClientConfig {
+            base_url: "https://api.test/v1".into(),
+            api_key: "sk-test".into(),
+            supports_prompt_cache_key: retention.is_some(),
+            prompt_cache_retention: retention,
             ..LlmClientConfig::default()
         };
         OpenAiProvider::new(config, api_mode, "gpt-test".into(), Some(1024), Some(8192))
@@ -966,6 +988,28 @@ mod tests {
 
         assert!(body["prompt_cache_key"].as_str().is_some());
         assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn responses_request_uses_responses_retention_wire_value() {
+        let provider = provider_with_retention(
+            OpenAiApiMode::Responses,
+            Some(PromptCacheRetention::InMemory),
+        );
+        let body = provider.build_request_body(&[LlmMessage::user("hello")], &[]);
+
+        assert_eq!(body["prompt_cache_retention"], "in-memory");
+    }
+
+    #[test]
+    fn chat_request_uses_chat_retention_wire_value() {
+        let provider = provider_with_retention(
+            OpenAiApiMode::ChatCompletions,
+            Some(PromptCacheRetention::InMemory),
+        );
+        let body = provider.build_request_body(&[LlmMessage::user("hello")], &[]);
+
+        assert_eq!(body["prompt_cache_retention"], "in_memory");
     }
 
     #[test]
@@ -1065,7 +1109,7 @@ mod tests {
 
         accumulator.ingest_responses(
             &serde_json::json!({
-                "event": "response.output_item.added",
+                "type": "response.output_item.added",
                 "item": {
                     "type": "function_call",
                     "id": "item_1",
@@ -1077,7 +1121,7 @@ mod tests {
         );
         accumulator.ingest_responses(
             &serde_json::json!({
-                "event": "response.function_call_arguments.delta",
+                "type": "response.function_call_arguments.delta",
                 "item_id": "item_1",
                 "delta": "{\"path\""
             }),
@@ -1085,7 +1129,7 @@ mod tests {
         );
         accumulator.ingest_responses(
             &serde_json::json!({
-                "event": "response.function_call_arguments.done",
+                "type": "response.function_call_arguments.done",
                 "item_id": "item_1",
                 "arguments": "{\"path\":\"Cargo.toml\"}"
             }),
@@ -1104,13 +1148,34 @@ mod tests {
     }
 
     #[test]
+    fn responses_text_delta_uses_official_type_field() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut accumulator = LlmAccumulator::new();
+
+        accumulator.ingest_responses(
+            &serde_json::json!({
+                "type": "response.output_text.delta",
+                "delta": "hello"
+            }),
+            &tx,
+        );
+
+        let events = drain_events(&mut rx);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LlmEvent::ContentDelta { delta } if delta == "hello"
+        )));
+    }
+
+    #[test]
     fn responses_done_arguments_are_used_when_no_deltas_arrived() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut accumulator = LlmAccumulator::new();
 
         accumulator.ingest_responses(
             &serde_json::json!({
-                "event": "response.function_call_arguments.done",
+                "type": "response.function_call_arguments.done",
                 "item_id": "item_1",
                 "name": "read",
                 "arguments": "{\"path\":\"Cargo.toml\"}"
@@ -1136,7 +1201,7 @@ mod tests {
     fn responses_completed_emits_done_once() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut accumulator = LlmAccumulator::new();
-        let event = serde_json::json!({"event": "response.completed"});
+        let event = serde_json::json!({"type": "response.completed"});
 
         accumulator.ingest_responses(&event, &tx);
         accumulator.ingest_responses(&event, &tx);

@@ -72,8 +72,12 @@ pub async fn run() -> io::Result<()> {
                         flush_scrollback(&mut state, &mut terminal, &theme)?;
                     },
                     StreamItem::Lagged(n) => {
-                        state.status = format!("Skipped {n} event(s)");
+                        state.status = format!("Skipped {n} event(s) · rehydrating");
                         state.mark_dirty();
+                        client
+                            .send_command(&ClientCommand::GetState)
+                            .await
+                            .map_err(io_error)?;
                     },
                 }
             },

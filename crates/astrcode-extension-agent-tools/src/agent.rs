@@ -184,10 +184,11 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
     let name = mapping_str(m, "name").unwrap_or(fallback);
     let id = normalize_id(&name);
 
-    let description = mapping_str(m, "description")
-        .ok_or_else(|| format!("{path}: description is required"))?;
+    let description =
+        mapping_str(m, "description").ok_or_else(|| format!("{path}: description is required"))?;
 
-    let tools = frontmatter::yaml_parse_tools_list(m.get(&serde_yaml::Value::String("tools".into())));
+    let tools =
+        frontmatter::yaml_parse_tools_list(m.get(serde_yaml::Value::String("tools".into())));
     // "inherit" 和空字符串表示继承父级模型设置
     let model = mapping_str(m, "model").filter(|s| s != "inherit" && !s.is_empty());
 

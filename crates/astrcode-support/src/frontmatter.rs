@@ -137,10 +137,7 @@ mod tests {
             serde_yaml::Value::String("read".into()),
             serde_yaml::Value::String("grep".into()),
         ]);
-        assert_eq!(
-            yaml_parse_tools_list(Some(&v)),
-            vec!["read", "grep"]
-        );
+        assert_eq!(yaml_parse_tools_list(Some(&v)), vec!["read", "grep"]);
     }
 
     #[test]

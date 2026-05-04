@@ -4,6 +4,9 @@
 //! 以及用于 stdio 管道通信的 JSONL（JSON Lines）帧协议。
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::{commands::ClientCommand, events::ClientNotification};
 
 /// 协议版本号标识符。
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -92,6 +95,86 @@ pub fn error_message(id: Option<u64>, code: i32, message: &str) -> JsonRpcMessag
             data: None,
         }),
     }
+}
+
+/// 将客户端命令包装成 JSON-RPC request。
+pub fn command_to_jsonrpc_request(
+    command: &ClientCommand,
+    id: u64,
+) -> Result<JsonRpcMessage, serde_json::Error> {
+    let mut value = serde_json::to_value(command)?;
+    let Some(object) = value.as_object_mut() else {
+        return Ok(JsonRpcMessage {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            method: Some("unknown".into()),
+            params: None,
+            result: None,
+            error: None,
+        });
+    };
+    let method = object
+        .remove("method")
+        .and_then(|value| value.as_str().map(|method| method.to_string()))
+        .unwrap_or_else(|| "unknown".into());
+    Ok(JsonRpcMessage {
+        jsonrpc: "2.0".into(),
+        id: Some(id),
+        method: Some(method),
+        params: object.remove("params"),
+        result: None,
+        error: None,
+    })
+}
+
+/// 从 JSON-RPC request 解出客户端命令。
+pub fn command_from_jsonrpc_request(
+    message: &JsonRpcMessage,
+) -> Result<ClientCommand, serde_json::Error> {
+    let mut object = Map::new();
+    if let Some(method) = &message.method {
+        object.insert("method".into(), Value::String(method.clone()));
+    }
+    if let Some(params) = &message.params {
+        object.insert("params".into(), params.clone());
+    }
+    serde_json::from_value(Value::Object(object))
+}
+
+/// 将服务端通知包装成 JSON-RPC notification。
+pub fn notification_to_jsonrpc_message(
+    notification: &ClientNotification,
+) -> Result<JsonRpcMessage, serde_json::Error> {
+    let mut value = serde_json::to_value(notification)?;
+    let Some(object) = value.as_object_mut() else {
+        return Ok(event_message("unknown", &Value::Null));
+    };
+    let event = object
+        .remove("event")
+        .and_then(|value| value.as_str().map(|event| event.to_string()))
+        .unwrap_or_else(|| "unknown".into());
+    Ok(JsonRpcMessage {
+        jsonrpc: "2.0".into(),
+        id: None,
+        method: Some(event),
+        params: object.remove("data"),
+        result: None,
+        error: None,
+    })
+}
+
+/// 从 JSON-RPC notification 解出服务端通知。
+pub fn notification_from_jsonrpc_message(
+    message: &JsonRpcMessage,
+) -> Result<ClientNotification, serde_json::Error> {
+    let mut object = Map::new();
+    if let Some(method) = &message.method {
+        object.insert("event".into(), Value::String(method.clone()));
+    }
+    if let Some(params) = &message.params {
+        object.insert("data".into(), params.clone());
+    }
+    serde_json::from_value(Value::Object(object))
 }
 
 /// 构造一个服务器事件通知消息（无 ID，属于通知模式）。

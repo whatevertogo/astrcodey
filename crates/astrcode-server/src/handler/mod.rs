@@ -125,6 +125,10 @@ impl CommandHandler {
                 self.compact_active_session().await?;
             },
 
+            ClientCommand::GetState => {
+                self.send_current_state().await;
+            },
+
             ClientCommand::ResumeSession { session_id }
             | ClientCommand::SwitchSession { session_id } => {
                 self.resume_session(session_id).await;
@@ -168,6 +172,24 @@ impl CommandHandler {
             },
         }
         Ok(())
+    }
+
+    /// 发送当前活跃会话快照，用于客户端初次同步或事件流 lag 后恢复。
+    async fn send_current_state(&mut self) {
+        let Some(session_id) = self.active_session_id.clone() else {
+            self.send_error(40400, "No active session");
+            return;
+        };
+        match self.runtime.session_manager.read_model(&session_id).await {
+            Ok(state) => {
+                let snapshot = session_snapshot(&state);
+                let _ = self.event_tx.send(ClientNotification::SessionResumed {
+                    session_id,
+                    snapshot,
+                });
+            },
+            Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
+        }
     }
 
     /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具和 system prompt 快照。

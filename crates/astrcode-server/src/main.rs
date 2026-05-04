@@ -9,10 +9,15 @@
 
 use std::sync::Arc;
 
-use astrcode_protocol::events::ClientNotification;
+use astrcode_protocol::{
+    events::ClientNotification,
+    framing::{notification_to_jsonrpc_message, to_jsonl_line},
+    framing::PROTOCOL_VERSION,
+    version::negotiate_version,
+};
 use astrcode_server::{
     handler::CommandHandler,
-    transport::{ServerTransport, StdioTransport, write_initialize_response},
+    transport::{ServerTransport, StdioTransport, write_initialize_error, write_initialize_response},
 };
 
 #[tokio::main]
@@ -30,7 +35,28 @@ async fn main() {
 
     let (cmd_tx, mut transport) = StdioTransport::new_channel();
     StdioTransport::spawn_stdin_reader(cmd_tx);
-    write_initialize_response();
+    let initialize = match transport.initialize().await {
+        Ok(initialize) => initialize,
+        Err(e) => {
+            tracing::error!("Initialize failed: {e}");
+            std::process::exit(1);
+        },
+    };
+    let request_id = transport.initialize_request_id();
+    let accepted_version = negotiate_version(initialize.protocol_version, &[PROTOCOL_VERSION]);
+    let Some(accepted_version) = accepted_version else {
+        write_initialize_error(
+            request_id,
+            -32000,
+            &format!("Unsupported protocol version {}", initialize.protocol_version),
+        );
+        std::process::exit(1);
+    };
+    let Some(request_id) = request_id else {
+        write_initialize_error(None, -32600, "Initialize request must include an id");
+        std::process::exit(1);
+    };
+    write_initialize_response(request_id, accepted_version);
 
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let handler = CommandHandler::spawn_actor(runtime, event_tx.clone());
@@ -39,7 +65,9 @@ async fn main() {
     let mut event_rx = event_tx.subscribe();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
-            let line = astrcode_protocol::framing::to_jsonl_line(&event).unwrap_or_default();
+            let line = notification_to_jsonrpc_message(&event)
+                .and_then(|message| to_jsonl_line(&message))
+                .unwrap_or_default();
             use std::io::Write;
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
