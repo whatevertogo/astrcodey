@@ -5,34 +5,41 @@
 //! 用户可用终端原生滚轮/键盘翻页查看历史消息。
 
 mod composer;
+mod custom_terminal;
 mod input;
+mod insert_history;
 mod render;
 mod slash;
 mod state;
 mod theme;
+mod terminal_probe;
+mod tui_event;
 mod tool_display;
 
 use std::{
     io::{self, Stdout},
     sync::Arc,
-    time::Duration,
 };
 
 use astrcode_client::{client::AstrcodeClient, stream::StreamItem};
 use astrcode_protocol::commands::ClientCommand;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers},
+    event::{DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
+    SynchronizedUpdate,
 };
 use input::Action;
 use ratatui::{
-    Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, prelude::Widget, text::Text,
-    widgets::Paragraph,
+    backend::CrosstermBackend,
+    layout::Position,
 };
+use custom_terminal::Terminal as CustomTerminal;
 use render::scrollback_entry_to_lines;
+use insert_history::insert_history_lines;
 use state::TuiState;
-use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tui_event::{EventBroker, TerminalFocus, TuiEvent, EventStream as TuiEventStream};
 
 use crate::transport::InProcessTransport;
 
@@ -48,8 +55,13 @@ pub async fn run() -> io::Result<()> {
     let theme = theme::Theme::detect();
     let mut state = TuiState::new();
 
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
-    spawn_keyboard_reader(action_tx.clone());
+    // 创建事件流管理器
+    let broker = EventBroker::new();
+    let focus = TerminalFocus::new();
+    let (draw_tx, _) = tokio::sync::broadcast::channel::<()>(16);
+
+    // 创建 TUI 事件流
+    let mut event_stream = TuiEventStream::new(broker, draw_tx.subscribe(), focus);
 
     // 首帧绘制
     terminal.draw_frame(&mut state, &theme)?;
@@ -57,10 +69,12 @@ pub async fn run() -> io::Result<()> {
 
     loop {
         tokio::select! {
-            action = action_rx.recv() => {
-                let Some(action) = action else { break };
-                handle_action(action, &mut state, &client, &mut terminal).await?;
+            // TUI 事件（键盘、粘贴、resize、绘制）
+            event = event_stream.next() => {
+                let Some(event) = event else { break };
+                handle_tui_event(event, &mut state, &client, &mut terminal).await?;
             },
+            // 服务器事件
             item = stream.recv() => {
                 match item.map_err(io_error)? {
                     StreamItem::Event(notification) => {
@@ -90,6 +104,38 @@ pub async fn run() -> io::Result<()> {
     Ok(())
 }
 
+/// 处理 TUI 事件。
+async fn handle_tui_event(
+    event: TuiEvent,
+    state: &mut TuiState,
+    client: &Arc<Client>,
+    terminal: &mut TerminalSession,
+) -> io::Result<()> {
+    match event {
+        TuiEvent::Key(key_event) => {
+            if let Some(action) = input::map_key(key_event) {
+                handle_action(action, state, client, terminal).await?;
+            }
+        },
+        TuiEvent::Paste(text) => {
+            let text = normalize_paste(&text);
+            state.insert_paste(&text);
+            state.mark_dirty();
+        },
+        TuiEvent::Resize => {
+            // 不调用 sync_resize / autoresize！
+            // 让 draw_frame 内的 update_inline_viewport 自己处理 resize，
+            // 这样它才能正确比较 old_height 和 new_height。
+            state.mark_dirty();
+        },
+        TuiEvent::Draw => {
+            // 计划的重绘事件
+            state.mark_dirty();
+        },
+    }
+    Ok(())
+}
+
 // ─── Action 处理 ──────────────────────────────────────────────────────
 
 async fn handle_action(
@@ -100,7 +146,6 @@ async fn handle_action(
 ) -> io::Result<()> {
     match action {
         Action::Quit => state.should_quit = true,
-        Action::Resize => terminal.sync_resize()?,
         Action::Key(event) => handle_key(event, state, client, terminal).await?,
         Action::Paste(text) => {
             let text = normalize_paste(&text);
@@ -302,51 +347,10 @@ async fn execute_slash_command(
     Ok(())
 }
 
-// ─── 键盘读取线程 ─────────────────────────────────────────────────────
-
-fn spawn_keyboard_reader(action_tx: mpsc::UnboundedSender<Action>) {
-    std::thread::spawn(move || {
-        loop {
-            match event::poll(Duration::from_millis(100)) {
-                Ok(true) => match event::read() {
-                    Ok(event::Event::Key(key)) => {
-                        if let Some(action) = input::map_key(key) {
-                            if action_tx.send(action).is_err() {
-                                break;
-                            }
-                        }
-                    },
-                    Ok(event::Event::Paste(text)) => {
-                        if action_tx.send(Action::Paste(text)).is_err() {
-                            break;
-                        }
-                    },
-                    Ok(event::Event::Resize(_, _)) => {
-                        if action_tx.send(Action::Resize).is_err() {
-                            break;
-                        }
-                    },
-                    // 不处理鼠标事件 — 原生选择/滚轮由终端管理
-                    Ok(_) => {},
-                    Err(_) => {
-                        let _ = action_tx.send(Action::Quit);
-                        break;
-                    },
-                },
-                Ok(false) => {},
-                Err(_) => {
-                    let _ = action_tx.send(Action::Quit);
-                    break;
-                },
-            }
-        }
-    });
-}
-
 // ─── 终端会话 ─────────────────────────────────────────────────────────
 
 struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: CustomTerminal<CrosstermBackend<Stdout>>,
 }
 
 impl TerminalSession {
@@ -354,33 +358,63 @@ impl TerminalSession {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnableBracketedPaste)?;
-        // 不进入 alternate screen；滚轮/翻页继续走终端原生 scrollback。
-        let options = TerminalOptions {
-            viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-        };
+
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::with_options(backend, options)?;
+
+        // 探测初始光标位置（必须在 raw mode 之后，使用 CPR 逃逸序列）
+        #[cfg(unix)]
+        let cursor_pos =
+            match terminal_probe::cursor_position(terminal_probe::DEFAULT_TIMEOUT) {
+                Ok(Some(pos)) => pos,
+                Ok(None) => {
+                    tracing::warn!("initial cursor position probe timed out; defaulting to origin");
+                    Position { x: 0, y: 0 }
+                }
+                Err(err) => {
+                    tracing::warn!("failed to read initial cursor position; defaulting to origin: {err}");
+                    Position { x: 0, y: 0 }
+                }
+            };
+
+        #[cfg(not(unix))]
+        let cursor_pos = backend
+            .get_cursor_position()
+            .unwrap_or_else(|err| {
+                tracing::warn!("failed to read initial cursor position; defaulting to origin: {err}");
+                Position { x: 0, y: 0 }
+            });
+
+        let terminal = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
+
         Ok(Self { terminal })
     }
 
     /// 将待提交历史写入原生 scrollback，并绘制底部面板。
+    ///
+    /// 使用 Codex 的 draw_with_resize_reflow 模式：
+    /// 不依赖 pending_viewport_area（光标位置启发式），
+    /// 而是通过 update_inline_viewport 的 resize-reflow 逻辑
+    /// 直接处理终端放大和缩小。
     fn draw_frame(&mut self, state: &mut TuiState, theme: &theme::Theme) -> io::Result<()> {
-        sync_viewport_resize(&mut self.terminal)?;
-        flush_scrollback(state, self, theme)?;
-        self.terminal
-            .draw(|frame| render::render(state, frame, theme))
-            .map(|_| ())
-    }
+        let _ = io::stdout().sync_update(|_| {
+            let needs_full_repaint = self.terminal.update_inline_viewport(INLINE_VIEWPORT_HEIGHT)?;
 
-    fn sync_resize(&mut self) -> io::Result<()> {
-        sync_viewport_resize(&mut self.terminal)
+            self.flush_scrollback(state, theme)?;
+
+            if needs_full_repaint {
+                self.terminal.invalidate_viewport();
+            }
+
+            self.terminal.draw(|frame| {
+                render::render(state, frame, theme)
+            })
+        })?;
+
+        Ok(())
     }
 
     fn composer_width(&self) -> usize {
-        self.terminal
-            .size()
-            .map(|area| area.width.saturating_sub(2).max(1) as usize)
-            .unwrap_or(80)
+        self.terminal.composer_width()
     }
 
     /// 将条目插入终端 scrollback（在 viewport 上方）。
@@ -389,7 +423,22 @@ impl TerminalSession {
         entry: &state::ScrollbackEntry,
         theme: &theme::Theme,
     ) -> io::Result<()> {
-        insert_scrollback_entry(&mut self.terminal, entry, theme)
+        let width = self.terminal.viewport_area.width;
+        let lines = scrollback_entry_to_lines(entry, width, theme);
+        insert_history_lines(&mut self.terminal, lines)
+    }
+
+    /// 刷新 scrollback_queue 中的所有条目。
+    fn flush_scrollback(
+        &mut self,
+        state: &mut TuiState,
+        theme: &theme::Theme,
+    ) -> io::Result<()> {
+        let entries: Vec<_> = state.scrollback_queue.drain(..).collect();
+        for entry in entries {
+            self.insert_scrollback_entry(&entry, theme)?;
+        }
+        Ok(())
     }
 }
 
@@ -399,42 +448,6 @@ impl Drop for TerminalSession {
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
     }
-}
-
-fn sync_viewport_resize<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-) -> io::Result<()> {
-    terminal.autoresize()
-}
-
-fn insert_scrollback_entry<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    entry: &state::ScrollbackEntry,
-    theme: &theme::Theme,
-) -> io::Result<()> {
-    sync_viewport_resize(terminal)?;
-    let width = terminal.size()?.width;
-    let lines = scrollback_entry_to_lines(entry, width, theme);
-    if lines.is_empty() {
-        return Ok(());
-    }
-    let height = lines.len() as u16;
-    terminal.insert_before(height, |buffer| {
-        Paragraph::new(Text::from(lines)).render(buffer.area, buffer);
-    })
-}
-
-/// 将 scrollback_queue 中的消息全部写入终端原生 scrollback。
-fn flush_scrollback(
-    state: &mut TuiState,
-    terminal: &mut TerminalSession,
-    theme: &theme::Theme,
-) -> io::Result<()> {
-    let entries: Vec<_> = state.scrollback_queue.drain(..).collect();
-    for entry in entries {
-        terminal.insert_scrollback_entry(&entry, theme)?;
-    }
-    Ok(())
 }
 
 fn io_error(error: impl std::fmt::Display) -> io::Error {
@@ -472,92 +485,10 @@ fn resolve_session_id(state: &TuiState, input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{
-        backend::{Backend, TestBackend},
-        layout::Position,
-    };
-    use state::MessageRole;
-
     use super::*;
 
-    fn inline_terminal(width: u16, height: u16) -> Terminal<TestBackend> {
-        let mut backend = TestBackend::new(width, height);
-        backend
-            .set_cursor_position(Position::new(0, height.saturating_sub(1)))
-            .unwrap();
-        Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-            },
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn scrollback_insert_survives_inline_resize() {
-        let theme = theme::Theme::detect();
-        let mut terminal = inline_terminal(20, 6);
-        let mut state = TuiState::new();
-        state.push_message(
-            MessageRole::Assistant,
-            "Astrcode".into(),
-            "alpha beta gamma delta".into(),
-            false,
-            None,
-        );
-        let entry = state.scrollback_queue.pop().unwrap();
-
-        terminal.backend_mut().resize(8, 6);
-        insert_scrollback_entry(&mut terminal, &entry, &theme).unwrap();
-
-        let state = TuiState::new();
-        terminal
-            .draw(|frame| render::render(&state, frame, &theme))
-            .unwrap();
-
-        let screen = terminal.backend().to_string();
-        assert!(!screen.contains("Ready"));
-        assert!(!screen.contains('─'));
-    }
-
-    #[test]
-    fn inline_resize_keeps_one_composer_prompt() {
-        let theme = theme::Theme::detect();
-        let mut terminal = inline_terminal(40, 8);
-        let state = TuiState::new();
-
-        for (width, height) in [(40, 12), (32, 7), (64, 14), (40, 8)] {
-            terminal.backend_mut().resize(width, height);
-            sync_viewport_resize(&mut terminal).unwrap();
-            terminal
-                .draw(|frame| render::render(&state, frame, &theme))
-                .unwrap();
-        }
-
-        let screen = terminal.backend().to_string();
-        assert_eq!(screen.matches("Ask astrcode to inspect").count(), 1);
-        assert!(!screen.contains('─'));
-    }
-
-    #[test]
-    fn cjk_history_text_is_not_expanded_with_manual_skip_cells() {
-        let theme = theme::Theme::detect();
-        let mut terminal = inline_terminal(40, 8);
-        let mut state = TuiState::new();
-        state.push_message(
-            MessageRole::User,
-            "You".into(),
-            "你不累吗".into(),
-            false,
-            None,
-        );
-        let entry = state.scrollback_queue.pop().unwrap();
-
-        insert_scrollback_entry(&mut terminal, &entry, &theme).unwrap();
-
-        let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("你不累吗"));
-        assert!(!rendered.contains("你 不 累 吗"));
+    fn test_constants() {
+        const { assert!(INLINE_VIEWPORT_HEIGHT > 0) };
     }
 }

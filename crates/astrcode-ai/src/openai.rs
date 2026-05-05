@@ -693,9 +693,11 @@ impl LlmAccumulator {
                                 if let Some(args) = func["arguments"].as_str() {
                                     let call_id =
                                         partial.id.clone().unwrap_or_else(|| idx.to_string());
+                                    // 清理参数中的无效字符
+                                    let cleaned_args = clean_json_fragment(args);
                                     let _ = tx.send(LlmEvent::ToolCallDelta {
                                         call_id,
-                                        delta: args.to_string(),
+                                        delta: cleaned_args,
                                     });
                                 }
                             }
@@ -900,6 +902,17 @@ impl Default for Utf8StreamDecoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 清理 JSON 片段，去除一些常见的无效字符。
+///
+/// 某些 LLM 提供者在流式传输工具调用参数时可能会插入
+/// 控制字符或其他无效内容。此函数尝试清理这些内容。
+fn clean_json_fragment(fragment: &str) -> String {
+    // 去除常见的控制字符（保留换行、制表符等空白字符）
+    fragment.chars().filter(|&c| {
+        c.is_ascii_graphic() || c.is_ascii_whitespace()
+    }).collect()
 }
 
 #[cfg(test)]

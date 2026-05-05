@@ -828,7 +828,7 @@ impl AgentLoop {
     /// 预处理工具调用列表。
     ///
     /// 对每个待执行的工具调用依次执行：
-    /// 1. 解析 JSON 参数（解析失败时使用空对象并记录警告）。
+    /// 1. 解析 JSON 参数（解析失败时尝试修复，仍失败则使用空对象并记录警告）。
     /// 2. 检查工具白名单，不在白名单中的工具直接标记为 `Blocked`。
     /// 3. 分发 `PreToolUse` 扩展钩子，允许扩展修改输入或阻止执行。
     /// 4. 根据工具注册表确定执行模式（并行 / 串行）。
@@ -841,14 +841,7 @@ impl AgentLoop {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
         for (index, tc) in tool_calls.iter().enumerate() {
-            let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
-                tracing::warn!(
-                    tool = %tc.name,
-                    error = %e,
-                    "Malformed tool call arguments, using empty object"
-                );
-                serde_json::json!({})
-            });
+            let args: serde_json::Value = parse_and_repair_json(&tc.arguments, &tc.name);
 
             if !self.tool_is_allowed(&tc.name) {
                 let blocked_result = ToolResult {
@@ -1793,6 +1786,73 @@ pub(crate) fn tool_name_matches_allowlist(allowed: &HashSet<String>, tool_name: 
     allowed
         .iter()
         .any(|allowed_name| allowed_name.eq_ignore_ascii_case(tool_name))
+}
+
+/// 解析并尝试修复 JSON 参数。
+///
+/// 某些 LLM 提供者（如 glm-5.1）可能生成格式不正确的 JSON。
+/// 此函数尝试修复常见问题，如：
+/// - 末尾缺少闭合括号
+/// - 末尾有多余的逗号
+/// - 引号不匹配
+fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Value {
+    // 首先尝试直接解析
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        return value;
+    }
+
+    // 记录原始错误信息
+    tracing::warn!(
+        tool = %tool_name,
+        arguments_preview = %arguments.chars().take(200).collect::<String>(),
+        arguments_len = arguments.len(),
+        "Failed to parse tool call arguments, attempting repair"
+    );
+
+    // 尝试修复策略 1：去除末尾的逗号
+    let trimmed = arguments.trim();
+    if let Some(repaired) = trimmed.strip_suffix(',') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(repaired) {
+            tracing::debug!(
+                tool = %tool_name,
+                "Successfully repaired JSON by removing trailing comma"
+            );
+            return value;
+        }
+    }
+
+    // 尝试修复策略 2：尝试补全未闭合的 JSON 对象
+    let mut repaired = trimmed.to_string();
+    let open_braces = trimmed.matches('{').count();
+    let close_braces = trimmed.matches('}').count();
+    let open_brackets = trimmed.matches('[').count();
+    let close_brackets = trimmed.matches(']').count();
+
+    // 补全缺失的闭合括号
+    for _ in 0..(open_braces.saturating_sub(close_braces)) {
+        repaired.push('}');
+    }
+    for _ in 0..(open_brackets.saturating_sub(close_brackets)) {
+        repaired.push(']');
+    }
+
+    if repaired != trimmed {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
+            tracing::debug!(
+                tool = %tool_name,
+                "Successfully repaired JSON by adding missing closing brackets"
+            );
+            return value;
+        }
+    }
+
+    // 所有修复尝试都失败，返回空对象
+    tracing::error!(
+        tool = %tool_name,
+        arguments_preview = %arguments.chars().take(500).collect::<String>(),
+        "All JSON repair attempts failed, using empty object"
+    );
+    serde_json::json!({})
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────

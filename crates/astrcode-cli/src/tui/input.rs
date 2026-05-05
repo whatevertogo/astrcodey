@@ -6,11 +6,10 @@ use crossterm::event::{KeyEvent, KeyEventKind};
 
 /// 驱动 TUI 事件循环的动作枚举。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Action {
     /// 退出 TUI
     Quit,
-    /// 终端窗口大小变化
-    Resize,
     /// 键盘按键事件
     Key(KeyEvent),
     /// bracketed paste 文本

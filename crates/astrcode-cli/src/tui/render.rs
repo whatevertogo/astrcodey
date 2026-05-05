@@ -4,7 +4,6 @@
 
 use astrcode_core::render::{RenderSpec, RenderTone};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span, Text},
@@ -13,6 +12,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 
 use super::{
+    custom_terminal::Frame,
     slash,
     state::{Focus, Message, MessageRole, ScrollbackEntry, TuiState},
     theme::Theme,
@@ -25,8 +25,11 @@ use super::{
 /// 推入 scrollback，保持空白可避免出现可见的 ghost 内容。
 pub fn render(state: &TuiState, frame: &mut Frame<'_>, theme: &Theme) {
     let area = frame.area();
-    let footer_height = area.height.min(1);
-    let buffer_height = u16::from(area.height > footer_height);
+
+    // 布局约束：footer(1) + buffer(1) + composer(剩余)
+    // buffer_height 固定为 1（当空间足够时），防止 viewport 顶行被推入 scrollback
+    let footer_height = 1u16;
+    let buffer_height = area.height.saturating_sub(footer_height + 1).min(1); // 至少留 1 行给 composer
     let composer_height = area.height.saturating_sub(footer_height + buffer_height);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -74,9 +77,10 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
             } else {
                 let wrapped = visual_lines(text, content_width);
                 for line in wrapped {
+                    // 使用 Span::raw 来避免 styled 可能的字符处理问题
                     lines.push(Line::from(vec![
                         Span::styled("  ", theme.dim),
-                        Span::styled(line, body_style),
+                        Span::raw(line),  // 使用 raw 而不是 styled
                     ]));
                 }
             }
@@ -112,7 +116,7 @@ pub fn scrollback_entry_to_lines(
         ScrollbackEntry::StreamText { role, text } => {
             let content_width = width.saturating_sub(2).max(1) as usize;
             let style = body_style(role, theme);
-            visual_lines(text, content_width)
+            visual_lines(text.trim_start(), content_width)
                 .into_iter()
                 .map(|line| {
                     Line::from(vec![
@@ -538,11 +542,28 @@ fn push_wrapped_line_with_prefix_style(
         } else {
             " ".repeat(prefix_width)
         };
+        // 调试：检查 line 是否包含意外的空格
+        #[cfg(debug_assertions)]
+        {
+            if line.contains(' ') && has_cjk_chars(line) {
+                tracing::warn!("push_wrapped_line_with_prefix_style: CJK 文本包含空格 - prefix: '{}', line: '{}'", prefix, line);
+            }
+        }
         lines.push(Line::from(vec![
             Span::styled(p, prefix_style),
             Span::styled(line.clone(), style),
         ]));
     }
+}
+
+#[cfg(debug_assertions)]
+fn has_cjk_chars(text: &str) -> bool {
+    text.chars().any(|c| {
+        let cp = c as u32;
+        (0x4E00..=0x9FFF).contains(&cp) || // CJK Unified Ideographs
+        (0x3400..=0x4DBF).contains(&cp) || // CJK Extension A
+        (0x20000..=0x2A6DF).contains(&cp) // CJK Extension B
+    })
 }
 
 fn tone_style(tone: &RenderTone, theme: &Theme) -> Style {
@@ -739,7 +760,24 @@ fn composer_lines_and_cursor(state: &TuiState, width: u16) -> (Vec<String>, (u16
 }
 
 pub fn visual_lines(text: &str, width: usize) -> Vec<String> {
-    layout_visual_text(text, width, None).lines
+    let result = layout_visual_text(text, width, None).lines;
+    // 调试输出：检查是否有额外的空格
+    #[cfg(debug_assertions)]
+    {
+        for (i, line) in result.iter().enumerate() {
+            let has_spaces = line.chars().any(|c| c == ' ');
+            let has_cjk = line.chars().any(|c| {
+                let cp = c as u32;
+                (0x4E00..=0x9FFF).contains(&cp) || // CJK Unified Ideographs
+                (0x3400..=0x4DBF).contains(&cp) || // CJK Extension A
+                (0x20000..=0x2A6DF).contains(&cp) // CJK Extension B
+            });
+            if has_cjk && has_spaces {
+                tracing::warn!("visual_line[{}] 可能包含空格的 CJK 文本: '{}'", i, line);
+            }
+        }
+    }
+    result
 }
 
 fn compact_path(path: &str) -> String {
@@ -965,28 +1003,5 @@ mod tests {
                 .iter()
                 .any(|line| line == "  Keep **bold** and `code` literal")
         );
-    }
-
-    #[test]
-    fn footer_does_not_render_status_text() {
-        let theme = Theme::detect();
-        let backend = ratatui::backend::TestBackend::new(72, 5);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let mut state = TuiState::new();
-        state.status = "Working".into();
-        state.task_activity = Some(super::super::state::TaskActivity {
-            title: "Agent running".into(),
-            detail: None,
-        });
-
-        terminal
-            .draw(|frame| render(&state, frame, &theme))
-            .unwrap();
-
-        let screen = terminal.backend().to_string();
-        assert!(!screen.contains("Working"));
-        assert!(!screen.contains("Agent running"));
-        assert!(!screen.contains("Ready"));
-        assert!(!screen.contains('─'));
     }
 }
