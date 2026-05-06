@@ -89,7 +89,7 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
 
     if msg.is_streaming {
         lines.push(Line::from(vec![
-            Span::styled("  ⎿ ", theme.dim),
+            Span::styled("  ... ", theme.dim),
             Span::styled("running...", theme.dim),
         ]));
     }
@@ -132,11 +132,11 @@ pub fn scrollback_entry_to_lines(
 
 fn role_icon_and_style(role: &MessageRole, theme: &Theme) -> (&'static str, Style) {
     match role {
-        MessageRole::User => ("›", theme.user_label),
-        MessageRole::Assistant => ("●", theme.assistant_label),
-        MessageRole::Tool => ("⏺", theme.tool_label),
-        MessageRole::System => ("•", theme.system_label),
-        MessageRole::Error => ("✖", theme.error_label),
+        MessageRole::User => (">", theme.user_label),
+        MessageRole::Assistant => ("*", theme.assistant_label),
+        MessageRole::Tool => ("+", theme.tool_label),
+        MessageRole::System => ("-", theme.system_label),
+        MessageRole::Error => ("!", theme.error_label),
     }
 }
 
@@ -173,12 +173,12 @@ fn render_spec_to_lines(
                 push_wrapped_line(
                     lines,
                     prefix,
-                    &format!("• {title}"),
+                    &format!("* {title}"),
                     theme.assistant_label,
                     width,
                 );
             }
-            let child_prefix = format!("{prefix}  ⎿ ");
+            let child_prefix = format!("{prefix}  | ");
             for child in children {
                 render_spec_to_lines(child, lines, width, theme, &child_prefix);
             }
@@ -187,10 +187,10 @@ fn render_spec_to_lines(
             for item in items {
                 match item {
                     RenderSpec::Text { text, tone: _ } => {
-                        push_wrapped_line(lines, prefix, &format!("• {text}"), theme.body, width);
+                        push_wrapped_line(lines, prefix, &format!("* {text}"), theme.body, width);
                     },
                     other => {
-                        let item_prefix = format!("{prefix}• ");
+                        let item_prefix = format!("{prefix}* ");
                         render_spec_to_lines(other, lines, width, theme, &item_prefix);
                     },
                 }
@@ -213,7 +213,7 @@ fn render_spec_to_lines(
             value,
             tone: _,
         } => {
-            let mut text = format!("• {label}");
+            let mut text = format!("* {label}");
             if let Some(status) = status {
                 text.push_str(" · ");
                 text.push_str(status);
@@ -369,7 +369,7 @@ fn render_markdown_to_lines(
                 lines,
                 prefix,
                 styles.marker,
-                &format!("• {}", item),
+                &format!("* {}", item),
                 styles.body,
                 width,
             );
@@ -387,7 +387,7 @@ fn render_markdown_to_lines(
                 lines,
                 prefix,
                 styles.marker,
-                &format!("│ {quote}"),
+                &format!("| {quote}"),
                 styles.body,
                 width,
             );
@@ -502,7 +502,7 @@ fn push_separator_line(lines: &mut Vec<Line<'static>>, prefix: &str, style: Styl
         lines,
         prefix,
         style,
-        &"─".repeat(separator_width),
+        &"-".repeat(separator_width),
         style,
         width,
     );
@@ -619,7 +619,7 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
     let (lines, cursor) = composer_lines_and_cursor(state, content_width);
     let styled_lines: Vec<Line> = if state.input_text().is_empty() {
         vec![Line::from(vec![
-            Span::styled("› ", theme.assistant_label),
+            Span::styled("> ", theme.assistant_label),
             Span::styled(
                 "Ask astrcode to inspect, edit, or explain...",
                 theme.composer_placeholder,
@@ -630,7 +630,7 @@ fn render_composer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &
             .into_iter()
             .enumerate()
             .map(|(idx, line)| {
-                let prefix = if idx == 0 { "› " } else { "  " };
+                let prefix = if idx == 0 { "> " } else { "  " };
                 Line::from(vec![
                     Span::styled(prefix, theme.assistant_label),
                     Span::styled(line, theme.composer),
@@ -922,10 +922,10 @@ mod tests {
 
         let texts = line_texts(&lines);
         assert!(texts.iter().any(|line| line == "  Title"));
-        assert!(texts.iter().any(|line| line == "  • first"));
+        assert!(texts.iter().any(|line| line == "  * first"));
         assert!(texts.iter().any(|line| line == "  2. second"));
-        assert!(texts.iter().any(|line| line == "  │ quoted"));
-        assert!(texts.iter().any(|line| line.starts_with("  ───")));
+        assert!(texts.iter().any(|line| line == "  | quoted"));
+        assert!(texts.iter().any(|line| line.starts_with("  ---")));
         assert!(texts.iter().any(|line| line == "  code rust"));
         assert!(texts.iter().any(|line| line == "      let x = 1;"));
         assert!(!texts.iter().any(|line| line.contains("# Title")));
@@ -948,7 +948,7 @@ mod tests {
         let texts = line_texts(&lines);
 
         assert!(texts.iter().any(|line| line == "  Done"));
-        assert!(texts.iter().any(|line| line == "  • item"));
+        assert!(texts.iter().any(|line| line == "  * item"));
         assert!(!texts.iter().any(|line| line.contains("# Done")));
     }
 
@@ -979,10 +979,10 @@ mod tests {
         };
         let mut lines = Vec::new();
 
-        render_spec_to_lines(&spec, &mut lines, 18, &theme, "  ⎿ ");
+        render_spec_to_lines(&spec, &mut lines, 18, &theme, "  | ");
 
         let texts = line_texts(&lines);
-        assert!(texts[0].starts_with("  ⎿ •"));
+        assert!(texts[0].starts_with("  | *"));
         assert!(texts[1].starts_with("    "));
     }
 

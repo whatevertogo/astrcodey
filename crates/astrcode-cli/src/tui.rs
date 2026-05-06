@@ -450,6 +450,77 @@ impl Drop for TerminalSession {
     }
 }
 
+fn sync_viewport_resize<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+) -> io::Result<()> {
+    terminal.autoresize()
+}
+
+fn insert_scrollback_entry<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    entry: &state::ScrollbackEntry,
+    theme: &theme::Theme,
+) -> io::Result<()> {
+    sync_viewport_resize(terminal)?;
+    let width = terminal.size()?.width;
+    let lines = scrollback_entry_to_lines(entry, width, theme);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let height = lines.len() as u16;
+    terminal.insert_before(height, |buffer| {
+        Paragraph::new(Text::from(lines)).render(buffer.area, buffer);
+        // Clear wide-char continuation cells to prevent CJK rendering artifacts.
+        // ratatui's crossterm backend tracks cursor position per cell (x, y),
+        // not per visual column — so when it writes a space into the continuation
+        // cell of a CJK character, the space overwrites the character's right half.
+        // Clearing the symbol makes Print("") a no-op, letting the wide character
+        // occupy both columns correctly.
+        clear_wide_continuation_cells(buffer);
+    })
+}
+
+/// Erase continuation-cell symbols left by ratatui after wide characters.
+fn clear_wide_continuation_cells(buffer: &mut ratatui::buffer::Buffer) {
+    use unicode_width::UnicodeWidthChar;
+
+    let buf_width = buffer.area.width as usize;
+    let buf_height = buffer.area.height as usize;
+    for row in 0..buf_height {
+        let mut col: usize = 0;
+        while col < buf_width {
+            let cell = &buffer.content[row * buf_width + col];
+            let w = cell
+                .symbol()
+                .chars()
+                .next()
+                .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(1))
+                .unwrap_or(1)
+                .max(1);
+            for offset in 1..w {
+                let idx = row * buf_width + col + offset;
+                if idx < buffer.content.len() {
+                    buffer.content[idx].set_symbol("");
+                }
+            }
+            col += w;
+        }
+    }
+}
+
+/// 将 scrollback_queue 中的消息全部写入终端原生 scrollback。
+fn flush_scrollback(
+    state: &mut TuiState,
+    terminal: &mut TerminalSession,
+    theme: &theme::Theme,
+) -> io::Result<()> {
+    let entries: Vec<_> = state.scrollback_queue.drain(..).collect();
+    for entry in entries {
+        terminal.insert_scrollback_entry(&entry, theme)?;
+    }
+    Ok(())
+}
+
 fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
