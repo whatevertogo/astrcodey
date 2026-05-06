@@ -1,10 +1,9 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
-use super::shared::{clean_quotes, error_result, find_unique_occurrence, tool_call_id};
+use super::shared::{clean_quotes, find_unique_occurrence, resolve_sandboxed_path, tool_call_id};
 // ─── edit ────────────────────────────────────────────────────────────────
 
 /// 文件精确编辑工具，对已有文件执行窄范围的字符串替换。
@@ -123,18 +122,8 @@ impl Tool for EditFileTool {
         let started_at = Instant::now();
         let args: EditFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
-        let path = resolve_path(&self.working_dir, &args.path);
-        if !is_path_within(&path, &self.working_dir) {
-            return Ok(error_result(
-                ctx,
-                started_at,
-                format!("path escapes working directory: {}", path.display()),
-                BTreeMap::from([
-                    ("path".into(), serde_json::json!(path.display().to_string())),
-                    ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-                ]),
-            ));
-        }
+        let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
+        let Ok(path) = path else { return Ok(path.unwrap_err()) };
         let operations = normalize_edit_operations(args)?;
 
         let original = std::fs::read_to_string(&path)

@@ -6,14 +6,13 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
 use serde::Deserialize;
 
-use super::shared::{collect_grep_files, error_result, tool_call_id, trunc};
+use super::shared::{collect_grep_files, resolve_sandboxed_path, tool_call_id, trunc};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
@@ -209,22 +208,14 @@ impl Tool for GrepTool {
             };
             ToolError::Execution(format!("regex: {e}{hint}"))
         })?;
-        let root = args
-            .path
-            .as_deref()
-            .map(|p| resolve_path(&self.working_dir, p))
-            .unwrap_or_else(|| self.working_dir.clone());
-        if !is_path_within(&root, &self.working_dir) {
-            return Ok(error_result(
-                ctx,
-                started_at,
-                format!("path escapes working directory: {}", root.display()),
-                BTreeMap::from([
-                    ("path".into(), serde_json::json!(root.display().to_string())),
-                    ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-                ]),
-            ));
-        }
+        let root = match args.path {
+            Some(ref raw) => {
+                let root = resolve_sandboxed_path(&self.working_dir, raw, ctx, started_at);
+                let Ok(root) = root else { return Ok(root.unwrap_err()) };
+                root
+            },
+            None => self.working_dir.clone(),
+        };
         let max_matches = args.max_matches.unwrap_or(250);
         let offset = args.offset.unwrap_or(0);
         let files = collect_grep_files(

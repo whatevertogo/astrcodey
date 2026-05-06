@@ -5,7 +5,7 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -231,6 +231,36 @@ pub(super) fn read_image_file(
         metadata,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
     })
+}
+
+/// Resolve `raw` relative to `working_dir` and verify it stays within the sandbox.
+///
+/// Returns the resolved absolute path on success, or a `ToolResult` error for
+/// path-traversal violations. Callers typically match on the result:
+///
+/// ```ignore
+/// let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
+/// let Ok(path) = path else { return Ok(path.unwrap_err()) };
+/// ```
+pub(super) fn resolve_sandboxed_path(
+    working_dir: &Path,
+    raw: &Path,
+    ctx: &ToolExecutionContext,
+    started_at: Instant,
+) -> Result<PathBuf, ToolResult> {
+    let path = resolve_path(working_dir, raw);
+    if !is_path_within(&path, working_dir) {
+        return Err(error_result(
+            ctx,
+            started_at,
+            format!("path escapes working directory: {}", path.display()),
+            BTreeMap::from([
+                ("path".into(), serde_json::json!(path.display().to_string())),
+                ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
+            ]),
+        ));
+    }
+    Ok(path)
 }
 
 pub(super) fn tool_call_id(ctx: &ToolExecutionContext) -> String {

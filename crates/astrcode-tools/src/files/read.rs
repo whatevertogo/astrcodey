@@ -97,14 +97,13 @@ impl Tool for ReadFileTool {
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
-        // 拒绝工作目录外的路径，防止 LLM 构造 ../ 等路径遍历读取敏感文件
-        if !is_path_within(&path, &self.working_dir) {
+        let path = if !is_path_within(&path, &self.working_dir) {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
             {
                 return Ok(result);
             }
-            return Ok(error_result(
+            let result = error_result(
                 ctx,
                 started_at,
                 format!("path escapes working directory: {}", path.display()),
@@ -112,8 +111,11 @@ impl Tool for ReadFileTool {
                     ("path".into(), serde_json::json!(path.display().to_string())),
                     ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
                 ]),
-            ));
-        }
+            );
+            return Ok(result);
+        } else {
+            path
+        };
         if !path.exists() {
             return Ok(not_found(ctx, started_at, &path));
         }

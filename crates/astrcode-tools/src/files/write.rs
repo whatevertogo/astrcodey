@@ -1,10 +1,9 @@
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
-use super::shared::{error_result, tool_call_id};
+use super::shared::{resolve_sandboxed_path, tool_call_id};
 // ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
@@ -72,18 +71,8 @@ impl Tool for WriteFileTool {
         let started_at = Instant::now();
         let args: WriteFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid write args: {e}")))?;
-        let path = resolve_path(&self.working_dir, &args.path);
-        if !is_path_within(&path, &self.working_dir) {
-            return Ok(error_result(
-                ctx,
-                started_at,
-                format!("path escapes working directory: {}", path.display()),
-                BTreeMap::from([
-                    ("path".into(), serde_json::json!(path.display().to_string())),
-                    ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-                ]),
-            ));
-        }
+        let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
+        let Ok(path) = path else { return Ok(path.unwrap_err()) };
         if args.create_dirs {
             let Some(parent) = path.parent() else {
                 return Err(ToolError::Execution("path has no parent directory".into()));

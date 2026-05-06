@@ -9,6 +9,11 @@ use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::retry::RetryPolicy;
+use crate::serialization::{
+    chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
+    responses_tools_json, stable_hash_hex, system_text, tools_to_json,
+};
+use crate::stream_decoder::{clean_json_fragment, SseLineReader, Utf8StreamDecoder};
 
 pub struct OpenAiProvider {
     config: LlmClientConfig,
@@ -69,10 +74,6 @@ impl OpenAiProvider {
         }
     }
 
-    /// 检测当前端点是否为官方 OpenAI API。
-    ///
-    /// 某些字段（如 `stream_options`）只有官方 API 支持，
-    /// 第三方兼容 API 可能因未知字段报错。
     fn is_official_openai(&self) -> bool {
         reqwest::Url::parse(&self.config.base_url)
             .ok()
@@ -82,7 +83,7 @@ impl OpenAiProvider {
             })
             .unwrap_or(false)
     }
-
+    
     /// 构建最终请求体。
     ///
     /// Chat Completions 和 Responses 的消息 / 工具结构不兼容，
@@ -114,7 +115,6 @@ impl OpenAiProvider {
             "max_tokens": self.model_limits_val.max_output_tokens,
             "stream": true,
         });
-        // stream_options 只有官方 OpenAI 支持，第三方兼容 API 可能因未知字段报错
         if self.is_official_openai() {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
@@ -181,8 +181,6 @@ impl OpenAiProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) {
-        // 只有明确声明支持的 OpenAI 配置才发送提示词缓存字段；
-        // DeepSeek 等 OpenAI 兼容提供者不一定接受这些扩展字段。
         if !self.config.supports_prompt_cache_key {
             return;
         }
@@ -195,9 +193,7 @@ impl OpenAiProvider {
     }
 
     fn prompt_cache_key(&self, messages: &[LlmMessage], tools: &[ToolDefinition]) -> String {
-        // 缓存键只包含稳定前缀相关内容：模型、系统提示词、工具结构。
-        // 用户消息和历史上下文不参与，避免每轮对话都打散同一个静态前缀缓存。
-        let system_text = system_text(messages);
+        let sys = system_text(messages);
         let tools_json = match self.api_mode {
             OpenAiApiMode::ChatCompletions => tools_to_json(tools),
             OpenAiApiMode::Responses => responses_tools_json(tools),
@@ -207,268 +203,11 @@ impl OpenAiProvider {
             "astrcode-{}",
             stable_hash_hex(&[
                 self.model_id.as_str(),
-                system_text.as_str(),
+                sys.as_str(),
                 tools_text.as_str()
             ])
         )
     }
-}
-
-fn system_text(messages: &[LlmMessage]) -> String {
-    messages
-        .iter()
-        .filter(|m| matches!(m.role, LlmRole::System))
-        .flat_map(|m| m.content.iter())
-        .filter_map(|c| match c {
-            LlmContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn stable_hash_hex(parts: &[&str]) -> String {
-    // FNV-1a：不引入额外依赖，只需要跨进程稳定，不需要密码学安全。
-    let mut hash = 0xcbf29ce484222325u64;
-    for part in parts {
-        for byte in part.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
-}
-
-fn prompt_cache_retention_wire_value(
-    api_mode: OpenAiApiMode,
-    retention: PromptCacheRetention,
-) -> &'static str {
-    match (api_mode, retention) {
-        (_, PromptCacheRetention::TwentyFourHours) => "24h",
-        (OpenAiApiMode::ChatCompletions, PromptCacheRetention::InMemory) => "in_memory",
-        (OpenAiApiMode::Responses, PromptCacheRetention::InMemory) => "in-memory",
-    }
-}
-
-// ─── 工具序列化 ────────────────────────────────────────────────────────
-
-fn tools_to_json(tools: &[ToolDefinition]) -> serde_json::Value {
-    serde_json::Value::Array(
-        tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect(),
-    )
-}
-
-fn responses_tools_json(tools: &[ToolDefinition]) -> serde_json::Value {
-    serde_json::Value::Array(
-        tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                    "strict": false,
-                })
-            })
-            .collect(),
-    )
-}
-
-// ─── 消息序列化 ────────────────────────────────────────────────────────
-
-fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
-    match message.role {
-        LlmRole::Tool => {
-            // Chat Completions 要求工具结果作为独立消息发送，
-            // 并通过原始 tool_call_id 关联到上一条 assistant 工具调用。
-            let Some(LlmContent::ToolResult {
-                tool_call_id,
-                content,
-                ..
-            }) = message.content.first()
-            else {
-                return serde_json::json!({"role": "tool", "tool_call_id": "", "content": ""});
-            };
-            serde_json::json!({"role": "tool", "tool_call_id": tool_call_id, "content": content})
-        },
-        LlmRole::Assistant
-            if message
-                .content
-                .iter()
-                .any(|c| matches!(c, LlmContent::ToolCall { .. })) =>
-        {
-            // assistant 的工具调用要和文本内容分开序列化。
-            // 后续 agent 追加工具结果时，会用同一组 call_id / arguments 还原关联。
-            let tool_calls: Vec<serde_json::Value> = message
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    LlmContent::ToolCall {
-                        call_id,
-                        name,
-                        arguments,
-                    } => Some(serde_json::json!({
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments.to_string()
-                        }
-                    })),
-                    _ => None,
-                })
-                .collect();
-            // 有 tool_calls 时 content 设为空字符串而不是 null，
-            // DeepSeek 等不认 null content 的 assistant 消息
-            serde_json::json!({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": tool_calls
-            })
-        },
-        _ => {
-            let role = match message.role {
-                LlmRole::System => "system",
-                LlmRole::User => "user",
-                LlmRole::Assistant => "assistant",
-                LlmRole::Tool => "tool",
-            };
-            let mut obj = serde_json::json!({
-                "role": role,
-                "content": chat_content_to_json(&message.content),
-            });
-            // name 只对 tool 消息有意义，其他角色不发送
-            if matches!(message.role, LlmRole::Tool) {
-                if let Some(ref name) = message.name {
-                    obj["name"] = serde_json::json!(name);
-                }
-            }
-            obj
-        },
-    }
-}
-
-fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
-    let has_image = content
-        .iter()
-        .any(|p| matches!(p, LlmContent::Image { .. }));
-    if !has_image {
-        let text = content
-            .iter()
-            .filter_map(|p| match p {
-                LlmContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        return serde_json::json!(text);
-    }
-    serde_json::Value::Array(
-        content
-            .iter()
-            .filter_map(|p| match p {
-                LlmContent::Text { text } => {
-                    Some(serde_json::json!({"type": "text", "text": text}))
-                },
-                LlmContent::Image { base64, media_type } => Some(serde_json::json!({
-                    "type": "image_url",
-                    "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
-                })),
-                _ => None,
-            })
-            .collect(),
-    )
-}
-
-// ─── Responses 输入项 ─────────────────────────────────────────────────
-
-fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Value> {
-    match message.role {
-        LlmRole::User => vec![serde_json::json!({
-            "role": "user",
-            "content": responses_message_content(&message.content, true)
-        })],
-        LlmRole::Assistant => {
-            // Responses 把 assistant 文本和 function_call 表示为同级输入项，
-            // 不能像 Chat Completions 那样塞进一个 assistant 消息的 tool_calls 字段。
-            let mut items = Vec::new();
-            let text_content = responses_message_content(&message.content, false);
-            if text_content.as_array().is_some_and(|c| !c.is_empty()) {
-                items.push(serde_json::json!({"role": "assistant", "content": text_content}));
-            }
-            for content in &message.content {
-                if let LlmContent::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                } = content
-                {
-                    items.push(serde_json::json!({
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": name,
-                        "arguments": arguments.to_string()
-                    }));
-                }
-            }
-            items
-        },
-        LlmRole::Tool => message
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                LlmContent::ToolResult {
-                    tool_call_id,
-                    content,
-                    ..
-                } => {
-                    // function_call_output 通过 call_id 续接前面的 function_call，
-                    // 因此这里必须保持扁平输入项，不能再包一层 role 消息。
-                    Some(serde_json::json!({
-                        "type": "function_call_output",
-                        "call_id": tool_call_id,
-                        "output": content
-                    }))
-                },
-                _ => None,
-            })
-            .collect(),
-        LlmRole::System => Vec::new(),
-    }
-}
-
-fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json::Value {
-    serde_json::Value::Array(
-        content
-            .iter()
-            .filter_map(|p| match p {
-                LlmContent::Text { text } => {
-                    let kind = if input { "input_text" } else { "output_text" };
-                    Some(serde_json::json!({"type": kind, "text": text}))
-                },
-                LlmContent::Image { base64, media_type } if input => Some(serde_json::json!({
-                    "type": "input_image",
-                    "image_url": format!("data:{};base64,{}", media_type, base64)
-                })),
-                _ => None,
-            })
-            .collect(),
-    )
 }
 
 // ─── LlmProvider 实现 ─────────────────────────────────────────────────
@@ -575,35 +314,25 @@ impl OpenAiProvider {
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
         let mut decoder = Utf8StreamDecoder::new();
-        // 解析器对外只发标准化 LlmEvent；不同 API 的流式细节都收敛在累积器内。
         let mut accumulator = LlmAccumulator::new();
-        // 行缓冲：HTTP chunk 边界可能切断 SSE 行，需要跨 chunk 拼接。
-        let mut line_buffer = String::new();
+        let mut line_reader = SseLineReader::new();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| LlmError::Transport(e.to_string()))?;
             if let Some(text) = decoder.push(&bytes) {
-                Self::consume_sse_text_chunk(
-                    &text,
-                    &mut line_buffer,
-                    &mut accumulator,
-                    api_mode,
-                    tx,
-                );
+                for line in line_reader.push_chunk(&text) {
+                    process_sse_line(&line, &mut accumulator, api_mode, tx);
+                }
             }
         }
-        // 流结束后刷新 UTF-8 尾部缓冲区（容错恢复坏字节）
         if let Some(tail_text) = decoder.finish() {
-            Self::consume_sse_text_chunk(
-                &tail_text,
-                &mut line_buffer,
-                &mut accumulator,
-                api_mode,
-                tx,
-            );
+            for line in line_reader.push_chunk(&tail_text) {
+                process_sse_line(&line, &mut accumulator, api_mode, tx);
+            }
         }
-        // 处理流结束后 line_buffer 中残留的最后一行（如果有）
-        Self::flush_sse_buffer(&mut line_buffer, &mut accumulator, api_mode, tx);
+        if let Some(line) = line_reader.flush() {
+            process_sse_line(&line, &mut accumulator, api_mode, tx);
+        }
         if !accumulator.done_sent() {
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
@@ -611,120 +340,77 @@ impl OpenAiProvider {
         }
         Ok(())
     }
+}
 
-    /// 处理一个 SSE 文本 chunk，按换行符拆分完整行并解析。
-    ///
-    /// TCP 是字节流协议，不保证消息边界。一个完整的 SSE 行可能被分成多个 chunk，
-    /// 因此不能假设每个 chunk 包含完整的 `data: {...}` 行。
-    fn consume_sse_text_chunk(
-        chunk_text: &str,
-        line_buffer: &mut String,
-        accumulator: &mut LlmAccumulator,
-        api_mode: OpenAiApiMode,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        line_buffer.push_str(chunk_text);
-
-        while let Some(newline_pos) = line_buffer.find('\n') {
-            let line: String = line_buffer[..newline_pos]
-                .trim_end_matches('\r')
-                .to_string();
-            // 移除已处理的行（包含换行符）
-            *line_buffer = line_buffer[newline_pos + 1..].to_string();
-
-            Self::process_sse_line(&line, accumulator, api_mode, tx);
-        }
-    }
-
-    /// 刷新 SSE 缓冲区中剩余的不完整行（流结束后的收尾处理）。
-    ///
-    /// 当 HTTP 流结束时，缓冲区中可能还剩一行没有换行符。
-    /// 本函数处理这最后一行并清空缓冲区。
-    fn flush_sse_buffer(
-        line_buffer: &mut String,
-        accumulator: &mut LlmAccumulator,
-        api_mode: OpenAiApiMode,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        let remaining = std::mem::take(line_buffer);
-        let remaining = remaining.trim().to_string();
-        if !remaining.is_empty() {
-            Self::process_sse_line(&remaining, accumulator, api_mode, tx);
-        }
-    }
-
-    /// 处理单条 SSE 行。
-    fn process_sse_line(
-        line: &str,
-        accumulator: &mut LlmAccumulator,
-        api_mode: OpenAiApiMode,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        match api_mode {
-            OpenAiApiMode::ChatCompletions => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return;
+/// 处理单条 SSE 行。
+fn process_sse_line(
+    line: &str,
+    accumulator: &mut LlmAccumulator,
+    api_mode: OpenAiApiMode,
+    tx: &mpsc::UnboundedSender<LlmEvent>,
+) {
+    match api_mode {
+        OpenAiApiMode::ChatCompletions => {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let Some(after_prefix) = trimmed.strip_prefix("data:") else {
+                return;
+            };
+            let data = after_prefix.trim_start();
+            if data == "[DONE]" {
+                if !accumulator.done_sent() {
+                    accumulator.done_sent = true;
+                    let _ = tx.send(LlmEvent::Done {
+                        finish_reason: "stop".into(),
+                    });
                 }
-                let Some(after_prefix) = trimmed.strip_prefix("data:") else {
-                    return;
-                };
-                let data = after_prefix.trim_start();
-                if data == "[DONE]" {
-                    if !accumulator.done_sent() {
-                        accumulator.done_sent = true;
-                        let _ = tx.send(LlmEvent::Done {
-                            finish_reason: "stop".into(),
-                        });
+                return;
+            }
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                accumulator.ingest_chat_completion(&event, tx);
+            } else {
+                let cleaned: String =
+                    data.chars().filter(|c| !c.is_control() || c.is_whitespace()).collect();
+                if cleaned != data {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned) {
+                        accumulator.ingest_chat_completion(&event, tx);
+                        return;
                     }
-                    return;
                 }
+                tracing::warn!(
+                    "Failed to parse SSE data as JSON: {} bytes, preview: {:?}",
+                    data.len(),
+                    &data[..data.len().min(80)]
+                );
+            }
+        },
+        OpenAiApiMode::Responses => {
+            if line.is_empty() {
+                return;
+            }
+            if let Some(after_prefix) = line.strip_prefix("data:") {
+                let data = after_prefix.trim_start();
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                    accumulator.ingest_chat_completion(&event, tx);
+                    accumulator.ingest_responses(&event, tx);
                 } else {
-                    // 清除控制字符后重试（某些提供者会在 JSON 中混入控制字符）
                     let cleaned: String =
                         data.chars().filter(|c| !c.is_control() || c.is_whitespace()).collect();
                     if cleaned != data {
                         if let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned) {
-                            accumulator.ingest_chat_completion(&event, tx);
+                            accumulator.ingest_responses(&event, tx);
                             return;
                         }
                     }
                     tracing::warn!(
-                        "Failed to parse SSE data as JSON: {} bytes, preview: {:?}",
+                        "Failed to parse Responses SSE data: {} bytes, preview: {:?}",
                         data.len(),
                         &data[..data.len().min(80)]
                     );
                 }
-            },
-            OpenAiApiMode::Responses => {
-                if line.is_empty() {
-                    return;
-                }
-                if let Some(after_prefix) = line.strip_prefix("data:") {
-                    let data = after_prefix.trim_start();
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        accumulator.ingest_responses(&event, tx);
-                    } else {
-                        let cleaned: String =
-                            data.chars().filter(|c| !c.is_control() || c.is_whitespace()).collect();
-                        if cleaned != data {
-                            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned)
-                            {
-                                accumulator.ingest_responses(&event, tx);
-                                return;
-                            }
-                        }
-                        tracing::warn!(
-                            "Failed to parse Responses SSE data: {} bytes, preview: {:?}",
-                            data.len(),
-                            &data[..data.len().min(80)]
-                        );
-                    }
-                }
-            },
-        }
+            }
+        },
     }
 }
 
@@ -732,12 +418,9 @@ impl OpenAiProvider {
 
 pub struct LlmAccumulator {
     text: String,
-    // Chat Completions 在真正 id 到达前，只能先用数组下标追踪进行中的工具调用。
     tool_calls: BTreeMap<u64, ToolCallPartial>,
-    // Responses 先流出 function_call 输出项，再用 item_id 继续发送参数增量。
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
     done_sent: bool,
-    // 避免重复打印 cache usage 日志（每个 SSE chunk 都携带相同的 usage 对象）
     cache_usage_reported: bool,
 }
 
@@ -800,8 +483,6 @@ impl LlmAccumulator {
                                 if let Some(name) = func["name"].as_str() {
                                     partial.name = Some(name.to_string());
                                 }
-                                // 只有拿到工具名后才发 ToolCallStart；
-                                // 某些兼容 API 会晚一点才给出真正的 call id。
                                 if !partial.started {
                                     if let Some(name) = &partial.name {
                                         let call_id =
@@ -817,7 +498,6 @@ impl LlmAccumulator {
                                 if let Some(args) = func["arguments"].as_str() {
                                     let call_id =
                                         partial.id.clone().unwrap_or_else(|| idx.to_string());
-                                    // 清理参数中的无效字符
                                     let cleaned_args = clean_json_fragment(args);
                                     let _ = tx.send(LlmEvent::ToolCallDelta {
                                         call_id,
@@ -918,8 +598,6 @@ impl LlmAccumulator {
                     partial.name = Some(name.to_string());
                 }
                 let call_id = partial.call_id.clone().unwrap_or(item_id);
-                // 有些 Responses 流会跳过前置 output_item.added，
-                // 直接给最终 arguments；此时补发一次 ToolCallStart。
                 if !partial.started {
                     partial.started = true;
                     let _ = tx.send(LlmEvent::ToolCallStart {
@@ -945,6 +623,12 @@ impl LlmAccumulator {
             },
             _ => {},
         }
+    }
+}
+
+impl Default for LlmAccumulator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -976,190 +660,11 @@ fn trace_prompt_cache_usage(event: &serde_json::Value) {
     }
 }
 
-impl Default for LlmAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ─── UTF-8 解码器 ─────────────────────────────────────────────────────
-
-/// 流式 UTF-8 解码器，处理分块字节流中的多字节字符边界和坏字节。
-///
-/// 借鉴 v1 的设计：
-/// - `push()` 追加新字节块并返回已确认完整的 UTF-8 文本
-/// - `finish()` 在流结束时刷新尾部缓冲，对坏字节做容错恢复（替换为 U+FFFD）
-/// - 遇到坏字节时用替换字符替代，继续保住整轮输出
-pub struct Utf8StreamDecoder {
-    pending: Vec<u8>,
-}
-
-impl Utf8StreamDecoder {
-    pub fn new() -> Self {
-        Self { pending: Vec::new() }
-    }
-
-    /// 追加一个新的字节块，并返回当前已经确认完整的 UTF-8 文本。
-    ///
-    /// 遇到坏字节时用 U+FFFD 替换字符替代，继续处理而不是丢弃。
-    pub fn push(&mut self, chunk: &[u8]) -> Option<String> {
-        if chunk.is_empty() {
-            return None;
-        }
-        self.pending.extend_from_slice(chunk);
-        self.decode_available()
-    }
-
-    /// 在流结束时刷新尾部缓冲。
-    ///
-    /// 流结束时也做容错恢复：如果尾部是损坏/不完整 UTF-8，替换为 U+FFFD 并继续。
-    /// 这样可以避免单个网关脏字节导致整轮会话失败。
-    pub fn finish(&mut self) -> Option<String> {
-        if self.pending.is_empty() {
-            return None;
-        }
-
-        let mut decoded = String::new();
-
-        loop {
-            match std::str::from_utf8(&self.pending) {
-                Ok(text) => {
-                    decoded.push_str(text);
-                    self.pending.clear();
-                    break;
-                },
-                Err(error) => {
-                    let valid_up_to = error.valid_up_to();
-                    if valid_up_to > 0 {
-                        let valid_prefix = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("valid_up_to should always point to a valid utf-8 prefix");
-                        decoded.push_str(valid_prefix);
-                    }
-
-                    if let Some(invalid_len) = error.error_len() {
-                        tracing::warn!(
-                            "stream decoder recovered invalid utf-8 sequence at stream end: \
-                             valid_up_to={}, invalid_len={}, bytes={}",
-                            valid_up_to,
-                            invalid_len,
-                            debug_utf8_bytes(&self.pending, valid_up_to, Some(invalid_len))
-                        );
-                        decoded.push(char::REPLACEMENT_CHARACTER);
-                        self.pending.drain(..valid_up_to + invalid_len);
-                        if self.pending.is_empty() {
-                            break;
-                        }
-                    } else {
-                        // `error_len == None` 表示尾部是"可能缺失字节"的不完整序列。
-                        // 流已经结束，不会再有后续字节，因此直接用替换符收尾并清空缓存。
-                        tracing::warn!(
-                            "stream decoder recovered incomplete utf-8 tail at stream end: \
-                             valid_up_to={}, bytes={}",
-                            valid_up_to,
-                            debug_utf8_bytes(&self.pending, valid_up_to, None)
-                        );
-                        decoded.push(char::REPLACEMENT_CHARACTER);
-                        self.pending.clear();
-                        break;
-                    }
-                },
-            }
-        }
-
-        (!decoded.is_empty()).then_some(decoded)
-    }
-
-    fn decode_available(&mut self) -> Option<String> {
-        let mut decoded = String::new();
-
-        loop {
-            match std::str::from_utf8(&self.pending) {
-                Ok(text) => {
-                    decoded.push_str(text);
-                    self.pending.clear();
-                    return (!decoded.is_empty()).then_some(decoded);
-                },
-                Err(error) => {
-                    let valid_up_to = error.valid_up_to();
-                    if valid_up_to > 0 {
-                        let valid_prefix = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("valid_up_to should always point to a valid utf-8 prefix");
-                        decoded.push_str(valid_prefix);
-                    }
-
-                    let Some(invalid_len) = error.error_len() else {
-                        if decoded.is_empty() {
-                            return None;
-                        }
-                        // 只消费已经确认完整的前缀，把尾部不完整字符留给下一个 chunk。
-                        let tail = self.pending.split_off(valid_up_to);
-                        self.pending = tail;
-                        return Some(decoded);
-                    };
-
-                    tracing::warn!(
-                        "stream decoder recovered invalid utf-8 sequence: valid_up_to={}, \
-                         invalid_len={}, bytes={}",
-                        valid_up_to,
-                        invalid_len,
-                        debug_utf8_bytes(&self.pending, valid_up_to, Some(invalid_len))
-                    );
-
-                    // 某些第三方网关会在 SSE 文本中混入坏字节。这里把坏字节替换为 U+FFFD，
-                    // 继续保住整轮输出，而不是因为单个脏字节直接终止会话。
-                    decoded.push(char::REPLACEMENT_CHARACTER);
-                    self.pending.drain(..valid_up_to + invalid_len);
-                    if self.pending.is_empty() {
-                        return Some(decoded);
-                    }
-                },
-            }
-        }
-    }
-}
-
-impl Default for Utf8StreamDecoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 格式化 UTF-8 字节片段用于日志输出。
-fn debug_utf8_bytes(bytes: &[u8], valid_up_to: usize, invalid_len: Option<usize>) -> String {
-    let start = valid_up_to.saturating_sub(8);
-    let end = invalid_len
-        .map(|len| (valid_up_to + len + 8).min(bytes.len()))
-        .unwrap_or(bytes.len().min(valid_up_to + 8));
-
-    bytes[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            if start + i == valid_up_to {
-                format!("[{b:02x}")
-            } else if invalid_len.is_some_and(|len| start + i == valid_up_to + len - 1) {
-                format!("{b:02x}]")
-            } else {
-                format!("{b:02x}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// 清理 JSON 片段，去除控制字符但保留所有可打印字符（包括 Unicode）。
-///
-/// 某些 LLM 提供者在流式传输工具调用参数时可能会插入
-/// 控制字符或其他无效内容。此函数尝试清理这些内容。
-fn clean_json_fragment(fragment: &str) -> String {
-    fragment.chars().filter(|&c| {
-        !c.is_control() || c.is_whitespace()
-    }).collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::config::OpenAiApiMode;
+    use astrcode_core::llm::*;
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin, ToolDefinition};
 
     use super::*;
 

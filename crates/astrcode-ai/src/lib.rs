@@ -5,3 +5,5 @@
 
 pub mod openai;
 pub mod retry;
+pub mod serialization;
+pub mod stream_decoder;

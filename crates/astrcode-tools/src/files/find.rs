@@ -5,10 +5,9 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use serde::Deserialize;
 
-use super::shared::{FileCollectOptions, collect_candidate_files, error_result, tool_call_id};
+use super::shared::{FileCollectOptions, collect_candidate_files, resolve_sandboxed_path, tool_call_id};
 // ─── find ────────────────────────────────────────────────────────────────
 
 const DEFAULT_FIND_FILES_MAX_RESULTS: usize = 100;
@@ -104,22 +103,14 @@ impl Tool for FindFilesTool {
         let started_at = Instant::now();
         let args: FindFilesArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid find args: {e}")))?;
-        let root = args
-            .root
-            .as_deref()
-            .map(|root| resolve_path(&self.working_dir, root))
-            .unwrap_or_else(|| self.working_dir.clone());
-        if !is_path_within(&root, &self.working_dir) {
-            return Ok(error_result(
-                ctx,
-                started_at,
-                format!("root escapes working directory: {}", root.display()),
-                BTreeMap::from([
-                    ("root".into(), serde_json::json!(root.display().to_string())),
-                    ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-                ]),
-            ));
-        }
+        let root = match args.root {
+            Some(ref raw) => {
+                let root = resolve_sandboxed_path(&self.working_dir, raw, ctx, started_at);
+                let Ok(root) = root else { return Ok(root.unwrap_err()) };
+                root
+            },
+            None => self.working_dir.clone(),
+        };
         let max_results = args.max_results.unwrap_or(DEFAULT_FIND_FILES_MAX_RESULTS);
         let mut results = collect_candidate_files(
             &self.working_dir,
