@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_client::{client::AstrcodeClient, stream::StreamItem};
+use astrcode_client::client::AstrcodeClient;
 use astrcode_protocol::commands::ClientCommand;
 use crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers},
@@ -78,20 +78,11 @@ pub async fn run() -> io::Result<()> {
                 };
                 handle_tui_event(event, &mut state, &client, &mut terminal).await?;
             },
-            // 服务器事件
-            item = stream.recv() => {
-                match item.map_err(io_error)? {
-                    StreamItem::Event(notification) => {
-                        state.apply(&notification);
-                    },
-                    StreamItem::Lagged(n) => {
-                        state.status = format!("Skipped {n} event(s) · rehydrating");
-                        state.mark_dirty();
-                        client
-                            .send_command(&ClientCommand::GetState)
-                            .await
-                            .map_err(io_error)?;
-                    },
+            // 服务器事件：先 await 第一条，再 try_recv 批量 drain
+            notification = stream.recv() => {
+                state.apply(&notification.map_err(io_error)?);
+                for pending in stream.drain_pending() {
+                    state.apply(&pending);
                 }
             },
         }

@@ -46,18 +46,41 @@ impl OpenAiProvider {
     }
 
     /// 根据当前协议形态解析实际请求端点。
+    ///
+    /// 如果 `base_url` 已经以目标路径结尾（如用户直接配了完整 URL），
+    /// 直接使用，避免重复拼接导致 405 错误。
     fn endpoint(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
         match self.api_mode {
             OpenAiApiMode::ChatCompletions => {
-                format!(
-                    "{}/chat/completions",
-                    self.config.base_url.trim_end_matches('/')
-                )
+                if base.ends_with("/chat/completions") {
+                    base.to_string()
+                } else {
+                    format!("{}/chat/completions", base)
+                }
             },
             OpenAiApiMode::Responses => {
-                format!("{}/responses", self.config.base_url.trim_end_matches('/'))
+                if base.ends_with("/responses") {
+                    base.to_string()
+                } else {
+                    format!("{}/responses", base)
+                }
             },
         }
+    }
+
+    /// 检测当前端点是否为官方 OpenAI API。
+    ///
+    /// 某些字段（如 `stream_options`）只有官方 API 支持，
+    /// 第三方兼容 API 可能因未知字段报错。
+    fn is_official_openai(&self) -> bool {
+        reqwest::Url::parse(&self.config.base_url)
+            .ok()
+            .and_then(|url| {
+                url.host_str()
+                    .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+            })
+            .unwrap_or(false)
     }
 
     /// 构建最终请求体。
@@ -90,8 +113,11 @@ impl OpenAiProvider {
             "messages": messages_json,
             "max_tokens": self.model_limits_val.max_output_tokens,
             "stream": true,
-            "stream_options": { "include_usage": true },
         });
+        // stream_options 只有官方 OpenAI 支持，第三方兼容 API 可能因未知字段报错
+        if self.is_official_openai() {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
 
         if !tools.is_empty() {
             body["tools"] = tools_to_json(tools);
@@ -636,10 +662,14 @@ impl OpenAiProvider {
     ) {
         match api_mode {
             OpenAiApiMode::ChatCompletions => {
-                if line.is_empty() || !line.starts_with("data: ") {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
                     return;
                 }
-                let data = &line[6..];
+                let Some(after_prefix) = trimmed.strip_prefix("data:") else {
+                    return;
+                };
+                let data = after_prefix.trim_start();
                 if data == "[DONE]" {
                     if !accumulator.done_sent() {
                         accumulator.done_sent = true;
@@ -672,7 +702,8 @@ impl OpenAiProvider {
                 if line.is_empty() {
                     return;
                 }
-                if let Some(data) = line.strip_prefix("data: ") {
+                if let Some(after_prefix) = line.strip_prefix("data:") {
+                    let data = after_prefix.trim_start();
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                         accumulator.ingest_responses(&event, tx);
                     } else {

@@ -65,12 +65,8 @@ pub(super) fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_j
     serde_json::json!({})
 }
 
-pub(super) fn initially_active_mcp_tools(tools: &[ToolDefinition]) -> HashSet<String> {
-    tools
-        .iter()
-        .filter(|tool| is_concrete_mcp_tool(&tool.name))
-        .map(|tool| tool.name.clone())
-        .collect()
+pub(super) fn initially_active_mcp_tools(_tools: &[ToolDefinition]) -> HashSet<String> {
+    HashSet::new()
 }
 
 pub(super) fn provider_visible_tools(

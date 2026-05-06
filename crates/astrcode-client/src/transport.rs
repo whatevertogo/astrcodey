@@ -163,8 +163,8 @@ impl StdioClientTransport {
             )));
         }
 
-        // 创建广播通道，容量 256 足以应对短时间的事件突发。
-        let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        // 创建广播通道，容量 16384 应对高速事件流和子 agent 并发。
+        let (event_tx, _) = tokio::sync::broadcast::channel(16384);
         let tx = event_tx.clone();
 
         // 启动后台读取线程，从子进程 stdout 逐行解析事件并广播。

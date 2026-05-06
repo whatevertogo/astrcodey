@@ -641,11 +641,38 @@ impl TuiState {
                         Some(call_id.to_string()),
                     );
                 }
+                // Agent 工具启动时立即写入 scrollback，避免长时间无渲染
+                if tool_name == "agent" {
+                    let snapshot = self
+                        .find_message_mut(call_id.as_str())
+                        .map(|m| m.clone());
+                    if let Some(msg) = snapshot {
+                        self.scrollback_queue
+                            .push(ScrollbackEntry::Message(msg));
+                    }
+                }
             },
-            EventPayload::ToolOutputDelta { call_id, .. } => {
+            EventPayload::ToolOutputDelta { call_id, delta, .. } => {
                 if let Some(message) = self.find_message_mut(call_id.as_str()) {
                     let label = message.label.clone();
-                    self.task_activity = Some(TaskActivity::new(format!("Receiving {label}")));
+                    let is_agent = label.starts_with("Task(");
+                    if is_agent {
+                        let clean = clean_child_progress(delta);
+                        if !clean.is_empty() {
+                            for line in clean.lines().filter(|l| !l.trim().is_empty()) {
+                                self.scrollback_queue.push(ScrollbackEntry::StreamText {
+                                    role: MessageRole::Tool,
+                                    text: line.to_string(),
+                                });
+                            }
+                        }
+                        self.task_activity = Some(TaskActivity::with_detail(
+                            "Running task",
+                            clean_child_progress_one_line(delta),
+                        ));
+                    } else {
+                        self.task_activity = Some(TaskActivity::new(format!("Receiving {label}")));
+                    }
                     self.status = format!("Receiving {label}");
                     self.mark_dirty();
                 }
@@ -687,6 +714,9 @@ impl TuiState {
                     }
                     message.is_streaming = false;
                     let completed = message.clone();
+                    if tool_name == "agent" {
+                        self.scrollback_queue.push(ScrollbackEntry::BlankLine);
+                    }
                     self.scrollback_queue
                         .push(ScrollbackEntry::Message(completed));
                     self.mark_dirty();
@@ -907,6 +937,28 @@ impl TuiState {
 
 fn compact_inline(text: &str, max_chars: usize) -> String {
     tool_display::compact_inline(text, max_chars)
+}
+
+/// 去除子 agent 进度文本的 "child " 前缀，使其更可读。
+fn clean_child_progress(delta: &str) -> String {
+    delta
+        .lines()
+        .map(|line| line.strip_prefix("child ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn clean_child_progress_one_line(delta: &str) -> String {
+    let clean = clean_child_progress(delta);
+    let first_line = clean.lines().next().unwrap_or("");
+    let mut summary = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if summary.chars().count() > 80 {
+        summary = summary.chars().take(79).collect();
+        summary.push('…');
+    }
+    summary
 }
 
 fn session_list_body(

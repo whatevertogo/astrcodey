@@ -25,7 +25,7 @@ impl InProcessTransport {
     /// 启动后台服务器任务并返回已连接的传输实例。
     pub fn start() -> Self {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
-        let (event_tx, _) = broadcast::channel::<ClientNotification>(256);
+        let (event_tx, _) = broadcast::channel::<ClientNotification>(16384);
         let tx = event_tx.clone();
 
         // 在后台 tokio 任务中运行服务器
