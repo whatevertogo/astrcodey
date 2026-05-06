@@ -11,6 +11,7 @@ use std::{
 
 use astrcode_context::{
     compaction::{CompactResult, PostCompactFile, PostCompactNote, recent_read_paths},
+    settings::ContextWindowSettings,
     token_usage::truncate_text_to_tokens,
 };
 use astrcode_core::{
@@ -34,6 +35,7 @@ pub(crate) async fn enrich_post_compact_context(
     working_dir: &str,
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
+    settings: &ContextWindowSettings,
 ) {
     let source_messages = source_messages.to_vec();
     let retained_messages = compaction.retained_messages.clone();
@@ -41,6 +43,7 @@ pub(crate) async fn enrich_post_compact_context(
     let system_prompt = system_prompt.map(str::to_string);
     let tools = tools.to_vec();
     let session_id = session_id.to_string();
+    let settings = settings.clone();
 
     let Ok((files, notes)) = tokio::task::spawn_blocking(move || {
         collect_post_compact_context(
@@ -50,6 +53,7 @@ pub(crate) async fn enrich_post_compact_context(
             &session_id,
             system_prompt.as_deref(),
             &tools,
+            &settings,
         )
     })
     .await
@@ -57,7 +61,7 @@ pub(crate) async fn enrich_post_compact_context(
         return;
     };
 
-    compaction.append_post_compact_context(files, notes);
+    compaction.append_post_compact_context(files, notes, &ContextWindowSettings::default());
 }
 
 fn collect_post_compact_context(
@@ -67,9 +71,10 @@ fn collect_post_compact_context(
     session_id: &str,
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
+    settings: &ContextWindowSettings,
 ) -> (Vec<PostCompactFile>, Vec<PostCompactNote>) {
     let working_dir = PathBuf::from(working_dir);
-    let files = fresh_recent_read_files(source_messages, retained_messages, &working_dir);
+    let files = fresh_recent_read_files(source_messages, retained_messages, &working_dir, settings);
     let mut notes = Vec::new();
 
     if let Some(note) = latest_plan_note(&working_dir, session_id) {
@@ -92,8 +97,9 @@ fn fresh_recent_read_files(
     source_messages: &[LlmMessage],
     retained_messages: &[LlmMessage],
     working_dir: &Path,
+    settings: &ContextWindowSettings,
 ) -> Vec<PostCompactFile> {
-    recent_read_paths(source_messages, retained_messages)
+    recent_read_paths(source_messages, retained_messages, settings)
         .into_iter()
         .filter_map(|path| fresh_read_file(working_dir, &path))
         .collect()
@@ -368,6 +374,7 @@ mod tests {
             temp.to_str().unwrap(),
             None,
             &[],
+            &ContextWindowSettings::default(),
         )
         .await;
 
@@ -416,6 +423,7 @@ mod tests {
             transcript_path: None,
         };
 
+        let settings = ContextWindowSettings::default();
         let (files, notes) = collect_post_compact_context(
             &messages,
             &compaction.retained_messages,
@@ -423,8 +431,9 @@ mod tests {
             session_id,
             Some("# Skills\n\nskill body\n\n# Agents\n\nagent list"),
             &tools,
+            &settings,
         );
-        compaction.append_post_compact_context(files, notes);
+        compaction.append_post_compact_context(files, notes, &settings);
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
         let restored = message_text(compaction.context_messages.last().unwrap());

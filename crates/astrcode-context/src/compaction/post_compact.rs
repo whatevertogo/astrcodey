@@ -5,13 +5,11 @@ use std::collections::{HashMap, HashSet};
 use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 
 use super::assemble::collapse_compaction_whitespace;
+use crate::settings::ContextWindowSettings;
 use crate::token_usage::{estimate_text_tokens, truncate_text_to_tokens};
 
 const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
 const POST_COMPACT_CONTEXT_END: &str = "</post_compact_context>";
-const MAX_FILES_TO_RESTORE: usize = 5;
-const FILE_TOKEN_BUDGET: usize = 50_000;
-const MAX_TOKENS_PER_FILE: usize = 5_000;
 const TRUNCATION_MARKER: &str = "\n\n[... file content truncated after compaction; use read on \
                                  this path if more detail is needed]";
 
@@ -41,6 +39,7 @@ pub(crate) fn is_post_compact_context_message(message: &LlmMessage) -> bool {
 pub fn recent_read_paths(
     source_messages: &[LlmMessage],
     retained_messages: &[LlmMessage],
+    settings: &ContextWindowSettings,
 ) -> Vec<String> {
     let retained_paths = read_paths(retained_messages);
     let mut seen_paths = HashSet::new();
@@ -50,7 +49,7 @@ pub fn recent_read_paths(
             continue;
         }
         paths.push(path);
-        if paths.len() >= MAX_FILES_TO_RESTORE {
+        if paths.len() >= settings.post_compact_max_files {
             break;
         }
     }
@@ -61,8 +60,9 @@ pub fn recent_read_paths(
 pub fn post_compact_context_message(
     files: Vec<PostCompactFile>,
     notes: Vec<PostCompactNote>,
+    settings: &ContextWindowSettings,
 ) -> Option<LlmMessage> {
-    let files = budget_files(files);
+    let files = budget_files(files, settings);
     if files.is_empty() && notes.is_empty() {
         return None;
     }
@@ -71,13 +71,16 @@ pub fn post_compact_context_message(
     )))
 }
 
-fn budget_files(files: Vec<PostCompactFile>) -> Vec<PostCompactFile> {
+fn budget_files(
+    files: Vec<PostCompactFile>,
+    settings: &ContextWindowSettings,
+) -> Vec<PostCompactFile> {
     let mut used_tokens = 0usize;
     let mut kept = Vec::new();
-    for file in files.into_iter().take(MAX_FILES_TO_RESTORE) {
-        let content = truncate_to_tokens(&file.content, MAX_TOKENS_PER_FILE);
+    for file in files.into_iter().take(settings.post_compact_max_files) {
+        let content = truncate_to_tokens(&file.content, settings.post_compact_max_tokens_per_file);
         let tokens = estimate_text_tokens(&file.path) + estimate_text_tokens(&content);
-        if used_tokens.saturating_add(tokens) > FILE_TOKEN_BUDGET {
+        if used_tokens.saturating_add(tokens) > settings.post_compact_token_budget {
             continue;
         }
         used_tokens += tokens;
@@ -222,12 +225,17 @@ mod tests {
     }
 
     fn render(files: Vec<PostCompactFile>) -> String {
-        let message = post_compact_context_message(files, Vec::new()).unwrap();
+        let settings = ContextWindowSettings::default();
+        let message = post_compact_context_message(files, Vec::new(), &settings).unwrap();
         message_text(&message)
     }
 
     fn read_result_with_content(call_id: &str, content: &str) -> LlmMessage {
         LlmMessage::tool("read", call_id, content, false)
+    }
+
+    fn default_settings() -> ContextWindowSettings {
+        ContextWindowSettings::default()
     }
 
     #[test]
@@ -241,7 +249,7 @@ mod tests {
         ];
         let retained = vec![LlmMessage::assistant("answer")];
 
-        let paths = recent_read_paths(&source, &retained);
+        let paths = recent_read_paths(&source, &retained, &default_settings());
 
         assert_eq!(paths, ["src/old.rs", "src/recent.rs"]);
     }
@@ -256,7 +264,7 @@ mod tests {
         ];
         let retained = vec![read_call("recent", "src/recent.rs"), read_result("recent")];
 
-        let paths = recent_read_paths(&source, &retained);
+        let paths = recent_read_paths(&source, &retained, &default_settings());
 
         assert_eq!(paths, ["src/old.rs"]);
     }
@@ -270,7 +278,7 @@ mod tests {
             source.push(read_result(&call_id));
         }
 
-        let paths = recent_read_paths(&source, &[]);
+        let paths = recent_read_paths(&source, &[], &default_settings());
 
         assert_eq!(
             paths,
@@ -280,12 +288,14 @@ mod tests {
 
     #[test]
     fn renders_restored_files_and_runtime_notes() {
+        let settings = default_settings();
         let message = post_compact_context_message(
             vec![file("src/lib.rs", "fresh content")],
             vec![PostCompactNote {
                 title: "Plan File".into(),
                 body: "plan body".into(),
             }],
+            &settings,
         )
         .unwrap();
 
@@ -299,11 +309,15 @@ mod tests {
 
     #[test]
     fn render_truncates_large_file_content() {
-        let text = render(vec![file("huge.rs", &"x".repeat(MAX_TOKENS_PER_FILE * 5))]);
+        let settings = default_settings();
+        let text = render(vec![file(
+            "huge.rs",
+            &"x".repeat(settings.post_compact_max_tokens_per_file * 5),
+        )]);
 
         assert!(text.contains("huge.rs"));
         assert!(text.contains("file content truncated after compaction"));
-        assert!(estimate_text_tokens(&text) < MAX_TOKENS_PER_FILE + 200);
+        assert!(estimate_text_tokens(&text) < settings.post_compact_max_tokens_per_file + 200);
     }
 
     #[test]
@@ -317,7 +331,7 @@ mod tests {
             read_result_with_content("manual", "manual content"),
         ];
 
-        let paths = recent_read_paths(&source, &[]);
+        let paths = recent_read_paths(&source, &[], &default_settings());
 
         assert_eq!(paths, ["src/ok.rs", "src/manual.rs"]);
     }

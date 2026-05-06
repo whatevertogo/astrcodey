@@ -13,6 +13,7 @@ use astrcode_context::{
         compact_messages_with_render_options, is_prompt_too_long_message,
     },
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
+    settings::ContextWindowSettings,
     token_usage::should_compact as token_should_compact,
 };
 use astrcode_core::{
@@ -531,6 +532,7 @@ impl AgentLoop {
                         &self.shared.working_dir,
                         Some(&self.system_prompt),
                         tools,
+                        &ContextWindowSettings::default(),
                     )
                     .await;
                     prepared_context_from_compaction(compaction)
@@ -548,6 +550,7 @@ impl AgentLoop {
                             &self.shared.working_dir,
                             Some(&self.system_prompt),
                             tools,
+                            &ContextWindowSettings::default(),
                         )
                         .await;
                         prepared_context_from_compaction(compaction)

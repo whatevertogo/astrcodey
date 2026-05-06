@@ -125,16 +125,3 @@ where
     // ...
 }
 ```
-
-### 关键设计决策
-
-| 决策 | 原因 |
-|------|------|
-| 用 `loop` 而非递归 | 避免栈溢出，状态管理更清晰 |
-| `event_tx` 为 `Option` | `None` 时静默执行（用于 compact 子调用） |
-| `drive_agent` 用 `select!` | 实时转发事件到 handler 层，不阻塞 agent |
-
-### 延伸讨论
-
-- 为什么不用状态机（FSM）？→ LLM 输出非确定性，状态转移不固定
-- 为什么 `drive_agent` 和 `process_prompt` 分开？→ 关注点分离：`process_prompt` 管逻辑，`drive_agent` 管事件流

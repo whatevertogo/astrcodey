@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 const SNAPSHOT_VERSION: u32 = 1;
 
+/// 保留的最大快照数量。创建新快照后自动清理超出数量的旧快照。
+const MAX_SNAPSHOTS: usize = 3;
+
 /// Projection snapshot persisted by astrcode-storage.
 ///
 /// This format is internal to storage. It is a recovery accelerator, not a
@@ -64,6 +67,7 @@ impl SnapshotManager {
             fs::remove_file(&path)?;
         }
         fs::rename(&temp_path, &path)?;
+        self.prune_old_snapshots()?;
         Ok(())
     }
 
@@ -108,6 +112,25 @@ impl SnapshotManager {
         }
         snapshots.sort();
         Ok(snapshots)
+    }
+
+    /// 清理旧快照，只保留最新的 [`MAX_SNAPSHOTS`] 个。
+    fn prune_old_snapshots(&self) -> Result<(), StorageError> {
+        let mut candidates = self.snapshot_candidates()?;
+        if candidates.len() <= MAX_SNAPSHOTS {
+            return Ok(());
+        }
+        // 按 cursor 降序排列，删除超出保留数量的旧快照
+        candidates.sort_by_key(|c| Reverse(c.cursor));
+        for old in candidates.into_iter().skip(MAX_SNAPSHOTS) {
+            if let Err(e) = fs::remove_file(&old.path) {
+                tracing::warn!(
+                    path = %old.path.display(),
+                    "Failed to remove old snapshot: {e}"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn snapshot_candidates(&self) -> Result<Vec<SnapshotCandidate>, StorageError> {

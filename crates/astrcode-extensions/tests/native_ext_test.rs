@@ -264,9 +264,9 @@ unsafe extern "C" fn test_ffi_register_tool(
 ) {
     let ud = &*((*api).user_data as *const TestUserData);
     ud.tools.lock().unwrap().push(ToolDefinition {
-        name: ffi::read_ffi_str(name_ptr, name_len).to_string(),
-        description: ffi::read_ffi_str(desc_ptr, desc_len).to_string(),
-        parameters: serde_json::from_str(ffi::read_ffi_str(params_ptr, params_len))
+        name: ffi::read_ffi_str(name_ptr, name_len),
+        description: ffi::read_ffi_str(desc_ptr, desc_len),
+        parameters: serde_json::from_str(&ffi::read_ffi_str(params_ptr, params_len))
             .unwrap_or(serde_json::json!({})),
         origin: astrcode_core::tool::ToolOrigin::Extension,
         execution_mode: astrcode_core::tool::ExecutionMode::Sequential,
@@ -284,7 +284,7 @@ unsafe extern "C" fn test_ffi_register_tool_handler(
     ud.tool_handlers
         .lock()
         .unwrap()
-        .insert(ffi::read_ffi_str(name_ptr, name_len).to_string(), callback);
+        .insert(ffi::read_ffi_str(name_ptr, name_len), callback);
 }
 
 /// 测试用 FFI 命令注册回调
@@ -300,8 +300,8 @@ unsafe extern "C" fn test_ffi_register_command(
         .lock()
         .unwrap()
         .push(astrcode_core::extension::SlashCommand {
-            name: ffi::read_ffi_str(name_ptr, name_len).to_string(),
-            description: ffi::read_ffi_str(desc_ptr, desc_len).to_string(),
+            name: ffi::read_ffi_str(name_ptr, name_len),
+            description: ffi::read_ffi_str(desc_ptr, desc_len),
             args_schema: None,
         });
 }

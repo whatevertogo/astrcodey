@@ -29,7 +29,7 @@ fn read_output(ptr: *const u8, len: u32) -> String {
     if ptr.is_null() || len == 0 {
         String::new()
     } else {
-        unsafe { ffi::read_ffi_str(ptr, len) }.to_string()
+        unsafe { ffi::read_ffi_str(ptr, len) }
     }
 }
 
@@ -422,10 +422,10 @@ unsafe extern "C" fn ffi_register_tool(
     let params_json = ffi::read_ffi_str(params_json_ptr, params_json_len);
     // 解析参数 JSON，失败时使用空对象
     let params: serde_json::Value =
-        serde_json::from_str(params_json).unwrap_or(serde_json::json!({}));
+        serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
     user_data!(api).tools.lock().unwrap().push(ToolDefinition {
-        name: name.to_string(),
-        description: desc.to_string(),
+        name,
+        description: desc,
         parameters: params,
         origin: ToolOrigin::Extension,
         execution_mode: ExecutionMode::Sequential,
@@ -439,7 +439,7 @@ unsafe extern "C" fn ffi_register_tool_handler(
     name_len: u32,
     callback: ToolCallback,
 ) {
-    let name = ffi::read_ffi_str(name_ptr, name_len).to_string();
+    let name = ffi::read_ffi_str(name_ptr, name_len);
     if let Ok(mut handlers) = user_data!(api).tool_handlers.lock() {
         handlers.insert(name, callback);
     }
@@ -460,8 +460,8 @@ unsafe extern "C" fn ffi_register_command(
         .lock()
         .unwrap()
         .push(astrcode_core::extension::SlashCommand {
-            name: name.to_string(),
-            description: desc.to_string(),
+            name,
+            description: desc,
             args_schema: None,
         });
 }

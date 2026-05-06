@@ -250,15 +250,25 @@ impl EventStore for FileSystemSessionRepository {
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        let sessions = self.sessions.read().await;
         let mut summaries = Vec::new();
-        // TODO: Large histories should use a sidecar summary index. The v1
-        // implementation intentionally rebuilds unopened projections from the
-        // EventLog so storage keeps a single fact source.
-        for session_id in self.list_sessions().await? {
-            summaries.push(SessionSummary::from(
-                self.session_read_model(&session_id).await?,
-            ));
+
+        for session_id in self.list_session_dirs().await? {
+            if let Some(meta) = sessions.get(&session_id) {
+                // 已打开的会话直接使用内存中的投影
+                let model = meta.projection.read().await.clone();
+                summaries.push(SessionSummary::from(model));
+            } else {
+                // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
+                if let Some(summary) = self
+                    .read_summary_from_first_event(&session_id)
+                    .await?
+                {
+                    summaries.push(summary);
+                }
+            }
         }
+
         summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(summaries)
     }
@@ -458,6 +468,65 @@ impl EventStore for FileSystemSessionRepository {
 impl FileSystemSessionRepository {
     fn session_roots(&self) -> Vec<&PathBuf> {
         vec![&self.base_path]
+    }
+
+    /// 仅扫描磁盘上的会话目录名，不打开任何文件。
+    async fn list_session_dirs(&self) -> Result<Vec<SessionId>, StorageError> {
+        let mut ids: Vec<SessionId> = self.sessions.read().await.keys().cloned().collect();
+        for base_path in self.session_roots() {
+            if !base_path.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(base_path)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    let id = SessionId::from(entry.file_name().to_string_lossy().to_string());
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// 从事件日志的第一行事件构造轻量级 SessionSummary。
+    ///
+    /// 避免为未打开的会话重放整个事件日志，大幅提升大量会话场景下的列表性能。
+    async fn read_summary_from_first_event(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionSummary>, StorageError> {
+        let dir = self.session_dir(session_id);
+        let log_path = Self::event_log_path(&dir, session_id);
+        let Some(first_event) = EventLog::read_first_event(&log_path).await? else {
+            return Ok(None);
+        };
+
+        let (working_dir, model_id, parent_session_id) = match &first_event.payload {
+            EventPayload::SessionStarted {
+                working_dir,
+                model_id,
+                parent_session_id,
+            } => (
+                working_dir.clone(),
+                model_id.clone(),
+                parent_session_id.clone(),
+            ),
+            _ => return Ok(None),
+        };
+
+        Ok(Some(SessionSummary {
+            session_id: session_id.clone(),
+            working_dir,
+            model_id,
+            parent_session_id,
+            created_at: first_event.timestamp.to_rfc3339(),
+            updated_at: first_event.timestamp.to_rfc3339(),
+            phase: astrcode_core::event::Phase::default(),
+            latest_cursor: "0".into(),
+        }))
     }
 }
 

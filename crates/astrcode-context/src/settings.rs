@@ -1,7 +1,7 @@
 //! 上下文窗口运行时配置模块。
 //!
 //! 从运行时配置中派生的上下文窗口相关设置，
-//! 控制自动压缩和摘要压缩行为。
+//! 控制自动压缩、压缩后恢复和摘要压缩行为。
 
 /// 上下文窗口的完整配置项。
 ///
@@ -16,16 +16,24 @@ pub struct ContextWindowSettings {
     pub compact_max_retry_attempts: u8,
     /// LLM 压缩输出的最大 token 数。
     pub compact_max_output_tokens: usize,
+    /// 压缩后恢复的最近读取文件数量上限。
+    pub post_compact_max_files: usize,
+    /// 压缩后恢复文件的总 token 预算。
+    pub post_compact_token_budget: usize,
+    /// 单个恢复文件的最大 token 数。
+    pub post_compact_max_tokens_per_file: usize,
 }
 
 impl Default for ContextWindowSettings {
     fn default() -> Self {
         Self {
-            // TODO: 后期需要让用户可控制。
             auto_compact_enabled: true,
             compact_threshold_percent: 83.5,
             compact_max_retry_attempts: 3,
             compact_max_output_tokens: 20000,
+            post_compact_max_files: 5,
+            post_compact_token_budget: 50_000,
+            post_compact_max_tokens_per_file: 5_000,
         }
     }
 }

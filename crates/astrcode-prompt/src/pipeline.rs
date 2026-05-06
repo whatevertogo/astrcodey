@@ -376,11 +376,6 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
         "Use the narrowest tool that can answer the request. Prefer read-only inspection before \
          mutation."
             .to_string(),
-        // "Prefer dedicated tools over raw shell commands: use `read` instead of cat/head/tail, \
-        //  `edit` instead of sed or awk, `write` instead of heredoc, `find` instead of shell find,
-        // \  `grep` instead of shell grep or rg. Reserve `shell` for system commands and
-        // operations \  without a dedicated tool."
-        //     .to_string(),
         "All file paths passed to builtin file tools must stay inside the working directory \
          unless the tool explicitly accepts a persisted result reference."
             .to_string(),

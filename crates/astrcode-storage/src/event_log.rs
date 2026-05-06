@@ -141,6 +141,29 @@ impl EventLog {
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
+
+    /// Read only the first event from the log file.
+    ///
+    /// This is significantly faster than `replay_all()` for large logs
+    /// because it stops after reading the first non-empty line.
+    /// Useful for extracting session metadata (SessionStarted event)
+    /// without replaying the entire history.
+    pub async fn read_first_event(path: &PathBuf) -> Result<Option<Event>, StorageError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.is_empty() {
+                continue;
+            }
+            let event: Event = serde_json::from_str(&line)?;
+            return Ok(Some(event));
+        }
+        Ok(None)
+    }
 }
 
 fn count_lines(path: &Path) -> Result<usize, StorageError> {

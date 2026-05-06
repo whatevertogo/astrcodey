@@ -62,8 +62,9 @@ impl CompactResult {
         &mut self,
         files: Vec<PostCompactFile>,
         notes: Vec<PostCompactNote>,
+        settings: &crate::settings::ContextWindowSettings,
     ) {
-        if let Some(message) = post_compact::post_compact_context_message(files, notes) {
+        if let Some(message) = post_compact::post_compact_context_message(files, notes, settings) {
             self.context_messages.push(message);
         }
     }

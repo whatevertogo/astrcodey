@@ -4,7 +4,10 @@
 //! 会被排队到此运行时中。当服务器就绪后，调用 `bind()` 注入
 //! 实际的会话创建能力。
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{
+    Arc, Mutex, RwLock,
+    atomic::{AtomicU32, Ordering},
+};
 
 use astrcode_core::{event::EventPayload, tool::ToolDefinition};
 use tokio::sync::mpsc;
@@ -56,6 +59,9 @@ pub struct SpawnResult {
     pub child_session_id: String,
 }
 
+/// 子会话最大嵌套深度。超过此深度时拒绝创建新的子会话。
+pub const MAX_SPAWN_DEPTH: u32 = 3;
+
 /// 所有已加载扩展的共享状态。
 ///
 /// 由 loader 创建，服务器就绪后调用 `bind()` 注入实际的会话创建能力。
@@ -65,6 +71,8 @@ pub struct ExtensionRuntime {
     /// 注入的会话创建器。在 `bind()` 调用前为 None。
     /// 使用 Arc 以支持 clone-then-drop-guard-before-await 模式。
     spawner: RwLock<Option<Arc<dyn SessionSpawner>>>,
+    /// 当前活跃的子会话嵌套深度。用于防止无限递归。
+    spawn_depth: AtomicU32,
 }
 
 impl Default for ExtensionRuntime {
@@ -79,6 +87,7 @@ impl ExtensionRuntime {
         Self {
             pending_tools: Mutex::new(Vec::new()),
             spawner: RwLock::new(None),
+            spawn_depth: AtomicU32::new(0),
         }
     }
 
@@ -98,6 +107,8 @@ impl ExtensionRuntime {
     }
 
     /// 执行子会话的一轮对话。如果 `bind()` 尚未调用则返回错误。
+    ///
+    /// 使用原子计数器跟踪嵌套深度，超过 [`MAX_SPAWN_DEPTH`] 时拒绝创建。
     pub async fn spawn(
         &self,
         parent_session_id: &str,
@@ -114,7 +125,17 @@ impl ExtensionRuntime {
                 },
             }
         };
-        // 在 await 之前释放锁
-        spawner.spawn(parent_session_id, request).await
+
+        let depth = self.spawn_depth.fetch_add(1, Ordering::SeqCst);
+        if depth >= MAX_SPAWN_DEPTH {
+            self.spawn_depth.fetch_sub(1, Ordering::SeqCst);
+            return Err(format!(
+                "Maximum spawn depth ({MAX_SPAWN_DEPTH}) exceeded — nested agent spawning too deep"
+            ));
+        }
+
+        let result = spawner.spawn(parent_session_id, request).await;
+        self.spawn_depth.fetch_sub(1, Ordering::SeqCst);
+        result
     }
 }

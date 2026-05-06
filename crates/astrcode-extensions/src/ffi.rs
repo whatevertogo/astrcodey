@@ -70,7 +70,7 @@ pub unsafe fn parse_tool_outcome(
             let content = if output_ptr.is_null() || output_len == 0 {
                 String::new()
             } else {
-                unsafe { read_ffi_str(output_ptr, output_len) }.to_string()
+                unsafe { read_ffi_str(output_ptr, output_len) }
             };
             Ok(astrcode_core::extension::ExtensionToolOutcome::Text {
                 content,
@@ -81,7 +81,7 @@ pub unsafe fn parse_tool_outcome(
             let error = if error_ptr.is_null() || error_len == 0 {
                 String::new()
             } else {
-                unsafe { read_ffi_str(error_ptr, error_len) }.to_string()
+                unsafe { read_ffi_str(error_ptr, error_len) }
             };
             Ok(astrcode_core::extension::ExtensionToolOutcome::Text {
                 content: error,
@@ -94,7 +94,7 @@ pub unsafe fn parse_tool_outcome(
             } else {
                 unsafe { read_ffi_str(output_ptr, output_len) }
             };
-            serde_json::from_str(json).map_err(|e| format!("parse outcome JSON: {e}"))
+            serde_json::from_str(&json).map_err(|e| format!("parse outcome JSON: {e}"))
         },
         other => Err(format!("unknown ToolCallback return code: {other}")),
     }
@@ -205,16 +205,19 @@ pub fn mode_from_discriminant(d: u8) -> Option<HookMode> {
     }
 }
 
-/// 从 FFI 的 (ptr, len) 对读取 Rust &str。
+/// 从 FFI 的 (ptr, len) 对读取 Rust String。
+///
+/// 使用 `from_utf8_lossy` 替代 `from_utf8_unchecked`，
+/// 将无效 UTF-8 字节替换为 `` 而不是触发 UB。
 ///
 /// # Safety
-/// `ptr` 必须指向 `len` 字节的有效 UTF-8 数据。
-pub unsafe fn read_ffi_str<'a>(ptr: *const u8, len: u32) -> &'a str {
+/// `ptr` 必须指向 `len` 字节的有效内存区域（允许包含非 UTF-8 数据）。
+pub unsafe fn read_ffi_str(ptr: *const u8, len: u32) -> String {
     if ptr.is_null() || len == 0 {
-        return "";
+        return String::new();
     }
     let bytes = std::slice::from_raw_parts(ptr, len as usize);
-    std::str::from_utf8_unchecked(bytes)
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 // ─── FFI 上下文 ────────────────────────────────────────────────
