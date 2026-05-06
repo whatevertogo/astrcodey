@@ -693,8 +693,9 @@ mod tests {
 
         let effect = reminder.before_provider_request().unwrap();
 
-        let HookEffect::AppendMessages { messages } = effect else {
-            panic!("stale todo list should inject a provider reminder");
+        let messages = match effect {
+            HookEffect::AppendMessages { messages } => messages,
+            _ => panic!("stale todo list should inject a provider reminder"),
         };
         assert!(text_exists(
             &messages,
