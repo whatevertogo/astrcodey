@@ -71,7 +71,7 @@ async fn test_e2e_create_session_and_prompt() {
 
     // 验证收到 SessionStarted 事件
     let session_id = match stream.recv().await.unwrap() {
-        astrcode_client::stream::StreamItem::Event(ClientNotification::Event(event))
+        ClientNotification::Event(event)
             if matches!(event.payload, EventPayload::SessionStarted { .. }) =>
         {
             event.session_id
@@ -96,29 +96,26 @@ async fn test_e2e_create_session_and_prompt() {
 
     for _ in 0..100 {
         match stream.recv().await {
-            Ok(astrcode_client::stream::StreamItem::Event(notification)) => match notification {
-                ClientNotification::Event(event) => match event.payload {
-                    EventPayload::TurnStarted => {
-                        got_turn_start = true;
-                    },
-                    EventPayload::AssistantTextDelta { .. } => {
-                        got_message = true;
-                    },
-                    EventPayload::TurnCompleted { .. } => {
-                        got_turn_end = true;
-                        break;
-                    },
-                    EventPayload::ErrorOccurred { message, .. } => {
-                        eprintln!("server error event: {message}");
-                    },
-                    _ => {},
+            Ok(ClientNotification::Event(event)) => match event.payload {
+                EventPayload::TurnStarted => {
+                    got_turn_start = true;
                 },
-                ClientNotification::Error { message, .. } => {
-                    eprintln!("server error notification: {message}");
+                EventPayload::AssistantTextDelta { .. } => {
+                    got_message = true;
+                },
+                EventPayload::TurnCompleted { .. } => {
+                    got_turn_end = true;
+                    break;
+                },
+                EventPayload::ErrorOccurred { message, .. } => {
+                    eprintln!("server error event: {message}");
                 },
                 _ => {},
             },
-            Ok(astrcode_client::stream::StreamItem::Lagged(_)) => {},
+            Ok(ClientNotification::Error { message, .. }) => {
+                eprintln!("server error notification: {message}");
+            },
+            Ok(_) => {},
             Err(_) => break,
         }
     }
@@ -159,9 +156,9 @@ async fn test_e2e_list_sessions() {
 
     // 验证收到 SessionList 通知
     match stream.recv().await.unwrap() {
-        astrcode_client::stream::StreamItem::Event(ClientNotification::SessionList {
+        ClientNotification::SessionList {
             sessions,
-        }) => {
+        } => {
             println!("Sessions: {:?}", sessions);
         },
         other => panic!("Expected SessionList, got: {:?}", other),
