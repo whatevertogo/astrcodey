@@ -344,7 +344,7 @@ impl ToolPipeline {
 
         while let Some(joined) = join_set.join_next().await {
             let (index, result) =
-                joined.map_err(|err| AgentError::Llm(format!("tool task failed: {err}")))?;
+                joined.map_err(|err| AgentError::Internal(format!("tool task failed: {err}")))?;
             results.insert(index, result);
 
             if let Some(call) = pending.next() {
@@ -529,7 +529,7 @@ impl ToolPipeline {
                 },
             )
             .await
-            .map_err(|error| AgentError::Llm(format!("persist tool result: {error}")))?;
+            .map_err(|error| AgentError::Internal(format!("persist tool result: {error}")))?;
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         result.metadata.insert(
             "persistedToolResult".into(),

@@ -129,16 +129,12 @@ pub(super) fn retained_messages_after_compaction(
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    #[error("LLM error: {0}")]
-    Llm(String),
+    #[error("{0}")]
+    Llm(#[from] astrcode_core::llm::LlmError),
     #[error("Tool error: {0}")]
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
     Extension(#[from] astrcode_core::extension::ExtensionError),
-}
-
-impl From<astrcode_core::llm::LlmError> for AgentError {
-    fn from(e: astrcode_core::llm::LlmError) -> Self {
-        AgentError::Llm(e.to_string())
-    }
+    #[error("{0}")]
+    Internal(String),
 }

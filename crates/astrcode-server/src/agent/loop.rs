@@ -21,7 +21,7 @@ use astrcode_context::{
 use astrcode_core::{
     event::EventPayload,
     extension::{CompactTrigger, ExtensionEvent},
-    llm::{LlmEvent, LlmMessage, LlmProvider, LlmRole},
+    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::CompactSnapshotInput,
     tool::ToolDefinition,
     types::*,
@@ -257,12 +257,12 @@ async fn consume_llm_stream(
                         recoverable,
                     },
                 );
-                return Err(AgentError::Llm(message));
+                return Err(AgentError::Llm(LlmError::StreamParse(message)));
             },
         }
     }
 
-    Err(AgentError::Llm("LLM stream ended unexpectedly".into()))
+    Err(AgentError::Internal("LLM stream ended unexpectedly".into()))
 }
 
 impl AgentLoop {
@@ -612,11 +612,11 @@ impl AgentLoop {
             compaction,
             reply,
         })
-        .map_err(|_| AgentError::Llm("auto compact transition channel closed".into()))?;
+        .map_err(|_| AgentError::Internal("auto compact transition channel closed".into()))?;
         rx.await
-            .map_err(|_| AgentError::Llm("auto compact transition was dropped".into()))?
+            .map_err(|_| AgentError::Internal("auto compact transition was dropped".into()))?
             .map(|_| ())
-            .map_err(AgentError::Llm)
+            .map_err(AgentError::Internal)
     }
 
     async fn apply_before_provider_request_hook(
@@ -637,7 +637,7 @@ impl AgentLoop {
                 self.extension_runner
                     .dispatch(ExtensionEvent::TurnEnd, &ext_ctx)
                     .await?;
-                Err(AgentError::Llm(reason))
+                Err(AgentError::Internal(reason))
             },
             ProviderHookOutcome::ModifiedMessages { messages } => {
                 send_messages = messages;
