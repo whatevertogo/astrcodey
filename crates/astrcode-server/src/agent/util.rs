@@ -9,7 +9,7 @@ use astrcode_core::{
     llm::LlmMessage,
 };
 
-use super::r#loop::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
+use super::shared_context::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 
 /// 解析并尝试修复 JSON 参数。
 ///

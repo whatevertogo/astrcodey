@@ -12,8 +12,8 @@ use astrcode_core::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::mpsc;
 
-use super::{AgentSignal, background::backgrounded_placeholder_result};
-use super::r#loop::send_event;
+use super::background::backgrounded_placeholder_result;
+use super::shared_context::{AgentSignal, send_event};
 use super::tool_types::{
     BackgroundTaskCompletion, ExecutableToolCall, ToolCallRuntimeContext,
 };

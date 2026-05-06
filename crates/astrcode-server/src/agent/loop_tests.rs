@@ -15,6 +15,7 @@ use astrcode_core::{
         HookEffect, HookMode, HookSubscription,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
+    storage::ToolResultArtifactReader,
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,

@@ -13,7 +13,7 @@ use astrcode_core::{
 };
 use tokio::sync::mpsc;
 
-use super::AgentSignal;
+use super::shared_context::{AgentSignal, send_event};
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 pub(crate) struct PendingToolCall {
@@ -115,7 +115,7 @@ pub(crate) fn send_tool_requested(
     tc: &PendingToolCall,
     arguments: &serde_json::Value,
 ) {
-    super::r#loop::send_event(
+    send_event(
         event_tx,
         EventPayload::ToolCallRequested {
             call_id: tc.call_id.clone().into(),

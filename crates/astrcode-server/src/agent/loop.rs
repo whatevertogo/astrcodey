@@ -6,72 +6,58 @@
 //! `drive_agent` 负责在回合执行时转发事件流并等待最终输出。
 
 use std::{
-    collections::BTreeMap,
     future::Future,
     sync::Arc,
-    time::Instant,
 };
 
 use astrcode_context::{
     compaction::{
-        CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
+        CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
         compact_messages_with_render_options, is_prompt_too_long_message,
     },
     manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
     token_usage::should_compact as token_should_compact,
 };
 use astrcode_core::{
-    config::ModelSelection,
     event::EventPayload,
-    extension::{CompactTrigger, ExtensionEvent, PostToolUseInput, PreToolUseInput},
-    llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    storage::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactReader},
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    extension::{CompactTrigger, ExtensionEvent},
+    llm::{LlmEvent, LlmMessage, LlmProvider, LlmRole},
+    storage::CompactSnapshotInput,
+    tool::ToolDefinition,
     types::*,
 };
 use astrcode_extensions::{
     context::ServerExtensionContext,
-    runner::{ExtensionRunner, ProviderHookOutcome, ToolHookOutcome},
-};
-use astrcode_support::tool_results::{
-    MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary,
-    should_persist_tool_result, tool_result_inline_limit, tool_result_preview,
+    runner::{ExtensionRunner, ProviderHookOutcome},
 };
 use astrcode_tools::registry::ToolRegistry;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinSet,
-};
+use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    agent::{
-        AutoCompactFailureTracker,
-        compact::{
-            CompactHookContext, MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, collect_compact_instructions,
-            compact_trigger_name, compact_with_forked_provider, dispatch_post_compact,
-        },
-        post_compact::enrich_post_compact_context,
-        tool_exec::execute_tool_call,
-        tool_types::{
-            BackgroundTaskCompletion, CommitToolResults, ExecuteToolCalls, ExecutableToolCall,
-            PendingCommittedToolResult, PendingToolCall, PreparedToolCall, PreparedToolOutcome,
-            ToolCallRuntimeContext, ToolExecutionStep, assistant_tool_call_message,
-            committed_tool_result_content_len, missing_tool_result, send_tool_requested,
-        },
-        util::{
-            activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder,
-            discovered_mcp_tool_names, initially_active_mcp_tools,
-            parse_and_repair_json, provider_visible_tools, tool_is_visible,
-        },
+use super::{
+    compact::{
+        CompactHookContext, MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES, collect_compact_instructions,
+        compact_trigger_name, compact_with_forked_provider, dispatch_post_compact,
+        counts_as_auto_compact_provider_failure, prepared_context_from_compaction,
     },
+    post_compact::enrich_post_compact_context,
+    shared_context::{
+        AgentError, AgentSignal, SharedTurnContext, end_turn_with_error, send_event,
+        retained_messages_after_compaction,
+    },
+    tool_pipeline::ToolPipeline,
+    tool_types::{
+        BackgroundTaskCompletion, ExecuteToolCalls, PendingToolCall,
+        assistant_tool_call_message,
+    },
+    util::{
+        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder,
+        initially_active_mcp_tools, provider_visible_tools,
+    },
+};
+use crate::{
+    agent::AutoCompactFailureTracker,
     session::SessionManager,
 };
-
-/// 并行执行工具调用时的最大并发数。
-const MAX_PARALLEL_TOOL_CALLS: usize = 5;
-pub(super) const MCP_TOOL_PREFIX: &str = "mcp__";
-pub(super) const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
-pub(super) const TOOL_SEARCH_METADATA_KEY: &str = "toolSearch";
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
@@ -123,58 +109,20 @@ where
     (output, emitted_error)
 }
 
-pub(crate) enum AgentSignal {
-    Event(EventPayload),
-    AutoCompact {
-        trigger: CompactTrigger,
-        compaction: CompactResult,
-        reply: oneshot::Sender<Result<SessionId, String>>,
-    },
-    /// 后台任务完成，需要通过 actor_tx 通知 handler。
-    #[allow(dead_code)]
-    BackgroundTaskCompleted {
-        session_id: SessionId,
-        task_id: BackgroundTaskId,
-        call_id: ToolCallId,
-        tool_name: String,
-        result: ToolResult,
-    },
-}
-
-pub(super) fn send_event(event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>, payload: EventPayload) {
-    if let Some(tx) = event_tx {
-        let _ = tx.send(AgentSignal::Event(payload));
-    }
-}
-
 /// Agent — a transient turn processor.
 ///
 /// Created from a session projection, processes one turn, emits event payloads,
 /// and is discarded. Durable event persistence stays in the handler; compact
 /// transcript snapshots are written through the injected session manager.
 pub struct AgentLoop {
-    /// 所属会话的唯一标识。
-    session_id: SessionId,
-    /// 当前工作目录，用于工具执行时的相对路径解析。
-    working_dir: String,
-    /// 当前使用的模型标识（如 "gpt-5.5"）。
-    model_id: String,
-    /// LLM 提供者，负责与语言模型通信。
-    llm: Arc<dyn LlmProvider>,
-    /// 会话初始化时固定下来的完整 system prompt。
     system_prompt: String,
-    /// 工具注册表，包含当前会话可用的所有工具定义。
-    tool_registry: Arc<ToolRegistry>,
-    /// 扩展运行器，用于分发 PreToolUse / PostToolUse 等钩子事件。
+    shared: SharedTurnContext,
+    llm: Arc<dyn LlmProvider>,
     extension_runner: Arc<ExtensionRunner>,
-    /// 上下文组装器，负责窗口估算与摘要压缩。
+    tools: ToolPipeline,
     context_assembler: Arc<LlmContextAssembler>,
-    /// 会话管理器，用于写 compact 前 transcript snapshot。
     session_manager: Arc<SessionManager>,
-    /// Auto compact provider 失败熔断器，跨 turn/continuation 共享。
     auto_compact_failures: Arc<AutoCompactFailureTracker>,
-    /// 后台任务完成通知通道。
-    background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
 }
 
 #[derive(Clone)]
@@ -185,19 +133,14 @@ pub struct AgentServices {
     pub context_assembler: Arc<LlmContextAssembler>,
     pub session_manager: Arc<SessionManager>,
     pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
-    /// 后台任务完成通知通道。handler 层创建并持有接收端。
     pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
 }
 
 impl AgentLoop {
     /// 创建一个新的 AgentLoop 实例。
     ///
-    /// # 参数
-    /// - `session_id`: 所属会话的唯一标识
-    /// - `working_dir`: 当前工作目录
-    /// - `system_prompt`: 会话初始化时固定下来的完整 system prompt
-    /// - `model_id`: 使用的模型标识
-    /// - `services`: 当前回合需要的共享运行时服务
+    /// `AgentServices` 中的依赖被分配给相应的子对象；
+    /// `AgentLoop` 本身只保留编排职责。
     pub fn new(
         session_id: SessionId,
         working_dir: String,
@@ -205,61 +148,53 @@ impl AgentLoop {
         model_id: String,
         services: AgentServices,
     ) -> Self {
+        let shared = SharedTurnContext::new(session_id, working_dir, model_id);
+        let tools = ToolPipeline::new(
+            shared.clone(),
+            services.tool_registry,
+            services.extension_runner.clone(),
+            services.session_manager.clone(),
+            services.background_result_tx,
+        );
         Self {
-            session_id,
-            working_dir,
-            model_id,
-            llm: services.llm,
             system_prompt,
-            tool_registry: services.tool_registry,
+            shared,
+            llm: services.llm,
             extension_runner: services.extension_runner,
+            tools,
             context_assembler: services.context_assembler,
             session_manager: services.session_manager,
             auto_compact_failures: services.auto_compact_failures,
-            background_result_tx: services.background_result_tx,
         }
     }
 
     /// 处理用户输入的完整 Agent 循环。
-    ///
-    /// 整体流程：
-    /// 1. 分发 `TurnStart` 和 `UserPromptSubmit` 扩展事件。
-    /// 2. 使用 session 初始化时固定下来的 system prompt 构造消息前缀。
-    /// 3. 进入 Agent 循环（LLM 调用 → 工具执行 → 再次调用 LLM），直到 LLM 不再请求工具调用为止。
-    ///
-    /// 当 `event_tx` 为 `Some` 时，会实时流式发送事件载荷，
-    /// 由 handler 层包装会话/回合元数据后决定持久化策略。
     pub(crate) async fn process_prompt(
         &self,
         user_text: &str,
         history: Vec<LlmMessage>,
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<AgentTurnOutput, AgentError> {
-        // 构建扩展上下文，填充工具定义供扩展钩子查询
-        let mut ext_ctx = self.build_ext_ctx();
-        let all_tools = self.tool_registry.list_definitions();
+        let mut ext_ctx = self.shared.ext_ctx();
+        let all_tools = self.tools.list_definitions();
         let mut active_mcp_tools = initially_active_mcp_tools(&all_tools);
         let mut tools = provider_visible_tools(&all_tools, &active_mcp_tools);
         let tool_map: std::collections::HashMap<_, _> =
             tools.iter().map(|t| (t.name.clone(), t.clone())).collect();
         ext_ctx.set_tools(tool_map);
 
-        // 分发 TurnStart 事件，通知扩展新回合开始
         self.extension_runner
             .dispatch(ExtensionEvent::TurnStart, &ext_ctx)
             .await?;
 
-        // 分发 UserPromptSubmit 事件。
-        // 如果扩展通过 Blocking 钩子拒绝了提示词，先触发 TurnEnd 再返回错误。
         if let Err(e) = self
             .extension_runner
             .dispatch(ExtensionEvent::UserPromptSubmit, &ext_ctx)
             .await
         {
-            return self.end_turn_with_error(&ext_ctx, e).await;
+            return end_turn_with_error(&self.extension_runner, &ext_ctx, e).await;
         }
 
-        // 每轮都以同一份 session system prompt 开头；历史来自 eventlog 投影。
         let mut messages = Vec::with_capacity(history.len() + 2);
         if !self.system_prompt.trim().is_empty() {
             messages.push(LlmMessage::system(self.system_prompt.clone()));
@@ -271,14 +206,11 @@ impl AgentLoop {
         );
         messages.push(LlmMessage::user(user_text));
 
-        // 累积本轮 Agent 的最终文本输出和所有工具执行结果
         let mut final_text = String::new();
-        let mut all_tool_results: Vec<ToolResult> = Vec::new();
+        let mut all_tool_results: Vec<astrcode_core::tool::ToolResult> = Vec::new();
         let return_auto_compaction = event_tx.is_none();
         let mut auto_compaction: Option<AgentCompactContinuation> = None;
 
-        // ── Agent 主循环 ──
-        // 每轮迭代：调用 LLM → 处理响应 → 执行工具 → 将结果追加到消息历史 → 下一轮
         loop {
             let (system_messages, prepared_context, compacted) = self
                 .prepare_provider_context(&mut messages, &tools, &ext_ctx, &event_tx)
@@ -292,7 +224,6 @@ impl AgentLoop {
                 }
             }
 
-            // 分发 BeforeProviderRequest 钩子，允许扩展修改发送给 LLM 的消息或阻止请求
             let mut context_messages = prepared_context.messages;
             append_deferred_mcp_tools_reminder(
                 &mut context_messages,
@@ -307,17 +238,13 @@ impl AgentLoop {
             let mut rx = self
                 .start_provider_stream(send_messages, &tools, &event_tx, &ext_ctx)
                 .await?;
-            // 每轮 LLM 调用的局部状态
-            let message_id = new_message_id(); // 本轮消息的唯一 ID
-            let mut message_started = false; // 是否已发送 AssistantMessageStarted
-            let mut current_text = String::new(); // 本轮累积的文本增量
-            let mut tool_calls: Vec<PendingToolCall> = Vec::new(); // LLM 请求的工具调用
-            // 延迟到工具调用执行完毕后才发送 AssistantMessageCompleted，
-            // 避免消息在工具执行前就被标记为已完成。
+            let message_id = new_message_id();
+            let mut message_started = false;
+            let mut current_text = String::new();
+            let mut tool_calls: Vec<PendingToolCall> = Vec::new();
             let mut completed_text: Option<String> = None;
 
             {
-                // 消费 LLM 事件流，处理文本增量和工具调用增量
                 while let Some(event) = rx.recv().await {
                     match event {
                         LlmEvent::ContentDelta { delta } => {
@@ -387,7 +314,6 @@ impl AgentLoop {
                             }
 
                             if tool_calls.is_empty() {
-                                // 无工具调用：消息在此处完成并直接返回
                                 if let (Some(text), true) = (completed_text.take(), message_started)
                                 {
                                     send_event(
@@ -431,21 +357,18 @@ impl AgentLoop {
                 }
             }
             {
-                // 分发 AfterProviderResponse 钩子，允许扩展在收到 LLM 响应后执行操作
                 self.dispatch_after_provider_response(&ext_ctx).await?;
             }
 
             {
-                // ── 工具调用执行管线 ──
-                // 1. 预处理：白名单检查 + PreToolUse 钩子
                 let prepared_tool_calls = self
+                    .tools
                     .prepare_tool_calls(&tool_calls, &tools, &event_tx)
                     .await?;
-                // 将助手侧的工具调用消息追加到对话历史（包含工具名和参数）
                 messages.push(assistant_tool_call_message(&prepared_tool_calls));
-                // 2. 执行 + 提交：每个并行/串行 barrier 完成后立即提交结果。
                 let discovered_tools = self
-                    .execute_and_commit_tool_calls(ExecuteToolCalls {
+                    .tools
+                    .execute_and_commit(ExecuteToolCalls {
                         prepared: &prepared_tool_calls,
                         tools: &tools,
                         messages: &mut messages,
@@ -461,8 +384,6 @@ impl AgentLoop {
                     tools = provider_visible_tools(&all_tools, &active_mcp_tools);
                 }
 
-                // 工具调用全部执行完毕后才发送消息完成事件，
-                // 保证 completed 事件在所有 tool_call 事件之后。
                 if let Some(text) = completed_text.take() {
                     if message_started {
                         send_event(
@@ -479,9 +400,6 @@ impl AgentLoop {
     }
 
     /// 准备本次 provider request 的上下文窗口。
-    ///
-    /// 这个阶段会在达到阈值时执行自动 compact，并在 compact 成功后更新
-    /// 本轮内存 `messages`；持久 session continuation 由 handler 统一执行。
     async fn prepare_provider_context(
         &self,
         messages: &mut Vec<LlmMessage>,
@@ -509,7 +427,7 @@ impl AgentLoop {
             {
                 Ok(instructions) => instructions,
                 Err(error) => {
-                    return self.end_turn_with_error(ext_ctx, error).await;
+                    return end_turn_with_error(&self.extension_runner, ext_ctx, error).await;
                 },
             };
             let transcript_path = self
@@ -522,7 +440,7 @@ impl AgentLoop {
             let render_options = CompactSummaryRenderOptions { transcript_path };
             let provider_compaction = if self
                 .auto_compact_failures
-                .should_skip_provider(&self.session_id)
+                .should_skip_provider(&self.shared.session_id)
             {
                 None
             } else {
@@ -540,16 +458,16 @@ impl AgentLoop {
                     {
                         Ok(compaction) => {
                             self.auto_compact_failures
-                                .record_provider_success(&self.session_id);
+                                .record_provider_success(&self.shared.session_id);
                             Ok(compaction)
                         },
                         Err(error) => {
                             if counts_as_auto_compact_provider_failure(&error) {
                                 let failures = self
                                     .auto_compact_failures
-                                    .record_provider_failure(&self.session_id);
+                                    .record_provider_failure(&self.shared.session_id);
                                 tracing::warn!(
-                                    session_id = %self.session_id,
+                                    session_id = %self.shared.session_id,
                                     failures,
                                     max_failures = MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                                     error = %error,
@@ -565,9 +483,9 @@ impl AgentLoop {
                 Some(Ok(mut compaction)) => {
                     enrich_post_compact_context(
                         &mut compaction,
-                        self.session_id.as_str(),
+                        self.shared.session_id.as_str(),
                         &prepare_input.messages,
-                        &self.working_dir,
+                        &self.shared.working_dir,
                         Some(&self.system_prompt),
                         tools,
                     )
@@ -582,9 +500,9 @@ impl AgentLoop {
                     Ok(mut compaction) => {
                         enrich_post_compact_context(
                             &mut compaction,
-                            self.session_id.as_str(),
+                            self.shared.session_id.as_str(),
                             &prepare_input.messages,
-                            &self.working_dir,
+                            &self.shared.working_dir,
                             Some(&self.system_prompt),
                             tools,
                         )
@@ -609,7 +527,7 @@ impl AgentLoop {
                 )
                 .await
             {
-                return self.end_turn_with_error(ext_ctx, error).await;
+                return end_turn_with_error(&self.extension_runner, ext_ctx, error).await;
             }
             let compacted = compaction.clone();
             if event_tx.is_some() {
@@ -644,7 +562,6 @@ impl AgentLoop {
             .map_err(AgentError::Llm)
     }
 
-    /// 运行 `BeforeProviderRequest` hook，并返回最终要发送给 provider 的消息。
     async fn apply_before_provider_request_hook(
         &self,
         system_messages: Vec<LlmMessage>,
@@ -652,7 +569,7 @@ impl AgentLoop {
         tools: &[ToolDefinition],
     ) -> Result<Vec<LlmMessage>, AgentError> {
         let mut send_messages = [system_messages, context_messages].concat();
-        let mut ext_ctx = self.build_ext_ctx_with_tools(tools);
+        let mut ext_ctx = self.shared.ext_ctx_with_tools(tools);
         ext_ctx.set_provider_messages(send_messages.clone());
         match self
             .extension_runner
@@ -673,7 +590,6 @@ impl AgentLoop {
         }
     }
 
-    /// 启动 provider 流式请求；调用级失败时先通知客户端再结束回合。
     async fn start_provider_stream(
         &self,
         send_messages: Vec<LlmMessage>,
@@ -684,8 +600,6 @@ impl AgentLoop {
         match self.llm.generate(send_messages, tools.to_vec()).await {
             Ok(rx) => Ok(rx),
             Err(e) => {
-                // LLM 调用级别失败（网络/认证等），需要通知客户端，
-                // 否则外部消费者无法感知此错误（流中错误通过 LlmEvent::Error 已有处理）
                 send_event(
                     event_tx,
                     EventPayload::ErrorOccurred {
@@ -694,12 +608,11 @@ impl AgentLoop {
                         recoverable: false,
                     },
                 );
-                self.end_turn_with_error(ext_ctx, e).await
+                end_turn_with_error(&self.extension_runner, ext_ctx, e).await
             },
         }
     }
 
-    /// 分发 provider 响应后的 hook；失败时保证回合被关闭。
     async fn dispatch_after_provider_response(
         &self,
         ext_ctx: &ServerExtensionContext,
@@ -709,12 +622,11 @@ impl AgentLoop {
             .dispatch(ExtensionEvent::AfterProviderResponse, ext_ctx)
             .await
         {
-            return self.end_turn_with_error(ext_ctx, e).await;
+            return end_turn_with_error(&self.extension_runner, ext_ctx, e).await;
         }
         Ok(())
     }
 
-    /// 写入 compact 前的 transcript snapshot，失败时只记录警告并继续。
     async fn write_compact_snapshot(
         &self,
         trigger: CompactTrigger,
@@ -723,20 +635,20 @@ impl AgentLoop {
     ) -> Option<String> {
         let snapshot = CompactSnapshotInput {
             trigger: compact_trigger_name(trigger).into(),
-            model_id: self.model_id.clone(),
-            working_dir: self.working_dir.clone(),
+            model_id: self.shared.model_id.clone(),
+            working_dir: self.shared.working_dir.clone(),
             system_prompt: system_prompt.map(str::to_string),
             provider_messages,
         };
         match self
             .session_manager
-            .write_compact_snapshot(&self.session_id, snapshot)
+            .write_compact_snapshot(&self.shared.session_id, snapshot)
             .await
         {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(
-                    session_id = %self.session_id,
+                    session_id = %self.shared.session_id,
                     trigger = compact_trigger_name(trigger),
                     error = %error,
                     "Failed to write compact transcript snapshot"
@@ -746,7 +658,6 @@ impl AgentLoop {
         }
     }
 
-    /// 执行 PreCompact hook，并返回 hook 追加的摘要指令。
     async fn compact_instructions(
         &self,
         trigger: CompactTrigger,
@@ -756,9 +667,9 @@ impl AgentLoop {
         collect_compact_instructions(
             &self.extension_runner,
             CompactHookContext {
-                session_id: self.session_id.as_str(),
-                working_dir: &self.working_dir,
-                model_id: &self.model_id,
+                session_id: self.shared.session_id.as_str(),
+                working_dir: &self.shared.working_dir,
+                model_id: &self.shared.model_id,
                 tools,
                 trigger,
                 message_count,
@@ -768,7 +679,6 @@ impl AgentLoop {
         .map_err(AgentError::Extension)
     }
 
-    /// 执行 PostCompact hook，让扩展观察 compact 结果。
     async fn notify_post_compact(
         &self,
         trigger: CompactTrigger,
@@ -779,9 +689,9 @@ impl AgentLoop {
         dispatch_post_compact(
             &self.extension_runner,
             CompactHookContext {
-                session_id: self.session_id.as_str(),
-                working_dir: &self.working_dir,
-                model_id: &self.model_id,
+                session_id: self.shared.session_id.as_str(),
+                working_dir: &self.shared.working_dir,
+                model_id: &self.shared.model_id,
                 tools,
                 trigger,
                 message_count,
@@ -791,593 +701,19 @@ impl AgentLoop {
         .await
         .map_err(AgentError::Extension)
     }
-
-    /// 在错误返回前补发 `TurnEnd`，避免扩展侧留下未结束回合。
-    async fn end_turn_with_error<T, E>(
-        &self,
-        ext_ctx: &ServerExtensionContext,
-        error: E,
-    ) -> Result<T, AgentError>
-    where
-        E: Into<AgentError>,
-    {
-        let _ = self
-            .extension_runner
-            .dispatch(ExtensionEvent::TurnEnd, ext_ctx)
-            .await;
-        Err(error.into())
-    }
-
-    /// 构建当前回合的扩展上下文，包含会话 ID、工作目录和模型信息。
-    fn build_ext_ctx(&self) -> ServerExtensionContext {
-        ServerExtensionContext::new(
-            self.session_id.to_string(),
-            self.working_dir.clone(),
-            ModelSelection::simple(self.model_id.clone()),
-        )
-    }
-
-    /// 构建带工具定义的扩展上下文，供 provider/tool hooks 查询当前工具集。
-    fn build_ext_ctx_with_tools(&self, tools: &[ToolDefinition]) -> ServerExtensionContext {
-        let mut ctx = self.build_ext_ctx();
-        ctx.set_tools(
-            tools
-                .iter()
-                .cloned()
-                .map(|tool| (tool.name.clone(), tool))
-                .collect(),
-        );
-        ctx
-    }
-
-    /// 预处理工具调用列表。
-    ///
-    /// 对每个待执行的工具调用依次执行：
-    /// 1. 解析 JSON 参数（解析失败时尝试修复，仍失败则使用空对象并记录警告）。
-    /// 2. 检查工具白名单，不在白名单中的工具直接标记为 `Blocked`。
-    /// 3. 分发 `PreToolUse` 扩展钩子，允许扩展修改输入或阻止执行。
-    /// 4. 根据工具注册表确定执行模式（并行 / 串行）。
-    async fn prepare_tool_calls(
-        &self,
-        tool_calls: &[PendingToolCall],
-        tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<Vec<PreparedToolCall>, AgentError> {
-        let mut prepared = Vec::with_capacity(tool_calls.len());
-
-        for (index, tc) in tool_calls.iter().enumerate() {
-            let args: serde_json::Value = parse_and_repair_json(&tc.arguments, &tc.name);
-
-            if !tool_is_visible(tools, &tc.name) {
-                let blocked_result = ToolResult {
-                    call_id: tc.call_id.clone(),
-                    content: format!("Tool '{}' has not been loaded for this request", tc.name),
-                    is_error: true,
-                    error: Some(format!("tool '{}' is not loaded", tc.name)),
-                    metadata: Default::default(),
-                    duration_ms: None,
-                };
-                send_tool_requested(event_tx, tc, &args);
-                prepared.push(PreparedToolCall {
-                    index,
-                    call_id: tc.call_id.clone(),
-                    name: tc.name.clone(),
-                    tool_input: args,
-                    mode: ExecutionMode::Sequential,
-                    outcome: PreparedToolOutcome::Blocked(blocked_result),
-                });
-                continue;
-            }
-
-            let mut pre_ctx = self.build_ext_ctx_with_tools(tools);
-            pre_ctx.set_pre_tool_use_input(PreToolUseInput {
-                tool_name: tc.name.clone(),
-                tool_input: args.clone(),
-            });
-
-            let pre_hook_outcome = self
-                .extension_runner
-                .dispatch_tool_hook(ExtensionEvent::PreToolUse, &pre_ctx)
-                .await?;
-
-            let tool_input = match &pre_hook_outcome {
-                ToolHookOutcome::ModifiedInput { tool_input } => tool_input.clone(),
-                _ => args.clone(),
-            };
-
-            send_tool_requested(event_tx, tc, &tool_input);
-
-            let outcome = if let ToolHookOutcome::Blocked { reason } = pre_hook_outcome {
-                PreparedToolOutcome::Blocked(ToolResult {
-                    call_id: tc.call_id.clone(),
-                    content: format!("Tool execution blocked by hook: {reason}"),
-                    is_error: true,
-                    error: Some(reason),
-                    metadata: Default::default(),
-                    duration_ms: None,
-                })
-            } else {
-                PreparedToolOutcome::Ready
-            };
-
-            let mode = match &outcome {
-                PreparedToolOutcome::Ready => self.tool_registry.execution_mode(&tc.name),
-                PreparedToolOutcome::Blocked(_) => ExecutionMode::Sequential,
-            };
-
-            prepared.push(PreparedToolCall {
-                index,
-                call_id: tc.call_id.clone(),
-                name: tc.name.clone(),
-                tool_input,
-                mode,
-                outcome,
-            });
-        }
-
-        Ok(prepared)
-    }
-
-    /// 执行已预处理的工具调用。
-    ///
-    /// 按顺序遍历预处理结果，根据执行模式决定调度方式：
-    /// - **Blocked**：先提交已完成的并行批次，再提交预处理阶段的阻止结果。
-    /// - **Parallel**：加入当前并行批次，由 `flush_parallel_batch` 统一调度。
-    /// - **Sequential**：先提交当前并行批次，再单独执行并提交当前调用。
-    ///
-    /// 每个 barrier 的结果都会先经过 PostToolUse、持久化和 budget 裁剪，再追加到
-    /// LLM 历史，避免后续慢工具阻塞已经完成的工具结果进入事件流。
-    async fn execute_and_commit_tool_calls(
-        &self,
-        mut input: ExecuteToolCalls<'_>,
-    ) -> Result<Vec<String>, AgentError> {
-        let mut discovered_tools = Vec::new();
-        let mut parallel_batch = Vec::new();
-        let mut parallel_batch_start = None;
-
-        for position in 0..input.prepared.len() {
-            let step = {
-                let call = &input.prepared[position];
-                match &call.outcome {
-                    PreparedToolOutcome::Blocked(result) => {
-                        ToolExecutionStep::Blocked(result.clone())
-                    },
-                    PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => {
-                        ToolExecutionStep::Parallel(call.to_executable())
-                    },
-                    PreparedToolOutcome::Ready => {
-                        ToolExecutionStep::Sequential(call.to_executable())
-                    },
-                }
-            };
-
-            match step {
-                ToolExecutionStep::Blocked(result) => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            &mut input,
-                        )
-                        .await?,
-                    );
-                    discovered_tools.extend(
-                        self.commit_single_tool_result(&mut input, position, result.clone())
-                            .await?,
-                    );
-                },
-                ToolExecutionStep::Parallel(executable) => {
-                    if parallel_batch_start.is_none() {
-                        parallel_batch_start = Some(position);
-                    }
-                    parallel_batch.push(executable);
-                },
-                ToolExecutionStep::Sequential(executable) => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            &mut input,
-                        )
-                        .await?,
-                    );
-                    let (index, result) = execute_tool_call(
-                        Arc::clone(&self.tool_registry),
-                        ToolCallRuntimeContext {
-                            session_id: self.session_id.clone(),
-                            working_dir: self.working_dir.clone(),
-                            model_id: self.model_id.clone(),
-                            tools: input.tools.to_vec(),
-                            tool_result_reader: Some(Arc::clone(&self.session_manager)
-                                as Arc<dyn ToolResultArtifactReader>),
-                            event_tx: input.event_tx.clone(),
-                            background_result_tx: self.background_result_tx.clone(),
-                        },
-                        executable,
-                    )
-                    .await;
-                    let mut results = BTreeMap::new();
-                    results.insert(index, result);
-                    discovered_tools.extend(
-                        self.commit_tool_results(CommitToolResults {
-                            prepared: &input.prepared[position..position + 1],
-                            results,
-                            tools: input.tools,
-                            messages: input.messages,
-                            all_tool_results: input.all_tool_results,
-                            event_tx: input.event_tx,
-                        })
-                        .await?,
-                    );
-                },
-            }
-        }
-
-        discovered_tools.extend(
-            self.flush_and_commit_parallel_batch(
-                &mut parallel_batch,
-                &mut parallel_batch_start,
-                &mut input,
-            )
-            .await?,
-        );
-
-        Ok(discovered_tools)
-    }
-
-    async fn flush_and_commit_parallel_batch(
-        &self,
-        parallel_batch: &mut Vec<ExecutableToolCall>,
-        parallel_batch_start: &mut Option<usize>,
-        input: &mut ExecuteToolCalls<'_>,
-    ) -> Result<Vec<String>, AgentError> {
-        let Some(batch_start) = parallel_batch_start.take() else {
-            return Ok(Vec::new());
-        };
-        let batch_len = parallel_batch.len();
-        let batch_end = batch_start + batch_len;
-        let mut results = BTreeMap::new();
-
-        self.flush_parallel_batch(
-            parallel_batch,
-            input.tools,
-            input.event_tx.clone(),
-            &mut results,
-        )
-        .await?;
-
-        self.commit_tool_results(CommitToolResults {
-            prepared: &input.prepared[batch_start..batch_end],
-            results,
-            tools: input.tools,
-            messages: input.messages,
-            all_tool_results: input.all_tool_results,
-            event_tx: input.event_tx,
-        })
-        .await
-    }
-
-    async fn commit_single_tool_result(
-        &self,
-        input: &mut ExecuteToolCalls<'_>,
-        position: usize,
-        result: ToolResult,
-    ) -> Result<Vec<String>, AgentError> {
-        let mut results = BTreeMap::new();
-        results.insert(input.prepared[position].index, result);
-        self.commit_tool_results(CommitToolResults {
-            prepared: &input.prepared[position..position + 1],
-            results,
-            tools: input.tools,
-            messages: input.messages,
-            all_tool_results: input.all_tool_results,
-            event_tx: input.event_tx,
-        })
-        .await
-    }
-
-    /// 刷新并行工具调用批次。
-    ///
-    /// 使用 `JoinSet` 同时启动最多 `MAX_PARALLEL_TOOL_CALLS` 个工具调用任务，
-    /// 每当一个任务完成后立即补充下一个待执行调用，保持并发水位不变。
-    /// 所有结果按索引写入 `results` 映射。
-    async fn flush_parallel_batch(
-        &self,
-        batch: &mut Vec<ExecutableToolCall>,
-        tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-        results: &mut BTreeMap<usize, ToolResult>,
-    ) -> Result<(), AgentError> {
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        let batch_len = batch.len();
-        let batch_started_at = Instant::now();
-        tracing::debug!(
-            batch_len,
-            max_parallel = MAX_PARALLEL_TOOL_CALLS,
-            "flushing parallel tool batch"
-        );
-
-        let mut pending = std::mem::take(batch).into_iter();
-        let mut join_set = JoinSet::new();
-
-        for _ in 0..MAX_PARALLEL_TOOL_CALLS {
-            let Some(call) = pending.next() else { break };
-            self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
-        }
-
-        while let Some(joined) = join_set.join_next().await {
-            let (index, result) =
-                joined.map_err(|err| AgentError::Llm(format!("tool task failed: {err}")))?;
-            results.insert(index, result);
-
-            if let Some(call) = pending.next() {
-                self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
-            }
-        }
-
-        tracing::debug!(
-            batch_len,
-            duration_ms = batch_started_at.elapsed().as_millis() as u64,
-            "parallel tool batch flushed"
-        );
-        Ok(())
-    }
-
-    /// 将单个工具调用封装为异步任务并加入 `JoinSet`。
-    ///
-    /// 克隆必要的上下文（工具注册表、会话 ID、工作目录等），
-    /// 使任务可以在独立线程中安全执行。
-    fn spawn_tool_call(
-        &self,
-        join_set: &mut JoinSet<(usize, ToolResult)>,
-        call: ExecutableToolCall,
-        tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) {
-        let tool_registry = Arc::clone(&self.tool_registry);
-        let session_id = self.session_id.clone();
-        let working_dir = self.working_dir.clone();
-        let model_id = self.model_id.clone();
-        let tools = tools.to_vec();
-        let tool_result_reader =
-            Some(Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>);
-        let background_result_tx = self.background_result_tx.clone();
-
-        join_set.spawn(async move {
-            execute_tool_call(
-                tool_registry,
-                ToolCallRuntimeContext {
-                    session_id,
-                    working_dir,
-                    model_id,
-                    tools,
-                    tool_result_reader,
-                    event_tx,
-                    background_result_tx,
-                },
-                call,
-            )
-            .await
-        });
-    }
-
-    /// 提交工具执行结果。
-    ///
-    /// 对每个已执行的工具调用依次处理：
-    /// 1. 分发 `PostToolUse` 扩展钩子，允许扩展修改结果内容或阻止。
-    /// 2. 通过 `event_tx` 发送 `ToolCallCompleted` 事件通知客户端。
-    /// 3. 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
-    async fn commit_tool_results(
-        &self,
-        mut input: CommitToolResults<'_>,
-    ) -> Result<Vec<String>, AgentError> {
-        let mut pending_results = Vec::with_capacity(input.prepared.len());
-        for call in input.prepared {
-            let mut result = input
-                .results
-                .remove(&call.index)
-                .unwrap_or_else(|| missing_tool_result(call));
-
-            if matches!(&call.outcome, PreparedToolOutcome::Ready) {
-                if result.is_error && result.error.is_none() {
-                    result.error = Some(result.content.clone());
-                }
-
-                let mut post_ctx = self.build_ext_ctx_with_tools(input.tools);
-                post_ctx.set_post_tool_use_input(PostToolUseInput {
-                    tool_name: call.name.clone(),
-                    tool_input: call.tool_input.clone(),
-                    tool_result: result.clone(),
-                });
-
-                match self
-                    .extension_runner
-                    .dispatch_tool_hook(ExtensionEvent::PostToolUse, &post_ctx)
-                    .await?
-                {
-                    ToolHookOutcome::ModifiedResult { content } => {
-                        result.content = content;
-                        if result.is_error {
-                            result.error = Some(result.content.clone());
-                        }
-                    },
-                    ToolHookOutcome::Blocked { reason } => {
-                        result.content = format!("Tool result blocked by hook: {reason}");
-                        result.is_error = true;
-                        result.error = Some(reason);
-                    },
-                    ToolHookOutcome::Allow | ToolHookOutcome::ModifiedInput { .. } => {},
-                }
-            }
-
-            pending_results.push(PendingCommittedToolResult {
-                call_id: call.call_id.clone(),
-                tool_name: call.name.clone(),
-                result,
-            });
-        }
-
-        for pending in &mut pending_results {
-            self.persist_large_tool_result(
-                &pending.tool_name,
-                &pending.call_id,
-                &mut pending.result,
-            )
-            .await?;
-        }
-        let committed_tool_result_chars = committed_tool_result_content_len(input.messages);
-        self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending_results)
-            .await?;
-
-        let mut discovered_tools = Vec::new();
-        for pending in pending_results {
-            if pending.tool_name == TOOL_SEARCH_TOOL_NAME {
-                discovered_tools.extend(discovered_mcp_tool_names(&pending.result));
-            }
-            if input.event_tx.is_some() {
-                send_event(
-                    input.event_tx,
-                    EventPayload::ToolCallCompleted {
-                        call_id: pending.call_id.clone().into(),
-                        tool_name: pending.tool_name.clone(),
-                        result: pending.result.clone(),
-                    },
-                );
-            }
-            input.messages.push(LlmMessage {
-                role: LlmRole::Tool,
-                content: vec![LlmContent::ToolResult {
-                    tool_call_id: pending.call_id,
-                    content: pending.result.content.clone(),
-                    is_error: pending.result.is_error,
-                }],
-                name: Some(pending.tool_name),
-            });
-            input.all_tool_results.push(pending.result);
-        }
-
-        Ok(discovered_tools)
-    }
-
-    async fn persist_large_tool_result(
-        &self,
-        tool_name: &str,
-        call_id: &str,
-        result: &mut ToolResult,
-    ) -> Result<(), AgentError> {
-        let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
-            return Ok(());
-        };
-        if !should_persist_tool_result(&result.content, inline_limit) {
-            return Ok(());
-        }
-        self.persist_tool_result(tool_name, call_id, result).await
-    }
-
-    async fn persist_tool_result(
-        &self,
-        tool_name: &str,
-        call_id: &str,
-        result: &mut ToolResult,
-    ) -> Result<(), AgentError> {
-        if result.metadata.contains_key("persistedToolResult") {
-            return Ok(());
-        }
-        let original_content = result.content.clone();
-        let reference = self
-            .session_manager
-            .write_tool_result_artifact(
-                &self.session_id,
-                ToolResultArtifactInput {
-                    call_id: call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    content: original_content.clone(),
-                },
-            )
-            .await
-            .map_err(|error| AgentError::Llm(format!("persist tool result: {error}")))?;
-        let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
-        result.metadata.insert(
-            "persistedToolResult".into(),
-            serde_json::json!({
-                "bytes": reference.bytes,
-                "path": reference.path.clone(),
-            }),
-        );
-        result.content = persisted_tool_result_summary(&reference, &preview);
-        if result.is_error {
-            result.error = Some(result.content.clone());
-        }
-        Ok(())
-    }
-
-    async fn enforce_tool_result_message_budget(
-        &self,
-        committed_tool_result_chars: usize,
-        pending_results: &mut [PendingCommittedToolResult],
-    ) -> Result<(), AgentError> {
-        let mut total: usize = committed_tool_result_chars
-            + pending_results
-                .iter()
-                .map(|pending| pending.result.content.len())
-                .sum::<usize>();
-        if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-            return Ok(());
-        }
-
-        let mut candidates: Vec<usize> = pending_results
-            .iter()
-            .enumerate()
-            .filter_map(|(index, pending)| {
-                let can_persist = tool_result_inline_limit(&pending.tool_name).is_some()
-                    && !pending.result.metadata.contains_key("persistedToolResult");
-                can_persist.then_some(index)
-            })
-            .collect();
-        candidates.sort_by(|left, right| {
-            pending_results[*right]
-                .result
-                .content
-                .len()
-                .cmp(&pending_results[*left].result.content.len())
-        });
-
-        for index in candidates {
-            if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-                break;
-            }
-            let pending = &mut pending_results[index];
-            let before = pending.result.content.len();
-            self.persist_tool_result(&pending.tool_name, &pending.call_id, &mut pending.result)
-                .await?;
-            let after = pending.result.content.len();
-            total = total.saturating_sub(before).saturating_add(after);
-        }
-
-        Ok(())
-    }
 }
 
 /// Agent 回合的输出结果。
 pub struct AgentTurnOutput {
-    /// 助手回复的文本内容
     pub text: String,
-    /// 结束原因（如 "stop"、"tool_calls"）
     pub finish_reason: String,
-    /// 本回合中所有工具调用的结果
-    pub tool_results: Vec<ToolResult>,
-    /// 本回合 auto compact 生成的 continuation 计划。
+    pub tool_results: Vec<astrcode_core::tool::ToolResult>,
     pub auto_compaction: Option<AgentCompactContinuation>,
 }
 
 /// Agent loop 发现 auto compact 后交给 command owner 执行的 continuation 计划。
 pub struct AgentCompactContinuation {
-    /// compact 触发来源。
     pub trigger: CompactTrigger,
-    /// compact 结果；`retained_messages` 会在回合结束时刷新为下一会话可见尾部。
     pub compaction: CompactResult,
 }
 
@@ -1389,63 +725,9 @@ impl AgentCompactContinuation {
     }
 }
 
-fn retained_messages_after_compaction(
-    messages: &[LlmMessage],
-    context_messages: &[LlmMessage],
-) -> Vec<LlmMessage> {
-    let without_session_prompt = if matches!(messages.first(), Some(message) if message.role == LlmRole::System)
-    {
-        &messages[1..]
-    } else {
-        messages
-    };
-    without_session_prompt
-        .strip_prefix(context_messages)
-        .unwrap_or(without_session_prompt)
-        .iter()
-        .filter(|message| message.role != LlmRole::System)
-        .cloned()
-        .collect()
-}
-
-
-/// 把 compact 结果转换成主循环继续发送给 provider 的 prepared context。
-fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContext {
-    let messages = [
-        compaction.context_messages.clone(),
-        compaction.retained_messages.clone(),
-    ]
-    .concat();
-    PreparedContext {
-        messages,
-        compaction: Some(compaction),
-    }
-}
-
-fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
-    !matches!(
-        error,
-        CompactError::Skip(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact)
-    )
-}
-
-/// Agent 处理过程中可能出现的错误类型。
-#[derive(Debug, thiserror::Error)]
-pub enum AgentError {
-    #[error("LLM error: {0}")]
-    Llm(String),
-    #[error("Tool error: {0}")]
-    Tool(#[from] astrcode_core::tool::ToolError),
-    #[error("Extension error: {0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
-}
-
-impl From<astrcode_core::llm::LlmError> for AgentError {
-    /// 将底层 LLM 错误收敛到 agent loop 的错误类型。
-    fn from(e: astrcode_core::llm::LlmError) -> Self {
-        AgentError::Llm(e.to_string())
-    }
-}
+// Re-export constants for the test module.
+#[cfg(test)]
+use super::shared_context::{TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 

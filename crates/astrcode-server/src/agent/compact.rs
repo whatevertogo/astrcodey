@@ -13,7 +13,7 @@ use std::{
 
 use astrcode_context::{
     compaction::{
-        CompactError, CompactResult, CompactSummaryRenderOptions, compact_messages_with_request,
+        CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions, compact_messages_with_request,
     },
     settings::ContextWindowSettings,
 };
@@ -314,6 +314,28 @@ pub(crate) async fn compact_with_forked_provider(
         },
     )
     .await
+}
+
+/// 把 compact 结果转换成主循环继续发送给 provider 的 prepared context。
+pub(crate) fn prepared_context_from_compaction(
+    compaction: CompactResult,
+) -> astrcode_context::manager::PreparedContext {
+    let messages = [
+        compaction.context_messages.clone(),
+        compaction.retained_messages.clone(),
+    ]
+    .concat();
+    astrcode_context::manager::PreparedContext {
+        messages,
+        compaction: Some(compaction),
+    }
+}
+
+pub(crate) fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
+    !matches!(
+        error,
+        CompactError::Skip(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact)
+    )
 }
 
 #[cfg(test)]

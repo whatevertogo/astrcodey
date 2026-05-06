@@ -4,11 +4,15 @@ pub mod background;
 pub(crate) mod compact;
 mod r#loop;
 pub(crate) mod post_compact;
+pub(crate) mod shared_context;
 pub(crate) mod tool_exec;
+pub(super) mod tool_pipeline;
 pub(crate) mod tool_types;
 pub(crate) mod util;
 
 pub use background::{BackgroundTaskManager, TaskSummary};
 pub use compact::AutoCompactFailureTracker;
-pub use r#loop::{AgentCompactContinuation, AgentError, AgentLoop, AgentServices, AgentTurnOutput};
-pub(crate) use r#loop::{AgentSignal, drive_agent};
+pub use r#loop::{AgentCompactContinuation, AgentLoop, AgentServices, AgentTurnOutput};
+pub use shared_context::AgentError;
+pub(crate) use r#loop::drive_agent;
+pub(crate) use shared_context::AgentSignal;
