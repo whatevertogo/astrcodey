@@ -152,6 +152,6 @@ MIT
 This project drew inspiration and design patterns from several open-source projects:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — tool execution pipeline, system prompt design, and the extension hook architecture were heavily informed by studying Claude Code's public documentation and design philosophy.
-- **[OpenCode](https://github.com/opencode-ai/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) and the session/event streaming model reference OpenCode's architecture.
+- **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) and the session/event streaming model reference OpenCode's architecture.
 - **[Codex CLI](https://github.com/openai/codex)** — the TUI layout and terminal UI design borrow from Codex's approach to rendering agent interactions in the terminal.
 - **[pi-mono](https://github.com/badlogic/pi-mono)** — the plugin extension model and lifecycle hook design were influenced by pi-mono's approach to composable, event-driven extensions.

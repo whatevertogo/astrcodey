@@ -136,10 +136,10 @@ Agent 循环（`astrcode-server/src/agent/`）采用分阶段流水线模式：
 
 ## 致谢
 
-本项目借鉴了以下开源项目的设计思想：
+本项目借鉴了以下开源项目的设计思想和工程实践：
 
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — 工具执行管线、系统提示词设计、扩展钩子架构参考了 Claude Code 的公开文档和设计理念。
-- **[OpenCode](https://github.com/opencode-ai/opencode)** — 前后端分离（HTTP/SSE + JSON-RPC）和会话/事件流模型参考了 OpenCode 的架构。
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — 工具执行管线、系统提示词设计
+- **[OpenCode](https://github.com/anomalyco/opencode)** — 前后端分离（HTTP/SSE + JSON-RPC）参考了 OpenCode 的架构。
 - **[Codex CLI](https://github.com/openai/codex)** — TUI 布局和终端 UI 设计借鉴了 Codex 在终端中渲染 Agent 交互的方式。
 - **[pi-mono](https://github.com/anthropics/pi-mono)** — 插件扩展模型和生命周期钩子设计受到了 pi-mono 组合式、事件驱动扩展思路的影响。
 
