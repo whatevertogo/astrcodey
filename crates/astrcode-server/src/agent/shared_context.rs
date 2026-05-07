@@ -27,7 +27,6 @@ pub(crate) enum AgentSignal {
         compaction: astrcode_context::compaction::CompactResult,
         reply: oneshot::Sender<Result<SessionId, String>>,
     },
-    #[allow(dead_code)]
     BackgroundTaskCompleted {
         session_id: SessionId,
         task_id: BackgroundTaskId,

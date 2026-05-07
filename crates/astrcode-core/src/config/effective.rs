@@ -7,6 +7,8 @@
 pub struct EffectiveConfig {
     /// LLM 提供者设置——已完整接入 OpenAiProvider 和 Agent。
     pub llm: LlmSettings,
+    /// 上下文窗口 / compact 设置。
+    pub context: ContextSettings,
 }
 
 // ─── LLM Settings ────────────────────────────────────────────────────────
@@ -47,6 +49,23 @@ pub struct LlmSettings {
     pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
 }
 
-// TODO: RuntimeSettings——当压缩/工具并发等功能接入时添加。
-// TODO: SessionSettings——当会话广播/分支深度等功能接入时添加。
-// TODO: AgentSettings——当 spawn 深度/并发等功能接入时添加。
+// ─── Context Settings ────────────────────────────────────────────────────
+
+/// 已解析的上下文窗口 / compact 配置。
+#[derive(Debug, Clone)]
+pub struct ContextSettings {
+    /// 是否启用自动压缩（当上下文占用达到阈值时自动触发）。
+    pub auto_compact_enabled: bool,
+    /// 触发自动压缩的上下文占用百分比阈值（0–100）。
+    pub compact_threshold_percent: f32,
+    /// 压缩失败时的最大重试次数。
+    pub compact_max_retry_attempts: u8,
+    /// LLM 压缩输出的最大 token 数。
+    pub compact_max_output_tokens: usize,
+    /// 压缩后恢复的最近读取文件数量上限。
+    pub post_compact_max_files: usize,
+    /// 压缩后恢复文件的总 token 预算。
+    pub post_compact_token_budget: usize,
+    /// 单个恢复文件的最大 token 数。
+    pub post_compact_max_tokens_per_file: usize,
+}

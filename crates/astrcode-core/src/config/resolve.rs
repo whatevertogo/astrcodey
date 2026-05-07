@@ -93,7 +93,39 @@ impl Config {
             prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
         };
 
-        Ok(EffectiveConfig { llm })
+        Ok(EffectiveConfig {
+            llm,
+            context: ContextSettings {
+                auto_compact_enabled: self
+                    .runtime
+                    .compact_auto_enabled
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
+                compact_threshold_percent: self
+                    .runtime
+                    .compact_threshold_percent
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT),
+                compact_max_retry_attempts: self
+                    .runtime
+                    .compact_max_retry_attempts
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS),
+                compact_max_output_tokens: self
+                    .runtime
+                    .compact_max_output_tokens
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
+                post_compact_max_files: self
+                    .runtime
+                    .post_compact_max_files
+                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_FILES),
+                post_compact_token_budget: self
+                    .runtime
+                    .post_compact_token_budget
+                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET),
+                post_compact_max_tokens_per_file: self
+                    .runtime
+                    .post_compact_max_tokens_per_file
+                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
+            },
+        })
     }
 }
 

@@ -32,9 +32,9 @@ use super::custom_terminal::Terminal;
 /// drops or mishandles those sequences, so `Zellij` mode falls back to emitting
 /// newlines at the bottom of the screen and writing lines at absolute positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum InsertHistoryMode {
     Standard,
+    #[allow(dead_code)]
     Zellij,
 }
 

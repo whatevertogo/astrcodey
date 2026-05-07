@@ -1,5 +1,8 @@
 //! Tool definitions and handlers for switchMode and upsertSessionPlan.
 
+use std::path::Path;
+
+#[cfg(test)]
 use std::path::PathBuf;
 
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata};
@@ -109,8 +112,8 @@ fn review_checklist_message() -> String {
 
 pub fn handle_switch_mode(
     arguments: Value,
-    mode_root: &PathBuf,
-    plan_dir: &PathBuf,
+    mode_root: &Path,
+    plan_dir: &Path,
     catalog: &ModeCatalog,
 ) -> Result<ToolResult, String> {
     let args = serde_json::from_value::<SwitchModeArgs>(arguments)
@@ -230,8 +233,8 @@ pub fn handle_switch_mode(
 
 pub fn handle_upsert_plan(
     arguments: Value,
-    mode_root: &PathBuf,
-    plan_dir: &PathBuf,
+    mode_root: &Path,
+    plan_dir: &Path,
 ) -> Result<ToolResult, String> {
     let args = serde_json::from_value::<UpsertPlanArgs>(arguments)
         .map_err(|e| format!("invalid args for {UPSERT_PLAN_TOOL_NAME}: {e}"))?;

@@ -48,15 +48,16 @@ impl TurnLock {
                     });
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if timeout.is_some_and(|timeout| start.elapsed() > timeout) {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                "Timed out waiting for turn lock after {:?}: {}",
-                                timeout.unwrap(),
-                                self.path.display()
-                            ),
-                        ));
+                    if let Some(timeout) = timeout {
+                        if start.elapsed() > timeout {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!(
+                                    "Timed out waiting for turn lock after {timeout:?}: {}",
+                                    self.path.display()
+                                ),
+                            ));
+                        }
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 },

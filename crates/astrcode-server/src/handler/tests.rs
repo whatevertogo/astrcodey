@@ -2,7 +2,7 @@ use std::{future, sync::Arc, time::Duration};
 
 use astrcode_context::{compaction::CompactResult, manager::LlmContextAssembler};
 use astrcode_core::{
-    config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
@@ -178,6 +178,15 @@ fn test_runtime_with_settings(
                 temperature: None,
                 supports_prompt_cache_key: false,
                 prompt_cache_retention: None,
+            },
+            context: ContextSettings {
+                auto_compact_enabled: context_settings.auto_compact_enabled,
+                compact_threshold_percent: context_settings.compact_threshold_percent,
+                compact_max_retry_attempts: context_settings.compact_max_retry_attempts,
+                compact_max_output_tokens: context_settings.compact_max_output_tokens,
+                post_compact_max_files: context_settings.post_compact_max_files,
+                post_compact_token_budget: context_settings.post_compact_token_budget,
+                post_compact_max_tokens_per_file: context_settings.post_compact_max_tokens_per_file,
             },
         },
     })

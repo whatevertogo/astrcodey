@@ -17,7 +17,6 @@ use std::{
 
 use crossterm::event::{Event, EventStream as CrosstermEventStream};
 use futures::Stream;
-#[allow(unused_imports)]
 pub use stream::{EventStream, TuiEvent};
 
 /// 事件代理：共享的 crossterm EventStream。
@@ -42,7 +41,7 @@ impl EventBroker {
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<io::Result<Event>>> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match &mut *state {
             BrokerState::Start => {
                 *state = BrokerState::Running(CrosstermEventStream::new());

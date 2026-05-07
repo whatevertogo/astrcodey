@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
 
 use astrcode_context::{manager::LlmContextAssembler, settings::ContextWindowSettings};
 use astrcode_core::{
-    config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{ToolDefinition, ToolResult},
@@ -467,6 +467,15 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
                 temperature: None,
                 supports_prompt_cache_key: false,
                 prompt_cache_retention: None,
+            },
+            context: ContextSettings {
+                auto_compact_enabled: true,
+                compact_threshold_percent: 83.5,
+                compact_max_retry_attempts: 3,
+                compact_max_output_tokens: 20_000,
+                post_compact_max_files: 5,
+                post_compact_token_budget: 50_000,
+                post_compact_max_tokens_per_file: 5_000,
             },
         },
     })

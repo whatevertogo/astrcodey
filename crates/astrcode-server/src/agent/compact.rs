@@ -160,8 +160,6 @@ fn clean_compact_instructions(instructions: Vec<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ForkQuerySource {
     Compact,
-    #[allow(dead_code)]
-    InternalAgent,
 }
 
 pub(crate) struct ForkedProviderRequest {

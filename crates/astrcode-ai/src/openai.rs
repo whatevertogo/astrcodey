@@ -38,7 +38,10 @@ impl OpenAiProvider {
             .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
             .timeout(std::time::Duration::from_secs(config.read_timeout_secs))
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to create HTTP client: {e}");
+                reqwest::Client::new()
+            });
 
         Self {
             config,

@@ -30,7 +30,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use custom_terminal::Terminal as CustomTerminal;
-use input::Action;
+use input::is_press_event;
 use insert_history::insert_history_lines;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
@@ -114,8 +114,8 @@ async fn handle_tui_event(
 ) -> io::Result<()> {
     match event {
         TuiEvent::Key(key_event) => {
-            if let Some(action) = input::map_key(key_event) {
-                handle_action(action, state, client, terminal).await?;
+            if is_press_event(&key_event) {
+                handle_key(key_event, state, client, terminal).await?;
             }
         },
         TuiEvent::Paste(text) => {
@@ -128,26 +128,6 @@ async fn handle_tui_event(
             state.mark_dirty();
         },
     }
-    Ok(())
-}
-
-// ─── Action 处理 ──────────────────────────────────────────────────────
-
-async fn handle_action(
-    action: Action,
-    state: &mut TuiState,
-    client: &Arc<Client>,
-    terminal: &mut TerminalSession,
-) -> io::Result<()> {
-    match action {
-        Action::Quit => state.should_quit = true,
-        Action::Key(event) => handle_key(event, state, client, terminal).await?,
-        Action::Paste(text) => {
-            let text = normalize_paste(&text);
-            state.insert_paste(&text);
-        },
-    }
-    state.mark_dirty();
     Ok(())
 }
 

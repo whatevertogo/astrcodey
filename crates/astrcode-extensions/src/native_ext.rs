@@ -149,7 +149,7 @@ impl Extension for NativeExtension {
     fn hook_subscriptions(&self) -> Vec<HookSubscription> {
         self.handlers
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .map(|(event, mode, _)| HookSubscription {
                 event: event.clone(),
@@ -170,7 +170,7 @@ impl Extension for NativeExtension {
     ) -> Result<HookEffect, ExtensionError> {
         let event_disc = ffi::event_discriminant(event.clone());
         let ffi_ctx = FfiCtxOwned::from_ext_ctx(ctx);
-        let handlers = self.handlers.lock().unwrap();
+        let handlers = self.handlers.lock().unwrap_or_else(|e| e.into_inner());
         // 收集匹配的回调，然后释放锁
         let callbacks: Vec<EventCallback> = handlers
             .iter()
@@ -262,7 +262,7 @@ impl Extension for NativeExtension {
 
     /// 返回此扩展注册的所有工具定义。
     fn tools(&self) -> Vec<ToolDefinition> {
-        self.tools.lock().unwrap().clone()
+        self.tools.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 执行指定名称的工具。
@@ -358,7 +358,7 @@ impl Extension for NativeExtension {
 
     /// 返回此扩展注册的所有斜杠命令。
     fn slash_commands(&self) -> Vec<astrcode_core::extension::SlashCommand> {
-        self.commands.lock().unwrap().clone()
+        self.commands.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -403,7 +403,7 @@ unsafe extern "C" fn ffi_on(
     user_data!(api)
         .handlers
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .push((event, mode, callback));
 }
 
@@ -423,7 +423,7 @@ unsafe extern "C" fn ffi_register_tool(
     // 解析参数 JSON，失败时使用空对象
     let params: serde_json::Value =
         serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
-    user_data!(api).tools.lock().unwrap().push(ToolDefinition {
+    user_data!(api).tools.lock().unwrap_or_else(|e| e.into_inner()).push(ToolDefinition {
         name,
         description: desc,
         parameters: params,
@@ -458,7 +458,7 @@ unsafe extern "C" fn ffi_register_command(
     user_data!(api)
         .commands
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .push(astrcode_core::extension::SlashCommand {
             name,
             description: desc,

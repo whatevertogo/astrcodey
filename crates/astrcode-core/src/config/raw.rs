@@ -116,7 +116,21 @@ pub struct RuntimeSection {
     pub llm_retry_base_delay_ms: Option<u64>,
     /// LLM 采样温度（0.0-2.0）。未设置时使用 API 默认值。
     pub llm_temperature: Option<f32>,
-    // TODO: 压缩相关字段
+    // ── Compact ───────────────────────────────────────────────────────
+    /// 是否启用自动压缩。
+    pub compact_auto_enabled: Option<bool>,
+    /// 触发自动压缩的上下文占用百分比阈值（0–100）。
+    pub compact_threshold_percent: Option<f32>,
+    /// 压缩失败时的最大重试次数。
+    pub compact_max_retry_attempts: Option<u8>,
+    /// LLM 压缩输出的最大 token 数。
+    pub compact_max_output_tokens: Option<usize>,
+    /// 压缩后恢复的最近读取文件数量上限。
+    pub post_compact_max_files: Option<usize>,
+    /// 压缩后恢复文件的总 token 预算。
+    pub post_compact_token_budget: Option<usize>,
+    /// 单个恢复文件的最大 token 数。
+    pub post_compact_max_tokens_per_file: Option<usize>,
     // TODO: 工具并发相关字段
     // TODO: Agent 限制相关字段
 }

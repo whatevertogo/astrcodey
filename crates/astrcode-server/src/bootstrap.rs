@@ -117,7 +117,15 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     ));
 
     // 3. 初始化上下文组装器。
-    let context_settings = ContextWindowSettings::default();
+    let context_settings = ContextWindowSettings {
+        auto_compact_enabled: effective.context.auto_compact_enabled,
+        compact_threshold_percent: effective.context.compact_threshold_percent,
+        compact_max_retry_attempts: effective.context.compact_max_retry_attempts,
+        compact_max_output_tokens: effective.context.compact_max_output_tokens,
+        post_compact_max_files: effective.context.post_compact_max_files,
+        post_compact_token_budget: effective.context.post_compact_token_budget,
+        post_compact_max_tokens_per_file: effective.context.post_compact_max_tokens_per_file,
+    };
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
     let auto_compact_failures = Arc::new(AutoCompactFailureTracker::default());
 

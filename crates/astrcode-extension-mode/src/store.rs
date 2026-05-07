@@ -1,6 +1,6 @@
 //! Mode state and plan artifact persistence.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use astrcode_support::hostpaths;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,7 @@ pub fn plan_dir(session_id: &str, working_dir: &str) -> PathBuf {
     hostpaths::session_plan_dir_for_project_path(&PathBuf::from(working_dir), session_id)
 }
 
-pub fn load_mode_state(root: &PathBuf) -> Result<ModeState, String> {
+pub fn load_mode_state(root: &Path) -> Result<ModeState, String> {
     let path = root.join(MODE_STATE_FILE);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content)
@@ -54,7 +54,7 @@ pub fn load_mode_state(root: &PathBuf) -> Result<ModeState, String> {
     }
 }
 
-pub fn save_mode_state(root: &PathBuf, state: &ModeState) -> Result<(), String> {
+pub fn save_mode_state(root: &Path, state: &ModeState) -> Result<(), String> {
     std::fs::create_dir_all(root)
         .map_err(|e| format!("create mode directory: {e}"))?;
     let path = root.join(MODE_STATE_FILE);
@@ -66,11 +66,11 @@ pub fn save_mode_state(root: &PathBuf, state: &ModeState) -> Result<(), String> 
     Ok(())
 }
 
-pub fn plan_file_path(plan_dir: &PathBuf) -> PathBuf {
+pub fn plan_file_path(plan_dir: &Path) -> PathBuf {
     plan_dir.join(PLAN_FILE)
 }
 
-pub fn load_plan(plan_dir: &PathBuf) -> Result<Option<String>, String> {
+pub fn load_plan(plan_dir: &Path) -> Result<Option<String>, String> {
     let path = plan_file_path(plan_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Some(content)),
@@ -79,7 +79,7 @@ pub fn load_plan(plan_dir: &PathBuf) -> Result<Option<String>, String> {
     }
 }
 
-pub fn save_plan(plan_dir: &PathBuf, content: &str) -> Result<String, String> {
+pub fn save_plan(plan_dir: &Path, content: &str) -> Result<String, String> {
     std::fs::create_dir_all(plan_dir)
         .map_err(|e| format!("create plan directory: {e}"))?;
     let path = plan_file_path(plan_dir);

@@ -22,6 +22,23 @@ pub const DEFAULT_LLM_MAX_RETRIES: u32 = 2;
 /// LLM 重试的指数退避基础延迟（毫秒）。
 pub const DEFAULT_LLM_RETRY_BASE_DELAY_MS: u64 = 250;
 
+// ── Compact 参数默认值 ──────────────────────────────────────────────────
+
+/// 是否启用自动压缩。
+pub const DEFAULT_COMPACT_AUTO_ENABLED: bool = true;
+/// 触发自动压缩的上下文占用百分比阈值。
+pub const DEFAULT_COMPACT_THRESHOLD_PERCENT: f32 = 83.5;
+/// 压缩失败时的最大重试次数。
+pub const DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS: u8 = 3;
+/// LLM 压缩输出的最大 token 数。
+pub const DEFAULT_COMPACT_MAX_OUTPUT_TOKENS: usize = 20_000;
+/// 压缩后恢复的最近读取文件数量上限。
+pub const DEFAULT_POST_COMPACT_MAX_FILES: usize = 5;
+/// 压缩后恢复文件的总 token 预算。
+pub const DEFAULT_POST_COMPACT_TOKEN_BUDGET: usize = 50_000;
+/// 单个恢复文件的最大 token 数。
+pub const DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE: usize = 5_000;
+
 // ── Serde 默认值函数 ──────────────────────────────────────────────────
 
 /// serde 用：返回默认配置版本号。

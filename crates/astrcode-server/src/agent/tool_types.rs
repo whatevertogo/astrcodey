@@ -77,7 +77,6 @@ pub(crate) struct ExecutableToolCall {
 }
 
 /// 后台任务完成通知的载荷。
-#[allow(dead_code)]
 pub struct BackgroundTaskCompletion {
     pub(crate) session_id: SessionId,
     pub(crate) task_id: BackgroundTaskId,

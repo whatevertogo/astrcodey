@@ -116,14 +116,23 @@ pub fn init_with(opts: LogOptions) -> tracing_appender::non_blocking::WorkerGuar
     let subscriber = subscriber.with(stderr_layer);
 
     if opts.file_enabled {
-        fs::create_dir_all(&opts.log_dir)
-            .expect("failed to create log directory; check ~/.astrcode permissions");
+        if let Err(e) = fs::create_dir_all(&opts.log_dir) {
+            tracing::error!("failed to create log directory: {e}");
+            subscriber.init();
+            return tracing_appender::non_blocking(std::io::sink()).1;
+        }
 
         let file_filter = std::env::var("ASTRCODE_LOG_FILE").unwrap_or(opts.file_filter);
 
         let log_path = next_log_path(&opts.log_dir);
-        let log_file = open_log_file(&log_path)
-            .expect("failed to create log file; check ~/.astrcode/logs permissions");
+        let log_file = match open_log_file(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("failed to create log file: {e}");
+                subscriber.init();
+                return tracing_appender::non_blocking(std::io::sink()).1;
+            },
+        };
         let (non_blocking, guard) = tracing_appender::non_blocking(log_file);
 
         let file_layer = tracing_subscriber::fmt::layer()

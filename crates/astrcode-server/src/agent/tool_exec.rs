@@ -170,7 +170,7 @@ async fn execute_tool_call_with_background(
     let slot_writer = Arc::clone(&result_slot);
     let exec_handle = tokio::spawn(async move {
         let result = tool_registry.execute(&name, tool_input, &tool_ctx).await;
-        *slot_writer.lock().unwrap() = Some(result);
+        *slot_writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
         let _ = done_tx.send(());
     });
 
@@ -181,7 +181,7 @@ async fn execute_tool_call_with_background(
             exec_handle.abort(); // 已完成，abort 无害
             let result = result_slot
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .expect("done_tx sent but no result");
             match result {
@@ -292,7 +292,7 @@ async fn background_tool_call(
         let _ = exec_handle.await;
 
         // 从共享槽读取结果
-        let raw = result_slot.lock().unwrap().take();
+        let raw = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut result = match raw {
             Some(Ok(mut r)) => {
                 r.call_id = bg_call_id.clone();
