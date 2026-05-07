@@ -185,6 +185,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-extension-mode"
+version = "0.1.0"
+dependencies = [
+ "astrcode-core",
+ "astrcode-support",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "astrcode-extension-skill"
 version = "0.1.0"
 dependencies = [
@@ -264,6 +276,7 @@ dependencies = [
  "astrcode-core",
  "astrcode-extension-agent-tools",
  "astrcode-extension-mcp",
+ "astrcode-extension-mode",
  "astrcode-extension-skill",
  "astrcode-extension-todo-tool",
  "astrcode-extensions",

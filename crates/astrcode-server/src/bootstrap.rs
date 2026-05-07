@@ -178,6 +178,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     extension_runner
         .register(astrcode_extension_todo_tool::extension())
         .await;
+    extension_runner
+        .register(astrcode_extension_mode::extension())
+        .await;
     for ext in load_result.extensions {
         extension_runner.register(ext).await;
     }

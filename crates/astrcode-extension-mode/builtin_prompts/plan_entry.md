@@ -1,0 +1,1 @@
+The session has entered plan mode. Use read-only tools to inspect the codebase and `upsertSessionPlan` to produce a structured plan. Do not modify any files. Call `switchMode` with mode "code" to return to execution after the plan is approved.

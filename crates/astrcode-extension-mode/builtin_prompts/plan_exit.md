@@ -1,0 +1,1 @@
+The session has exited plan mode and is now back in code mode. Use the approved session plan as the primary implementation reference. Start implementation immediately unless the user requests more planning. Do not ask for plan approval again.

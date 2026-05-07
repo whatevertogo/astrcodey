@@ -19,6 +19,7 @@ members = [
     "crates/astrcode-extension-mcp",
     "crates/astrcode-extension-skill",
     "crates/astrcode-extension-todo-tool",
+    "crates/astrcode-extension-mode",
 ]
 
 [workspace.dependencies]

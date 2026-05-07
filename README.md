@@ -96,17 +96,6 @@ The agent loop (`astrcode-server/src/agent/`) follows a phased pipeline pattern:
 
 The `ToolPipeline` struct owns tool preprocessing, parallel scheduling, and result persistence. The `SharedTurnContext` struct carries session-level identifiers. `consume_llm_stream` returns a `StreamOutcome` enum (`Complete` | `ToolCalls`) that makes the loop body read as a linear sequence of named phases.
 
-### Extension / Hook System
-
-Extensions subscribe to lifecycle events and can intercept at hook points:
-
-- `PreToolUse` / `PostToolUse` — inspect, modify, or block tool execution
-- `BeforeProviderRequest` / `AfterProviderResponse` — modify messages or block LLM calls
-- `PreCompact` / `PostCompact` — inject compaction instructions
-- `PromptBuild` — contribute system prompt fragments
-
-Extensions ship as WASM-style sandboxed units loaded from `extension.json` manifests.
-
 ### LLM Provider Layer
 
 `astrcode-ai` supports both OpenAI Chat Completions and Responses API modes. Key components:
@@ -118,7 +107,7 @@ Extensions ship as WASM-style sandboxed units loaded from `extension.json` manif
 
 ### Context Window Management
 
-When conversation history approaches the model's context limit, `astrcode-context` triggers automatic compaction:
+When conversation history approaches 83.5% of the model's context limit, `astrcode-context` triggers automatic compaction:
 
 1. Deterministic compaction (rule-based summarization) runs by default
 2. Provider-backed compaction (LLM generates summary) is attempted when available
@@ -143,15 +132,15 @@ Large tool results are automatically persisted to disk and replaced with preview
 | **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl` streaming output |
 | **Server** | `cargo run --bin astrcode-server` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
 
-## License
-
-MIT
-
 ## Acknowledgments
 
 This project drew inspiration and design patterns from several open-source projects:
 
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — tool execution pipeline, system prompt design, and the extension hook architecture were heavily informed by studying Claude Code's public documentation and design philosophy.
-- **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) and the session/event streaming model reference OpenCode's architecture.
-- **[Codex CLI](https://github.com/openai/codex)** — the TUI layout and terminal UI design borrow from Codex's approach to rendering agent interactions in the terminal.
-- **[pi-mono](https://github.com/badlogic/pi-mono)** — the plugin extension model and lifecycle hook design were influenced by pi-mono's approach to composable, event-driven extensions.
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — tool execution pipeline, system prompt design
+- **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) references OpenCode's architecture.
+- **[Codex CLI](https://github.com/openai/codex)** — TUI layout and terminal UI design borrow from Codex's approach to rendering agent interactions in the terminal.
+- **[pi-mono](https://github.com/anthropics/pi-mono)** — the plugin extension model and lifecycle hook design were influenced by pi-mono's composable, event-driven extension approach.
+
+## License
+
+MIT

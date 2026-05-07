@@ -1,0 +1,57 @@
+{
+  "id": "astrcode-mode",
+  "name": "Mode Switcher",
+  "version": "0.1.0",
+  "description": "Agent running mode switching with exit gate and plan artifact (code / plan)",
+  "astrcode_version": "0.1.0",
+  "subscriptions": [
+    {
+      "event": "prompt_build",
+      "mode": "blocking",
+      "priority": 600
+    },
+    {
+      "event": "pre_tool_use",
+      "mode": "blocking",
+      "priority": 100
+    },
+    {
+      "event": "before_provider_request",
+      "mode": "blocking",
+      "priority": 50
+    }
+  ],
+  "tools": [
+    {
+      "name": "switchMode",
+      "description": "Switch the agent running mode. Available modes: \"code\" (default execution with full tools) and \"plan\" (read-only planning mode). In plan mode, the first switch back to code triggers an exit review gate; call again after review to complete the transition.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["code", "plan"],
+            "description": "The target mode to switch to."
+          }
+        },
+        "required": ["mode"]
+      }
+    },
+    {
+      "name": "upsertSessionPlan",
+      "description": "Create or update the session plan artifact. The plan must contain all required headings: Context, Goal, Scope, Non-Goals, Existing Code To Reuse, Implementation Steps, Verification, Open Questions. Only available in plan mode.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The full plan content in markdown. Must include all required headings."
+          }
+        },
+        "required": ["content"]
+      }
+    }
+  ]
+}

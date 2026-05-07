@@ -31,6 +31,7 @@ astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", d
 astrcode-extension-mcp = { path = "../astrcode-extension-mcp", default-features = false }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", default-features = false }
 astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", default-features = false }
+astrcode-extension-mode = { path = "../astrcode-extension-mode", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

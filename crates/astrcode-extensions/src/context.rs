@@ -134,22 +134,14 @@ impl ServerExtensionContext {
 
     /// 构建当前上下文的轻量级快照，可跨线程共享。
     pub fn snapshot(&self) -> Arc<ServerExtensionContextSnapshot> {
-        Arc::new(ServerExtensionContextSnapshot {
-            session_id: self.session_id.clone(),
-            working_dir: self.working_dir.clone(),
-            model_selection: self.model_selection.clone(),
-            pre_tool_use_input: self.pre_tool_use_input.clone(),
-            post_tool_use_input: self.post_tool_use_input.clone(),
-            pre_compact_input: self.pre_compact_input.clone(),
-            post_compact_input: self.post_compact_input.clone(),
-            provider_messages: self.provider_messages.clone(),
-        })
+        Arc::new(ServerExtensionContextSnapshot::from(self))
     }
 }
 
 /// 轻量级上下文快照，用于 NonBlocking 即发即弃钩子。
 ///
 /// 不包含可变状态（如工具注册、事件通道），仅保留只读的会话信息。
+#[derive(Clone)]
 pub struct ServerExtensionContextSnapshot {
     session_id: String,
     working_dir: String,
@@ -159,6 +151,21 @@ pub struct ServerExtensionContextSnapshot {
     pre_compact_input: Option<PreCompactInput>,
     post_compact_input: Option<PostCompactInput>,
     provider_messages: Option<Vec<LlmMessage>>,
+}
+
+impl From<&ServerExtensionContext> for ServerExtensionContextSnapshot {
+    fn from(ctx: &ServerExtensionContext) -> Self {
+        Self {
+            session_id: ctx.session_id.clone(),
+            working_dir: ctx.working_dir.clone(),
+            model_selection: ctx.model_selection.clone(),
+            pre_tool_use_input: ctx.pre_tool_use_input.clone(),
+            post_tool_use_input: ctx.post_tool_use_input.clone(),
+            pre_compact_input: ctx.pre_compact_input.clone(),
+            post_compact_input: ctx.post_compact_input.clone(),
+            provider_messages: ctx.provider_messages.clone(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -201,16 +208,7 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
         tracing::warn!("[extension] {msg}");
     }
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
-        Arc::new(ServerExtensionContextSnapshot {
-            session_id: self.session_id.clone(),
-            working_dir: self.working_dir.clone(),
-            model_selection: self.model_selection.clone(),
-            pre_tool_use_input: self.pre_tool_use_input.clone(),
-            post_tool_use_input: self.post_tool_use_input.clone(),
-            pre_compact_input: self.pre_compact_input.clone(),
-            post_compact_input: self.post_compact_input.clone(),
-            provider_messages: self.provider_messages.clone(),
-        })
+        Arc::new(self.clone())
     }
 }
 
@@ -283,15 +281,6 @@ impl ExtensionContext for ServerExtensionContext {
     }
 
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
-        Arc::new(ServerExtensionContextSnapshot {
-            session_id: self.session_id.clone(),
-            working_dir: self.working_dir.clone(),
-            model_selection: self.model_selection.clone(),
-            pre_tool_use_input: self.pre_tool_use_input.clone(),
-            post_tool_use_input: self.post_tool_use_input.clone(),
-            pre_compact_input: self.pre_compact_input.clone(),
-            post_compact_input: self.post_compact_input.clone(),
-            provider_messages: self.provider_messages.clone(),
-        })
+        Arc::new(ServerExtensionContextSnapshot::from(self))
     }
 }
