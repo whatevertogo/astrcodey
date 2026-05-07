@@ -505,5 +505,3 @@ pub enum ExtensionToolOutcome {
         model_preference: Option<String>,
     },
 }
-
-

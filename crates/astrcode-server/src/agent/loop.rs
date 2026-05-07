@@ -48,8 +48,7 @@ use super::{
         BackgroundTaskCompletion, ExecuteToolCalls, PendingToolCall, assistant_tool_call_message,
     },
     util::{
-        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder,
-        provider_visible_tools,
+        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, provider_visible_tools,
     },
 };
 

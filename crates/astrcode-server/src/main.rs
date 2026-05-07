@@ -16,9 +16,7 @@ use astrcode_protocol::{
 };
 use astrcode_server::{
     handler::CommandHandler,
-    transport::{
-        ServerTransport, StdioTransport, write_error_response, write_initialize_response,
-    },
+    transport::{ServerTransport, StdioTransport, write_error_response, write_initialize_response},
 };
 
 #[tokio::main]

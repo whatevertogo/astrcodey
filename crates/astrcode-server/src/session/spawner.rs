@@ -172,7 +172,8 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     match signal {
                         AgentSignal::Event(payload) => {
                             let sid = current_child_sid.lock().await.clone();
-                            let _ = append_child_payload(&sm, &sid, Some(&cti), payload.clone()).await;
+                            let _ =
+                                append_child_payload(&sm, &sid, Some(&cti), payload.clone()).await;
                             p.forward(&payload);
                         },
                         AgentSignal::AutoCompact {

@@ -18,8 +18,7 @@ use astrcode_protocol::{
         ConversationBlockStatusDto, ConversationControlStateDto, ConversationCursorDto,
         ConversationDeltaDto, ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
         ConversationStreamEnvelopeDto, CreateSessionRequest, CreateSessionResponseDto,
-        PromptRequest, PromptSubmitResponse, SessionListItemDto,
-        SessionListResponseDto,
+        PromptRequest, PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
     },
 };
 use axum::{
@@ -326,9 +325,11 @@ fn event_to_delta(event: &Event) -> Option<ConversationDeltaDto> {
         | EventPayload::AgentRunStarted
         | EventPayload::CompactionStarted
         | EventPayload::ToolCallBackgrounded { .. }
-        | EventPayload::BackgroundTaskCompleted { .. } => Some(ConversationDeltaDto::UpdateControlState {
-            control: control_from_phase(projected_phase(&event.payload)),
-        }),
+        | EventPayload::BackgroundTaskCompleted { .. } => {
+            Some(ConversationDeltaDto::UpdateControlState {
+                control: control_from_phase(projected_phase(&event.payload)),
+            })
+        },
         // Terminal events — the client already has the block content
         EventPayload::TurnCompleted { .. }
         | EventPayload::AgentRunCompleted { .. }

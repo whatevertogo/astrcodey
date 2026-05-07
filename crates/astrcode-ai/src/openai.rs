@@ -235,7 +235,14 @@ impl LlmProvider for OpenAiProvider {
 
         tokio::spawn(async move {
             let result = Self::stream_request(
-                client, endpoint, api_key, extra_headers, body, api_mode, retry, tx.clone(),
+                client,
+                endpoint,
+                api_key,
+                extra_headers,
+                body,
+                api_mode,
+                retry,
+                tx.clone(),
             )
             .await;
             if let Err(e) = result {

@@ -12,8 +12,8 @@ use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary,
-        StorageError, ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
+        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary, StorageError,
+        ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
         ToolResultArtifactSlice,
     },
     types::*,
@@ -72,7 +72,9 @@ impl SessionManager {
 
         // open_session rebuilds the storage-owned projection.
         self.store.open_session(session_id).await?;
-        let session = Arc::new(Session { id: session_id.clone() });
+        let session = Arc::new(Session {
+            id: session_id.clone(),
+        });
         self.active
             .write()
             .await

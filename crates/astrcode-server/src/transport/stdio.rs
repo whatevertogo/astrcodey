@@ -1,8 +1,6 @@
 //! stdio 传输实现 — JSON-RPC 2.0 over stdin/stdout。
 
-use std::{
-    io::{BufRead, BufReader, Write},
-};
+use std::io::{BufRead, BufReader, Write};
 
 use astrcode_protocol::{
     commands::ClientCommand,

@@ -546,8 +546,7 @@ mod tests {
             temp.path(),
             "repo-search",
             "---\nname: Repo Search\ndescription: Search the repository.\nwhen_to_use: When the \
-             task mentions files.\nextra: ignored\n---\nUse \
-             ${CLAUDE_SKILL_DIR}.",
+             task mentions files.\nextra: ignored\n---\nUse ${CLAUDE_SKILL_DIR}.",
         );
 
         let skill = load_skill_dir(skill_dir, SkillSource::UserClaude).expect("skill");
@@ -638,8 +637,7 @@ mod tests {
         let skill_dir = write_skill(
             &workspace.join(".claude").join("skills"),
             "review",
-            "---\ndescription: Review code.\n---\nRead ${SKILL_DIR} \
-             for ${SESSION_ID}.",
+            "---\ndescription: Review code.\n---\nRead ${SKILL_DIR} for ${SESSION_ID}.",
         );
         fs::create_dir_all(skill_dir.join("references")).expect("asset dir");
         fs::write(skill_dir.join("references").join("rules.md"), "rules").expect("asset");

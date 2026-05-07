@@ -18,7 +18,11 @@ use super::{
     tool_types::{BackgroundTaskCompletion, ExecutableToolCall, ToolCallRuntimeContext},
 };
 
-fn error_tool_result(call_id: String, message: String, duration: std::time::Duration) -> ToolResult {
+fn error_tool_result(
+    call_id: String,
+    message: String,
+    duration: std::time::Duration,
+) -> ToolResult {
     ToolResult {
         call_id,
         content: message.clone(),
@@ -55,7 +59,10 @@ pub(crate) async fn execute_tool_call(
 /// 调用方需在 tool_ctx drop 后再 drop tool_event_tx，然后 await JoinHandle。
 fn spawn_event_bridge(
     agent_tx: &mpsc::UnboundedSender<AgentSignal>,
-) -> (mpsc::UnboundedSender<EventPayload>, tokio::task::JoinHandle<()>) {
+) -> (
+    mpsc::UnboundedSender<EventPayload>,
+    tokio::task::JoinHandle<()>,
+) {
     let (tool_tx, mut tool_rx) = mpsc::unbounded_channel();
     let agent_tx = agent_tx.clone();
     let handle = tokio::spawn(async move {

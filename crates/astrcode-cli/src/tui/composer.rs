@@ -235,7 +235,8 @@ impl ComposerState {
         if self.history.last().map(|value| value.as_str()) != Some(trimmed) {
             self.history.push(trimmed.to_string());
             if self.history.len() > MAX_HISTORY_ENTRIES {
-                self.history.drain(0..self.history.len() - MAX_HISTORY_ENTRIES);
+                self.history
+                    .drain(0..self.history.len() - MAX_HISTORY_ENTRIES);
             }
         }
     }
