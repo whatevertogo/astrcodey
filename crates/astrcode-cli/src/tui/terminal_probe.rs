@@ -19,6 +19,12 @@ mod imp {
 
     use ratatui::layout::Position;
 
+    /// Default timeout for terminal response probes during startup.
+    ///
+    /// Kept intentionally short — unsupported terminals should fall back quickly
+    /// rather than blocking the TUI initialization.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
+
     /// Temporary terminal handle used while a startup probe owns terminal input.
     ///
     /// The preferred path is duplicated stdin/stdout, because terminal replies are delivered to the

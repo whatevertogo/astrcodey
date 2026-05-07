@@ -32,10 +32,9 @@ use crossterm::{
 use custom_terminal::Terminal as CustomTerminal;
 use input::is_press_event;
 use insert_history::insert_history_lines;
-use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
-};
+#[cfg(not(unix))]
+use ratatui::backend::Backend;
+use ratatui::{backend::CrosstermBackend, layout::Position};
 use render::scrollback_entry_to_lines;
 use state::TuiState;
 use tokio_stream::StreamExt;
