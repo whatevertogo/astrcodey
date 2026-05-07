@@ -146,6 +146,7 @@ pub struct AgentServices {
     pub session_manager: Arc<SessionManager>,
     pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    pub background_tasks: Arc<std::sync::Mutex<super::background::BackgroundTaskManager>>,
 }
 
 /// 消费 LLM 事件流直到完成或积累工具调用。
@@ -279,6 +280,7 @@ impl AgentLoop {
             services.extension_runner.clone(),
             services.session_manager.clone(),
             services.background_result_tx,
+            services.background_tasks,
         );
         Self {
             system_prompt,

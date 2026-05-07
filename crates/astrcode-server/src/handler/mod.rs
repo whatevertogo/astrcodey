@@ -26,7 +26,11 @@ use tokio::{
 };
 
 use crate::{
-    agent::{AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput, drive_agent},
+    agent::{
+        AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput,
+        drive_agent,
+        tool_types::BackgroundTaskCompletion,
+    },
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},
 };
 
@@ -545,6 +549,22 @@ impl CommandHandler {
             } = input;
             let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
 
+            let (background_result_tx, mut background_result_rx) =
+                mpsc::unbounded_channel::<BackgroundTaskCompletion>();
+
+            let bg_actor_tx = actor_tx.clone();
+            tokio::spawn(async move {
+                while let Some(completion) = background_result_rx.recv().await {
+                    let _ = bg_actor_tx.send(CommandMessage::BackgroundTaskCompleted {
+                        session_id: completion.session_id,
+                        task_id: completion.task_id,
+                        call_id: completion.call_id,
+                        tool_name: completion.tool_name,
+                        result: completion.result,
+                    });
+                }
+            });
+
             let agent = AgentLoop::new(
                 sid.clone(),
                 working_dir,
@@ -557,8 +577,8 @@ impl CommandHandler {
                     context_assembler: runtime.context_assembler.clone(),
                     session_manager: runtime.session_manager.clone(),
                     auto_compact_failures: runtime.auto_compact_failures.clone(),
-                    background_result_tx: None, /* TODO: wire up handler-level background result
-                                                 * receiver */
+                    background_result_tx: Some(background_result_tx),
+                    background_tasks: Default::default(),
                 },
             );
 
@@ -606,21 +626,6 @@ impl CommandHandler {
                                 *current_session_id.lock().await = child_session_id.clone();
                             }
                             let _ = reply.send(result);
-                        },
-                        AgentSignal::BackgroundTaskCompleted {
-                            session_id,
-                            task_id,
-                            call_id,
-                            tool_name,
-                            result,
-                        } => {
-                            let _ = actor_tx.send(CommandMessage::BackgroundTaskCompleted {
-                                session_id,
-                                task_id,
-                                call_id,
-                                tool_name,
-                                result,
-                            });
                         },
                     }
                 }

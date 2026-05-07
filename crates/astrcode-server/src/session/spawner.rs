@@ -144,6 +144,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 session_manager: Arc::clone(&self.session_manager),
                 auto_compact_failures: Arc::clone(&self.auto_compact_failures),
                 background_result_tx: None, // 子会话暂不支持后台任务
+                background_tasks: Default::default(),
             },
         );
 
@@ -212,9 +213,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                                 *current_child_sid.lock().await = child_sid.clone();
                             }
                             let _ = reply.send(result);
-                        },
-                        AgentSignal::BackgroundTaskCompleted { .. } => {
-                            // 子会话不支持后台任务，忽略
                         },
                     }
                 }

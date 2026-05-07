@@ -6,7 +6,7 @@ use astrcode_core::{
     event::EventPayload,
     extension::ExtensionEvent,
     llm::LlmRole,
-    tool::{ToolDefinition, ToolResult},
+    tool::ToolDefinition,
     types::*,
 };
 use astrcode_extensions::{context::ServerExtensionContext, runner::ExtensionRunner};
@@ -26,13 +26,6 @@ pub(crate) enum AgentSignal {
         trigger: astrcode_core::extension::CompactTrigger,
         compaction: astrcode_context::compaction::CompactResult,
         reply: oneshot::Sender<Result<SessionId, String>>,
-    },
-    BackgroundTaskCompleted {
-        session_id: SessionId,
-        task_id: BackgroundTaskId,
-        call_id: ToolCallId,
-        tool_name: String,
-        result: ToolResult,
     },
 }
 

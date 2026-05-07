@@ -13,6 +13,8 @@ use astrcode_core::{
 };
 use tokio::sync::mpsc;
 
+use super::background::BackgroundTaskManager;
+
 use super::shared_context::{AgentSignal, send_event};
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
@@ -94,6 +96,8 @@ pub(crate) struct ToolCallRuntimeContext {
     pub(super) event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     /// 后台任务完成后的通知通道。
     pub(super) background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    /// 后台任务管理器，用于注册 watcher handle 以支持取消。
+    pub(super) background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
 }
 
 impl PreparedToolCall {

@@ -164,6 +164,7 @@ async fn execute_tool_call_with_background(
         None::<Result<ToolResult, astrcode_core::tool::ToolError>>,
     ));
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let (exec_complete_tx, exec_complete_rx) = tokio::sync::oneshot::channel::<()>();
 
     let name = call.name.clone();
     let tool_input = call.tool_input.clone();
@@ -172,6 +173,7 @@ async fn execute_tool_call_with_background(
         let result = tool_registry.execute(&name, tool_input, &tool_ctx).await;
         *slot_writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
         let _ = done_tx.send(());
+        let _ = exec_complete_tx.send(());
     });
 
     // 用 timeout 等待完成通知或超时
@@ -235,6 +237,7 @@ async fn execute_tool_call_with_background(
             // 超时，转入后台。exec_handle 继续运行。
             background_tool_call(
                 exec_handle,
+                exec_complete_rx,
                 result_slot,
                 runtime,
                 call,
@@ -249,6 +252,7 @@ async fn execute_tool_call_with_background(
 /// 将已超时的工具执行转为后台运行，返回占位结果。
 async fn background_tool_call(
     exec_handle: tokio::task::JoinHandle<()>,
+    exec_complete_rx: tokio::sync::oneshot::Receiver<()>,
     result_slot: Arc<std::sync::Mutex<Option<Result<ToolResult, astrcode_core::tool::ToolError>>>>,
     runtime: ToolCallRuntimeContext,
     call: ExecutableToolCall,
@@ -268,7 +272,6 @@ async fn background_tool_call(
         "tool execution moved to background"
     );
 
-    // 发送后台化事件
     send_event(
         &runtime.event_tx,
         EventPayload::ToolCallBackgrounded {
@@ -279,19 +282,17 @@ async fn background_tool_call(
         },
     );
 
-    // Spawn 后台 watcher：等待执行完成，然后通知
-    let bg_session_id = runtime.session_id.clone();
     let bg_call_id = call_id.clone();
     let bg_tool_name = tool_name.clone();
     let bg_task_id = task_id.clone();
+    let bg_session_id = runtime.session_id.clone();
     let bg_result_tx = runtime.background_result_tx.clone();
-    let bg_event_tx = runtime.event_tx.clone();
+    let bg_manager = runtime.background_tasks.clone();
 
-    tokio::spawn(async move {
-        // 等待 exec task 完成
-        let _ = exec_handle.await;
+    let watcher_handle = tokio::spawn(async move {
+        // 等待 exec 完成（或被 cancel abort 导致 oneshot 断开）
+        let _ = exec_complete_rx.await;
 
-        // 从共享槽读取结果
         let raw = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
         let mut result = match raw {
             Some(Ok(mut r)) => {
@@ -335,28 +336,30 @@ async fn background_tool_call(
             "background task completed"
         );
 
-        // 通过 background_result_tx 通知 handler（持久化路径）
+        // 通过 background_result_tx 通知 handler 进行持久化和广播
         if let Some(tx) = bg_result_tx {
             let _ = tx.send(BackgroundTaskCompletion {
                 session_id: bg_session_id.clone(),
                 task_id: bg_task_id.clone(),
-                call_id: ToolCallId::from(bg_call_id.clone()),
-                tool_name: bg_tool_name.clone(),
-                result: result.clone(),
-            });
-        }
-
-        // 通过 event 通道发送完成事件（live 通知）
-        send_event(
-            &bg_event_tx,
-            EventPayload::BackgroundTaskCompleted {
-                task_id: bg_task_id,
                 call_id: ToolCallId::from(bg_call_id),
                 tool_name: bg_tool_name,
                 result,
-            },
-        );
+            });
+        }
+
+        // 完成后从管理器移除
+        super::background::complete_background_task(&bg_manager, &bg_task_id);
     });
+
+    // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）
+    if let Ok(mut mgr) = runtime.background_tasks.lock() {
+        mgr.register(
+            task_id.clone(),
+            runtime.session_id.clone(),
+            exec_handle,
+            watcher_handle,
+        );
+    }
 
     // 返回占位结果
     let command = call

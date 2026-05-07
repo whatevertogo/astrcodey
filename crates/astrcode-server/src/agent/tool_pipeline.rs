@@ -19,6 +19,7 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
 use super::{
+    background::BackgroundTaskManager,
     shared_context::{
         AgentError, AgentSignal, SharedTurnContext, TOOL_SEARCH_TOOL_NAME, send_event,
     },
@@ -41,6 +42,7 @@ pub(in crate::agent) struct ToolPipeline {
     extension_runner: Arc<ExtensionRunner>,
     session_manager: Arc<SessionManager>,
     background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
 }
 
 impl ToolPipeline {
@@ -50,6 +52,7 @@ impl ToolPipeline {
         extension_runner: Arc<ExtensionRunner>,
         session_manager: Arc<SessionManager>,
         background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+        background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
     ) -> Self {
         Self {
             shared,
@@ -57,6 +60,7 @@ impl ToolPipeline {
             extension_runner,
             session_manager,
             background_result_tx,
+            background_tasks,
         }
     }
 
@@ -223,6 +227,7 @@ impl ToolPipeline {
                                 as Arc<dyn ToolResultArtifactReader>),
                             event_tx: input.event_tx.clone(),
                             background_result_tx: self.background_result_tx.clone(),
+                            background_tasks: self.background_tasks.clone(),
                         },
                         executable,
                     )
@@ -372,6 +377,7 @@ impl ToolPipeline {
         let tool_result_reader =
             Some(Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>);
         let background_result_tx = self.background_result_tx.clone();
+        let background_tasks = self.background_tasks.clone();
 
         join_set.spawn(async move {
             execute_tool_call(
@@ -384,6 +390,7 @@ impl ToolPipeline {
                     tool_result_reader,
                     event_tx,
                     background_result_tx,
+                    background_tasks,
                 },
                 call,
             )

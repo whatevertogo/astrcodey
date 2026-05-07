@@ -10,7 +10,7 @@ pub(super) mod tool_pipeline;
 pub(crate) mod tool_types;
 pub(crate) mod util;
 
-pub use background::{BackgroundTaskManager, TaskSummary};
+pub use background::BackgroundTaskManager;
 pub use compact::AutoCompactFailureTracker;
 pub(crate) use r#loop::drive_agent;
 pub use r#loop::{AgentCompactContinuation, AgentLoop, AgentServices, AgentTurnOutput};
