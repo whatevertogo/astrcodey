@@ -72,6 +72,20 @@ pub trait Extension: Send + Sync {
     fn slash_commands(&self) -> Vec<SlashCommand> {
         vec![]
     }
+
+    /// 可选：执行此扩展注册的斜杠命令。
+    ///
+    /// 当用户在 TUI 输入 `/command_name arguments` 时调用。
+    /// 默认返回 `NotFound`，保持仅声明元数据的扩展有效。
+    async fn execute_command(
+        &self,
+        command_name: &str,
+        _arguments: &str,
+        _working_dir: &str,
+        _ctx: &dyn ExtensionContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        Err(ExtensionError::NotFound(command_name.into()))
+    }
 }
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
@@ -361,6 +375,15 @@ pub struct SlashCommand {
     pub description: String,
     /// 参数的 JSON Schema 定义。
     pub args_schema: Option<serde_json::Value>,
+}
+
+/// 扩展斜杠命令的执行结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionCommandResult {
+    /// 输出文本，展示给用户。
+    pub content: String,
+    /// 是否为错误结果。
+    pub is_error: bool,
 }
 
 // ─── Extension Context ───────────────────────────────────────────────────

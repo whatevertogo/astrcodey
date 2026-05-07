@@ -174,6 +174,63 @@ impl CommandHandler {
                 }
             },
 
+            ClientCommand::ListExtensionCommands => {
+                let commands = self.runtime.extension_runner.collect_commands().await;
+                let infos: Vec<
+                    astrcode_protocol::events::ExtensionCommandInfo,
+                > = commands
+                    .iter()
+                    .map(|cmd| astrcode_protocol::events::ExtensionCommandInfo {
+                        name: cmd.name.clone(),
+                        description: cmd.description.clone(),
+                        needs_argument: cmd.args_schema.is_some(),
+                    })
+                    .collect();
+                let _ = self
+                    .event_tx
+                    .send(ClientNotification::ExtensionCommandList { commands: infos });
+            },
+
+            ClientCommand::ExecuteExtensionCommand {
+                command_name,
+                arguments,
+            } => {
+                let sid = self.ensure_session().await?;
+                let state = self
+                    .runtime
+                    .session_manager
+                    .read_model(&sid)
+                    .await
+                    .map_err(|e| format!("read session {sid}: {e}"))?;
+                let ext_ctx = ServerExtensionContext::new(
+                    sid.to_string(),
+                    state.working_dir.clone(),
+                    ModelSelection::simple(self.runtime.effective.llm.model_id.clone()),
+                );
+                match self
+                    .runtime
+                    .extension_runner
+                    .dispatch_command(&command_name, &arguments, &state.working_dir, &ext_ctx)
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = self
+                            .event_tx
+                            .send(ClientNotification::ExtensionCommandResult {
+                                command_name,
+                                content: result.content,
+                                is_error: result.is_error,
+                            });
+                    },
+                    Err(astrcode_core::extension::ExtensionError::NotFound(name)) => {
+                        self.send_error(40402, &format!("Unknown command: /{name}"));
+                    },
+                    Err(e) => {
+                        self.send_error(-32603, &format!("Command error: {e}"));
+                    },
+                }
+            },
+
             _ => {
                 self.send_error(-32601, "Not implemented");
             },

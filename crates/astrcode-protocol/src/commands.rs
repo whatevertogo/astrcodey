@@ -76,6 +76,18 @@ pub enum ClientCommand {
     /// 获取当前完整状态快照。
     GetState,
 
+    // ---- 扩展命令 ----
+    /// 查询插件注册的斜杠命令列表。
+    ListExtensionCommands,
+
+    /// 执行插件注册的斜杠命令。
+    ExecuteExtensionCommand {
+        /// 命令名称（不含前导斜杠 `/`）。
+        command_name: String,
+        /// 用户输入的原始参数字符串。
+        arguments: String,
+    },
+
     // ---- UI 响应 ----
     /// 对服务器发起的 UI 请求进行响应。
     UiResponse {

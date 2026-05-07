@@ -53,6 +53,22 @@ pub enum ClientNotification {
         /// 错误描述信息。
         message: String,
     },
+
+    /// 插件注册的斜杠命令列表（响应 `ListExtensionCommands`）。
+    ExtensionCommandList {
+        /// 命令信息列表。
+        commands: Vec<ExtensionCommandInfo>,
+    },
+
+    /// 插件斜杠命令执行结果。
+    ExtensionCommandResult {
+        /// 被执行的命令名称。
+        command_name: String,
+        /// 输出文本。
+        content: String,
+        /// 是否为错误结果。
+        is_error: bool,
+    },
 }
 
 /// UI 交互请求的类型。
@@ -108,4 +124,15 @@ pub struct MessageDto {
     pub role: String,
     /// 消息文本内容。
     pub content: String,
+}
+
+/// 插件注册的斜杠命令信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionCommandInfo {
+    /// 命令名称（不含前导斜杠 `/`）。
+    pub name: String,
+    /// 人类可读的命令描述。
+    pub description: String,
+    /// 是否需要参数。
+    pub needs_argument: bool,
 }

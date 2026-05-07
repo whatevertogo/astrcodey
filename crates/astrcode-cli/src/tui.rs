@@ -66,6 +66,12 @@ pub async fn run() -> io::Result<()> {
     terminal.draw_frame(&mut state, &theme)?;
     state.dirty = false;
 
+    // 查询插件注册的斜杠命令
+    client
+        .send_command(&ClientCommand::ListExtensionCommands)
+        .await
+        .map_err(io_error)?;
+
     let mut exit_reason = None::<String>;
     loop {
         tokio::select! {
@@ -173,14 +179,18 @@ async fn handle_key(
         KeyCode::End => state.move_end(),
         KeyCode::Up => {
             if state.show_slash_palette {
-                state.slash_move_up(slash::filtered(&state.slash_filter).len());
+                state.slash_move_up(
+                    slash::filtered(&state.slash_filter, &state.extension_commands).len(),
+                );
             } else if !state.move_visual_up(terminal.composer_width()) {
                 state.history_previous();
             }
         },
         KeyCode::Down => {
             if state.show_slash_palette {
-                state.slash_move_down(slash::filtered(&state.slash_filter).len());
+                state.slash_move_down(
+                    slash::filtered(&state.slash_filter, &state.extension_commands).len(),
+                );
             } else if !state.move_visual_down(terminal.composer_width()) {
                 state.history_next();
             }
@@ -207,16 +217,20 @@ async fn handle_key(
 }
 
 async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
-    let commands = slash::filtered(&state.slash_filter);
+    let commands = slash::filtered(&state.slash_filter, &state.extension_commands);
     let Some(spec) = commands
         .get(state.slash_selected.min(commands.len().saturating_sub(1)))
-        .copied()
+        .cloned()
     else {
         state.close_slash();
         return Ok(());
     };
 
-    let cmd_name = spec.usage.split_whitespace().next().unwrap_or(spec.usage);
+    let cmd_name = spec
+        .usage
+        .split_whitespace()
+        .next()
+        .unwrap_or(&spec.usage);
     let argument = state
         .input_text()
         .split_once(char::is_whitespace)
@@ -239,14 +253,14 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
 
 /// Tab completion: replace input with full command name without submitting.
 fn complete_slash_selection(state: &mut TuiState) {
-    let commands = slash::filtered(&state.slash_filter);
+    let commands = slash::filtered(&state.slash_filter, &state.extension_commands);
     let Some(spec) = commands
         .get(state.slash_selected.min(commands.len().saturating_sub(1)))
-        .copied()
+        .cloned()
     else {
         return;
     };
-    state.set_input(slash::command_line_for(spec));
+    state.set_input(slash::command_line_for(&spec));
 }
 
 async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
@@ -255,7 +269,14 @@ async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io:
         return Ok(());
     }
 
-    if let Some(command) = slash::parse(&input) {
+    if let Some(command) = slash::parse(
+        &input,
+        &state
+            .extension_commands
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>(),
+    ) {
         let input = state.take_input();
         state.remember_input(&input);
         execute_slash_command(command, state, client).await?;
@@ -331,10 +352,20 @@ async fn execute_slash_command(
             state.push_message(
                 state::MessageRole::System,
                 "Help".into(),
-                slash_help_text(),
+                slash_help_text(&state.extension_commands),
                 false,
                 None,
             );
+        },
+        slash::SlashCommand::Extension { name, arguments } => {
+            client
+                .send_command(&ClientCommand::ExecuteExtensionCommand {
+                    command_name: name,
+                    arguments,
+                })
+                .await
+                .map_err(io_error)?;
+            state.status = "Executing command".into();
         },
     }
     state.mark_dirty();
@@ -498,15 +529,19 @@ fn normalize_paste(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn slash_help_text() -> String {
-    [
-        "/new                 create a fresh session",
-        "/sessions            list known sessions",
-        "/resume <id>         resume a session",
-        "/help                show this help",
-        "/quit                exit astrcode",
-    ]
-    .join("\n")
+fn slash_help_text(extension_commands: &[slash::SlashCommandSpec]) -> String {
+    let mut lines = vec![
+        "/new                 create a fresh session".into(),
+        "/sessions            list known sessions".into(),
+        "/resume <id>         resume a session".into(),
+        "/help                show this help".into(),
+        "/quit                exit astrcode".into(),
+    ];
+    for cmd in extension_commands {
+        let padding = if cmd.needs_argument { " <args>" } else { "" };
+        lines.push(format!("/{}{}", cmd.name, padding));
+    }
+    lines.join("\n")
 }
 
 fn resolve_session_id(state: &TuiState, input: &str) -> String {

@@ -185,6 +185,8 @@ pub struct TuiState {
     pub dirty: bool,
     /// 是否应退出 TUI
     pub should_quit: bool,
+    /// 插件注册的斜杠命令列表。
+    pub extension_commands: Vec<super::slash::SlashCommandSpec>,
     /// 待写入 scrollback 的消息队列。
     pub scrollback_queue: Vec<ScrollbackEntry>,
     /// 正在按片段写入 scrollback 的助手消息。
@@ -266,6 +268,7 @@ impl TuiState {
             working_dir: String::new(),
             dirty: true,
             should_quit: false,
+            extension_commands: Vec::new(),
             scrollback_queue: Vec::new(),
             stream_scrollback: BTreeMap::new(),
             child_agents: BTreeMap::new(),
@@ -499,6 +502,38 @@ impl TuiState {
             },
             ClientNotification::Error { message, .. } => {
                 self.show_error(message);
+            },
+            ClientNotification::ExtensionCommandList { commands } => {
+                use super::slash::SlashCommandSpec;
+                self.extension_commands = commands
+                    .iter()
+                    .map(|info| SlashCommandSpec {
+                        name: info.name.clone(),
+                        usage: format!("/{}", info.name),
+                        description: info.description.clone(),
+                        needs_argument: info.needs_argument,
+                    })
+                    .collect();
+                self.status = format!("{} extension command(s) loaded", commands.len());
+                self.mark_dirty();
+            },
+            ClientNotification::ExtensionCommandResult {
+                command_name,
+                content,
+                is_error,
+            } => {
+                let role = if *is_error {
+                    MessageRole::Error
+                } else {
+                    MessageRole::System
+                };
+                let label = if *is_error {
+                    "Error"
+                } else {
+                    command_name
+                };
+                self.push_message(role, label.into(), content.clone(), false, None);
+                self.mark_dirty();
             },
         }
     }

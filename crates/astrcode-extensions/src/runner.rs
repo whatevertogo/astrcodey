@@ -404,6 +404,29 @@ impl ExtensionRunner {
         cmds
     }
 
+    /// 将斜杠命令派发到注册了该命令的扩展。
+    ///
+    /// 遍历所有扩展，找到 `slash_commands()` 中包含该命令名的扩展并调用其
+    /// `execute_command()`。如果没有任何扩展声明该命令，返回 `NotFound`。
+    pub async fn dispatch_command(
+        &self,
+        command_name: &str,
+        arguments: &str,
+        working_dir: &str,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<astrcode_core::extension::ExtensionCommandResult, ExtensionError> {
+        let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
+        for ext in exts.iter() {
+            let commands = ext.slash_commands();
+            if commands.iter().any(|cmd| cmd.name == command_name) {
+                return ext
+                    .execute_command(command_name, arguments, working_dir, ctx)
+                    .await;
+            }
+        }
+        Err(ExtensionError::NotFound(command_name.into()))
+    }
+
     async fn ordered_extensions_for(&self, event: &ExtensionEvent) -> Vec<OrderedExtension> {
         let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
         let mut matched = exts

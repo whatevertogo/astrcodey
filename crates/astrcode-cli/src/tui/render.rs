@@ -687,7 +687,7 @@ fn render_footer(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Th
 }
 
 fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-    let commands = slash::filtered(&state.slash_filter);
+    let commands = slash::filtered(&state.slash_filter, &state.extension_commands);
     if commands.is_empty() {
         return;
     }
@@ -719,7 +719,7 @@ fn render_slash_palette(state: &TuiState, frame: &mut Frame<'_>, area: Rect, the
             let desc_style = if is_selected { theme.body } else { theme.dim };
             Line::from(vec![
                 Span::styled(format!("{:<16}", command.usage), label_style),
-                Span::styled(command.description, desc_style),
+                Span::styled(command.description.clone(), desc_style),
             ])
         })
         .collect();
