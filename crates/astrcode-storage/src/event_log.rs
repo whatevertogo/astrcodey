@@ -165,17 +165,20 @@ impl EventLog {
         Ok(None)
     }
 
-    /// Read only the last event from the log file.
+    /// Read the first and last events from the log file in a single pass.
     ///
-    /// Iterates to the end of the file and returns the last non-empty line
-    /// parsed as an event. This is more efficient than `replay_all()` for
-    /// extracting the most recent event (e.g. for `updated_at` timestamps).
-    pub async fn read_last_event(path: &PathBuf) -> Result<Option<Event>, StorageError> {
+    /// Returns `(first, last)` — both may be `None` if the file is empty.
+    /// Only parses two events regardless of log size, keeping the bulk of
+    /// JSON deserialization work constant.
+    pub async fn read_first_and_last(
+        path: &PathBuf,
+    ) -> Result<(Option<Event>, Option<Event>), StorageError> {
         if !path.exists() {
-            return Ok(None);
+            return Ok((None, None));
         }
         let file = File::open(path)?;
         let reader = BufReader::new(file);
+        let mut first: Option<Event> = None;
         let mut last: Option<Event> = None;
         for line in reader.lines() {
             let line = line?;
@@ -183,10 +186,13 @@ impl EventLog {
                 continue;
             }
             if let Ok(event) = serde_json::from_str::<Event>(&line) {
+                if first.is_none() {
+                    first = Some(event.clone());
+                }
                 last = Some(event);
             }
         }
-        Ok(last)
+        Ok((first, last))
     }
 }
 

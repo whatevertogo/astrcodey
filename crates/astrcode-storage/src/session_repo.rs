@@ -490,8 +490,8 @@ impl FileSystemSessionRepository {
 
     /// 从事件日志的首行和末行事件构造轻量级 SessionSummary。
     ///
-    /// 读取首行获取 SessionStarted 元数据（working_dir, model_id 等），
-    /// 读取末行获取更准确的 updated_at 和 latest_cursor。
+    /// 单次遍历读取首行获取 SessionStarted 元数据（working_dir, model_id 等），
+    /// 末行获取更准确的 updated_at 和 latest_cursor。
     /// 避免为未打开的会话重放整个事件日志。
     async fn read_summary_from_first_event(
         &self,
@@ -499,7 +499,8 @@ impl FileSystemSessionRepository {
     ) -> Result<Option<SessionSummary>, StorageError> {
         let dir = self.session_dir(session_id);
         let log_path = Self::event_log_path(&dir, session_id);
-        let Some(first_event) = EventLog::read_first_event(&log_path).await? else {
+        let (first_event, last_event) = EventLog::read_first_and_last(&log_path).await?;
+        let Some(first_event) = first_event else {
             return Ok(None);
         };
 
@@ -516,7 +517,6 @@ impl FileSystemSessionRepository {
             _ => return Ok(None),
         };
 
-        let last_event = EventLog::read_last_event(&log_path).await?;
         let updated_at = last_event
             .as_ref()
             .map(|e| e.timestamp.to_rfc3339())
