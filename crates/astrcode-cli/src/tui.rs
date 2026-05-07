@@ -181,7 +181,7 @@ async fn handle_key(
             }
         },
         KeyCode::Tab if state.show_slash_palette => {
-            accept_slash_selection(state, client).await?;
+            complete_slash_selection(state);
         },
         KeyCode::Backspace if event.modifiers.contains(KeyModifiers::ALT) => {
             state.delete_previous_word();
@@ -236,15 +236,38 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
         state.close_slash();
         return Ok(());
     };
-    let current_has_argument = state
+
+    let cmd_name = spec.usage.split_whitespace().next().unwrap_or(spec.usage);
+    let argument = state
         .input_text()
         .split_once(char::is_whitespace)
-        .is_some_and(|(_, rest)| !rest.trim().is_empty());
-    if spec.needs_argument && !current_has_argument {
-        state.set_input(slash::command_line_for(spec));
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("");
+
+    if spec.needs_argument && argument.is_empty() {
+        state.set_input(format!("{cmd_name} "));
         return Ok(());
     }
+
+    let full_input = if argument.is_empty() {
+        cmd_name.to_string()
+    } else {
+        format!("{cmd_name} {argument}")
+    };
+    state.set_input(full_input);
     submit_current_input(state, client).await
+}
+
+/// Tab completion: replace input with full command name without submitting.
+fn complete_slash_selection(state: &mut TuiState) {
+    let commands = slash::filtered(&state.slash_filter);
+    let Some(spec) = commands
+        .get(state.slash_selected.min(commands.len().saturating_sub(1)))
+        .copied()
+    else {
+        return;
+    };
+    state.set_input(slash::command_line_for(spec));
 }
 
 async fn submit_current_input(state: &mut TuiState, client: &Arc<Client>) -> io::Result<()> {
