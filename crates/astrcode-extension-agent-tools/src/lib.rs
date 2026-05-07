@@ -131,7 +131,6 @@ fn build_agent_run(input: &serde_json::Value, agents: &[AgentConfig]) -> Result<
                     name: agent.name.clone(),
                     system_prompt: agent.body.clone(),
                     user_prompt: prompt.to_string(),
-                    allowed_tools: agent.tools.clone(),
                     model_preference: agent.model.clone(),
                 },
             })
@@ -147,11 +146,6 @@ fn agent_run_render_spec(
     let description = input["description"]
         .as_str()
         .unwrap_or(agent.description.as_str());
-    let tools = if agent.tools.is_empty() {
-        "inherit/default".into()
-    } else {
-        agent.tools.join(", ")
-    };
     let model = agent.model.as_deref().unwrap_or("inherit/default");
 
     RenderSpec::Box {
@@ -173,11 +167,6 @@ fn agent_run_render_spec(
                     RenderKeyValue {
                         key: "model".into(),
                         value: model.into(),
-                        tone: RenderTone::Muted,
-                    },
-                    RenderKeyValue {
-                        key: "tools".into(),
-                        value: tools,
                         tone: RenderTone::Muted,
                     },
                 ],
@@ -231,15 +220,10 @@ fn format_agents_for_model(agents: &[AgentConfig]) -> String {
     let mut lines = Vec::with_capacity(agents.len() + 1);
     lines.push(String::from("Available agents:"));
     for agent in agents {
-        let tools = if agent.tools.is_empty() {
-            String::from("inherit/default")
-        } else {
-            agent.tools.join(", ")
-        };
         let model = agent.model.as_deref().unwrap_or("inherit/default");
         lines.push(format!(
-            "- {}: {} (tools: {}; model: {})",
-            agent.name, agent.description, tools, model
+            "- {}: {} (model: {})",
+            agent.name, agent.description, model
         ));
     }
     lines.join("\n")
@@ -255,7 +239,6 @@ mod tests {
             id: String::from("code-reviewer"),
             name: String::from("code-reviewer"),
             description: String::from("Use for behavior-focused code review"),
-            tools: vec![String::from("read"), String::from("grep")],
             model: Some(String::from("opus")),
             body: String::from("Review carefully."),
         }];
@@ -264,7 +247,6 @@ mod tests {
 
         assert!(output.contains("code-reviewer"));
         assert!(output.contains("Use for behavior-focused code review"));
-        assert!(output.contains("tools: read, grep"));
         assert!(output.contains("model: opus"));
     }
 

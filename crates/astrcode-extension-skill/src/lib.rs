@@ -100,7 +100,6 @@ struct SkillDefinition {
     guide: String,
     skill_root: PathBuf,
     asset_files: Vec<String>,
-    allowed_tools: Vec<String>,
     source: SkillSource,
 }
 
@@ -151,8 +150,6 @@ struct RawSkillFrontmatter {
     name: Option<serde_yaml::Value>,
     description: Option<serde_yaml::Value>,
     when_to_use: Option<serde_yaml::Value>,
-    #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,7 +357,6 @@ fn parse_skill_md(
         guide,
         asset_files: collect_asset_files(&skill_root),
         skill_root,
-        allowed_tools: frontmatter::yaml_parse_tools_list(raw.allowed_tools.as_ref()),
         source,
     })
 }
@@ -476,13 +472,6 @@ fn render_skill_content(skill: &SkillDefinition, args: Option<&str>, session_id:
     guide = substitute_skill_variables(&guide, &skill_root, session_id);
     sections.push(guide.trim().to_string());
 
-    if !skill.allowed_tools.is_empty() {
-        sections.push(format!(
-            "Skill-declared tools: {}",
-            skill.allowed_tools.join(", ")
-        ));
-    }
-
     if !skill.asset_files.is_empty() {
         let files = skill
             .asset_files
@@ -557,7 +546,7 @@ mod tests {
             temp.path(),
             "repo-search",
             "---\nname: Repo Search\ndescription: Search the repository.\nwhen_to_use: When the \
-             task mentions files.\nallowed-tools: read, grep\nextra: ignored\n---\nUse \
+             task mentions files.\nextra: ignored\n---\nUse \
              ${CLAUDE_SKILL_DIR}.",
         );
 
@@ -570,7 +559,6 @@ mod tests {
             skill.when_to_use.as_deref(),
             Some("When the task mentions files.")
         );
-        assert_eq!(skill.allowed_tools, ["read", "grep"]);
     }
 
     #[test]
@@ -650,7 +638,7 @@ mod tests {
         let skill_dir = write_skill(
             &workspace.join(".claude").join("skills"),
             "review",
-            "---\ndescription: Review code.\nallowed-tools: [read, grep]\n---\nRead ${SKILL_DIR} \
+            "---\ndescription: Review code.\n---\nRead ${SKILL_DIR} \
              for ${SESSION_ID}.",
         );
         fs::create_dir_all(skill_dir.join("references")).expect("asset dir");
@@ -672,7 +660,6 @@ mod tests {
         assert!(result.content.contains("Skill: review"));
         assert!(result.content.contains("Invocation arguments: src/lib.rs"));
         assert!(result.content.contains("session-123"));
-        assert!(result.content.contains("Skill-declared tools: read, grep"));
         assert!(result.content.contains("- references/rules.md"));
     }
 

@@ -539,7 +539,6 @@ mod tests {
                     system_prompt: "nested extra prompt".into(),
                     user_prompt: "current nested prompt".into(),
                     working_dir: ".".into(),
-                    allowed_tools: vec![],
                     model_preference: Some("mock".into()),
                     tool_call_id: Some("tool-call-1".into()),
                     event_tx: Some(progress_tx),

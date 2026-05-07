@@ -1,7 +1,6 @@
 //! stdio 传输实现 — JSON-RPC 2.0 over stdin/stdout。
 
 use std::{
-    collections::VecDeque,
     io::{BufRead, BufReader, Write},
 };
 
@@ -21,7 +20,6 @@ use super::{ServerTransport, TransportError};
 /// stdio transport: JSON-RPC 2.0 over stdin/stdout.
 pub struct StdioTransport {
     rx: mpsc::UnboundedReceiver<StdioMessage>,
-    pending_commands: VecDeque<ClientCommand>,
     initialize_request_id: Option<u64>,
 }
 
@@ -30,7 +28,10 @@ pub enum StdioMessage {
         id: Option<u64>,
         request: InitializeRequest,
     },
-    Command(ClientCommand),
+    Command {
+        id: Option<u64>,
+        command: ClientCommand,
+    },
 }
 
 impl StdioTransport {
@@ -41,7 +42,6 @@ impl StdioTransport {
             tx,
             Self {
                 rx,
-                pending_commands: VecDeque::new(),
                 initialize_request_id: None,
             },
         )
@@ -60,9 +60,17 @@ impl StdioTransport {
                 if line.is_empty() {
                     continue;
                 }
-                let Ok(message) = from_jsonl_line::<JsonRpcMessage>(&line) else {
-                    continue;
+                let message = match from_jsonl_line::<JsonRpcMessage>(&line) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        write_error_response(None, -32700, "Parse error");
+                        continue;
+                    },
                 };
+                if message.jsonrpc != "2.0" {
+                    write_error_response(message.id, -32600, "Invalid Request");
+                    continue;
+                }
                 if message.method.as_deref() == Some("initialize") {
                     let request = message.params.clone().and_then(|params| {
                         serde_json::from_value::<InitializeRequest>(params).ok()
@@ -77,13 +85,27 @@ impl StdioTransport {
                         {
                             break;
                         }
+                    } else {
+                        write_error_response(
+                            message.id,
+                            -32602,
+                            "Invalid params: initialize requires valid InitializeRequest",
+                        );
                     }
                     continue;
                 }
                 if let Ok(cmd) = command_from_jsonrpc_request(&message) {
-                    if tx.send(StdioMessage::Command(cmd)).is_err() {
-                        break; // Receiver dropped
+                    if tx
+                        .send(StdioMessage::Command {
+                            id: message.id,
+                            command: cmd,
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
+                } else {
+                    write_error_response(message.id, -32601, "Method not found");
                 }
             }
         });
@@ -97,12 +119,9 @@ impl StdioTransport {
 #[async_trait::async_trait]
 impl ServerTransport for StdioTransport {
     async fn read_command(&mut self) -> Option<ClientCommand> {
-        if let Some(command) = self.pending_commands.pop_front() {
-            return Some(command);
-        }
         while let Some(message) = self.rx.recv().await {
             match message {
-                StdioMessage::Command(command) => return Some(command),
+                StdioMessage::Command { command, .. } => return Some(command),
                 StdioMessage::Initialize { .. } => {},
             }
         }
@@ -127,7 +146,13 @@ impl ServerTransport for StdioTransport {
                     self.initialize_request_id = id;
                     return Ok(request);
                 },
-                StdioMessage::Command(command) => self.pending_commands.push_back(command),
+                StdioMessage::Command { id, .. } => {
+                    write_error_response(
+                        id,
+                        -32002,
+                        "Server not initialized: send initialize first",
+                    );
+                },
             }
         }
         Err(TransportError::Disconnected)
@@ -166,8 +191,8 @@ pub fn write_initialize_response(id: u64, accepted_version: u32) {
     }
 }
 
-/// Write an initialize error response to stdout.
-pub fn write_initialize_error(id: Option<u64>, code: i32, message: &str) {
+/// Write a JSON-RPC error response to stdout.
+pub fn write_error_response(id: Option<u64>, code: i32, message: &str) {
     if let Ok(line) = to_jsonl_line(&error_message(id, code, message)) {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();

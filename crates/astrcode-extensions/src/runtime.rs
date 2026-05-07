@@ -41,8 +41,6 @@ pub struct SpawnRequest {
     pub user_prompt: String,
     /// 工作目录
     pub working_dir: String,
-    /// 允许使用的工具名称列表
-    pub allowed_tools: Vec<String>,
     /// 模型偏好（可选）
     pub model_preference: Option<String>,
     /// 触发此次派生的工具调用 ID，用于进度事件归属。

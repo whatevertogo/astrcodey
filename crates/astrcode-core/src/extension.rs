@@ -8,7 +8,7 @@
 //! - [`ExtensionEvent`]：扩展可订阅的生命周期事件
 //! - [`HookMode`] / [`HookEffect`]：钩子的执行模式和返回结果
 //! - [`ExtensionContext`]：扩展可访问的受限上下文
-//! - [`AgentProfile`]：Agent 协作配置文件
+//! - [`ExtensionToolOutcome`]：扩展工具的声明式结果
 
 use serde::{Deserialize, Serialize};
 
@@ -492,7 +492,6 @@ pub enum ExtensionToolOutcome {
     /// - `parent_session_id` 来自当前的 `ToolExecutionContext`，而非插件提供——
     ///   插件无法伪造父子关系。
     /// - `system_prompt` 追加到全局系统提示词之后，而非替换。
-    /// - `allowed_tools` 为空表示继承父会话的工具集。
     /// - `model_preference` 在 v1 中仅为建议值。
     RunSession {
         /// 子会话的显示名称。
@@ -501,34 +500,10 @@ pub enum ExtensionToolOutcome {
         system_prompt: String,
         /// 发送给子会话的用户提示词。
         user_prompt: String,
-        /// 允许使用的工具列表（空 = 继承父会话）。
-        #[serde(default)]
-        allowed_tools: Vec<String>,
         /// 建议使用的模型（v1 中仅为建议）。
         #[serde(default)]
         model_preference: Option<String>,
     },
 }
 
-// ─── Agent Profile (basic type for collaboration tools) ──────────────────
 
-/// Agent 配置文件——一个命名的 Agent 配置。
-///
-/// 核心层仅定义类型，加载和管理由扩展完成。
-/// Agent 协作工具（spawn/send/observe/close）使用此类型。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentProfile {
-    /// 配置文件标识符。
-    pub id: String,
-    /// 显示名称。
-    pub name: String,
-    /// 此 Agent 的功能描述。
-    pub description: String,
-    /// 此 Agent 类型的指导指令。
-    pub guide: String,
-    /// 此 Agent 可使用的工具列表（空 = 所有可用工具）。
-    #[serde(default)]
-    pub allowed_tools: Vec<String>,
-    /// 此 Agent 类型偏好的模型。
-    pub model_preference: Option<String>,
-}

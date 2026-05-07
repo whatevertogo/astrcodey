@@ -495,26 +495,14 @@ impl Tool for ExtensionTool {
                 name,
                 system_prompt,
                 user_prompt,
-                allowed_tools,
                 model_preference,
             }) = serde_json::from_value(outcome_value)
             {
-                // 如果未指定允许的工具，则继承父会话的所有工具
-                let effective_tools = if allowed_tools.is_empty() {
-                    _ctx.available_tools
-                        .iter()
-                        .map(|t| t.name.clone())
-                        .collect()
-                } else {
-                    allowed_tools
-                };
-
                 let request = SpawnRequest {
                     name,
                     system_prompt,
                     user_prompt,
                     working_dir: _ctx.working_dir.clone(),
-                    allowed_tools: effective_tools,
                     model_preference,
                     tool_call_id: _ctx.tool_call_id.clone(),
                     event_tx: _ctx.event_tx.clone(),

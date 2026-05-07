@@ -17,7 +17,7 @@ use astrcode_protocol::{
 use astrcode_server::{
     handler::CommandHandler,
     transport::{
-        ServerTransport, StdioTransport, write_initialize_error, write_initialize_response,
+        ServerTransport, StdioTransport, write_error_response, write_initialize_response,
     },
 };
 
@@ -46,7 +46,7 @@ async fn main() {
     let request_id = transport.initialize_request_id();
     let accepted_version = negotiate_version(initialize.protocol_version, &[PROTOCOL_VERSION]);
     let Some(accepted_version) = accepted_version else {
-        write_initialize_error(
+        write_error_response(
             request_id,
             -32000,
             &format!(
@@ -57,7 +57,7 @@ async fn main() {
         std::process::exit(1);
     };
     let Some(request_id) = request_id else {
-        write_initialize_error(None, -32600, "Initialize request must include an id");
+        write_error_response(None, -32600, "Initialize request must include an id");
         std::process::exit(1);
     };
     write_initialize_response(request_id, accepted_version);

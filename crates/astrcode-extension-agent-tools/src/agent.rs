@@ -21,8 +21,6 @@ pub struct AgentConfig {
     pub name: String,
     /// 描述何时应选择此 Agent
     pub description: String,
-    /// 可选的工具白名单，从兼容 Claude 的 frontmatter 中解析
-    pub tools: Vec<String>,
     /// 可选的模型偏好，从兼容 Claude 的 frontmatter 中解析
     pub model: Option<String>,
     /// 系统提示词正文（markdown 正文或 systemPrompt/prompt frontmatter 字段）
@@ -187,8 +185,6 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
     let description =
         mapping_str(m, "description").ok_or_else(|| format!("{path}: description is required"))?;
 
-    let tools =
-        frontmatter::yaml_parse_tools_list(m.get(serde_yaml::Value::String("tools".into())));
     // "inherit" 和空字符串表示继承父级模型设置
     let model = mapping_str(m, "model").filter(|s| s != "inherit" && !s.is_empty());
 
@@ -204,7 +200,6 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         id,
         name,
         description,
-        tools,
         model,
         body,
     })
@@ -248,31 +243,6 @@ mod tests {
         assert!(agents.iter().any(|a| a.id == "reviewer"));
         assert!(agents.iter().any(|a| a.id == "execute"));
     }
-
-    #[test]
-    fn parse_csv_tools_format() {
-        let md = r#"---
-name: test-agent
-description: A test agent
-tools: read, grep, shell
----
-Body text."#;
-        let agent = parse("test.md", md).unwrap();
-        assert_eq!(agent.tools, vec!["read", "grep", "shell"]);
-    }
-
-    #[test]
-    fn parse_list_tools_format() {
-        let md = r#"---
-name: test-agent
-description: A test agent
-tools: ["read", "grep", "shell"]
----
-Body text."#;
-        let agent = parse("test.md", md).unwrap();
-        assert_eq!(agent.tools, vec!["read", "grep", "shell"]);
-    }
-
 
     #[test]
     fn system_prompt_from_body() {
