@@ -226,11 +226,7 @@ async fn accept_slash_selection(state: &mut TuiState, client: &Arc<Client>) -> i
         return Ok(());
     };
 
-    let cmd_name = spec
-        .usage
-        .split_whitespace()
-        .next()
-        .unwrap_or(&spec.usage);
+    let cmd_name = spec.usage.split_whitespace().next().unwrap_or(&spec.usage);
     let argument = state
         .input_text()
         .split_once(char::is_whitespace)

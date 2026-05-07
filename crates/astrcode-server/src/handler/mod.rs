@@ -176,9 +176,7 @@ impl CommandHandler {
 
             ClientCommand::ListExtensionCommands => {
                 let commands = self.runtime.extension_runner.collect_commands().await;
-                let infos: Vec<
-                    astrcode_protocol::events::ExtensionCommandInfo,
-                > = commands
+                let infos: Vec<astrcode_protocol::events::ExtensionCommandInfo> = commands
                     .iter()
                     .map(|cmd| astrcode_protocol::events::ExtensionCommandInfo {
                         name: cmd.name.clone(),

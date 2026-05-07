@@ -527,11 +527,7 @@ impl TuiState {
                 } else {
                     MessageRole::System
                 };
-                let label = if *is_error {
-                    "Error"
-                } else {
-                    command_name
-                };
+                let label = if *is_error { "Error" } else { command_name };
                 self.push_message(role, label.into(), content.clone(), false, None);
                 self.mark_dirty();
             },

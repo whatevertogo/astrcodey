@@ -30,10 +30,7 @@ pub enum SlashCommand {
     /// 显示帮助信息
     Help,
     /// 插件注册的扩展命令
-    Extension {
-        name: String,
-        arguments: String,
-    },
+    Extension { name: String, arguments: String },
 }
 
 /// 内置斜杠命令规范列表。
