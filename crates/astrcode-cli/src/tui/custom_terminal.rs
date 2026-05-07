@@ -516,6 +516,3 @@ impl ModifierDiff {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {}
