@@ -76,11 +76,12 @@ cargo run --bin astrcode-server
 | `astrcode-support` | 831 | Path resolution, shell detection, tool result persistence |
 | `astrcode-extension-skill` | 829 | Slash-command skill discovery and dispatch |
 | `astrcode-extension-todo-tool` | 743 | Progress tracking todo list tool |
+| `astrcode-extension-mode` | 1.1k | Agent running mode switching (Code / Plan), plan artifact, exit gate |
 | `astrcode-extension-agent-tools` | 586 | Sub-agent delegation (Agent tool) |
 | `astrcode-client` | 496 | Typed JSON-RPC client, transport, stream subscription |
 | `astrcode-log` | 344 | File rotation, stderr output, env-filter logging |
 
-**Total: ~40k lines across 17 crates, 135 source files.**
+**Total: ~41k lines across 18 crates, 135+ source files.**
 
 ## Key Design Decisions
 
@@ -93,6 +94,8 @@ The agent loop (`astrcode-server/src/agent/`) follows a phased pipeline pattern:
 3. **Stream LLM response** — SSE parsing, UTF-8 safe decoding, event accumulation
 4. **Execute tools** — parallel batch execution with pre/post hooks, result persistence
 5. **Loop or return** — tool calls loop back; text-only responses terminate
+
+The agent supports running mode switching (Code / Plan). Plan mode restricts tools to read-only and plan management, enforces an exit gate (self-review checklist + required heading validation), and persists the plan artifact to `<session>/plan/plan.md`. Mode instructions are injected via `BeforeProviderRequest`, preserving the system prompt KV cache.
 
 The `ToolPipeline` struct owns tool preprocessing, parallel scheduling, and result persistence. The `SharedTurnContext` struct carries session-level identifiers. `consume_llm_stream` returns a `StreamOutcome` enum (`Complete` | `ToolCalls`) that makes the loop body read as a linear sequence of named phases.
 

@@ -77,11 +77,12 @@ cargo run --bin astrcode-server
 | `astrcode-support` | 831 | 路径解析、Shell 检测、工具结果持久化 |
 | `astrcode-extension-skill` | 829 | 斜杠命令技能发现与分发 |
 | `astrcode-extension-todo-tool` | 743 | 进度追踪 Todo 工具 |
+| `astrcode-extension-mode` | 1.1k | Agent 运行模式切换（Code / Plan）、计划 Artifact、Exit Gate |
 | `astrcode-extension-agent-tools` | 586 | 子 Agent 委派（Agent 工具） |
 | `astrcode-client` | 496 | 类型化 JSON-RPC 客户端、传输层、流订阅 |
 | `astrcode-log` | 344 | 文件轮转、stderr 输出、env-filter 日志 |
 
-**共计：17 个 crate、135 个源文件、约 4 万行代码。**
+**共计：18 个 crate、135+ 个源文件、约 4.1 万行代码。**
 
 ## 核心设计
 
@@ -94,6 +95,8 @@ Agent 循环（`astrcode-server/src/agent/`）采用分阶段流水线模式：
 3. **流式接收 LLM 响应** — SSE 解析、UTF-8 安全解码、事件累积
 4. **执行工具** — 并行批量执行，支持 pre/post 钩子，结果持久化
 5. **循环或返回** — 有工具调用则回到步骤 1；纯文本回复则终止
+
+Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读工具和计划管理工具，通过 Exit Gate（自审清单 + 必填 heading 校验）控制退出条件，计划 Artifact 持久化到 `<session>/plan/plan.md`。模式指令通过 `BeforeProviderRequest` 注入，不影响 system prompt 的 KV 缓存。
 
 `ToolPipeline` 结构体负责工具预处理、并行调度和结果持久化。`SharedTurnContext` 携带会话级标识。`consume_llm_stream` 返回 `StreamOutcome` 枚举（`Complete` | `ToolCalls`），让循环体读起来是一组线性排列的命名阶段。
 

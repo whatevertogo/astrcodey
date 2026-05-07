@@ -97,7 +97,7 @@ v2 首期刻意选择保守、明确、容易落地的基础设施组合：
 │ astrcode-tools               │   │                              │
 │ astrcode-ai                  │   │ 注册 tools、commands、       │
 │ astrcode-context             │   │ context providers、skills、  │
-│ astrcode-storage             │   │ agent profiles               │
+│ astrcode-storage             │   │ agent profiles、mode control│
 └───────────────┬──────────────┘   └──────────────────────────────┘
                 │
                 ▼
@@ -112,7 +112,7 @@ v2 首期刻意选择保守、明确、容易落地的基础设施组合：
 
 ## Workspace 与分层
 
-v2 设计把系统拆成 `crates/` 下的 14 个 crate，并分为五层。
+v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 依赖方向严格单向：上层可以依赖下层，下层不能反向依赖上层。
 
 ### Layer 0：Foundation
@@ -131,6 +131,7 @@ v2 设计把系统拆成 `crates/` 下的 14 个 crate，并分为五层。
 ### Layer 2：Extensions
 
 - `astrcode-extensions`：扩展加载、生命周期分发、hook 执行策略、超时处理、能力注册
+- `astrcode-extension-mode`：Agent 运行模式切换（Code / Plan），包含 Exit Gate、计划 Artifact 持久化、heading 校验
 
 这一层是 v2 的主要定制边界。
 
@@ -336,18 +337,6 @@ Frontend 与 server 之间使用类型化 JSON-RPC 2.0 over stdio。
 - 面向长生命周期 server 的热重载
 
 因此 config 不只是启动参数，而是运行时编排的一部分。
-
-## 明确不在 v2 核心范围内的内容
-
-v2 架构明确不把以下内容纳入当前核心范围：
-
-- MCP 集成
-- 执行沙箱
-- 第一阶段的 WebSocket transport
-- 第一阶段的 Web UI
-- 硬编码的 skills 和 agents 子系统
-
-这些能力未来可以追加，但当前架构决策不依赖它们存在。
 
 ## 取舍
 
