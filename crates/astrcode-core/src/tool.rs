@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::{event::EventPayload, storage::ToolResultArtifactReader, types::SessionId};
 
-/// 工具定义，作为函数调用 schema 发送给 LLM。
+/// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOrigin {

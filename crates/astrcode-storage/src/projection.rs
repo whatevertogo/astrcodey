@@ -5,7 +5,7 @@
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{ConversationReadModel, SessionReadModel},
+    storage::SessionReadModel,
     types::SessionId,
 };
 
@@ -173,6 +173,6 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
     }
 }
 
-pub(crate) fn conversation_snapshot(model: SessionReadModel) -> ConversationReadModel {
-    ConversationReadModel { session: model }
+pub(crate) fn conversation_snapshot(model: SessionReadModel) -> SessionReadModel {
+    model
 }

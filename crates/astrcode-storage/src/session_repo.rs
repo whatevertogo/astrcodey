@@ -12,7 +12,7 @@ use std::{
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
+        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary,
         StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::{Cursor, ProjectKey, SessionId, project_key_from_path, validate_session_id},
@@ -273,7 +273,7 @@ impl EventStore for FileSystemSessionRepository {
     async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
-    ) -> Result<ConversationReadModel, StorageError> {
+    ) -> Result<SessionReadModel, StorageError> {
         Ok(projection::conversation_snapshot(
             self.session_read_model(session_id).await?,
         ))

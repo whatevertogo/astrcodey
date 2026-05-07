@@ -2,12 +2,10 @@
 //!
 //! 本模块定义了会话事件持久化的核心抽象：
 //! - [`EventStore`] trait：事件存储的统一接口
-//! - [`SessionInfo`]：会话元数据
 //! - [`StorageError`]：存储操作错误类型
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -59,11 +57,11 @@ pub trait EventStore: Send + Sync {
     /// 返回当前 conversation 的全量快照读模型。
     ///
     /// v1 语义是 full snapshot；cursor 仅表示该快照对应的最新 durable seq，
-    /// 不表示“从此 cursor 开始增量查询”。
+    /// 不表示”从此 cursor 开始增量查询”。
     async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
-    ) -> Result<ConversationReadModel, StorageError>;
+    ) -> Result<SessionReadModel, StorageError>;
 
     /// 返回当前会话最新 durable cursor。
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError>;
@@ -314,30 +312,6 @@ impl From<SessionReadModel> for SessionSummary {
             latest_cursor,
         }
     }
-}
-
-/// conversation hydration 的内部全量快照。
-#[derive(Debug, Clone, PartialEq)]
-pub struct ConversationReadModel {
-    /// 当前会话读模型。
-    pub session: SessionReadModel,
-}
-
-/// 会话元数据，用于列表展示。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    /// 会话唯一标识。
-    pub session_id: SessionId,
-    /// 会话创建时间。
-    pub created_at: DateTime<Utc>,
-    /// 最后活跃时间。
-    pub last_active_at: DateTime<Utc>,
-    /// 工作目录路径。
-    pub working_dir: String,
-    /// 使用的模型标识。
-    pub model_id: String,
-    /// 父会话 ID（子会话场景）。
-    pub parent_session_id: Option<SessionId>,
 }
 
 /// 存储操作产生的错误。

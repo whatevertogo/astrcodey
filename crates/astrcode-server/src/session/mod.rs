@@ -12,7 +12,7 @@ use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
+        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary,
         StorageError, ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
         ToolResultArtifactSlice,
     },
@@ -108,11 +108,11 @@ impl SessionManager {
         Ok(self.store.session_read_model(session_id).await?)
     }
 
-    /// 返回 conversation 当前全量快照读模型。
+    /// 返回 session 当前全量快照读模型。
     pub async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
-    ) -> Result<ConversationReadModel, SessionError> {
+    ) -> Result<SessionReadModel, SessionError> {
         Ok(self.store.conversation_snapshot(session_id).await?)
     }
 

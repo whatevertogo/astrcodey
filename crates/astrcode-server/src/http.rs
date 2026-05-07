@@ -8,7 +8,7 @@ use std::{convert::Infallible, sync::Arc};
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{ConversationReadModel, SessionSummary},
+    storage::{SessionReadModel, SessionSummary},
     types::SessionId,
 };
 use astrcode_protocol::{
@@ -238,8 +238,7 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     }
 }
 
-fn conversation_to_dto(snapshot: ConversationReadModel) -> ConversationSnapshotResponseDto {
-    let session = snapshot.session;
+fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotResponseDto {
     let can_submit_prompt = matches!(session.phase, Phase::Idle | Phase::Error);
     ConversationSnapshotResponseDto {
         session_id: session.session_id.to_string(),
@@ -470,7 +469,7 @@ mod tests {
         session.latest_seq = Some(9);
         session.messages.push(LlmMessage::user("hello"));
 
-        let dto = conversation_to_dto(ConversationReadModel { session });
+        let dto = conversation_to_dto(session);
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);

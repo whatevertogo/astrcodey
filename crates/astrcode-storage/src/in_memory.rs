@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, ConversationReadModel, EventStore, SessionReadModel, SessionSummary,
+        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary,
         StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::{Cursor, SessionId},
@@ -121,7 +121,7 @@ impl EventStore for InMemoryEventStore {
     async fn conversation_snapshot(
         &self,
         session_id: &SessionId,
-    ) -> Result<ConversationReadModel, StorageError> {
+    ) -> Result<SessionReadModel, StorageError> {
         Ok(projection::conversation_snapshot(
             self.session_read_model(session_id).await?,
         ))
