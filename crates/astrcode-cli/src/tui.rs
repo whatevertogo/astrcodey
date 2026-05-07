@@ -353,6 +353,9 @@ impl TerminalSession {
         let mut stdout = io::stdout();
         execute!(stdout, EnableBracketedPaste)?;
 
+        #[cfg(unix)]
+        let backend = CrosstermBackend::new(stdout);
+        #[cfg(not(unix))]
         let mut backend = CrosstermBackend::new(stdout);
 
         // 探测初始光标位置（必须在 raw mode 之后，使用 CPR 逃逸序列）

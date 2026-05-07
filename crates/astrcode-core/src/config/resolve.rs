@@ -220,19 +220,35 @@ mod tests {
 
     #[test]
     fn test_resolve_default_config() {
+        let previous = std::env::var("DEEPSEEK_API_KEY").ok();
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
+
         let config = Config::default();
         let effective = config.into_effective().unwrap();
         assert_eq!(effective.llm.model_id, "deepseek-chat");
+
+        match previous {
+            Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
+            None => std::env::remove_var("DEEPSEEK_API_KEY"),
+        }
     }
 
     #[test]
     fn test_runtime_temperature_is_resolved() {
+        let previous = std::env::var("DEEPSEEK_API_KEY").ok();
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
+
         let mut config = Config::default();
         config.runtime.llm_temperature = Some(0.2);
 
         let effective = config.into_effective().unwrap();
 
         assert_eq!(effective.llm.temperature, Some(0.2));
+
+        match previous {
+            Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
+            None => std::env::remove_var("DEEPSEEK_API_KEY"),
+        }
     }
 
     #[test]
