@@ -13,9 +13,10 @@ use astrcode_core::{
 };
 use tokio::sync::mpsc;
 
-use super::background::BackgroundTaskManager;
-
-use super::shared_context::{AgentSignal, send_event};
+use super::{
+    background::BackgroundTaskManager,
+    shared_context::{AgentSignal, send_event},
+};
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 pub(crate) struct PendingToolCall {

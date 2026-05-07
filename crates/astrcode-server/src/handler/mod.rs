@@ -27,8 +27,7 @@ use tokio::{
 
 use crate::{
     agent::{
-        AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput,
-        drive_agent,
+        AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput, drive_agent,
         tool_types::BackgroundTaskCompletion,
     },
     bootstrap::{ServerRuntime, build_system_prompt_snapshot, build_tool_registry_snapshot},

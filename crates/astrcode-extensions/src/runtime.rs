@@ -98,7 +98,10 @@ impl ExtensionRuntime {
 
     /// 将工具注册加入队列。在 NativeExtension 的 factory() 调用期间使用。
     pub fn register_tool(&self, def: ToolDefinition) {
-        self.pending_tools.lock().unwrap_or_else(|e| e.into_inner()).push(def);
+        self.pending_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(def);
     }
 
     /// 取出所有待处理的工具注册（消费式取出）。

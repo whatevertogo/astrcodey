@@ -120,11 +120,7 @@ pub fn validate_transition(
     catalog
         .get(to)
         .ok_or_else(|| format!("unknown target mode '{}'", to))?;
-    if !from_spec
-        .allowed_transitions
-        .iter()
-        .any(|t| t == to)
-    {
+    if !from_spec.allowed_transitions.iter().any(|t| t == to) {
         return Err(format!(
             "transition from '{}' to '{}' is not allowed",
             from, to

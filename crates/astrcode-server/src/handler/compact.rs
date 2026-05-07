@@ -74,18 +74,14 @@ impl CommandHandler {
             trigger: CompactTrigger::ManualCommand,
             message_count: provider_messages.len(),
         };
-        let compact_instructions = match collect_compact_instructions(
-            &self.runtime.extension_runner,
-            hook_ctx,
-        )
-        .await
-        {
-            Ok(instructions) => instructions,
-            Err(error) => {
-                self.send_error(-32603, &format!("Compaction failed: {error}"));
-                return Ok(None);
-            },
-        };
+        let compact_instructions =
+            match collect_compact_instructions(&self.runtime.extension_runner, hook_ctx).await {
+                Ok(instructions) => instructions,
+                Err(error) => {
+                    self.send_error(-32603, &format!("Compaction failed: {error}"));
+                    return Ok(None);
+                },
+            };
         let snapshot_path = match self
             .runtime
             .session_manager
@@ -147,12 +143,8 @@ impl CommandHandler {
         )
         .await;
 
-        if let Err(error) = dispatch_post_compact(
-            &self.runtime.extension_runner,
-            hook_ctx,
-            &compaction,
-        )
-        .await
+        if let Err(error) =
+            dispatch_post_compact(&self.runtime.extension_runner, hook_ctx, &compaction).await
         {
             self.send_error(-32603, &format!("Compaction failed: {error}"));
             return Ok(None);

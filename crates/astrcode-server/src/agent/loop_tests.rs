@@ -1198,7 +1198,7 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
             session_manager: Arc::clone(&session_manager),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
-        background_tasks: Default::default(),
+            background_tasks: Default::default(),
         },
     );
 
@@ -1325,7 +1325,7 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
             session_manager,
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
-        background_tasks: Default::default(),
+            background_tasks: Default::default(),
         },
     );
 
@@ -1663,7 +1663,7 @@ async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
             session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
             auto_compact_failures,
             background_result_tx: None,
-        background_tasks: Default::default(),
+            background_tasks: Default::default(),
         },
     );
     let mut history = Vec::new();

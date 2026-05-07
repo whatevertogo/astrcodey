@@ -24,22 +24,25 @@ use std::sync::Arc;
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionContext, ExtensionError, ExtensionEvent,
-        HookEffect, HookMode, HookSubscription,
+        Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
+        HookSubscription,
     },
     llm::LlmMessage,
     tool::{ToolResult, tool_metadata},
 };
 use serde_json::json;
 
-use crate::catalog::{ModeId, builtin_catalog};
-use crate::tools::{
-    SWITCH_MODE_TOOL_NAME, UPSERT_PLAN_TOOL_NAME, handle_switch_mode, handle_upsert_plan,
-    switch_mode_tool_definition, upsert_plan_tool_definition,
+pub use crate::{
+    catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec},
+    store::ModeState,
 };
-
-pub use crate::catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec};
-pub use crate::store::ModeState;
+use crate::{
+    catalog::{ModeId, builtin_catalog},
+    tools::{
+        SWITCH_MODE_TOOL_NAME, UPSERT_PLAN_TOOL_NAME, handle_switch_mode, handle_upsert_plan,
+        switch_mode_tool_definition, upsert_plan_tool_definition,
+    },
+};
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(ModeExtension {
@@ -86,8 +89,7 @@ impl Extension for ModeExtension {
                 let Some(input) = ctx.pre_tool_use_input() else {
                     return Ok(HookEffect::Allow);
                 };
-                let state =
-                    store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
+                let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
                 let mode_id = ModeId::from_raw(&state.current_mode);
                 let Some(spec) = self.catalog.get(&mode_id) else {
                     return Ok(HookEffect::Allow);
@@ -104,10 +106,7 @@ impl Extension for ModeExtension {
 
                 if !spec.allow_delegation && input.tool_name == "agent" {
                     return Ok(HookEffect::Block {
-                        reason: format!(
-                            "Agent delegation is not allowed in {} mode",
-                            spec.name
-                        ),
+                        reason: format!("Agent delegation is not allowed in {} mode", spec.name),
                     });
                 }
 
@@ -118,8 +117,7 @@ impl Extension for ModeExtension {
                     store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
                 if let Some(context) = state.pending_transition_context.take() {
-                    store::save_mode_state(&mode_root, &state)
-                        .map_err(ExtensionError::Internal)?;
+                    store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
                     return Ok(HookEffect::AppendMessages {
                         messages: vec![LlmMessage::user(context)],
                     });
@@ -132,10 +130,7 @@ impl Extension for ModeExtension {
     }
 
     fn tools(&self) -> Vec<astrcode_core::tool::ToolDefinition> {
-        vec![
-            switch_mode_tool_definition(),
-            upsert_plan_tool_definition(),
-        ]
+        vec![switch_mode_tool_definition(), upsert_plan_tool_definition()]
     }
 
     async fn execute_tool(
@@ -149,21 +144,16 @@ impl Extension for ModeExtension {
         let plan_dir = store::plan_dir(ctx.session_id.as_str(), working_dir);
 
         match tool_name {
-            SWITCH_MODE_TOOL_NAME => {
-                Ok(match handle_switch_mode(
-                    arguments,
-                    &mode_root,
-                    &plan_dir,
-                    &self.catalog,
-                ) {
+            SWITCH_MODE_TOOL_NAME => Ok(
+                match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
                     Ok(result) => result,
                     Err(error) => ToolResult::text(
                         error.clone(),
                         true,
                         tool_metadata([("error", json!(error))]),
                     ),
-                })
-            },
+                },
+            ),
             UPSERT_PLAN_TOOL_NAME => {
                 Ok(match handle_upsert_plan(arguments, &mode_root, &plan_dir) {
                     Ok(result) => result,

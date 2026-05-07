@@ -409,9 +409,7 @@ impl TerminalSession {
                 self.terminal.clear()?;
             }
 
-            let needs_full_repaint = self
-                .terminal
-                .update_inline_viewport(viewport_height)?;
+            let needs_full_repaint = self.terminal.update_inline_viewport(viewport_height)?;
 
             self.flush_scrollback(state, theme)?;
 

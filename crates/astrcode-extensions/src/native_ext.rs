@@ -358,7 +358,10 @@ impl Extension for NativeExtension {
 
     /// 返回此扩展注册的所有斜杠命令。
     fn slash_commands(&self) -> Vec<astrcode_core::extension::SlashCommand> {
-        self.commands.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -423,13 +426,17 @@ unsafe extern "C" fn ffi_register_tool(
     // 解析参数 JSON，失败时使用空对象
     let params: serde_json::Value =
         serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
-    user_data!(api).tools.lock().unwrap_or_else(|e| e.into_inner()).push(ToolDefinition {
-        name,
-        description: desc,
-        parameters: params,
-        origin: ToolOrigin::Extension,
-        execution_mode: ExecutionMode::Sequential,
-    });
+    user_data!(api)
+        .tools
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(ToolDefinition {
+            name,
+            description: desc,
+            parameters: params,
+            origin: ToolOrigin::Extension,
+            execution_mode: ExecutionMode::Sequential,
+        });
 }
 
 /// FFI `register_tool_handler` 回调实现：注册工具执行处理器。

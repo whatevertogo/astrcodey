@@ -2,12 +2,8 @@
 //! types shared across agent sub-objects.
 
 use astrcode_core::{
-    config::ModelSelection,
-    event::EventPayload,
-    extension::ExtensionEvent,
-    llm::LlmRole,
-    tool::ToolDefinition,
-    types::*,
+    config::ModelSelection, event::EventPayload, extension::ExtensionEvent, llm::LlmRole,
+    tool::ToolDefinition, types::*,
 };
 use astrcode_extensions::{context::ServerExtensionContext, runner::ExtensionRunner};
 use tokio::sync::{mpsc, oneshot};

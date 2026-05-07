@@ -135,4 +135,3 @@ pub fn backgrounded_placeholder_result(
         duration_ms: None,
     }
 }
-

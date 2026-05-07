@@ -47,20 +47,18 @@ pub fn plan_dir(session_id: &str, working_dir: &str) -> PathBuf {
 pub fn load_mode_state(root: &Path) -> Result<ModeState, String> {
     let path = root.join(MODE_STATE_FILE);
     match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content)
-            .map_err(|e| format!("parse mode state: {e}")),
+        Ok(content) => serde_json::from_str(&content).map_err(|e| format!("parse mode state: {e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ModeState::initial()),
         Err(e) => Err(format!("read mode state: {e}")),
     }
 }
 
 pub fn save_mode_state(root: &Path, state: &ModeState) -> Result<(), String> {
-    std::fs::create_dir_all(root)
-        .map_err(|e| format!("create mode directory: {e}"))?;
+    std::fs::create_dir_all(root).map_err(|e| format!("create mode directory: {e}"))?;
     let path = root.join(MODE_STATE_FILE);
     let tmp = root.join(format!("{MODE_STATE_FILE}.tmp"));
-    let json = serde_json::to_string_pretty(state)
-        .map_err(|e| format!("serialize mode state: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(state).map_err(|e| format!("serialize mode state: {e}"))?;
     std::fs::write(&tmp, json).map_err(|e| format!("write mode state: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("save mode state: {e}"))?;
     Ok(())
@@ -80,8 +78,7 @@ pub fn load_plan(plan_dir: &Path) -> Result<Option<String>, String> {
 }
 
 pub fn save_plan(plan_dir: &Path, content: &str) -> Result<String, String> {
-    std::fs::create_dir_all(plan_dir)
-        .map_err(|e| format!("create plan directory: {e}"))?;
+    std::fs::create_dir_all(plan_dir).map_err(|e| format!("create plan directory: {e}"))?;
     let path = plan_file_path(plan_dir);
     let tmp = plan_dir.join("plan.md.tmp");
     std::fs::write(&tmp, content).map_err(|e| format!("write plan artifact: {e}"))?;

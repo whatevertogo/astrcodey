@@ -264,7 +264,10 @@ impl ExtensionContext for ServerExtensionContext {
 
     /// 注册一个工具定义到待处理列表
     fn register_tool(&self, def: ToolDefinition) {
-        self.pending_tools.lock().unwrap_or_else(|e| e.into_inner()).push(def);
+        self.pending_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(def);
     }
 
     /// 取出所有已注册的工具定义（消费式取出）

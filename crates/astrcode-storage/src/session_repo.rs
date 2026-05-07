@@ -260,10 +260,7 @@ impl EventStore for FileSystemSessionRepository {
                 summaries.push(SessionSummary::from(model));
             } else {
                 // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
-                if let Some(summary) = self
-                    .read_summary_from_first_event(&session_id)
-                    .await?
-                {
+                if let Some(summary) = self.read_summary_from_first_event(&session_id).await? {
                     summaries.push(summary);
                 }
             }
@@ -1026,8 +1023,10 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_tool_call_requested_events_produce_single_assistant_message() {
-        use astrcode_core::llm::{LlmContent, LlmRole};
-        use astrcode_core::types::ToolCallId;
+        use astrcode_core::{
+            llm::{LlmContent, LlmRole},
+            types::ToolCallId,
+        };
 
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("sessions"));
@@ -1140,7 +1139,10 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, LlmContent::ToolCall { .. }))
             .count();
-        assert_eq!(tool_call_count, 2, "parallel tool calls must be merged into one assistant message");
+        assert_eq!(
+            tool_call_count, 2,
+            "parallel tool calls must be merged into one assistant message"
+        );
 
         assert_eq!(model.messages[2].role, LlmRole::Tool);
         assert_eq!(model.messages[3].role, LlmRole::Tool);

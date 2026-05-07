@@ -1,7 +1,6 @@
 //! Tool definitions and handlers for switchMode and upsertSessionPlan.
 
 use std::path::Path;
-
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -9,8 +8,10 @@ use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult,
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::catalog::{ModeCatalog, ModeId, validate_transition};
-use crate::store;
+use crate::{
+    catalog::{ModeCatalog, ModeId, validate_transition},
+    store,
+};
 
 // ─── Tool Names ──────────────────────────────────────────────────────────
 
@@ -23,9 +24,10 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: "\
-Switch the agent running mode. Available modes: \"code\" (default execution with full tools) \
-and \"plan\" (read-only planning mode). In plan mode, the first switch back to code triggers \
-an exit review gate; call again after review to complete the transition."
+Switch the agent running mode. Available modes: \"code\" (default execution with full tools) and \
+                      \"plan\" (read-only planning mode). In plan mode, the first switch back to \
+                      code triggers an exit review gate; call again after review to complete the \
+                      transition."
             .into(),
         parameters: json!({
             "type": "object",
@@ -48,9 +50,10 @@ pub fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
         description: "\
-Create or update the session plan artifact. The plan must contain all required headings: \
-Context, Goal, Scope, Non-Goals, Existing Code To Reuse, Implementation Steps, Verification, \
-Dependencies and Risks, Assumptions (defaults and open questions). Only available in plan mode."
+Create or update the session plan artifact. The plan must contain all required headings: Context, \
+                      Goal, Scope, Non-Goals, Existing Code To Reuse, Implementation Steps, \
+                      Verification, Dependencies and Risks, Assumptions (defaults and open \
+                      questions). Only available in plan mode."
             .into(),
         parameters: json!({
             "type": "object",
@@ -105,8 +108,8 @@ fn review_checklist_message() -> String {
         .join("\n");
     format!(
         "Exit review gate: review the plan against these criteria before calling switchMode \
-         again.\n\n{items}\n\nIf the review changes the plan, update it with {UPSERT_PLAN_TOOL_NAME} \
-         first, then retry switchMode."
+         again.\n\n{items}\n\nIf the review changes the plan, update it with \
+         {UPSERT_PLAN_TOOL_NAME} first, then retry switchMode."
     )
 }
 
@@ -151,8 +154,8 @@ pub fn handle_switch_mode(
                 None => {
                     return Ok(ToolResult::text(
                         format!(
-                            "Cannot exit {} mode: no plan artifact found. \
-                             Create one with {UPSERT_PLAN_TOOL_NAME} first.",
+                            "Cannot exit {} mode: no plan artifact found. Create one with \
+                             {UPSERT_PLAN_TOOL_NAME} first.",
                             current_spec.name
                         ),
                         true,
@@ -243,8 +246,7 @@ pub fn handle_upsert_plan(
     if state.current_mode != "plan" {
         return Ok(ToolResult::text(
             format!(
-                "{UPSERT_PLAN_TOOL_NAME} is only available in plan mode. \
-                 Current mode: {}.",
+                "{UPSERT_PLAN_TOOL_NAME} is only available in plan mode. Current mode: {}.",
                 state.current_mode
             ),
             true,
@@ -277,7 +279,10 @@ pub fn handle_upsert_plan(
         false,
         tool_metadata([
             ("path", json!(path)),
-            ("operation", json!(if is_create { "create" } else { "update" })),
+            (
+                "operation",
+                json!(if is_create { "create" } else { "update" }),
+            ),
         ]),
     ))
 }
@@ -338,22 +343,11 @@ mod tests {
         let catalog = builtin_catalog();
 
         // Enter plan mode first.
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         // Try to exit — should be blocked (no plan artifact).
-        let result = handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .expect("should return result");
+        let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
+            .expect("should return result");
         assert!(result.is_error);
         assert!(result.content.contains("no plan artifact found"));
     }
@@ -365,26 +359,15 @@ mod tests {
         let catalog = builtin_catalog();
 
         // Enter plan mode.
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         // Create a valid plan.
         let plan = crate::prompts::plan_template().replace("<title>", "test");
         store::save_plan(&plan_dir, &plan).unwrap();
 
         // First exit attempt — review checkpoint.
-        let result = handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .expect("should return result");
+        let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
+            .expect("should return result");
         assert!(!result.is_error);
         assert!(result.content.contains("review gate"));
         assert_eq!(result.metadata["gateStatus"], "review_pending");
@@ -397,35 +380,18 @@ mod tests {
         let catalog = builtin_catalog();
 
         // Enter plan mode.
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         // Create a valid plan.
         let plan = crate::prompts::plan_template().replace("<title>", "test");
         store::save_plan(&plan_dir, &plan).unwrap();
 
         // First exit — review checkpoint.
-        handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         // Second exit — gate passed.
-        let result = handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .expect("should succeed");
+        let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
+            .expect("should succeed");
         assert!(!result.is_error);
         assert!(result.content.contains("Switched from plan to Code"));
     }
@@ -437,21 +403,11 @@ mod tests {
         let catalog = builtin_catalog();
 
         // Enter plan mode.
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         let plan = crate::prompts::plan_template().replace("<title>", "test plan");
-        let result = handle_upsert_plan(
-            json!({ "content": plan }),
-            &mode_root,
-            &plan_dir,
-        )
-        .expect("upsert should succeed");
+        let result = handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir)
+            .expect("upsert should succeed");
 
         assert!(!result.is_error);
         assert!(result.content.contains("created"));
@@ -463,12 +419,9 @@ mod tests {
         let mode_root = test_root("upsert-code-mode").join("mode");
         let plan_dir = test_root("upsert-code-mode").join("plan");
 
-        let result = handle_upsert_plan(
-            json!({ "content": "## Goal\nTest" }),
-            &mode_root,
-            &plan_dir,
-        )
-        .expect("should return result");
+        let result =
+            handle_upsert_plan(json!({ "content": "## Goal\nTest" }), &mode_root, &plan_dir)
+                .expect("should return result");
 
         assert!(result.is_error);
         assert!(result.content.contains("only available in plan mode"));
@@ -480,13 +433,7 @@ mod tests {
         let plan_dir = test_root("upsert-incomplete").join("plan");
         let catalog = builtin_catalog();
 
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         let result = handle_upsert_plan(
             json!({ "content": "# Plan: test\n\n## Goal\n\nDo something.\n" }),
@@ -506,26 +453,15 @@ mod tests {
         let catalog = builtin_catalog();
 
         // Enter plan mode.
-        handle_switch_mode(
-            json!({ "mode": "plan" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
         // Create valid plan.
         let plan = crate::prompts::plan_template().replace("<title>", "full test");
         handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir).unwrap();
 
         // First exit — review.
-        let review = handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        let review =
+            handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog).unwrap();
         assert_eq!(review.metadata["gateStatus"], "review_pending");
 
         // Update plan after review.
@@ -533,13 +469,8 @@ mod tests {
         handle_upsert_plan(json!({ "content": updated_plan }), &mode_root, &plan_dir).unwrap();
 
         // Second exit — success.
-        let exit = handle_switch_mode(
-            json!({ "mode": "code" }),
-            &mode_root,
-            &plan_dir,
-            &catalog,
-        )
-        .unwrap();
+        let exit =
+            handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog).unwrap();
         assert!(!exit.is_error);
 
         let state = store::load_mode_state(&mode_root).unwrap();

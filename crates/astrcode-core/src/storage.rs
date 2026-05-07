@@ -370,8 +370,7 @@ pub enum StorageError {
 /// 会导致 400 协议错误。此函数作为防御性归一化步骤，确保即使上游 projection
 /// 或旧 snapshot 产生了分离的消息，发给 provider 的也是正确格式。
 fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
-    use crate::llm::LlmContent;
-    use crate::llm::LlmRole;
+    use crate::llm::{LlmContent, LlmRole};
     let mut i = 0;
     while i < messages.len() {
         if messages[i].role != LlmRole::Assistant
