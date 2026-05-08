@@ -1,6 +1,5 @@
 # AstrCode
 
-Tauri v2 桌面应用：Rust 后端 + React 前端。
 
 ## 项目结构
 
