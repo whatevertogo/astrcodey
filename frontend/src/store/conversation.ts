@@ -104,7 +104,7 @@ function patchAssistantBlock(
   }
 
   const next = [...blocks]
-  next[idx] = { ...block, text: block.text + textDelta }
+  next[idx] = { ...block, text: (block.text ?? '') + textDelta }
   return next
 }
 

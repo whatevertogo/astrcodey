@@ -164,6 +164,7 @@ function extractThinkingBlocks(text: string): {
   visibleText: string
   thinkingBlocks: string[]
 } {
+  if (typeof text !== 'string') return { visibleText: '', thinkingBlocks: [] }
   const thinkingBlocks: string[] = []
   const visibleText = text
     .replace(/<think([\s\S]*?)<\/think>/gi, (_match, content: string) => {
