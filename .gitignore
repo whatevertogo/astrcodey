@@ -1,11 +1,19 @@
 # Rust build outputs
 /target/
+/src-tauri/target/
 **/*.rs.bk
 
 # Rust/Cargo diagnostics and profiling artifacts
 *.profraw
 *.profdata
 *.dSYM/
+
+# Frontend (node)
+node_modules/
+/frontend/dist/
+
+# Tauri sidecar binaries (built from workspace, copied at dev time)
+/src-tauri/binaries/
 
 # Local environment files
 .env
