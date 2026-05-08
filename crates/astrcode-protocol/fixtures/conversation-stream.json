@@ -1,0 +1,44 @@
+[
+  {
+    "sessionId": "session-1",
+    "cursor": { "value": "2" },
+    "delta": {
+      "kind": "patchBlock",
+      "blockId": "assistant-1",
+      "textDelta": "hello"
+    }
+  },
+  {
+    "sessionId": "session-1",
+    "cursor": { "value": "3" },
+    "delta": {
+      "kind": "finalizeBlock",
+      "block": {
+        "kind": "assistant",
+        "id": "assistant-1",
+        "text": "complete answer",
+        "status": "complete"
+      }
+    }
+  },
+  {
+    "sessionId": "parent-session",
+    "cursor": { "value": "7" },
+    "delta": {
+      "kind": "sessionContinued",
+      "parentSessionId": "parent-session",
+      "newSessionId": "child-session",
+      "parentCursor": { "value": "7" }
+    }
+  },
+  {
+    "sessionId": "session-1",
+    "cursor": { "value": "4" },
+    "delta": {
+      "kind": "toolOutput",
+      "callId": "tool-1",
+      "stream": "stdout",
+      "delta": "tool output"
+    }
+  }
+]

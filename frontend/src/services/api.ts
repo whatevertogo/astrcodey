@@ -1,4 +1,18 @@
 import { getHostBridge } from '../lib/hostBridge'
+import {
+  decodeActiveSelectionResponse,
+  decodeAvailableModels,
+  decodeCompactSessionResponse,
+  decodeConfigReloadResponse,
+  decodeConfigView,
+  decodeConversationSnapshot,
+  decodeCreateSessionResponse,
+  decodeCurrentModelInfo,
+  decodeDeleteProjectResponse,
+  decodeModelTestResult,
+  decodePromptSubmitResponse,
+  decodeSessionListResponse,
+} from './protocol'
 import type {
   CreateSessionResponse,
   PromptSubmitResponse,
@@ -28,7 +42,7 @@ export function initBaseUrl(): void {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request(path: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
@@ -41,7 +55,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${response.status} ${response.statusText}: ${body}`)
   }
   if (response.status === 204) {
-    return undefined as T
+    return undefined
   }
   return response.json()
 }
@@ -51,10 +65,12 @@ export async function createSession(
 ): Promise<CreateSessionResponse> {
   console.log('[api] createSession → POST /api/sessions', { workingDir })
   try {
-    const result = await request<CreateSessionResponse>('/api/sessions', {
-      method: 'POST',
-      body: JSON.stringify({ workingDir }),
-    })
+    const result = decodeCreateSessionResponse(
+      await request('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ workingDir }),
+      })
+    )
     console.log('[api] createSession ←', result)
     return result
   } catch (err) {
@@ -64,14 +80,14 @@ export async function createSession(
 }
 
 export async function listSessions(): Promise<SessionListResponse> {
-  return request<SessionListResponse>('/api/sessions')
+  return decodeSessionListResponse(await request('/api/sessions'))
 }
 
 export async function getConversation(
   sessionId: string
 ): Promise<ConversationSnapshot> {
-  return request<ConversationSnapshot>(
-    `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
+  return decodeConversationSnapshot(
+    await request(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
   )
 }
 
@@ -81,12 +97,11 @@ export async function submitPrompt(
 ): Promise<PromptSubmitResponse> {
   console.log('[api] submitPrompt →', { sessionId, text })
   try {
-    const result = await request<PromptSubmitResponse>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/prompt`,
-      {
+    const result = decodePromptSubmitResponse(
+      await request(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
         method: 'POST',
         body: JSON.stringify({ text }),
-      }
+      })
     )
     console.log('[api] submitPrompt ←', result)
     return result
@@ -99,20 +114,22 @@ export async function submitPrompt(
 export async function compactSession(
   sessionId: string
 ): Promise<CompactSessionResponse> {
-  return request<CompactSessionResponse>(
-    `/api/sessions/${encodeURIComponent(sessionId)}/compact`,
-    { method: 'POST', body: JSON.stringify({}) }
+  return decodeCompactSessionResponse(
+    await request(`/api/sessions/${encodeURIComponent(sessionId)}/compact`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
   )
 }
 
 export async function abortSession(sessionId: string): Promise<void> {
-  await request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
+  await request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
     method: 'POST',
   })
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  await request<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+  await request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   })
 }
@@ -120,9 +137,13 @@ export async function deleteSession(sessionId: string): Promise<void> {
 export async function deleteProject(
   workingDir: string
 ): Promise<{ deletedCount: number }> {
-  return request<{ deletedCount: number }>(
-    `/api/projects?workingDir=${encodeURIComponent(workingDir)}`,
-    { method: 'DELETE' }
+  return decodeDeleteProjectResponse(
+    await request(
+      `/api/projects?workingDir=${encodeURIComponent(workingDir)}`,
+      {
+        method: 'DELETE',
+      }
+    )
   )
 }
 
@@ -140,18 +161,17 @@ export async function healthCheck(): Promise<boolean> {
 // ── Config / Models ──
 
 export async function getConfig(): Promise<ConfigView> {
-  return request<ConfigView>('/api/config')
+  return decodeConfigView(await request('/api/config'))
 }
 
 export async function reloadConfig(): Promise<{
   activeProfile: string
   activeModel: string
 }> {
-  return request<{ activeProfile: string; activeModel: string }>(
-    '/api/config/reload',
-    {
+  return decodeConfigReloadResponse(
+    await request('/api/config/reload', {
       method: 'POST',
-    }
+    })
   )
 }
 
@@ -159,24 +179,24 @@ export async function updateActiveSelection(
   activeProfile: string,
   activeModel: string
 ): Promise<{ success: boolean; warning?: string }> {
-  return request<{ success: boolean; warning?: string }>(
-    '/api/config/active-selection',
-    {
+  return decodeActiveSelectionResponse(
+    await request('/api/config/active-selection', {
       method: 'POST',
       body: JSON.stringify({ activeProfile, activeModel }),
-    }
+    })
   )
 }
 
 export async function getCurrentModel(): Promise<CurrentModelInfo> {
-  return request<CurrentModelInfo>('/api/models/current')
+  return decodeCurrentModelInfo(await request('/api/models/current'))
 }
 
 export async function listModels(): Promise<AvailableModel[]> {
-  const response = await request<{ models: AvailableModel[] }>('/api/models')
-  return response.models
+  return decodeAvailableModels(await request('/api/models'))
 }
 
 export async function testModel(): Promise<ModelTestResult> {
-  return request<ModelTestResult>('/api/models/test', { method: 'POST' })
+  return decodeModelTestResult(
+    await request('/api/models/test', { method: 'POST' })
+  )
 }

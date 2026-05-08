@@ -10,6 +10,7 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test:contract": "tsc --module ES2022 --moduleResolution Bundler --target ES2021 --strict --skipLibCheck --outDir ../target/frontend-contract --rootDir src --noEmit false src/services/protocol.ts src/services/types.ts && node scripts/protocol-contract.test.mjs",
     "format:check": "prettier --check .",
     "format": "prettier --write ."
   },

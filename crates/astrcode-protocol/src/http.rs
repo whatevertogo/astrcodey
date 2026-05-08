@@ -32,7 +32,11 @@ pub struct PromptRequest {
 
 /// prompt 提交结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum PromptSubmitResponse {
     /// 已接受并异步执行。
     Accepted {
@@ -173,7 +177,11 @@ pub struct ConversationControlStateDto {
 
 /// conversation 块。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ConversationBlockDto {
     /// 用户消息。
     User { id: String, text: String },
@@ -222,7 +230,11 @@ pub struct ConversationStreamEnvelopeDto {
 
 /// SSE conversation 增量。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub enum ConversationDeltaDto {
     /// 追加 block。
     AppendBlock { block: ConversationBlockDto },
@@ -361,4 +373,46 @@ pub struct ModelListResponseDto {
 pub struct ModelTestResponseDto {
     pub success: bool,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversation_stream_fixture_matches_wire_contract() {
+        let fixture = include_str!("../fixtures/conversation-stream.json");
+        let envelopes: Vec<ConversationStreamEnvelopeDto> =
+            serde_json::from_str(fixture).expect("fixture should deserialize");
+
+        assert_eq!(envelopes.len(), 4);
+
+        match &envelopes[0].delta {
+            ConversationDeltaDto::PatchBlock {
+                block_id,
+                text_delta,
+            } => {
+                assert_eq!(block_id, "assistant-1");
+                assert_eq!(text_delta, "hello");
+            },
+            other => panic!("unexpected fixture delta: {other:?}"),
+        }
+
+        match &envelopes[1].delta {
+            ConversationDeltaDto::FinalizeBlock {
+                block: ConversationBlockDto::Assistant { id, text, status },
+            } => {
+                assert_eq!(id, "assistant-1");
+                assert_eq!(text, "complete answer");
+                assert!(matches!(status, ConversationBlockStatusDto::Complete));
+            },
+            other => panic!("unexpected fixture delta: {other:?}"),
+        }
+
+        let encoded = serde_json::to_string(&envelopes[0]).expect("fixture should serialize");
+        assert!(encoded.contains("\"blockId\""));
+        assert!(encoded.contains("\"textDelta\""));
+        assert!(!encoded.contains("block_id"));
+        assert!(!encoded.contains("text_delta"));
+    }
 }
