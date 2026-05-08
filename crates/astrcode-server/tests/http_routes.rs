@@ -244,6 +244,132 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 }
 
 #[tokio::test]
+async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let (event_tx, _) = broadcast::channel(64);
+    let app = router(Arc::clone(&runtime), event_tx);
+    let session_id = create_session(app.clone()).await;
+
+    let stream_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let accepted = post_json(
+        app,
+        &format!("/api/sessions/{session_id}/prompt"),
+        r#"{"text":"hello"}"#,
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let body = read_sse_until(stream_response.into_body(), r#""phase":"idle""#).await;
+    assert!(body.contains(r#""canSubmitPrompt":true"#));
+}
+
+#[tokio::test]
+async fn stream_replays_events_after_snapshot_cursor() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let (event_tx, _) = broadcast::channel(64);
+    let app = router(Arc::clone(&runtime), event_tx.clone());
+    let session_id = create_session(app.clone()).await;
+    let sid = SessionId::from(session_id.clone());
+
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            sid.clone(),
+            None,
+            EventPayload::UserMessage {
+                message_id: "snapshot-message".into(),
+                text: "already in snapshot".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let snapshot = get_json::<ConversationSnapshotResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation"),
+    )
+    .await;
+    assert_eq!(snapshot.blocks.len(), 1);
+
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            sid,
+            None,
+            EventPayload::UserMessage {
+                message_id: "missed-message".into(),
+                text: "missed while connecting stream".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .session_manager
+        .append_event(Event::new(
+            SessionId::from(session_id.clone()),
+            None,
+            EventPayload::AssistantMessageCompleted {
+                message_id: "missed-assistant".into(),
+                text: "completed response after snapshot".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/sessions/{session_id}/stream?cursor={}",
+                    snapshot.cursor.value
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = read_sse_until(response.into_body(), "completed response after snapshot").await;
+    assert!(body.contains("missed-message"));
+    assert!(body.contains("completed response after snapshot"));
+    assert!(!body.contains("already in snapshot"));
+}
+
+#[tokio::test]
+async fn stream_invalid_cursor_requests_rehydrate() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let (event_tx, _) = broadcast::channel(64);
+    let app = router(Arc::clone(&runtime), event_tx);
+    let session_id = create_session(app.clone()).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=invalid"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body = read_sse_until(response.into_body(), "rehydrateRequired").await;
+    assert!(body.contains("rehydrateRequired"));
+}
+
+#[tokio::test]
 async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
     let runtime = runtime(Arc::new(SummaryLlm));
     let (event_tx, _) = broadcast::channel(64);
@@ -451,6 +577,7 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             Duration::from_secs(1),
             Arc::new(ExtensionRuntime::new()),
         )),
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
         effective: EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),

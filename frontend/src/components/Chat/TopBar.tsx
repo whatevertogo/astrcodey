@@ -15,6 +15,9 @@ export default function TopBar() {
   const phase = useAppStore((s) => s.phase);
   const activeSessionTitle = useAppStore((s) => s.activeSessionTitle);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
+  const control = useAppStore((s) => s.control);
+  const compactSession = useAppStore((s) => s.compactSession);
+  const canCompact = Boolean(activeSessionId && control?.canRequestCompact && !control.compacting);
 
   return (
     <div className="relative z-30 flex shrink-0 items-center justify-between gap-4 border-b border-border bg-surface/92 px-[22px] py-3.5 backdrop-blur-[12px]">
@@ -27,7 +30,7 @@ export default function TopBar() {
           title={phase}
         />
         <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
-          {activeSessionTitle || (activeSessionId ? 'AstrCode' : 'AstrCode')}
+          {activeSessionTitle || 'AstrCode'}
         </span>
         {phase !== 'idle' && (
           <span className="shrink-0 text-xs text-text-secondary">
@@ -35,6 +38,15 @@ export default function TopBar() {
           </span>
         )}
       </div>
+      <button
+        type="button"
+        className="inline-flex h-8 shrink-0 items-center gap-2 rounded-lg border border-border bg-surface-soft px-3 text-[12px] font-semibold text-text-secondary transition-[background-color,border-color,color,opacity] duration-150 ease-out hover:border-border-strong hover:bg-white hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
+        onClick={() => void compactSession()}
+        disabled={!canCompact}
+        title="压缩上下文"
+      >
+        压缩
+      </button>
     </div>
   );
 }

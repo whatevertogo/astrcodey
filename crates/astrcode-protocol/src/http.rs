@@ -262,3 +262,11 @@ pub struct ConversationErrorEnvelopeDto {
     /// 错误消息。
     pub message: String,
 }
+
+/// 删除项目响应（删除某工作目录下所有会话）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProjectResponseDto {
+    /// 被删除的会话数量。
+    pub deleted_count: usize,
+}

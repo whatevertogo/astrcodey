@@ -30,9 +30,11 @@ interface ConversationState {
   initServer: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   createSession: (workingDir: string) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
   switchSession: (sessionId: string) => Promise<void>;
-  submitPrompt: (text: string) => Promise<void>;
+  submitPrompt: (text: string) => Promise<boolean>;
   abortCurrentTurn: () => Promise<void>;
+  compactSession: () => Promise<void>;
   applyDelta: (delta: ConversationDelta) => void;
 }
 
@@ -95,6 +97,28 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     await get().switchSession(response.sessionId);
   },
 
+  deleteSession: async (sessionId: string) => {
+    try {
+      await api.deleteSession(sessionId);
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+    const state = get();
+    if (state.activeSessionId === sessionId) {
+      state.streamAbortController?.abort();
+      set({
+        activeSessionId: null,
+        activeSessionTitle: null,
+        blocks: [],
+        control: null,
+        cursor: null,
+        phase: 'idle',
+        workingDir: null,
+      });
+    }
+    await get().refreshSessions();
+  },
+
   switchSession: async (sessionId: string) => {
     const state = get();
 
@@ -110,7 +134,8 @@ export const useAppStore = create<ConversationState>((set, get) => ({
 
     try {
       const snapshot = await api.getConversation(sessionId);
-      const sessionItem = state.sessions.find((s) => s.sessionId === sessionId);
+      const sessions = get().sessions;
+      const sessionItem = sessions.find((s) => s.sessionId === sessionId);
 
       set({
         blocks: snapshot.blocks,
@@ -121,26 +146,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         workingDir: sessionItem?.workingDir ?? null,
       });
 
-      const abortController = new AbortController();
-      set({ streamAbortController: abortController });
-
-      const sessionIdRef = sessionId;
-      void consumeSseStream(
-        sessionIdRef,
-        (envelope) => {
-          const current = get();
-          if (current.activeSessionId !== sessionIdRef) return;
-          if (envelope.cursor) {
-            set({ cursor: envelope.cursor.value });
-          }
-          current.applyDelta(envelope.delta);
-        },
-        abortController.signal
-      ).catch((err) => {
-        if (!abortController.signal.aborted) {
-          console.error('SSE stream error:', err);
-        }
-      });
+      connectSse(sessionId, snapshot.cursor.value, get, set);
     } catch (err) {
       console.error('Failed to switch session:', err);
     }
@@ -148,9 +154,10 @@ export const useAppStore = create<ConversationState>((set, get) => ({
 
   submitPrompt: async (text: string) => {
     const { activeSessionId, control } = get();
-    if (!activeSessionId || !control?.canSubmitPrompt) return;
+    if (!activeSessionId || !control?.canSubmitPrompt) return false;
 
     await api.submitPrompt(activeSessionId, text);
+    return true;
   },
 
   abortCurrentTurn: async () => {
@@ -158,6 +165,19 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     if (!activeSessionId) return;
 
     await api.abortSession(activeSessionId);
+  },
+
+  compactSession: async () => {
+    const { activeSessionId, control } = get();
+    if (!activeSessionId || !control?.canRequestCompact) return;
+
+    const response = await api.compactSession(activeSessionId);
+    await get().refreshSessions();
+    if (response.newSessionId) {
+      await get().switchSession(response.newSessionId);
+    } else {
+      await get().switchSession(activeSessionId);
+    }
   },
 
   applyDelta: (delta: ConversationDelta) => {
@@ -169,28 +189,30 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         break;
 
       case 'patchBlock': {
-        const blocks = state.blocks.map((b) => {
-          const id = 'id' in b ? b.id : '';
-          if (id !== delta.blockId) return b;
-          if (b.kind === 'assistant' || b.kind === 'toolCall') {
-            return { ...b, text: b.text + delta.textDelta };
-          }
-          return b;
-        });
-        set({ blocks });
+        const idx = state.blocks.findIndex(
+          (b) => 'id' in b && b.id === delta.blockId
+        );
+        if (idx === -1) break;
+        const block = state.blocks[idx];
+        if (block.kind === 'assistant' || block.kind === 'toolCall') {
+          const next = [...state.blocks];
+          next[idx] = { ...block, text: block.text + delta.textDelta };
+          set({ blocks: next });
+        }
         break;
       }
 
       case 'completeBlock': {
-        const blocks = state.blocks.map((b) => {
-          const id = 'id' in b ? b.id : '';
-          if (id !== delta.blockId) return b;
-          if (b.kind === 'assistant' || b.kind === 'toolCall') {
-            return { ...b, status: 'complete' as const };
-          }
-          return b;
-        });
-        set({ blocks });
+        const idx = state.blocks.findIndex(
+          (b) => 'id' in b && b.id === delta.blockId
+        );
+        if (idx === -1) break;
+        const block = state.blocks[idx];
+        if (block.kind === 'assistant' || block.kind === 'toolCall') {
+          const next = [...state.blocks];
+          next[idx] = { ...block, status: 'complete' as const };
+          set({ blocks: next });
+        }
         break;
       }
 
@@ -202,14 +224,16 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         break;
 
       case 'toolOutput': {
-        const blocks = state.blocks.map((b) => {
-          if (b.kind === 'toolCall' && b.id === delta.callId) {
-            const prefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n';
-            return { ...b, text: b.text + prefix + delta.delta };
-          }
-          return b;
-        });
-        set({ blocks });
+        const idx = state.blocks.findIndex(
+          (b) => b.kind === 'toolCall' && b.id === delta.callId
+        );
+        if (idx === -1) break;
+        const block = state.blocks[idx];
+        if (block.kind !== 'toolCall') break;
+        const prefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n';
+        const next = [...state.blocks];
+        next[idx] = { ...block, text: block.text + prefix + delta.delta };
+        set({ blocks: next });
         break;
       }
 
@@ -229,3 +253,53 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     }
   },
 }));
+
+const SSE_RECONNECT_DELAY_MS = 3000;
+
+function connectSse(
+  sessionId: string,
+  cursor: string,
+  get: () => ConversationState,
+  set: (partial: Partial<ConversationState> | ((s: ConversationState) => Partial<ConversationState>)) => void,
+): void {
+  const abortController = new AbortController();
+  set({ streamAbortController: abortController });
+
+  consumeSseStream(
+    sessionId,
+    cursor,
+    (envelope) => {
+      const current = get();
+      if (current.activeSessionId !== sessionId) return;
+      if (envelope.cursor) {
+        set({ cursor: envelope.cursor.value });
+      }
+      current.applyDelta(envelope.delta);
+    },
+    abortController.signal,
+  ).then((result) => {
+    if (abortController.signal.aborted) return;
+    if (result === 'ended') {
+      const current = get();
+      if (current.activeSessionId === sessionId) {
+        const latestCursor = current.cursor ?? cursor;
+        setTimeout(() => {
+          if (get().activeSessionId === sessionId) {
+            connectSse(sessionId, latestCursor, get, set);
+          }
+        }, SSE_RECONNECT_DELAY_MS);
+      }
+    }
+  }).catch((err) => {
+    if (abortController.signal.aborted) return;
+    console.error('SSE stream error, reconnecting in', SSE_RECONNECT_DELAY_MS, 'ms:', err);
+    if (get().activeSessionId === sessionId) {
+      const latestCursor = get().cursor ?? cursor;
+      setTimeout(() => {
+        if (get().activeSessionId === sessionId) {
+          connectSse(sessionId, latestCursor, get, set);
+        }
+      }, SSE_RECONNECT_DELAY_MS);
+    }
+  });
+}

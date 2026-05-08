@@ -162,6 +162,7 @@ fn test_runtime_with_settings(
             Duration::from_secs(1),
             Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
         )),
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
         effective: EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),

@@ -87,6 +87,12 @@ export async function abortSession(sessionId: string): Promise<void> {
   });
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  await request<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function healthCheck(): Promise<boolean> {
   try {
     const response = await fetch(`${baseUrl}/api/sessions`, {

@@ -12,26 +12,29 @@ use astrcode_core::{
     types::SessionId,
 };
 use astrcode_protocol::{
+    commands::ClientCommand,
     events::ClientNotification,
     http::{
         CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
         ConversationBlockStatusDto, ConversationControlStateDto, ConversationCursorDto,
         ConversationDeltaDto, ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
         ConversationStreamEnvelopeDto, CreateSessionRequest, CreateSessionResponseDto,
-        PromptRequest, PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
+        DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse, SessionListItemDto,
+        SessionListResponseDto,
     },
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
-use futures_util::{Stream, stream};
+use futures_util::{Stream, StreamExt, stream};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use crate::{bootstrap::ServerRuntime, handler::CommandHandler};
@@ -42,6 +45,11 @@ pub struct HttpState {
     runtime: Arc<ServerRuntime>,
     handler: crate::handler::CommandHandle,
     event_tx: broadcast::Sender<ClientNotification>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamQuery {
+    cursor: Option<String>,
 }
 
 /// Build an axum router for the HTTP/SSE API.
@@ -63,6 +71,8 @@ pub fn router(
         .route("/api/sessions/:id/prompt", post(submit_prompt))
         .route("/api/sessions/:id/compact", post(compact_session))
         .route("/api/sessions/:id/abort", post(abort_session))
+        .route("/api/sessions/:id", delete(delete_session))
+        .route("/api/shutdown", post(shutdown))
         .with_state(state)
 }
 
@@ -161,16 +171,74 @@ async fn abort_session(State(state): State<HttpState>, Path(session_id): Path<St
     }
 }
 
+async fn delete_session(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    match state
+        .handler
+        .handle(ClientCommand::DeleteSession { session_id })
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error_response(StatusCode::NOT_FOUND, "delete_failed", error),
+    }
+}
+
 async fn session_stream(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
+    Query(query): Query<StreamQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let session_id = SessionId::from(session_id);
     let rx = state.event_tx.subscribe();
+    let (missed_events, replay_error) = match query.cursor.as_ref() {
+        Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
+        Some(cursor) => match state
+            .runtime
+            .session_manager
+            .replay_after(&session_id, cursor)
+            .await
+        {
+            Ok(events) => (events, false),
+            Err(error) => {
+                tracing::warn!(session_id = %session_id, cursor, "failed to replay SSE cursor: {error}");
+                (Vec::new(), true)
+            },
+        },
+        None => (Vec::new(), false),
+    };
+    let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
+    let replay_runtime = Arc::clone(&state.runtime);
+    let replay_session_id = session_id.clone();
+    let replay_stream = stream::iter(missed_events).filter_map(move |event| {
+        let runtime = Arc::clone(&replay_runtime);
+        let session_id = replay_session_id.clone();
+        async move {
+            let delta = event_to_replay_delta(&event)?;
+            let cursor = event_cursor(&runtime, &event).await;
+            Some(Ok(sse_event(&ConversationStreamEnvelopeDto {
+                session_id: session_id.to_string(),
+                cursor: ConversationCursorDto {
+                    value: cursor.clone(),
+                },
+                delta,
+            })
+            .id(cursor)))
+        }
+    });
+    let replay_error_stream = stream::iter(replay_error.then(|| {
+        Ok(sse_event(&ConversationStreamEnvelopeDto {
+            session_id: session_id.to_string(),
+            cursor: ConversationCursorDto { value: "0".into() },
+            delta: ConversationDeltaDto::RehydrateRequired,
+        }))
+    }));
+
     let runtime = Arc::clone(&state.runtime);
-    let stream = stream::unfold(
-        (rx, runtime, session_id, false),
-        |(mut rx, runtime, session_id, closing)| async move {
+    let live_stream = stream::unfold(
+        (rx, runtime, session_id, replay_max_seq, false),
+        |(mut rx, runtime, session_id, replay_max_seq, closing)| async move {
             if closing {
                 return None;
             }
@@ -178,6 +246,12 @@ async fn session_stream(
             loop {
                 match rx.recv().await {
                     Ok(ClientNotification::Event(event)) if event.session_id == session_id => {
+                        if replay_max_seq
+                            .zip(event.seq)
+                            .is_some_and(|(max_seq, event_seq)| event_seq <= max_seq)
+                        {
+                            continue;
+                        }
                         let Some(delta) = event_to_delta(&event) else {
                             continue;
                         };
@@ -190,7 +264,7 @@ async fn session_stream(
                             delta,
                         })
                         .id(cursor);
-                        return Some((Ok(item), (rx, runtime, session_id, false)));
+                        return Some((Ok(item), (rx, runtime, session_id, replay_max_seq, false)));
                     },
                     Ok(_) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -200,13 +274,14 @@ async fn session_stream(
                             cursor: ConversationCursorDto { value: cursor },
                             delta: ConversationDeltaDto::RehydrateRequired,
                         });
-                        return Some((Ok(item), (rx, runtime, session_id, true)));
+                        return Some((Ok(item), (rx, runtime, session_id, replay_max_seq, true)));
                     },
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
         },
     );
+    let stream = replay_error_stream.chain(replay_stream).chain(live_stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -330,15 +405,92 @@ fn event_to_delta(event: &Event) -> Option<ConversationDeltaDto> {
                 control: control_from_phase(projected_phase(&event.payload)),
             })
         },
-        // Terminal events — the client already has the block content
-        EventPayload::TurnCompleted { .. }
-        | EventPayload::AgentRunCompleted { .. }
-        | EventPayload::SystemPromptConfigured { .. }
+        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
+            Some(ConversationDeltaDto::UpdateControlState {
+                control: control_from_phase(Phase::Idle),
+            })
+        },
+        // Terminal events where the client already has the block content
+        EventPayload::SystemPromptConfigured { .. }
         | EventPayload::SessionContinuedFromCompaction { .. }
         | EventPayload::ThinkingDelta { .. }
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolCallRequested { .. } => None,
         _ => None,
+    }
+}
+
+fn event_to_replay_delta(event: &Event) -> Option<ConversationDeltaDto> {
+    match &event.payload {
+        EventPayload::UserMessage { message_id, text } => Some(ConversationDeltaDto::AppendBlock {
+            block: ConversationBlockDto::User {
+                id: message_id.to_string(),
+                text: text.clone(),
+            },
+        }),
+        EventPayload::AssistantMessageCompleted { message_id, text } => {
+            Some(ConversationDeltaDto::AppendBlock {
+                block: ConversationBlockDto::Assistant {
+                    id: message_id.to_string(),
+                    text: text.clone(),
+                    status: ConversationBlockStatusDto::Complete,
+                },
+            })
+        },
+        EventPayload::ToolCallCompleted {
+            call_id,
+            tool_name,
+            result,
+        } => Some(ConversationDeltaDto::AppendBlock {
+            block: ConversationBlockDto::ToolCall {
+                id: call_id.to_string(),
+                name: tool_name.clone(),
+                text: result.content.clone(),
+                status: if result.is_error {
+                    ConversationBlockStatusDto::Error
+                } else {
+                    ConversationBlockStatusDto::Complete
+                },
+            },
+        }),
+        EventPayload::ErrorOccurred { message, .. } => Some(ConversationDeltaDto::AppendBlock {
+            block: ConversationBlockDto::Error {
+                id: event.id.to_string(),
+                message: message.clone(),
+            },
+        }),
+        EventPayload::CompactBoundaryCreated {
+            continued_session_id,
+            ..
+        } => Some(ConversationDeltaDto::SessionContinued {
+            parent_session_id: event.session_id.to_string(),
+            new_session_id: continued_session_id.to_string(),
+            parent_cursor: ConversationCursorDto {
+                value: event.seq.unwrap_or_default().to_string(),
+            },
+        }),
+        EventPayload::TurnCompleted { .. } => Some(ConversationDeltaDto::UpdateControlState {
+            control: control_from_phase(Phase::Idle),
+        }),
+        EventPayload::SessionContinuedFromCompaction { .. }
+        | EventPayload::SessionStarted { .. }
+        | EventPayload::SystemPromptConfigured { .. }
+        | EventPayload::TurnStarted
+        | EventPayload::AgentRunStarted
+        | EventPayload::AgentRunCompleted { .. }
+        | EventPayload::AssistantMessageStarted { .. }
+        | EventPayload::AssistantTextDelta { .. }
+        | EventPayload::ThinkingDelta { .. }
+        | EventPayload::ToolCallStarted { .. }
+        | EventPayload::ToolCallArgumentsDelta { .. }
+        | EventPayload::ToolCallRequested { .. }
+        | EventPayload::ToolOutputDelta { .. }
+        | EventPayload::CompactionStarted
+        | EventPayload::ToolCallBackgrounded { .. }
+        | EventPayload::BackgroundTaskOutput { .. }
+        | EventPayload::BackgroundTaskCompleted { .. }
+        | EventPayload::Custom { .. }
+        | EventPayload::SessionDeleted => None,
     }
 }
 
@@ -421,6 +573,16 @@ async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String
 fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {
     let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
     SseEvent::default().event("conversation").data(data)
+}
+
+async fn shutdown(State(state): State<HttpState>) -> Response {
+    tracing::info!("shutdown requested via HTTP");
+    let runtime = Arc::clone(&state.runtime);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        runtime.shutdown_token.cancel();
+    });
+    StatusCode::NO_CONTENT.into_response()
 }
 
 fn error_response(status: StatusCode, code: impl Into<String>, message: impl ToString) -> Response {

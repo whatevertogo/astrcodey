@@ -24,8 +24,10 @@ export default function Sidebar() {
   const sessions = useAppStore((s) => s.sessions);
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const phase = useAppStore((s) => s.phase);
+  const workingDir = useAppStore((s) => s.workingDir);
   const createSession = useAppStore((s) => s.createSession);
   const switchSession = useAppStore((s) => s.switchSession);
+  const deleteSession = useAppStore((s) => s.deleteSession);
 
   const [showNewProject, setShowNewProject] = useState(false);
 
@@ -35,6 +37,10 @@ export default function Sidebar() {
   const handleSelectSession = useCallback((sessionId: string) => {
     void switchSession(sessionId);
   }, [switchSession]);
+
+  const handleDeleteSession = useCallback((sessionId: string) => {
+    void deleteSession(sessionId);
+  }, [deleteSession]);
 
   const handleNewProject = useCallback(async (workingDir: string) => {
     await createSession(workingDir);
@@ -60,10 +66,10 @@ export default function Sidebar() {
         <button
           type="button"
           onClick={() => {
-            if (sessions.length > 0) {
-              // Create new session for the first project's working dir
-              const firstWorkingDir = sessions[0].workingDir;
-              void createSession(firstWorkingDir);
+            const activeWorkingDir =
+              workingDir ?? sessions.find((session) => session.sessionId === activeSessionId)?.workingDir;
+            if (activeWorkingDir) {
+              void createSession(activeWorkingDir);
             } else {
               setShowNewProject(true);
             }
@@ -91,6 +97,7 @@ export default function Sidebar() {
             sessions={groupSessions}
             activeSessionId={activeSessionId}
             onSelectSession={handleSelectSession}
+            onDeleteSession={handleDeleteSession}
           />
         ))}
       </div>

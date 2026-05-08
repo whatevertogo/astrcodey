@@ -43,10 +43,12 @@ astrcode-log = { path = "../astrcode-log" }
 notify = "7"
 axum = "0.7"
 futures-util = "0.3"
+tokio-util = "0.7"
 
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+tokio-util = "0.7"
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }

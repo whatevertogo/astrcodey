@@ -5,10 +5,12 @@ export type SseEventHandler = (envelope: ConversationStreamEnvelope) => void;
 
 export async function consumeSseStream(
   sessionId: string,
+  cursor: string | null,
   onEnvelope: SseEventHandler,
   signal: AbortSignal
 ): Promise<'ended' | 'aborted'> {
-  const url = `${getBaseUrl()}/api/sessions/${encodeURIComponent(sessionId)}/stream`;
+  const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+  const url = `${getBaseUrl()}/api/sessions/${encodeURIComponent(sessionId)}/stream${params}`;
 
   const response = await fetch(url, {
     headers: {

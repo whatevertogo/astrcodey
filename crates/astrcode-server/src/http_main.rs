@@ -26,6 +26,7 @@ async fn main() {
             std::process::exit(1);
         });
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let shutdown_token = runtime.shutdown_token.clone();
     let app = astrcode_server::http::router(runtime, event_tx);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -35,7 +36,13 @@ async fn main() {
         });
 
     tracing::info!("HTTP server ready at http://{addr}");
-    if let Err(error) = axum::serve(listener, app).await {
+    if let Err(error) = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+            tracing::info!("graceful shutdown triggered");
+        })
+        .await
+    {
         tracing::error!("HTTP server failed: {error}");
         std::process::exit(1);
     }

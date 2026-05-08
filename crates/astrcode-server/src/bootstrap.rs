@@ -46,6 +46,8 @@ pub struct ServerRuntime {
     pub extension_runner: Arc<ExtensionRunner>,
     /// 已解析的最终配置（只读快照）
     pub effective: EffectiveConfig,
+    /// 触发后通知 HTTP server 执行 graceful shutdown
+    pub shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -222,6 +224,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         auto_compact_failures,
         extension_runner,
         effective,
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
 

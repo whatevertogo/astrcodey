@@ -30,7 +30,7 @@ function browserBridge(): HostBridge {
       return Promise.resolve(null);
     },
     getServerOrigin() {
-      return '';
+      return window.__ASTRCODE_BOOTSTRAP__?.serverOrigin ?? '';
     },
   };
 }

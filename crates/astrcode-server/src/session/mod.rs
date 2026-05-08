@@ -111,6 +111,25 @@ impl SessionManager {
         Ok(self.store.latest_cursor(session_id).await?)
     }
 
+    /// 从指定 cursor 之后重放 durable 事件。
+    pub async fn replay_after(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, SessionError> {
+        let min_seq = cursor.parse::<u64>().ok();
+        Ok(self
+            .store
+            .replay_from(session_id, cursor)
+            .await?
+            .into_iter()
+            .filter(|event| match (min_seq, event.seq) {
+                (Some(cursor_seq), Some(event_seq)) => event_seq > cursor_seq,
+                _ => true,
+            })
+            .collect())
+    }
+
     /// 为当前 projection cursor 写入恢复 checkpoint。
     ///
     /// 只有当传入 cursor 与当前 recovered projection cursor 匹配时，才会

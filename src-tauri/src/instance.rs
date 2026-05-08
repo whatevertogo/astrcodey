@@ -51,7 +51,6 @@ pub enum InstanceBootstrap {
 pub struct InstanceCoordinator {
     _lock_file: File,
     info_path: std::path::PathBuf,
-    info: InstanceInfo,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     main_window_ready: Arc<AtomicBool>,
     pending_focus: Arc<AtomicBool>,
@@ -130,7 +129,6 @@ impl InstanceCoordinator {
         Ok(Arc::new(Self {
             _lock_file: lock_file,
             info_path,
-            info,
             app_handle,
             main_window_ready,
             pending_focus,
@@ -163,9 +161,8 @@ impl InstanceCoordinator {
     }
 
     pub fn attach_app_handle(&self, handle: AppHandle) {
-        if let Ok(mut slot) = self.app_handle.lock() {
-            *slot = Some(handle);
-        }
+        let mut slot = self.app_handle.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = Some(handle);
         self.flush_pending_focus();
     }
 
@@ -267,10 +264,10 @@ fn trigger_focus(
 
     let handle = match app_handle.lock() {
         Ok(slot) => slot.clone(),
-        Err(_) => {
-            pending_focus.store(true, Ordering::SeqCst);
-            return;
-        }
+        Err(e) => {
+            let slot = e.into_inner();
+            slot.clone()
+        },
     };
     let Some(handle) = handle else {
         pending_focus.store(true, Ordering::SeqCst);

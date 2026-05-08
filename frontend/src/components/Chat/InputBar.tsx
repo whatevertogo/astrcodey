@@ -29,20 +29,21 @@ export default function InputBar() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
   }, []);
 
-  const submit = useCallback(() => {
+  const submit = useCallback(async () => {
     const trimmed = value.trim();
-    if (!trimmed || !activeSessionId) return;
-    void submitPrompt(trimmed);
+    if (!trimmed || !activeSessionId || !canSubmit) return;
+    const accepted = await submitPrompt(trimmed);
+    if (!accepted) return;
     setValue('');
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [value, activeSessionId, submitPrompt]);
+  }, [value, activeSessionId, canSubmit, submitPrompt]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey && !isComposing) {
       event.preventDefault();
-      submit();
+      submit().catch((err) => console.error('submit failed:', err));
     }
   }, [submit, isComposing]);
 
@@ -88,8 +89,8 @@ export default function InputBar() {
                       <button
                         className={cn(composerSubmitButton)}
                         type="button"
-                        onClick={submit}
-                        disabled={!value.trim() || !activeSessionId}
+                        onClick={() => void submit()}
+                        disabled={!value.trim() || !activeSessionId || !canSubmit}
                         aria-label="发送消息"
                         title="发送消息"
                       >

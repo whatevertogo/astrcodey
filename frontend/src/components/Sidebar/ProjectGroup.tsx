@@ -8,9 +8,10 @@ interface ProjectGroupProps {
   sessions: SessionListItem[];
   activeSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
 }
 
-function ProjectGroup({ workingDir, sessions, activeSessionId, onSelectSession }: ProjectGroupProps) {
+function ProjectGroup({ workingDir, sessions, activeSessionId, onSelectSession, onDeleteSession }: ProjectGroupProps) {
   const [isExpanded, setIsExpanded] = useState(true);
   const projectName = workingDir.split(/[\\/]/).filter(Boolean).pop() ?? workingDir;
 
@@ -44,6 +45,7 @@ function ProjectGroup({ workingDir, sessions, activeSessionId, onSelectSession }
               session={session}
               isActive={activeSessionId === session.sessionId}
               onSelect={onSelectSession}
+              onDelete={onDeleteSession}
             />
           ))}
         </div>
