@@ -5,7 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use astrcode_ai::openai::OpenAiProvider;
+use astrcode_ai::create_provider;
 use astrcode_context::{manager::LlmContextAssembler, settings::ContextWindowSettings};
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
@@ -125,7 +125,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 
     // 2. 构建 LLM provider。
     //
-    // 这里把 EffectiveConfig 中的 LLM 参数转换成底层 OpenAI 兼容客户端配置。
+    // 根据 `provider_kind` 路由到对应的 provider 实现。
     // 后续所有主会话和子会话都会共享这个 provider。
     let llm_config = LlmClientConfig {
         base_url: effective.llm.base_url.clone(),
@@ -139,13 +139,14 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         prompt_cache_retention: effective.llm.prompt_cache_retention,
         extra_headers: Default::default(),
     };
-    let llm_provider: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(
+    let llm_provider = create_provider(
+        &effective.llm.provider_kind,
         llm_config,
         effective.llm.api_mode,
         effective.llm.model_id.clone(),
         Some(effective.llm.max_tokens),
         Some(effective.llm.context_limit),
-    ));
+    );
 
     // 3. 初始化上下文组装器。
     let context_settings = ContextWindowSettings {

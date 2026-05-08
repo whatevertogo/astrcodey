@@ -191,7 +191,7 @@ impl ModelSelection {
 
 /// 生成内置的默认配置文件列表。
 ///
-/// 包含 DeepSeek 和 OpenAI 两个预配置的 LLM 提供者。
+/// 包含 DeepSeek、OpenAI、Anthropic 和 Google Gemini 四个预配置的 LLM 提供者。
 pub(crate) fn raw_default_profiles() -> Vec<Profile> {
     vec![
         Profile {
@@ -230,6 +230,46 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                 max_tokens: Some(16384),
                 context_limit: Some(1000000),
             }],
+        },
+        Profile {
+            name: "anthropic".into(),
+            provider_kind: "anthropic".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            api_key: Some("env:ANTHROPIC_API_KEY".into()),
+            api_mode: None,
+            openai_capabilities: None,
+            models: vec![
+                ModelConfig {
+                    id: "claude-sonnet-4-6".into(),
+                    max_tokens: Some(16384),
+                    context_limit: Some(200_000),
+                },
+                ModelConfig {
+                    id: "claude-opus-4-7".into(),
+                    max_tokens: Some(16384),
+                    context_limit: Some(200_000),
+                },
+            ],
+        },
+        Profile {
+            name: "gemini".into(),
+            provider_kind: "google_genai".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+            api_key: Some("env:GOOGLE_API_KEY".into()),
+            api_mode: None,
+            openai_capabilities: None,
+            models: vec![
+                ModelConfig {
+                    id: "gemini-2.5-pro".into(),
+                    max_tokens: Some(16384),
+                    context_limit: Some(1_048_576),
+                },
+                ModelConfig {
+                    id: "gemini-2.5-flash".into(),
+                    max_tokens: Some(16384),
+                    context_limit: Some(1_048_576),
+                },
+            ],
         },
     ]
 }

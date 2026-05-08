@@ -9,6 +9,7 @@ use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::{
+    common::build_client,
     retry::RetryPolicy,
     serialization::{
         chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
@@ -34,14 +35,7 @@ impl OpenAiProvider {
         max_tokens: Option<u32>,
         context_limit: Option<usize>,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
-            .timeout(std::time::Duration::from_secs(config.read_timeout_secs))
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to create HTTP client: {e}");
-                reqwest::Client::new()
-            });
+        let client = build_client(&config);
 
         Self {
             config,
