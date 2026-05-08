@@ -12,10 +12,14 @@
 
 ## 高优先级
 
+- [ ] 引入 fd、rg、sed、cat 等外部依赖
+  - [ ] 添加可选配置让 agent 系统优先使用终端指令而非内置工具，并抽离内置工具为插件并隐藏
+  - [ ] 工具执行策略配置（builtin / external / auto）
 
+<!-- 
 - [ ] MCP (Model Context Protocol) 支持完善
   - [ ] MCP 服务器发现与配置
-  - [ ] MCP 工具动态注册
+  - [ ] MCP 工具动态注册 -->
 
 - [ ] 上下文压缩优化
   - [ ] 智能压缩策略（基于语义而非纯规则）
@@ -30,9 +34,6 @@
   - [ ] Google Gemini API 适配
   - [ ] 本地模型 (Ollama/LM Studio) 支持
 
-- [ ] 引入 fd、rg、sed、cat 等外部依赖
-  - [ ] 添加可选配置让 agent 系统优先使用终端指令而非内置工具
-  - [ ] 工具执行策略配置（builtin / external / auto）
 
 - [ ] 会话 Fork/Branch 功能
   - [ ] 会话树可视化
