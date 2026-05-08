@@ -1,6 +1,6 @@
-import { useAppStore } from '../../store/conversation';
-import { cn } from '../../lib/utils';
-import { PHASE_BG_CLASS } from '../../lib/styles';
+import { useAppStore } from '../../store/conversation'
+import { cn } from '../../lib/utils'
+import { PHASE_BG_CLASS, ghostIconButton } from '../../lib/styles'
 
 const PHASE_LABELS: Record<string, string> = {
   idle: '就绪',
@@ -9,19 +9,50 @@ const PHASE_LABELS: Record<string, string> = {
   calling_tool: '调用工具',
   compacting: '压缩中',
   error: '错误',
-};
+}
 
-export default function TopBar() {
-  const phase = useAppStore((s) => s.phase);
-  const activeSessionTitle = useAppStore((s) => s.activeSessionTitle);
-  const activeSessionId = useAppStore((s) => s.activeSessionId);
-  const control = useAppStore((s) => s.control);
-  const compactSession = useAppStore((s) => s.compactSession);
-  const canCompact = Boolean(activeSessionId && control?.canRequestCompact && !control.compacting);
+interface TopBarProps {
+  isSidebarOpen: boolean
+  onToggleSidebar: () => void
+}
+
+export default function TopBar({
+  isSidebarOpen,
+  onToggleSidebar,
+}: TopBarProps) {
+  const phase = useAppStore((s) => s.phase)
+  const activeSessionTitle = useAppStore((s) => s.activeSessionTitle)
+  const activeSessionId = useAppStore((s) => s.activeSessionId)
+  const control = useAppStore((s) => s.control)
+  const compactSession = useAppStore((s) => s.compactSession)
+  const canCompact = Boolean(
+    activeSessionId && control?.canRequestCompact && !control.compacting
+  )
 
   return (
     <div className="relative z-30 flex shrink-0 items-center justify-between gap-4 border-b border-border bg-surface/92 px-[22px] py-3.5 backdrop-blur-[12px]">
-      <div className="flex items-center gap-2.5 min-w-0">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <button
+          className={cn(ghostIconButton, '-ml-1 p-1')}
+          type="button"
+          onClick={onToggleSidebar}
+          aria-label={isSidebarOpen ? '收起侧边栏' : '展开侧边栏'}
+          title={isSidebarOpen ? '收起侧边栏' : '展开侧边栏'}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+            <line x1="9" y1="3" x2="9" y2="21" />
+          </svg>
+        </button>
         <span
           className={cn(
             'h-[9px] w-[9px] shrink-0 rounded-full shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
@@ -48,5 +79,5 @@ export default function TopBar() {
         压缩
       </button>
     </div>
-  );
+  )
 }

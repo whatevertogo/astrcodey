@@ -578,7 +578,11 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             Arc::new(ExtensionRuntime::new()),
         )),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        effective: EffectiveConfig {
+        config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+            std::path::PathBuf::from("target/test-config.json"),
+        )),
+        raw_config: std::sync::RwLock::new(astrcode_core::config::Config::default()),
+        effective: std::sync::RwLock::new(EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
@@ -604,6 +608,6 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
                 post_compact_token_budget: 50_000,
                 post_compact_max_tokens_per_file: 5_000,
             },
-        },
+        }),
     })
 }

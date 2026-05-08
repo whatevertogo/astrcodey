@@ -44,10 +44,37 @@ pub struct ServerRuntime {
     pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
-    /// 已解析的最终配置（只读快照）
-    pub effective: EffectiveConfig,
+    /// 已解析的最终配置（运行时可通过 `sync_effective` 刷新）
+    pub effective: std::sync::RwLock<EffectiveConfig>,
+    /// 配置持久化存储，用于运行时读写配置
+    pub config_store: Arc<dyn astrcode_core::config::ConfigStore>,
+    /// 原始配置（用于设置面板展示 profile 列表等）
+    pub raw_config: std::sync::RwLock<astrcode_core::config::Config>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
+}
+
+impl ServerRuntime {
+    pub fn read_effective(&self) -> std::sync::RwLockReadGuard<'_, EffectiveConfig> {
+        self.effective.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn write_raw_config(&self) -> std::sync::RwLockWriteGuard<'_, astrcode_core::config::Config> {
+        self.raw_config.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn read_raw_config(&self) -> std::sync::RwLockReadGuard<'_, astrcode_core::config::Config> {
+        self.raw_config.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn sync_effective(&self) -> Result<(), astrcode_core::config::ResolveError> {
+        let raw = self.raw_config.read().unwrap_or_else(|e| e.into_inner());
+        let new_effective = raw.clone().into_effective()?;
+        drop(raw);
+        let mut guard = self.effective.write().unwrap_or_else(|e| e.into_inner());
+        *guard = new_effective;
+        Ok(())
+    }
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -92,7 +119,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         FileConfigStore::default_path()
     };
     let config = config_store.load().await?;
-    let effective = config.into_effective()?;
+    let effective = config.clone().into_effective()?;
 
     // 2. 构建 LLM provider。
     //
@@ -223,7 +250,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         context_assembler,
         auto_compact_failures,
         extension_runner,
-        effective,
+        effective: std::sync::RwLock::new(effective),
+        config_store: Arc::new(config_store),
+        raw_config: std::sync::RwLock::new(config),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }

@@ -270,3 +270,93 @@ pub struct DeleteProjectResponseDto {
     /// 被删除的会话数量。
     pub deleted_count: usize,
 }
+
+// ── Config / Models DTOs ──
+
+/// GET /api/config 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigViewResponseDto {
+    pub config_path: String,
+    pub active_profile: String,
+    pub active_model: String,
+    pub profiles: Vec<ProfileDto>,
+    pub warning: Option<String>,
+}
+
+/// 配置文件中的 Profile 信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDto {
+    pub name: String,
+    pub provider_kind: String,
+    pub base_url: String,
+    pub has_api_key: bool,
+    pub models: Vec<ModelDto>,
+}
+
+/// Profile 中的模型信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDto {
+    pub id: String,
+    pub max_tokens: Option<u32>,
+    pub context_limit: Option<usize>,
+}
+
+/// POST /api/config/active-selection 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateActiveSelectionRequest {
+    pub active_profile: String,
+    pub active_model: String,
+}
+
+/// POST /api/config/active-selection 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateActiveSelectionResponseDto {
+    pub success: bool,
+    pub warning: Option<String>,
+}
+
+/// POST /api/config/reload 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigReloadResponseDto {
+    pub active_profile: String,
+    pub active_model: String,
+}
+
+/// GET /api/models/current 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentModelResponseDto {
+    pub profile_name: String,
+    pub model_id: String,
+    pub provider_kind: String,
+}
+
+/// GET /api/models 响应中的单个模型。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModelDto {
+    pub profile_name: String,
+    pub model_id: String,
+    pub provider_kind: String,
+}
+
+/// GET /api/models 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelListResponseDto {
+    pub models: Vec<AvailableModelDto>,
+}
+
+/// POST /api/models/test 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTestResponseDto {
+    pub success: bool,
+    pub message: String,
+}

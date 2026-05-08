@@ -1,9 +1,9 @@
-import { memo } from 'react';
-import type { ConversationBlock } from '../../services/types';
-import { emptyStateSurface } from '../../lib/styles';
+import { memo } from 'react'
+import type { ConversationBlock } from '../../services/types'
+import { emptyStateSurface } from '../../lib/styles'
 
 interface SystemNoteProps {
-  block: Extract<ConversationBlock, { kind: 'systemNote' }>;
+  block: Extract<ConversationBlock, { kind: 'systemNote' }>
 }
 
 function SystemNote({ block }: SystemNoteProps) {
@@ -11,7 +11,7 @@ function SystemNote({ block }: SystemNoteProps) {
     <div className={emptyStateSurface}>
       <div className="text-[13px] text-text-secondary">{block.text}</div>
     </div>
-  );
+  )
 }
 
-export default memo(SystemNote);
+export default memo(SystemNote)

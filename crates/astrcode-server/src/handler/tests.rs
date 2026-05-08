@@ -163,7 +163,11 @@ fn test_runtime_with_settings(
             Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
         )),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        effective: EffectiveConfig {
+        config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+            std::path::PathBuf::from("target/test-config.json"),
+        )),
+        raw_config: std::sync::RwLock::new(astrcode_core::config::Config::default()),
+        effective: std::sync::RwLock::new(EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
@@ -189,7 +193,7 @@ fn test_runtime_with_settings(
                 post_compact_token_budget: context_settings.post_compact_token_budget,
                 post_compact_max_tokens_per_file: context_settings.post_compact_max_tokens_per_file,
             },
-        },
+        }),
     })
 }
 

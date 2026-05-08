@@ -75,8 +75,10 @@
   --avatar-surface-strong: #ebdfd1;
   --avatar-text: #8a7458;
   --shadow-soft: 0 10px 30px rgba(117, 90, 52, 0.08);
-  --shadow-composer-shell: 0 24px 42px rgba(117, 90, 52, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.82);
-  --shadow-focus-accent: 0 0 0 4px rgba(57, 201, 143, 0.12), 0 28px 48px rgba(117, 90, 52, 0.13);
+  --shadow-composer-shell:
+    0 24px 42px rgba(117, 90, 52, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  --shadow-focus-accent:
+    0 0 0 4px rgba(57, 201, 143, 0.12), 0 28px 48px rgba(117, 90, 52, 0.13);
   --phase-idle: #4ec9b0;
   --phase-thinking: #dcdcaa;
   --phase-calling-tool: #9cdcfe;
@@ -105,7 +107,9 @@ body,
   overflow: hidden;
   background: #ffffff;
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
   font-size: 16px;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -130,13 +134,24 @@ body,
 }
 
 @keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 @keyframes fadeSlideUp {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 button {
@@ -159,22 +174,53 @@ textarea {
   resize: none;
 }
 
-code, pre {
+code,
+pre {
   font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
   font-size: 13px;
 }
 
-.prose-chat p { margin: 0 0 14px; }
-.prose-chat p:last-child { margin-bottom: 0; }
-.prose-chat ul, .prose-chat ol { margin: 8px 0 16px; padding-left: 24px; }
-.prose-chat ul { list-style-type: disc; list-style-position: outside; }
-.prose-chat ol { list-style-type: decimal; list-style-position: outside; }
-.prose-chat li { margin-bottom: 6px; }
-.prose-chat strong { color: #201b16; }
-.prose-chat h1, .prose-chat h2, .prose-chat h3 { margin: 24px 0 12px; font-weight: 600; color: #201b16; }
-.prose-chat h1 { font-size: 1.5em; }
-.prose-chat h2 { font-size: 1.25em; }
-.prose-chat h3 { font-size: 1.1em; }
+.prose-chat p {
+  margin: 0 0 14px;
+}
+.prose-chat p:last-child {
+  margin-bottom: 0;
+}
+.prose-chat ul,
+.prose-chat ol {
+  margin: 8px 0 16px;
+  padding-left: 24px;
+}
+.prose-chat ul {
+  list-style-type: disc;
+  list-style-position: outside;
+}
+.prose-chat ol {
+  list-style-type: decimal;
+  list-style-position: outside;
+}
+.prose-chat li {
+  margin-bottom: 6px;
+}
+.prose-chat strong {
+  color: #201b16;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  margin: 24px 0 12px;
+  font-weight: 600;
+  color: #201b16;
+}
+.prose-chat h1 {
+  font-size: 1.5em;
+}
+.prose-chat h2 {
+  font-size: 1.25em;
+}
+.prose-chat h3 {
+  font-size: 1.1em;
+}
 .prose-chat code {
   background: rgba(0, 0, 0, 0.04) !important;
   color: var(--text-primary) !important;
@@ -191,8 +237,32 @@ code, pre {
   border-left: 3px solid rgba(0, 0, 0, 0.12);
   color: var(--text-secondary);
 }
-.prose-chat a { color: #3b82f6; text-decoration: none; }
-.prose-chat a:hover { text-decoration: underline; }
-.prose-chat table { margin: 16px 0; display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; width: 100%; font-size: 13px; line-height: 1.6; }
-.prose-chat th { text-align: left; padding: 8px 12px; font-weight: 600; color: #201b16; border-bottom: 1px solid rgba(0, 0, 0, 0.08); }
-.prose-chat td { padding: 8px 12px; border-top: 1px solid rgba(0, 0, 0, 0.04); color: var(--text-secondary); }
+.prose-chat a {
+  color: #3b82f6;
+  text-decoration: none;
+}
+.prose-chat a:hover {
+  text-decoration: underline;
+}
+.prose-chat table {
+  margin: 16px 0;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.prose-chat th {
+  text-align: left;
+  padding: 8px 12px;
+  font-weight: 600;
+  color: #201b16;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+.prose-chat td {
+  padding: 8px 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.04);
+  color: var(--text-secondary);
+}

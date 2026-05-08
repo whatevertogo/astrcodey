@@ -1,18 +1,18 @@
-import { Component } from 'react';
+import { Component } from 'react'
 
 interface Props {
-  children: React.ReactNode;
+  children: React.ReactNode
 }
 
 interface State {
-  error: Error | null;
+  error: Error | null
 }
 
 export default class ErrorBoundary extends Component<Props, State> {
-  state: State = { error: null };
+  state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error }
   }
 
   render() {
@@ -20,7 +20,9 @@ export default class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex h-full w-full items-center justify-center bg-panel-bg">
           <div className="text-center max-w-md px-6">
-            <div className="mb-2 text-[15px] font-semibold text-danger">渲染出错</div>
+            <div className="mb-2 text-[15px] font-semibold text-danger">
+              渲染出错
+            </div>
             <div className="mb-4 text-[13px] text-text-secondary break-words">
               {this.state.error.message}
             </div>
@@ -33,8 +35,8 @@ export default class ErrorBoundary extends Component<Props, State> {
             </button>
           </div>
         </div>
-      );
+      )
     }
-    return this.props.children;
+    return this.props.children
   }
 }

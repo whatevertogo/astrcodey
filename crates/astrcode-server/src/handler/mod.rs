@@ -151,7 +151,7 @@ impl CommandHandler {
                     let ext_ctx = ServerExtensionContext::new(
                         session_id.to_string(),
                         String::new(),
-                        ModelSelection::simple(self.runtime.effective.llm.model_id.clone()),
+                        ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
                     );
                     if let Err(e) = self
                         .runtime
@@ -203,7 +203,7 @@ impl CommandHandler {
                 let ext_ctx = ServerExtensionContext::new(
                     sid.to_string(),
                     state.working_dir.clone(),
-                    ModelSelection::simple(self.runtime.effective.llm.model_id.clone()),
+                    ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
                 );
                 match self
                     .runtime
@@ -256,7 +256,7 @@ impl CommandHandler {
 
     /// 创建新会话，分发 SessionStart 扩展事件，并固定该会话的工具和 system prompt 快照。
     pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, String> {
-        let model_id = self.runtime.effective.llm.model_id.clone();
+        let model_id = self.runtime.read_effective().llm.model_id.clone();
         match self
             .runtime
             .session_manager
@@ -269,7 +269,7 @@ impl CommandHandler {
                 let ext_ctx = ServerExtensionContext::new(
                     event.session_id.to_string(),
                     working_dir.clone(),
-                    ModelSelection::simple(self.runtime.effective.llm.model_id.clone()),
+                    ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
                 );
                 if let Err(e) = self
                     .runtime
@@ -482,7 +482,7 @@ impl CommandHandler {
             return Ok(sid.clone());
         }
 
-        let model_id = self.runtime.effective.llm.model_id.clone();
+        let model_id = self.runtime.read_effective().llm.model_id.clone();
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
@@ -499,7 +499,7 @@ impl CommandHandler {
         let ext_ctx = ServerExtensionContext::new(
             sid.to_string(),
             wd.clone(),
-            ModelSelection::simple(self.runtime.effective.llm.model_id.clone()),
+            ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
         );
         self.runtime
             .extension_runner
@@ -544,12 +544,8 @@ impl CommandHandler {
     }
 
     async fn build_tool_registry_for(&self, working_dir: &str) -> Arc<ToolRegistry> {
-        build_tool_registry_snapshot(
-            &self.runtime.extension_runner,
-            working_dir,
-            self.runtime.effective.llm.read_timeout_secs,
-        )
-        .await
+        let timeout = self.runtime.read_effective().llm.read_timeout_secs;
+        build_tool_registry_snapshot(&self.runtime.extension_runner, working_dir, timeout).await
     }
 
     async fn configure_session_prompt(
@@ -560,11 +556,12 @@ impl CommandHandler {
         extra_system_prompt: Option<&str>,
     ) -> Result<String, String> {
         let tools = tool_registry.list_definitions();
+        let model_id = self.runtime.read_effective().llm.model_id.clone();
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.runtime.extension_runner,
             session_id.as_str(),
             working_dir,
-            &self.runtime.effective.llm.model_id,
+            &model_id,
             &tools,
             extra_system_prompt,
         )
@@ -619,11 +616,12 @@ impl CommandHandler {
                 }
             });
 
+            let model_id = runtime.read_effective().llm.model_id.clone();
             let agent = AgentLoop::new(
                 sid.clone(),
                 working_dir,
                 system_prompt,
-                runtime.effective.llm.model_id.clone(),
+                model_id,
                 AgentServices {
                     llm: runtime.llm_provider.clone(),
                     tool_registry,

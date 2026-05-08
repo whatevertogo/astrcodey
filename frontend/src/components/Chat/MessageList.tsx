@@ -1,66 +1,72 @@
-import { useCallback, useEffect, useRef } from 'react';
-import type { ConversationBlock } from '../../services/types';
-import { cn } from '../../lib/utils';
-import { emptyStateSurface } from '../../lib/styles';
-import AssistantMessage from './AssistantMessage';
-import UserMessage from './UserMessage';
-import ToolCallBlock from './ToolCallBlock';
-import ErrorBlock from './ErrorBlock';
-import SystemNote from './SystemNote';
+import { useCallback, useEffect, useRef } from 'react'
+import type { ConversationBlock } from '../../services/types'
+import { cn } from '../../lib/utils'
+import { emptyStateSurface } from '../../lib/styles'
+import AssistantMessage from './AssistantMessage'
+import UserMessage from './UserMessage'
+import ToolCallBlock from './ToolCallBlock'
+import ErrorBlock from './ErrorBlock'
+import SystemNote from './SystemNote'
 
 interface MessageListProps {
-  blocks: ConversationBlock[];
-  sessionId: string | null;
+  blocks: ConversationBlock[]
+  sessionId: string | null
 }
 
 function isAssistantLike(block: ConversationBlock): boolean {
-  return block.kind === 'assistant' || block.kind === 'toolCall';
+  return block.kind === 'assistant' || block.kind === 'toolCall'
 }
 
 function renderBlock(block: ConversationBlock): React.ReactNode {
   switch (block.kind) {
     case 'user':
-      return <UserMessage key={block.id} block={block} />;
+      return <UserMessage key={block.id} block={block} />
     case 'assistant':
-      return <AssistantMessage key={block.id} block={block} />;
+      return <AssistantMessage key={block.id} block={block} />
     case 'toolCall':
-      return <ToolCallBlock key={block.id} block={block} />;
+      return <ToolCallBlock key={block.id} block={block} />
     case 'error':
-      return <ErrorBlock key={block.id} block={block} />;
+      return <ErrorBlock key={block.id} block={block} />
     case 'systemNote':
-      return <SystemNote key={block.id} block={block} />;
+      return <SystemNote key={block.id} block={block} />
   }
 }
 
 export default function MessageList({ blocks, sessionId }: MessageListProps) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const shouldStickRef = useRef(true);
-  const prevLengthRef = useRef(0);
+  const listRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const shouldStickRef = useRef(true)
+  const prevLengthRef = useRef(0)
 
   const updateStickiness = useCallback(() => {
-    const container = listRef.current;
-    if (!container) { shouldStickRef.current = true; return; }
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldStickRef.current = distanceFromBottom <= 48;
-  }, []);
+    const container = listRef.current
+    if (!container) {
+      shouldStickRef.current = true
+      return
+    }
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight
+    shouldStickRef.current = distanceFromBottom <= 48
+  }, [])
 
   useEffect(() => {
-    const shouldAutoScroll = prevLengthRef.current === 0 || shouldStickRef.current;
-    prevLengthRef.current = blocks.length;
-    if (!shouldAutoScroll) return;
+    const shouldAutoScroll =
+      prevLengthRef.current === 0 || shouldStickRef.current
+    prevLengthRef.current = blocks.length
+    if (!shouldAutoScroll) return
 
     requestAnimationFrame(() => {
       if (listRef.current) {
-        listRef.current.scrollTop = listRef.current.scrollHeight;
+        listRef.current.scrollTop = listRef.current.scrollHeight
       }
-      updateStickiness();
-    });
-  }, [blocks, updateStickiness]);
+      updateStickiness()
+    })
+  }, [blocks, updateStickiness])
 
   const renderedBlocks = blocks.map((block, index) => {
-    const prevBlock = index > 0 ? blocks[index - 1] : null;
-    const isContinuation = prevBlock !== null && isAssistantLike(block) && isAssistantLike(prevBlock);
+    const prevBlock = index > 0 ? blocks[index - 1] : null
+    const isContinuation =
+      prevBlock !== null && isAssistantLike(block) && isAssistantLike(prevBlock)
 
     return (
       <div
@@ -72,8 +78,8 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       >
         {renderBlock(block)}
       </div>
-    );
-  });
+    )
+  })
 
   return (
     <div
@@ -82,12 +88,17 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       onScroll={updateStickiness}
     >
       {blocks.length === 0 && (
-        <div className={cn(emptyStateSurface, 'mx-auto mt-[90px] w-[min(100%,var(--chat-content-max-width))]')}>
+        <div
+          className={cn(
+            emptyStateSurface,
+            'mx-auto mt-[90px] w-[min(100%,var(--chat-content-max-width))]'
+          )}
+        >
           {sessionId ? '向 AstrCode 提问，开始对话...' : '选择或创建一个会话'}
         </div>
       )}
       {renderedBlocks}
       <div ref={bottomRef} />
     </div>
-  );
+  )
 }

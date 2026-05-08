@@ -15,12 +15,14 @@ use astrcode_protocol::{
     commands::ClientCommand,
     events::ClientNotification,
     http::{
-        CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
-        ConversationBlockStatusDto, ConversationControlStateDto, ConversationCursorDto,
-        ConversationDeltaDto, ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
+        AvailableModelDto, CompactSessionRequest, CompactSessionResponse, ConfigReloadResponseDto,
+        ConfigViewResponseDto, ConversationBlockDto, ConversationBlockStatusDto,
+        ConversationControlStateDto, ConversationCursorDto, ConversationDeltaDto,
+        ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
         ConversationStreamEnvelopeDto, CreateSessionRequest, CreateSessionResponseDto,
-        DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse, SessionListItemDto,
-        SessionListResponseDto,
+        CurrentModelResponseDto, DeleteProjectResponseDto, ModelDto, ModelListResponseDto,
+        ModelTestResponseDto, ProfileDto, PromptRequest, PromptSubmitResponse, SessionListItemDto,
+        SessionListResponseDto, UpdateActiveSelectionRequest, UpdateActiveSelectionResponseDto,
     },
 };
 use axum::{
@@ -52,6 +54,31 @@ struct StreamQuery {
     cursor: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProjectParams {
+    working_dir: String,
+}
+
+/// Run the HTTP/SSE server until graceful shutdown.
+pub async fn run_http_server(
+    runtime: Arc<ServerRuntime>,
+    addr: std::net::SocketAddr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (event_tx, _) = broadcast::channel(256);
+    let shutdown_token = runtime.shutdown_token.clone();
+    let app = router(Arc::clone(&runtime), event_tx);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("HTTP server ready at http://{addr}");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+            tracing::info!("graceful shutdown triggered");
+        })
+        .await?;
+    Ok(())
+}
+
 /// Build an axum router for the HTTP/SSE API.
 pub fn router(
     runtime: Arc<ServerRuntime>,
@@ -72,6 +99,16 @@ pub fn router(
         .route("/api/sessions/:id/compact", post(compact_session))
         .route("/api/sessions/:id/abort", post(abort_session))
         .route("/api/sessions/:id", delete(delete_session))
+        .route("/api/projects", delete(delete_project))
+        .route("/api/config", get(get_config))
+        .route("/api/config/reload", post(reload_config))
+        .route(
+            "/api/config/active-selection",
+            post(update_active_selection),
+        )
+        .route("/api/models/current", get(get_current_model))
+        .route("/api/models", get(list_models))
+        .route("/api/models/test", post(test_model))
         .route("/api/shutdown", post(shutdown))
         .with_state(state)
 }
@@ -182,6 +219,175 @@ async fn delete_session(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error_response(StatusCode::NOT_FOUND, "delete_failed", error),
+    }
+}
+
+async fn delete_project(
+    State(state): State<HttpState>,
+    Query(params): Query<DeleteProjectParams>,
+) -> Response {
+    match state.runtime.session_manager.list_summaries().await {
+        Ok(summaries) => {
+            let matching: Vec<_> = summaries
+                .into_iter()
+                .filter(|s| s.working_dir == params.working_dir)
+                .collect();
+            let count = matching.len();
+            for summary in &matching {
+                if let Err(error) = state
+                    .handler
+                    .handle(ClientCommand::DeleteSession {
+                        session_id: summary.session_id.to_string(),
+                    })
+                    .await
+                {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "delete_project_failed",
+                        error,
+                    );
+                }
+            }
+            Json(DeleteProjectResponseDto {
+                deleted_count: count,
+            })
+            .into_response()
+        },
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "list_failed", error),
+    }
+}
+
+async fn get_config(State(state): State<HttpState>) -> Response {
+    let raw = state.runtime.read_raw_config();
+    let config_path = state.runtime.config_store.path().display().to_string();
+    let profiles: Vec<ProfileDto> = raw
+        .profiles
+        .iter()
+        .map(|p| ProfileDto {
+            name: p.name.clone(),
+            provider_kind: p.provider_kind.clone(),
+            base_url: p.base_url.clone(),
+            has_api_key: p.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+            models: p
+                .models
+                .iter()
+                .map(|m| ModelDto {
+                    id: m.id.clone(),
+                    max_tokens: m.max_tokens,
+                    context_limit: m.context_limit,
+                })
+                .collect(),
+        })
+        .collect();
+    Json(ConfigViewResponseDto {
+        config_path,
+        active_profile: raw.active_profile.clone(),
+        active_model: raw.active_model.clone(),
+        profiles,
+        warning: None,
+    })
+    .into_response()
+}
+
+async fn reload_config(State(state): State<HttpState>) -> Response {
+    match state.runtime.config_store.load().await {
+        Ok(config) => {
+            let active_profile = config.active_profile.clone();
+            let active_model = config.active_model.clone();
+            {
+                let mut guard = state.runtime.write_raw_config();
+                *guard = config;
+            }
+            let _ = state.runtime.sync_effective();
+            Json(ConfigReloadResponseDto {
+                active_profile,
+                active_model,
+            })
+            .into_response()
+        },
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reload_failed",
+            error.to_string(),
+        ),
+    }
+}
+
+async fn update_active_selection(
+    State(state): State<HttpState>,
+    Json(request): Json<UpdateActiveSelectionRequest>,
+) -> Response {
+    let updated = {
+        let mut guard = state.runtime.write_raw_config();
+        guard.active_profile = request.active_profile;
+        guard.active_model = request.active_model;
+        guard.clone()
+    };
+    match state.runtime.config_store.save(&updated).await {
+        Ok(()) => {
+            let warning = state.runtime.sync_effective().err().map(|e| e.to_string());
+            Json(UpdateActiveSelectionResponseDto {
+                success: true,
+                warning,
+            })
+            .into_response()
+        },
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "save_failed",
+            error.to_string(),
+        ),
+    }
+}
+
+async fn get_current_model(State(state): State<HttpState>) -> Response {
+    let raw = state.runtime.read_raw_config();
+    let eff = state.runtime.read_effective();
+    Json(CurrentModelResponseDto {
+        profile_name: raw.active_profile.clone(),
+        model_id: eff.llm.model_id.clone(),
+        provider_kind: eff.llm.provider_kind.clone(),
+    })
+    .into_response()
+}
+
+async fn list_models(State(state): State<HttpState>) -> Response {
+    let raw = state.runtime.read_raw_config();
+    let models: Vec<AvailableModelDto> = raw
+        .profiles
+        .iter()
+        .flat_map(|p| {
+            p.models.iter().map(|m| AvailableModelDto {
+                profile_name: p.name.clone(),
+                model_id: m.id.clone(),
+                provider_kind: p.provider_kind.clone(),
+            })
+        })
+        .collect();
+    Json(ModelListResponseDto { models }).into_response()
+}
+
+async fn test_model(State(state): State<HttpState>) -> Response {
+    let start = std::time::Instant::now();
+    match state
+        .runtime
+        .llm_provider
+        .generate(vec![astrcode_core::llm::LlmMessage::user("Hi")], vec![])
+        .await
+    {
+        Ok(mut rx) => {
+            while rx.recv().await.is_some() {}
+            Json(ModelTestResponseDto {
+                success: true,
+                message: format!("ok ({}ms)", start.elapsed().as_millis()),
+            })
+            .into_response()
+        },
+        Err(error) => Json(ModelTestResponseDto {
+            success: false,
+            message: error.to_string(),
+        })
+        .into_response(),
     }
 }
 
