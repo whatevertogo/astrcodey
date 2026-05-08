@@ -21,6 +21,7 @@ impl SidecarState {
     }
 }
 
+// TODO: 需要更健壮的方式定位 sidecar 可执行文件
 fn resolve_sidecar_path() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let dir = exe.parent().ok_or_else(|| "no parent dir".to_string())?;
