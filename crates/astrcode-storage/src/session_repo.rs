@@ -270,15 +270,6 @@ impl EventStore for FileSystemSessionRepository {
         Ok(summaries)
     }
 
-    async fn conversation_snapshot(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        Ok(projection::conversation_snapshot(
-            self.session_read_model(session_id).await?,
-        ))
-    }
-
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
         Ok(self
             .session_read_model(session_id)
@@ -294,14 +285,11 @@ impl EventStore for FileSystemSessionRepository {
     ) -> Result<Vec<Event>, StorageError> {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
-        let events = self.replay_events(session_id).await?;
+        let meta = self.get_or_open_meta(session_id).await?;
         let Ok(seq) = cursor.parse::<u64>() else {
             return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
         };
-        Ok(events
-            .into_iter()
-            .filter(|event| event.seq.unwrap_or(0) >= seq)
-            .collect())
+        meta.log.replay_after(seq).await
     }
 
     async fn checkpoint(

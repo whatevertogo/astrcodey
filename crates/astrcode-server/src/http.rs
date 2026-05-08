@@ -161,7 +161,7 @@ async fn conversation_snapshot(
     match state
         .runtime
         .session_manager
-        .conversation_snapshot(&session_id)
+        .read_model(&session_id)
         .await
     {
         Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),

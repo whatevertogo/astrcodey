@@ -54,19 +54,10 @@ pub trait EventStore: Send + Sync {
     /// 返回所有会话摘要，供列表类接口使用。
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
 
-    /// 返回当前 conversation 的全量快照读模型。
-    ///
-    /// v1 语义是 full snapshot；cursor 仅表示该快照对应的最新 durable seq，
-    /// 不表示”从此 cursor 开始增量查询”。
-    async fn conversation_snapshot(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError>;
-
     /// 返回当前会话最新 durable cursor。
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError>;
 
-    /// 从指定的游标位置开始重放事件。
+    /// 从指定的游标位置之后重放事件（exclusive: seq > cursor）。
     async fn replay_from(
         &self,
         session_id: &SessionId,

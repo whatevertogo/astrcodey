@@ -58,22 +58,16 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
         },
-        EventPayload::AssistantMessageStarted { .. }
-        | EventPayload::AssistantTextDelta { .. }
-        | EventPayload::ThinkingDelta { .. } => {
+        EventPayload::AssistantMessageStarted { .. } => {
             model.phase = Phase::Streaming;
         },
         EventPayload::AssistantMessageCompleted { text, .. } => {
             model.messages.push(LlmMessage::assistant(text));
             model.phase = Phase::Idle;
         },
-        EventPayload::ToolCallStarted { call_id, .. } => {
-            model.pending_tool_calls.insert(call_id.clone());
-            model.phase = Phase::CallingTool;
-        },
-        EventPayload::ToolCallArgumentsDelta { .. } | EventPayload::ToolOutputDelta { .. } => {
-            model.phase = Phase::CallingTool;
-        },
+        // ToolCallStarted is non-durable and only used for live UI state.
+        // Retained for backwards compatibility with existing JSONL files.
+        EventPayload::ToolCallStarted { .. } => {},
         EventPayload::ToolCallRequested {
             call_id,
             tool_name,
@@ -134,9 +128,20 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                 Phase::CallingTool
             };
         },
-        EventPayload::CompactionStarted => {
-            model.phase = Phase::Compacting;
-        },
+        // Non-durable events below: never persisted to JSONL, only broadcast for
+        // live UI. Kept as no-op arms to maintain exhaustive matching for
+        // backwards compatibility with existing JSONL files that may contain
+        // ToolCallStarted / ToolCallBackgrounded / BackgroundTaskCompleted.
+        EventPayload::CompactionStarted
+        | EventPayload::AssistantTextDelta { .. }
+        | EventPayload::ThinkingDelta { .. }
+        | EventPayload::ToolCallArgumentsDelta { .. }
+        | EventPayload::ToolOutputDelta { .. }
+        | EventPayload::AgentRunStarted
+        | EventPayload::AgentRunCompleted { .. }
+        | EventPayload::ToolCallBackgrounded { .. }
+        | EventPayload::BackgroundTaskOutput { .. }
+        | EventPayload::BackgroundTaskCompleted { .. } => {},
         EventPayload::CompactBoundaryCreated { .. } => {
             model.phase = Phase::Idle;
         },
@@ -153,26 +158,9 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.messages = retained_messages.clone();
             model.phase = Phase::Idle;
         },
-        EventPayload::AgentRunStarted => {
-            model.phase = Phase::Thinking;
-        },
-        EventPayload::AgentRunCompleted { .. } => {
-            model.phase = Phase::Idle;
-        },
         EventPayload::ErrorOccurred { .. } => {
             model.phase = Phase::Error;
         },
         EventPayload::Custom { .. } => {},
-        // 后台任务事件：ToolCallBackgrounded 是 durable，
-        // 标记调用已转入后台但不改变 phase（agent loop 仍在运行）。
-        EventPayload::ToolCallBackgrounded { .. } => {},
-        // BackgroundTaskOutput 是 live 事件，正常情况下不会出现在持久化回放中。
-        EventPayload::BackgroundTaskOutput { .. } => {},
-        // BackgroundTaskCompleted 记录后台任务的最终结果。
-        EventPayload::BackgroundTaskCompleted { .. } => {},
     }
-}
-
-pub(crate) fn conversation_snapshot(model: SessionReadModel) -> SessionReadModel {
-    model
 }

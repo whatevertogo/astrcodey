@@ -280,14 +280,17 @@ impl EventPayload {
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
-            Self::AssistantTextDelta { .. }
+            Self::ToolCallStarted { .. }
+                | Self::AssistantTextDelta { .. }
                 | Self::ThinkingDelta { .. }
                 | Self::ToolCallArgumentsDelta { .. }
                 | Self::ToolOutputDelta { .. }
                 | Self::CompactionStarted
                 | Self::AgentRunStarted
                 | Self::AgentRunCompleted { .. }
+                | Self::ToolCallBackgrounded { .. }
                 | Self::BackgroundTaskOutput { .. }
+                | Self::BackgroundTaskCompleted { .. }
         )
     }
 }
@@ -407,6 +410,41 @@ mod tests {
             "CompactionStarted is live UI state only"
         );
         assert!(
+            !EventPayload::ToolCallStarted {
+                call_id: "c1".into(),
+                tool_name: "shell".into(),
+            }
+            .is_durable(),
+            "ToolCallStarted is live UI state only"
+        );
+        assert!(
+            !EventPayload::ToolCallBackgrounded {
+                call_id: "c1".into(),
+                tool_name: "shell".into(),
+                task_id: "t1".into(),
+                reason: "auto_threshold".into(),
+            }
+            .is_durable(),
+            "ToolCallBackgrounded is live UI state only"
+        );
+        assert!(
+            !EventPayload::BackgroundTaskCompleted {
+                task_id: "t1".into(),
+                call_id: "c1".into(),
+                tool_name: "shell".into(),
+                result: ToolResult {
+                    call_id: "c1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    error: None,
+                    metadata: BTreeMap::new(),
+                    duration_ms: Some(10),
+                },
+            }
+            .is_durable(),
+            "BackgroundTaskCompleted is live UI state only"
+        );
+        assert!(
             EventPayload::CompactBoundaryCreated {
                 trigger: "manual_command".into(),
                 pre_tokens: 10,
@@ -483,7 +521,7 @@ mod tests {
             arguments: serde_json::json!({"cmd": "pwd"}),
         };
 
-        assert!(start.is_durable());
+        assert!(!start.is_durable(), "ToolCallStarted is live UI state only");
         assert!(request.is_durable());
         assert_ne!(start, request);
     }

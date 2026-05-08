@@ -95,14 +95,6 @@ impl SessionManager {
         Ok(self.store.session_read_model(session_id).await?)
     }
 
-    /// 返回 session 当前全量快照读模型。
-    pub async fn conversation_snapshot(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, SessionError> {
-        Ok(self.store.conversation_snapshot(session_id).await?)
-    }
-
     /// 返回最新 cursor。
     pub async fn latest_cursor(
         &self,
@@ -117,17 +109,7 @@ impl SessionManager {
         session_id: &SessionId,
         cursor: &Cursor,
     ) -> Result<Vec<Event>, SessionError> {
-        let min_seq = cursor.parse::<u64>().ok();
-        Ok(self
-            .store
-            .replay_from(session_id, cursor)
-            .await?
-            .into_iter()
-            .filter(|event| match (min_seq, event.seq) {
-                (Some(cursor_seq), Some(event_seq)) => event_seq > cursor_seq,
-                _ => true,
-            })
-            .collect())
+        Ok(self.store.replay_from(session_id, cursor).await?)
     }
 
     /// 为当前 projection cursor 写入恢复 checkpoint。

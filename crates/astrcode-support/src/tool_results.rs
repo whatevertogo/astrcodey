@@ -22,6 +22,10 @@ pub const SHELL_TOOL_RESULT_INLINE_LIMIT: usize = 30_000;
 /// 搜索工具结果通常可重新分页查询，采用更低的默认阈值。
 pub const GREP_TOOL_RESULT_INLINE_LIMIT: usize = 20_000;
 
+/// read 工具自身已通过 maxChars 截断（默认 20K），此处阈值用于
+/// 超大读取场景的持久化以及多轮总预算超限时的候选选取。
+pub const READ_TOOL_RESULT_INLINE_LIMIT: usize = 40_000;
+
 /// 同一轮工具结果进入 LLM history 的总预算。
 pub const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 200_000;
 
@@ -45,7 +49,7 @@ pub fn should_persist_tool_result(content: &str, inline_limit: usize) -> bool {
 /// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
 pub fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
     match tool_name {
-        "read" => None,
+        "read" => Some(READ_TOOL_RESULT_INLINE_LIMIT),
         "shell" => Some(SHELL_TOOL_RESULT_INLINE_LIMIT),
         "grep" => Some(GREP_TOOL_RESULT_INLINE_LIMIT),
         _ => Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT),
@@ -211,7 +215,10 @@ mod tests {
 
     #[test]
     fn tool_inline_limits_match_high_volume_tools() {
-        assert_eq!(tool_result_inline_limit("read"), None);
+        assert_eq!(
+            tool_result_inline_limit("read"),
+            Some(READ_TOOL_RESULT_INLINE_LIMIT)
+        );
         assert_eq!(
             tool_result_inline_limit("shell"),
             Some(SHELL_TOOL_RESULT_INLINE_LIMIT)

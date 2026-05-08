@@ -118,15 +118,6 @@ impl EventStore for InMemoryEventStore {
         Ok(summaries)
     }
 
-    async fn conversation_snapshot(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        Ok(projection::conversation_snapshot(
-            self.session_read_model(session_id).await?,
-        ))
-    }
-
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
         Ok(self
             .session_read_model(session_id)
@@ -146,7 +137,7 @@ impl EventStore for InMemoryEventStore {
         };
         Ok(events
             .into_iter()
-            .filter(|event| event.seq.unwrap_or(0) >= seq)
+            .filter(|event| event.seq.unwrap_or(0) > seq)
             .collect())
     }
 

@@ -1230,31 +1230,43 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
 }
 
 #[tokio::test]
-async fn read_file_tool_result_is_not_persisted_again() {
-    let large_content = "R".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+async fn read_file_tool_result_is_persisted_when_exceeds_limit() {
+    use astrcode_support::tool_results::READ_TOOL_RESULT_INLINE_LIMIT;
+
+    let large_content = "R".repeat(READ_TOOL_RESULT_INLINE_LIMIT + 1);
     let tool_registry = test_registry(vec![Arc::new(LargeResultTool {
         name: "read",
         content: large_content.clone(),
     })]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
+    let session_manager = Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new())));
+    let start = session_manager
+        .create(".", "mock", 2048, None)
+        .await
+        .unwrap();
 
     let agent_loop = AgentLoop::new(
-        "session-1".into(),
+        start.session_id,
         ".".into(),
         String::new(),
         "mock".into(),
-        test_services(
-            Arc::new(ToolCallsThenFinalLlm {
+        AgentServices {
+            llm: Arc::new(ToolCallsThenFinalLlm {
                 call_count: AtomicUsize::new(0),
                 calls: vec![("call-1", "read")],
                 captured_messages: Arc::clone(&captured_messages),
             }),
             tool_registry,
-            Arc::new(ExtensionRunner::new(
+            extension_runner: Arc::new(ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
             )),
-        ),
+            context_assembler: test_context_assembler(),
+            session_manager,
+            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
+            background_result_tx: None,
+            background_tasks: Default::default(),
+        },
     );
 
     agent_loop
@@ -1263,7 +1275,17 @@ async fn read_file_tool_result_is_not_persisted_again() {
         .unwrap();
 
     let messages = captured_messages.lock().unwrap();
-    assert_eq!(tool_result_contents(&messages), vec![large_content]);
+    let contents = tool_result_contents(&messages);
+    assert_eq!(contents.len(), 1);
+    assert!(
+        contents[0].contains("Tool result was persisted"),
+        "read result should be persisted when exceeding inline limit, got: {}",
+        &contents[0][..contents[0].len().min(200)]
+    );
+    assert!(
+        !contents[0].contains(&large_content),
+        "full content should not be inlined"
+    );
 }
 
 #[tokio::test]

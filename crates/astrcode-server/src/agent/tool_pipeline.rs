@@ -520,6 +520,9 @@ impl ToolPipeline {
         if result.metadata.contains_key("persistedToolResult") {
             return Ok(());
         }
+        if is_artifact_read(result) {
+            return Ok(());
+        }
         let original_content = result.content.clone();
         let reference = self
             .session_manager
@@ -567,7 +570,8 @@ impl ToolPipeline {
             .enumerate()
             .filter_map(|(index, pending)| {
                 let can_persist = tool_result_inline_limit(&pending.tool_name).is_some()
-                    && !pending.result.metadata.contains_key("persistedToolResult");
+                    && !pending.result.metadata.contains_key("persistedToolResult")
+                    && !is_artifact_read(&pending.result);
                 can_persist.then_some(index)
             })
             .collect();
@@ -593,4 +597,12 @@ impl ToolPipeline {
 
         Ok(())
     }
+}
+
+fn is_artifact_read(result: &ToolResult) -> bool {
+    result
+        .metadata
+        .get("source")
+        .and_then(|v| v.as_str())
+        == Some("toolResultArtifact")
 }
