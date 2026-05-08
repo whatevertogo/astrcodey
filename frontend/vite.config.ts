@@ -1,8 +1,6 @@
-import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
@@ -18,28 +16,11 @@ function resolveApiProxyTarget(): string | undefined {
   }
 }
 
-function cargoBuildPlugin(): Plugin {
-  return {
-    name: 'cargo-build',
-    buildStart() {
-      const root = path.resolve(__dirname, '..')
-      try {
-        execSync('cargo build -p astrcode-server', {
-          cwd: root,
-          stdio: 'inherit',
-        })
-      } catch {
-        throw new Error('cargo build failed — fix Rust errors before continuing')
-      }
-    },
-  }
-}
-
 const host = process.env.TAURI_DEV_HOST
 const apiProxyTarget = resolveApiProxyTarget()
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), cargoBuildPlugin()],
+  plugins: [react(), tailwindcss()],
   clearScreen: false,
   server: {
     port: 5173,

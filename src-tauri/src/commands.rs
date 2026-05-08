@@ -1,10 +1,13 @@
 use std::sync::{
-    atomic::{AtomicI32, Ordering},
     Arc,
+    atomic::{AtomicI32, Ordering},
 };
 
 use tauri::State;
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{ShellExt, process::CommandChild};
+
+const SIDECAR_NAME: &str = "astrcode-http-server";
+const SIDECAR_ADDR_ENV: &str = "ASTRCODE_HTTP_ADDR";
 
 pub struct SidecarState {
     port: AtomicI32,
@@ -35,28 +38,6 @@ impl SidecarState {
     }
 }
 
-// TODO: 需要更健壮的方式定位 sidecar 可执行文件
-fn resolve_sidecar_path() -> Result<std::path::PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let dir = exe.parent().ok_or_else(|| "no parent dir".to_string())?;
-
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let name = format!("astrcode-http-server{suffix}");
-    let candidates = [
-        dir.join("binaries").join(&name),
-        dir.join(&name),
-    ];
-    for p in &candidates {
-        if p.is_file() {
-            return Ok(p.clone());
-        }
-    }
-    Err(format!(
-        "sidecar not found, tried: {}",
-        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-    ))
-}
-
 #[tauri::command]
 pub async fn start_server(
     app: tauri::AppHandle,
@@ -81,17 +62,16 @@ pub async fn start_server(
     }
     state.port.store(0, Ordering::SeqCst);
 
-    let port = portpicker::pick_unused_port()
-        .ok_or_else(|| "No available port found".to_string())?;
+    let port =
+        portpicker::pick_unused_port().ok_or_else(|| "No available port found".to_string())?;
 
     let addr = format!("127.0.0.1:{port}");
 
-    let sidecar_path = resolve_sidecar_path()?;
-
     let sidecar_command = app
         .shell()
-        .command(sidecar_path.to_str().ok_or_else(|| "invalid sidecar path".to_string())?)
-        .env("ASTRCODE_HTTP_ADDR", &addr);
+        .sidecar(SIDECAR_NAME)
+        .map_err(|e| format!("Failed to resolve sidecar `{SIDECAR_NAME}`: {e}"))?
+        .env(SIDECAR_ADDR_ENV, &addr);
 
     let (mut rx, child) = sidecar_command
         .spawn()
@@ -107,23 +87,23 @@ pub async fn start_server(
             match event {
                 CommandEvent::Stdout(line) => {
                     tracing::info!("[sidecar stdout] {}", String::from_utf8_lossy(&line));
-                }
+                },
                 CommandEvent::Stderr(line) => {
                     tracing::info!("[sidecar stderr] {}", String::from_utf8_lossy(&line));
-                }
+                },
                 CommandEvent::Terminated(status) => {
                     tracing::warn!("[sidecar] exited with status: {status:?}");
                     sidecar_state.port.store(0, Ordering::SeqCst);
                     let _ = sidecar_state.child.lock().await.take();
                     break;
-                }
+                },
                 CommandEvent::Error(err) => {
                     tracing::error!("[sidecar error] {err}");
                     sidecar_state.port.store(0, Ordering::SeqCst);
                     let _ = sidecar_state.child.lock().await.take();
                     break;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     });
@@ -131,8 +111,8 @@ pub async fn start_server(
     let health_url = format!("http://{addr}/api/sessions");
     for attempt in 0..40 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let still_tracked = state.port.load(Ordering::SeqCst) == port as i32
-            && state.child.lock().await.is_some();
+        let still_tracked =
+            state.port.load(Ordering::SeqCst) == port as i32 && state.child.lock().await.is_some();
         if still_tracked && client.get(&health_url).send().await.is_ok() {
             tracing::info!("Server ready at {addr} (attempt {})", attempt + 1);
             return Ok(port as i32);

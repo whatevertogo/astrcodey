@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd ../frontend && npm run dev",
-    "beforeBuildCommand": "cd ../frontend && npm run build"
+    "beforeDevCommand": "npm run prepare:sidecar && npm run dev",
+    "beforeBuildCommand": "npm run prepare:sidecar -- --release && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
