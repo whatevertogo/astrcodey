@@ -172,9 +172,13 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_env_prefix() {
-        std::env::set_var("TEST_API_KEY", "sk-test-123");
-        assert_eq!(resolve_api_key("env:TEST_API_KEY").unwrap(), "sk-test-123");
-        std::env::remove_var("TEST_API_KEY");
+        let key = format!("TEST_API_KEY_{}", std::process::id());
+        std::env::set_var(&key, "sk-test-123");
+        assert_eq!(
+            resolve_api_key(&format!("env:{key}")).unwrap(),
+            "sk-test-123"
+        );
+        std::env::remove_var(&key);
     }
 
     #[test]
@@ -220,35 +224,52 @@ mod tests {
 
     #[test]
     fn test_resolve_default_config() {
-        let previous = std::env::var("DEEPSEEK_API_KEY").ok();
-        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
-
-        let config = Config::default();
+        let config = Config {
+            profiles: vec![Profile {
+                name: "deepseek".into(),
+                provider_kind: "openai".into(),
+                base_url: "https://api.deepseek.com".into(),
+                api_key: Some("sk-test".into()),
+                api_mode: Some(OpenAiApiMode::ChatCompletions),
+                openai_capabilities: None,
+                models: vec![ModelConfig {
+                    id: "deepseek-chat".into(),
+                    max_tokens: Some(8192),
+                    context_limit: Some(65536),
+                }],
+            }],
+            active_profile: "deepseek".into(),
+            active_model: "deepseek-chat".into(),
+            ..Config::default()
+        };
         let effective = config.into_effective().unwrap();
         assert_eq!(effective.llm.model_id, "deepseek-chat");
-
-        match previous {
-            Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
-            None => std::env::remove_var("DEEPSEEK_API_KEY"),
-        }
     }
 
     #[test]
     fn test_runtime_temperature_is_resolved() {
-        let previous = std::env::var("DEEPSEEK_API_KEY").ok();
-        std::env::set_var("DEEPSEEK_API_KEY", "sk-test");
-
-        let mut config = Config::default();
+        let mut config = Config {
+            profiles: vec![Profile {
+                name: "deepseek".into(),
+                provider_kind: "openai".into(),
+                base_url: "https://api.deepseek.com".into(),
+                api_key: Some("sk-test".into()),
+                api_mode: Some(OpenAiApiMode::ChatCompletions),
+                openai_capabilities: None,
+                models: vec![ModelConfig {
+                    id: "deepseek-chat".into(),
+                    max_tokens: Some(8192),
+                    context_limit: Some(65536),
+                }],
+            }],
+            active_profile: "deepseek".into(),
+            active_model: "deepseek-chat".into(),
+            ..Config::default()
+        };
         config.runtime.llm_temperature = Some(0.2);
 
         let effective = config.into_effective().unwrap();
-
         assert_eq!(effective.llm.temperature, Some(0.2));
-
-        match previous {
-            Some(v) => std::env::set_var("DEEPSEEK_API_KEY", v),
-            None => std::env::remove_var("DEEPSEEK_API_KEY"),
-        }
     }
 
     #[test]
@@ -258,17 +279,23 @@ mod tests {
             active_model: "gpt-4.1".into(),
             ..Config::default()
         };
-        let previous = std::env::var("OPENAI_API_KEY").ok();
-        std::env::set_var("OPENAI_API_KEY", "sk-test");
+        // Replace env-referenced api_key with a plain value to avoid env var dependency
+        let mut profiles = config.profiles;
+        for p in &mut profiles {
+            if p.name == "openai" {
+                p.api_key = Some("sk-test".into());
+            }
+        }
+        let config = Config {
+            profiles,
+            active_profile: "openai".into(),
+            active_model: "gpt-4.1".into(),
+            ..Config::default()
+        };
 
         let effective = config.into_effective().unwrap();
 
         assert!(effective.llm.supports_prompt_cache_key);
         assert_eq!(effective.llm.prompt_cache_retention, None);
-        if let Some(value) = previous {
-            std::env::set_var("OPENAI_API_KEY", value);
-        } else {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
     }
 }
