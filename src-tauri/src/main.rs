@@ -75,8 +75,8 @@ fn run() -> anyhow::Result<()> {
                             .build();
                         if let Ok(client) = client {
                             let url = format!("http://127.0.0.1:{port}/api/shutdown");
-                            std::thread::spawn(move || {
-                                let _ = client.post(&url).send();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = client.post(&url).send().await;
                             });
                         }
                     }
