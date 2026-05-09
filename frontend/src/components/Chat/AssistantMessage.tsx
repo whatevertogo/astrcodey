@@ -167,13 +167,16 @@ function extractThinkingBlocks(text: string): {
   if (typeof text !== 'string') return { visibleText: '', thinkingBlocks: [] }
   const thinkingBlocks: string[] = []
   const visibleText = text
-    .replace(/<think([\s\S]*?)<\/think>/gi, (_match, content: string) => {
-      const normalized = content.trim()
-      if (normalized && !thinkingBlocks.includes(normalized)) {
-        thinkingBlocks.push(normalized)
+    .replace(
+      /<think-block>([\s\S]*?)<\/think-block>/gi,
+      (_match, content: string) => {
+        const normalized = content.trim()
+        if (normalized && !thinkingBlocks.includes(normalized)) {
+          thinkingBlocks.push(normalized)
+        }
+        return ''
       }
-      return ''
-    })
+    )
     .trim()
   return { visibleText, thinkingBlocks }
 }

@@ -6,8 +6,10 @@
 use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
-use crate::common::{build_client, stream_with_retry};
-use crate::retry::RetryPolicy;
+use crate::{
+    common::{build_client, stream_with_retry},
+    retry::RetryPolicy,
+};
 
 pub struct GeminiProvider {
     config: LlmClientConfig,
@@ -47,7 +49,11 @@ impl GeminiProvider {
         )
     }
 
-    fn build_request_body(&self, messages: &[LlmMessage], tools: &[ToolDefinition]) -> serde_json::Value {
+    fn build_request_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
         let mut system_instruction: Option<serde_json::Value> = None;
         let mut contents: Vec<serde_json::Value> = Vec::new();
         let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
@@ -69,18 +75,18 @@ impl GeminiProvider {
                             "parts": [{"text": text}]
                         }));
                     }
-                }
+                },
                 LlmRole::Assistant => {
                     flush_tool_results(&mut pending_tool_results, &mut contents);
                     contents.push(convert_assistant_to_gemini(msg));
-                }
+                },
                 LlmRole::User => {
                     flush_tool_results(&mut pending_tool_results, &mut contents);
                     contents.push(convert_user_to_gemini(msg));
-                }
+                },
                 LlmRole::Tool => {
                     pending_tool_results.push(convert_tool_result_to_gemini(msg));
-                }
+                },
             }
         }
         flush_tool_results(&mut pending_tool_results, &mut contents);
@@ -164,16 +170,27 @@ fn process_gemini_chunk(event: &serde_json::Value, tx: &mpsc::UnboundedSender<Ll
     };
 
     for candidate in candidates {
-        let Some(parts) = candidate.pointer("/content/parts").and_then(|v| v.as_array()) else {
+        let Some(parts) = candidate
+            .pointer("/content/parts")
+            .and_then(|v| v.as_array())
+        else {
             continue;
         };
 
         for part in parts {
             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let _ = tx.send(LlmEvent::ThinkingDelta { delta: text.to_string() });
+                if part
+                    .get("thought")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    let _ = tx.send(LlmEvent::ThinkingDelta {
+                        delta: text.to_string(),
+                    });
                 } else {
-                    let _ = tx.send(LlmEvent::ContentDelta { delta: text.to_string() });
+                    let _ = tx.send(LlmEvent::ContentDelta {
+                        delta: text.to_string(),
+                    });
                 }
             }
 
@@ -208,13 +225,13 @@ fn convert_user_to_gemini(msg: &LlmMessage) -> serde_json::Value {
         match content {
             LlmContent::Text { text } => {
                 parts.push(serde_json::json!({"text": text}));
-            }
+            },
             LlmContent::Image { base64, media_type } => {
                 parts.push(serde_json::json!({
                     "inlineData": {"mimeType": media_type, "data": base64}
                 }));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     if parts.is_empty() {
@@ -229,19 +246,21 @@ fn convert_assistant_to_gemini(msg: &LlmMessage) -> serde_json::Value {
         match content {
             LlmContent::Text { text } => {
                 parts.push(serde_json::json!({"text": text}));
-            }
-            LlmContent::ToolCall { name, arguments, .. } => {
+            },
+            LlmContent::ToolCall {
+                name, arguments, ..
+            } => {
                 let args = match arguments {
                     serde_json::Value::String(s) => {
                         serde_json::from_str(s).unwrap_or(serde_json::json!({}))
-                    }
+                    },
                     other => other.clone(),
                 };
                 parts.push(serde_json::json!({
                     "functionCall": {"name": name, "args": args}
                 }));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     if parts.is_empty() {
@@ -255,7 +274,12 @@ fn convert_tool_result_to_gemini(msg: &LlmMessage) -> serde_json::Value {
     let mut result_text = String::new();
     let mut is_error = false;
     for content in &msg.content {
-        if let LlmContent::ToolResult { tool_call_id, content: text, is_error: err } = content {
+        if let LlmContent::ToolResult {
+            tool_call_id,
+            content: text,
+            is_error: err,
+        } = content
+        {
             name = msg.name.clone().unwrap_or_else(|| tool_call_id.clone());
             result_text = text.clone();
             is_error = *err;
@@ -322,9 +346,15 @@ mod tests {
     fn gemini_tool_results_pack_into_single_user_turn() {
         let mut contents: Vec<serde_json::Value> = Vec::new();
         let mut pending: Vec<serde_json::Value> = Vec::new();
-        contents.push(convert_assistant_to_gemini(&LlmMessage::assistant("checking")));
-        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool("read", "call_1", "content", false)));
-        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool("grep", "call_2", "match", false)));
+        contents.push(convert_assistant_to_gemini(&LlmMessage::assistant(
+            "checking",
+        )));
+        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool(
+            "read", "call_1", "content", false,
+        )));
+        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool(
+            "grep", "call_2", "match", false,
+        )));
         flush_tool_results(&mut pending, &mut contents);
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[1]["role"], "user");

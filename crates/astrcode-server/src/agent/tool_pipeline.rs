@@ -600,9 +600,5 @@ impl ToolPipeline {
 }
 
 fn is_artifact_read(result: &ToolResult) -> bool {
-    result
-        .metadata
-        .get("source")
-        .and_then(|v| v.as_str())
-        == Some("toolResultArtifact")
+    result.metadata.get("source").and_then(|v| v.as_str()) == Some("toolResultArtifact")
 }

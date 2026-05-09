@@ -158,12 +158,7 @@ async fn conversation_snapshot(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state
-        .runtime
-        .session_manager
-        .read_model(&session_id)
-        .await
-    {
+    match state.runtime.session_manager.read_model(&session_id).await {
         Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }
@@ -504,14 +499,26 @@ async fn session_stream(
 
     let runtime = Arc::clone(&state.runtime);
     let live_stream = stream::unfold(
-        (rx, runtime, session_id, replay_max_seq, false, std::collections::VecDeque::<Result<axum::response::sse::Event, std::convert::Infallible>>::new()),
+        (
+            rx,
+            runtime,
+            session_id,
+            replay_max_seq,
+            false,
+            std::collections::VecDeque::<
+                Result<axum::response::sse::Event, std::convert::Infallible>,
+            >::new(),
+        ),
         |(mut rx, runtime, session_id, replay_max_seq, closing, mut pending)| async move {
             if closing {
                 return None;
             }
 
             if let Some(item) = pending.pop_front() {
-                return Some((item, (rx, runtime, session_id, replay_max_seq, false, pending)));
+                return Some((
+                    item,
+                    (rx, runtime, session_id, replay_max_seq, false, pending),
+                ));
             }
 
             loop {
@@ -543,7 +550,10 @@ async fn session_stream(
                             .collect();
                         let mut items = items;
                         let first = items.pop_front().unwrap();
-                        return Some((first, (rx, runtime, session_id, replay_max_seq, false, items)));
+                        return Some((
+                            first,
+                            (rx, runtime, session_id, replay_max_seq, false, items),
+                        ));
                     },
                     Ok(_) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -553,7 +563,10 @@ async fn session_stream(
                             cursor: ConversationCursorDto { value: cursor },
                             delta: ConversationDeltaDto::RehydrateRequired,
                         }));
-                        return Some((item, (rx, runtime, session_id, replay_max_seq, true, pending)));
+                        return Some((
+                            item,
+                            (rx, runtime, session_id, replay_max_seq, true, pending),
+                        ));
                     },
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
@@ -956,7 +969,11 @@ mod tests {
         );
 
         let deltas = event_to_deltas(&event);
-        assert_eq!(deltas.len(), 1, "assistant completion should produce one delta");
+        assert_eq!(
+            deltas.len(),
+            1,
+            "assistant completion should produce one delta"
+        );
         let delta = deltas.into_iter().next().unwrap();
 
         match delta {

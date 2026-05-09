@@ -158,6 +158,7 @@ async fn consume_llm_stream(
     message_id: MessageId,
 ) -> Result<StreamOutcome, AgentError> {
     let mut current_text = String::new();
+    let mut thinking_text = String::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut message_started = false;
 
@@ -189,6 +190,7 @@ async fn consume_llm_stream(
                         delta: delta.clone(),
                     },
                 );
+                thinking_text.push_str(&delta);
             },
             LlmEvent::ToolCallStart {
                 call_id,
@@ -230,18 +232,23 @@ async fn consume_llm_stream(
                 );
             },
             LlmEvent::Done { finish_reason } => {
+                let final_text = if thinking_text.is_empty() {
+                    current_text
+                } else {
+                    format!("<think-block>\n{thinking_text}\n</think-block>\n\n{current_text}")
+                };
                 if tool_calls.is_empty() {
                     return Ok(StreamOutcome::Complete {
-                        text: current_text,
+                        text: final_text,
                         finish_reason,
                         message_id,
                         message_started,
                     });
                 }
-                let text = if current_text.is_empty() {
+                let text = if final_text.is_empty() {
                     None
                 } else {
-                    Some(current_text)
+                    Some(final_text)
                 };
                 return Ok(StreamOutcome::ToolCalls {
                     text,

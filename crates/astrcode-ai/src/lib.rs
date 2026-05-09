@@ -11,11 +11,12 @@ pub mod retry;
 pub mod serialization;
 pub mod stream_decoder;
 
+use std::sync::Arc;
+
 use astrcode_core::{
     config::OpenAiApiMode,
     llm::{LlmClientConfig, LlmProvider},
 };
-use std::sync::Arc;
 
 /// 根据 `provider_kind` 创建对应的 LLM provider 实例。
 pub fn create_provider(

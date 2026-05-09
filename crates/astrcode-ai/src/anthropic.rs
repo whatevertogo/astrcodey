@@ -6,8 +6,10 @@
 use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
-use crate::common::{build_client, stream_with_event_type};
-use crate::retry::RetryPolicy;
+use crate::{
+    common::{build_client, stream_with_event_type},
+    retry::RetryPolicy,
+};
 
 pub struct AnthropicProvider {
     config: LlmClientConfig,
@@ -44,7 +46,10 @@ impl AnthropicProvider {
         }
     }
 
-    fn convert_messages(&self, messages: &[LlmMessage]) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
+    fn convert_messages(
+        &self,
+        messages: &[LlmMessage],
+    ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
         let mut system_blocks: Vec<serde_json::Value> = Vec::new();
         let mut api_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -67,13 +72,13 @@ impl AnthropicProvider {
                             "cache_control": {"type": "ephemeral"}
                         }));
                     }
-                }
+                },
                 LlmRole::User => {
                     api_messages.push(convert_user_message(msg));
-                }
+                },
                 LlmRole::Assistant => {
                     api_messages.push(convert_assistant_message(msg));
-                }
+                },
                 LlmRole::Tool => {
                     let block = convert_tool_result_block(msg);
                     if let Some(last) = api_messages.last_mut() {
@@ -89,7 +94,7 @@ impl AnthropicProvider {
                         "role": "user",
                         "content": [block]
                     }));
-                }
+                },
             }
         }
 
@@ -184,11 +189,19 @@ fn process_anthropic_event(
                 match block.get("type").and_then(|v| v.as_str()) {
                     Some("tool_use") => {
                         let _ = tx.send(LlmEvent::ToolCallStart {
-                            call_id: block.get("id").and_then(|v| v.as_str()).unwrap_or_default().into(),
-                            name: block.get("name").and_then(|v| v.as_str()).unwrap_or_default().into(),
+                            call_id: block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .into(),
+                            name: block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .into(),
                             arguments: String::new(),
                         });
-                    }
+                    },
                     Some("thinking") => {
                         if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
                             if !thinking.is_empty() {
@@ -197,7 +210,7 @@ fn process_anthropic_event(
                                 });
                             }
                         }
-                    }
+                    },
                     Some("text") => {
                         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                             if !text.is_empty() {
@@ -206,11 +219,11 @@ fn process_anthropic_event(
                                 });
                             }
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
-        }
+        },
         "content_block_delta" => {
             if let Some(delta) = event.get("delta") {
                 match delta.get("type").and_then(|v| v.as_str()) {
@@ -220,14 +233,14 @@ fn process_anthropic_event(
                                 delta: text.to_string(),
                             });
                         }
-                    }
+                    },
                     Some("thinking_delta") => {
                         if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
                             let _ = tx.send(LlmEvent::ThinkingDelta {
                                 delta: thinking.to_string(),
                             });
                         }
-                    }
+                    },
                     Some("input_json_delta") => {
                         let call_id = event
                             .get("index")
@@ -240,18 +253,19 @@ fn process_anthropic_event(
                                 delta: partial.to_string(),
                             });
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
-        }
+        },
         "message_delta" => {
-            if let Some(stop_reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
+            if let Some(stop_reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
+            {
                 let _ = tx.send(LlmEvent::Done {
                     finish_reason: stop_reason.to_string(),
                 });
             }
-        }
+        },
         "error" => {
             let message = event
                 .pointer("/error/message")
@@ -259,8 +273,8 @@ fn process_anthropic_event(
                 .unwrap_or("unknown Anthropic error")
                 .to_string();
             let _ = tx.send(LlmEvent::Error { message });
-        }
-        _ => {}
+        },
+        _ => {},
     }
 }
 
@@ -272,22 +286,26 @@ fn convert_user_message(msg: &LlmMessage) -> serde_json::Value {
         match content {
             LlmContent::Text { text } => {
                 blocks.push(serde_json::json!({"type": "text", "text": text}));
-            }
+            },
             LlmContent::Image { base64, media_type } => {
                 blocks.push(serde_json::json!({
                     "type": "image",
                     "source": {"type": "base64", "data": base64, "media_type": media_type}
                 }));
-            }
-            LlmContent::ToolResult { tool_call_id, content, is_error } => {
+            },
+            LlmContent::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 blocks.push(serde_json::json!({
                     "type": "tool_result",
                     "tool_use_id": tool_call_id,
                     "content": content,
                     "is_error": is_error,
                 }));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     if blocks.is_empty() {
@@ -302,8 +320,12 @@ fn convert_assistant_message(msg: &LlmMessage) -> serde_json::Value {
         match content {
             LlmContent::Text { text } => {
                 blocks.push(serde_json::json!({"type": "text", "text": text}));
-            }
-            LlmContent::ToolCall { call_id, name, arguments } => {
+            },
+            LlmContent::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => {
                 let args_str = match arguments {
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
@@ -315,8 +337,8 @@ fn convert_assistant_message(msg: &LlmMessage) -> serde_json::Value {
                     "input": serde_json::from_str::<serde_json::Value>(&args_str)
                         .unwrap_or(serde_json::json!({}))
                 }));
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     if blocks.is_empty() {
@@ -327,7 +349,12 @@ fn convert_assistant_message(msg: &LlmMessage) -> serde_json::Value {
 
 fn convert_tool_result_block(msg: &LlmMessage) -> serde_json::Value {
     for content in &msg.content {
-        if let LlmContent::ToolResult { tool_call_id, content, is_error } = content {
+        if let LlmContent::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } = content
+        {
             return serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
@@ -408,13 +435,16 @@ mod tests {
                     let block = convert_tool_result_block(msg);
                     if let Some(last) = api_messages.last_mut() {
                         if last["role"] == "user" && has_only_tool_results(last) {
-                            last["content"].as_array_mut().expect("content array").push(block);
+                            last["content"]
+                                .as_array_mut()
+                                .expect("content array")
+                                .push(block);
                             continue;
                         }
                     }
                     api_messages.push(serde_json::json!({"role": "user", "content": [block]}));
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
         assert_eq!(api_messages.len(), 2);
@@ -446,7 +476,10 @@ mod tests {
             Some(4096),
             Some(200_000),
         );
-        let msgs = vec![LlmMessage::system("You are helpful"), LlmMessage::user("hello")];
+        let msgs = vec![
+            LlmMessage::system("You are helpful"),
+            LlmMessage::user("hello"),
+        ];
         let (system, api_messages) = provider.convert_messages(&msgs);
         let sys = system.expect("system should be present");
         assert_eq!(sys[0]["text"], "You are helpful");

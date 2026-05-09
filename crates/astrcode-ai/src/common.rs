@@ -9,8 +9,10 @@ use astrcode_core::llm::{LlmClientConfig, LlmError, LlmEvent};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::retry::RetryPolicy;
-use crate::stream_decoder::{SseLineReader, Utf8StreamDecoder};
+use crate::{
+    retry::RetryPolicy,
+    stream_decoder::{SseLineReader, Utf8StreamDecoder},
+};
 
 /// 根据 LlmClientConfig 构建 reqwest::Client。
 pub fn build_client(config: &LlmClientConfig) -> reqwest::Client {
@@ -227,8 +229,14 @@ fn drain_decoder(
 
 pub fn classify_error(status: u16, text: String) -> LlmError {
     if status >= 500 {
-        LlmError::ServerError { status, message: text }
+        LlmError::ServerError {
+            status,
+            message: text,
+        }
     } else {
-        LlmError::ClientError { status, message: text }
+        LlmError::ClientError {
+            status,
+            message: text,
+        }
     }
 }

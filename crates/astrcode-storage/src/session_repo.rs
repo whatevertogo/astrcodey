@@ -15,7 +15,7 @@ use astrcode_core::{
         CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary, StorageError,
         ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
-    types::{Cursor, ProjectKey, SessionId, project_key_from_path, validate_session_id},
+    types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
 use astrcode_support::{
     hostpaths,
@@ -36,8 +36,8 @@ use crate::{event_log::EventLog, projection, snapshot::SnapshotManager};
 pub struct FileSystemSessionRepository {
     /// 已打开的会话元数据缓存，按会话 ID 索引
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionMeta>>>>,
-    /// 会话存储的基础路径
-    base_path: PathBuf,
+    /// 所有项目目录的父目录：`~/.astrcode/projects/`
+    projects_base: PathBuf,
 }
 
 /// 会话的内部元数据，持有事件日志和快照管理器。
@@ -52,39 +52,81 @@ struct SessionMeta {
     projection: RwLock<SessionReadModel>,
 }
 
+impl Default for FileSystemSessionRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileSystemSessionRepository {
     /// 创建新的文件系统会话仓库。
     ///
-    /// # 参数
-    /// - `project_key`: 项目路径派生的可读目录名，用于确定存储目录
-    pub fn new(project_key: ProjectKey) -> Self {
-        Self::with_base_path(hostpaths::sessions_dir(&project_key))
+    /// 会话按 `working_dir` 动态分发到对应的项目目录，不再绑定启动时的 cwd。
+    pub fn new() -> Self {
+        Self::with_projects_base(hostpaths::projects_dir())
     }
 
-    /// 根据真实项目路径创建仓库，新会话使用可读 project key。
-    pub fn for_project_path(project_path: &Path) -> Self {
-        Self::with_base_path(hostpaths::sessions_dir(&project_key_from_path(
-            project_path,
-        )))
+    /// 根据真实项目路径创建仓库（与 `new` 相同，保留语义入口）。
+    pub fn for_project_path(_: &Path) -> Self {
+        Self::new()
     }
 
-    fn with_base_path(base_path: PathBuf) -> Self {
-        if let Err(e) = std::fs::create_dir_all(&base_path) {
-            tracing::warn!("Failed to create sessions dir {}: {e}", base_path.display());
+    fn with_projects_base(projects_base: PathBuf) -> Self {
+        if let Err(e) = std::fs::create_dir_all(&projects_base) {
+            tracing::warn!(
+                "Failed to create projects dir {}: {e}",
+                projects_base.display()
+            );
         }
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            base_path,
+            projects_base,
         }
     }
 
-    /// 获取指定会话的目录路径。
-    fn session_dir(&self, id: &SessionId) -> PathBuf {
-        self.base_path.join(id.as_str())
+    /// 根据 `working_dir` 计算新会话的存储目录。
+    fn session_dir_from_working_dir(&self, working_dir: &str, id: &SessionId) -> PathBuf {
+        let project_key = project_key_from_path(&PathBuf::from(working_dir));
+        self.projects_base
+            .join(project_key)
+            .join("sessions")
+            .join(id.as_str())
     }
 
-    fn existing_session_dir(&self, id: &SessionId) -> PathBuf {
-        self.session_dir(id)
+    /// 扫描 projects_base 下所有项目目录，返回其 sessions 子目录列表。
+    fn all_session_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.projects_base) else {
+            return roots;
+        };
+        for entry in entries.flatten() {
+            let sessions_dir = entry.path().join("sessions");
+            if sessions_dir.is_dir() {
+                roots.push(sessions_dir);
+            }
+        }
+        roots
+    }
+
+    /// 在所有项目目录中查找指定会话的目录。
+    fn find_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
+        for root in self.all_session_roots() {
+            let dir = root.join(id.as_str());
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+        None
+    }
+
+    /// 获取指定会话的目录路径。
+    fn session_dir(&self, id: &SessionId) -> Option<PathBuf> {
+        self.find_session_dir(id)
+    }
+
+    fn existing_session_dir(&self, id: &SessionId) -> Result<PathBuf, StorageError> {
+        self.find_session_dir(id)
+            .ok_or_else(|| StorageError::NotFound(id.clone()))
     }
 
     /// 获取指定会话的事件日志文件路径。
@@ -110,7 +152,7 @@ impl FileSystemSessionRepository {
 
         // Opening a log restores its in-memory next_seq from disk. That should
         // happen once per active process/session, not once per append.
-        let dir = self.existing_session_dir(session_id);
+        let dir = self.existing_session_dir(session_id)?;
         let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
         let projection = self
@@ -195,7 +237,7 @@ impl EventStore for FileSystemSessionRepository {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
-        let dir = self.session_dir(session_id);
+        let dir = self.session_dir_from_working_dir(working_dir, session_id);
         std::fs::create_dir_all(&dir)?;
 
         let start_event = Event::new(
@@ -451,8 +493,8 @@ impl EventStore for FileSystemSessionRepository {
 }
 
 impl FileSystemSessionRepository {
-    fn session_roots(&self) -> Vec<&PathBuf> {
-        vec![&self.base_path]
+    fn session_roots(&self) -> Vec<PathBuf> {
+        self.all_session_roots()
     }
 
     /// 仅扫描磁盘上的会话目录名，不打开任何文件。
@@ -485,7 +527,9 @@ impl FileSystemSessionRepository {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
-        let dir = self.session_dir(session_id);
+        let Some(dir) = self.session_dir(session_id) else {
+            return Ok(None);
+        };
         let log_path = Self::event_log_path(&dir, session_id);
         let (first_event, last_event) = EventLog::read_first_and_last(&log_path).await?;
         let Some(first_event) = first_event else {
@@ -542,7 +586,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = FileSystemSessionRepository {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            base_path: temp_dir.path().join("sessions"),
+            projects_base: temp_dir.path().join("projects"),
         };
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
@@ -574,8 +618,8 @@ mod tests {
     #[tokio::test]
     async fn tool_result_artifact_writes_under_session_dir_and_reads_slice() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
-        let repo = test_repo(base_path.clone());
+        let projects_base = temp_dir.path().join("projects");
+        let repo = test_repo(projects_base.clone());
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
             .await
@@ -596,7 +640,15 @@ mod tests {
         let path = reference.path.as_ref().expect("filesystem path");
         assert!(path.contains("tool-results"));
         assert!(path.contains("session-test"));
-        assert!(std::path::Path::new(path).starts_with(base_path.join(session_id.as_str())));
+        let project_key = project_key_from_path(std::path::Path::new("."));
+        assert!(
+            std::path::Path::new(path).starts_with(
+                projects_base
+                    .join(project_key)
+                    .join("sessions")
+                    .join(session_id.as_str())
+            )
+        );
 
         let slice = repo
             .read_tool_result_artifact_by_path(&session_id, path, 2, 3)
@@ -610,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn tool_result_artifact_reuses_same_content_and_keeps_collisions() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("sessions"));
+        let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
             .await
@@ -659,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn append_updates_projection_immediately() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("sessions"));
+        let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
             .await
@@ -685,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn reopen_rebuilds_projection_from_event_log() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
         repo.create_session(&session_id, ".", "mock", None)
@@ -713,7 +765,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_writes_projection_snapshot() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
@@ -731,7 +783,10 @@ mod tests {
         .unwrap();
         repo.checkpoint(&session_id, &"1".into()).await.unwrap();
 
+        let project_key = project_key_from_path(std::path::Path::new("."));
         let snapshot_path = base_path
+            .join(project_key)
+            .join("sessions")
             .join(session_id.as_str())
             .join("snapshots")
             .join("snapshot-1.json");
@@ -747,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn reopen_restores_projection_from_snapshot_and_tail() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
         repo.create_session(&session_id, ".", "mock", None)
@@ -787,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_rejects_stale_cursor() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("sessions"));
+        let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
             .await
@@ -815,7 +870,7 @@ mod tests {
     #[tokio::test]
     async fn corrupt_snapshot_falls_back_to_full_replay() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
         repo.create_session(&session_id, ".", "mock", None)
@@ -833,8 +888,11 @@ mod tests {
         .unwrap();
         repo.checkpoint(&session_id, &"1".into()).await.unwrap();
         let expected = repo.session_read_model(&session_id).await.unwrap();
+        let project_key = project_key_from_path(std::path::Path::new("."));
         std::fs::write(
             base_path
+                .join(project_key)
+                .join("sessions")
                 .join(session_id.as_str())
                 .join("snapshots")
                 .join("snapshot-1.json"),
@@ -851,7 +909,7 @@ mod tests {
     #[tokio::test]
     async fn list_summaries_reads_unopened_session_projection() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
         let parent_id = SessionId::from("parent");
@@ -880,13 +938,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let workspace = temp_dir.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        let current_project_dir = temp_dir
-            .path()
-            .join("projects")
-            .join(project_key_from_path(&workspace));
-        let current_sessions_dir = current_project_dir.join("sessions");
+        let projects_base = temp_dir.path().join("projects");
+        let current_project_dir = projects_base.join(project_key_from_path(&workspace));
 
-        let repo = FileSystemSessionRepository::with_base_path(current_sessions_dir);
+        let repo = FileSystemSessionRepository::with_projects_base(projects_base);
         let current_session = SessionId::from("current-session");
         repo.create_session(&current_session, workspace.to_str().unwrap(), "mock", None)
             .await
@@ -908,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn custom_event_does_not_change_projection() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("sessions"));
+        let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
         repo.create_session(&session_id, ".", "mock", None)
             .await
@@ -945,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn compact_continuation_child_projection_uses_summary_context() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("sessions");
+        let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let parent_id = SessionId::from("parent-session");
         let child_id = SessionId::from("child-session");
@@ -1013,10 +1068,10 @@ mod tests {
         assert_eq!(child.provider_messages().len(), 2);
     }
 
-    fn test_repo(base_path: PathBuf) -> FileSystemSessionRepository {
+    fn test_repo(projects_base: PathBuf) -> FileSystemSessionRepository {
         FileSystemSessionRepository {
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            base_path,
+            projects_base,
         }
     }
 
@@ -1028,7 +1083,7 @@ mod tests {
         };
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("sessions"));
+        let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-parallel");
         repo.create_session(&session_id, ".", "mock", None)
             .await
