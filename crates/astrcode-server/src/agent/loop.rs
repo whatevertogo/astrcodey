@@ -275,6 +275,24 @@ async fn consume_llm_stream(
     Err(AgentError::Internal("LLM stream ended unexpectedly".into()))
 }
 
+/// 从文本中剥离 `<think-block>...</think-block>`，返回纯可见文本。
+/// 兼容kimi
+fn strip_think_block(mut text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    while let Some(start) = text.find("<think-block>") {
+        result.push_str(&text[..start]);
+        let after_open = &text[start + "<think-block>".len()..];
+        if let Some(end) = after_open.find("</think-block>") {
+            text = &after_open[end + "</think-block>".len()..];
+        } else {
+            // 未闭合标签：把剩余文本原样保留
+            break;
+        }
+    }
+    result.push_str(text);
+    result.trim().to_string()
+}
+
 impl AgentLoop {
     /// 创建一个新的 AgentLoop 实例。
     ///
@@ -350,6 +368,8 @@ impl AgentLoop {
         let mut all_tool_results: Vec<astrcode_core::tool::ToolResult> = Vec::new();
         let return_auto_compaction = event_tx.is_none();
         let mut auto_compaction: Option<AgentCompactContinuation> = None;
+        // 跟踪已发射的可见文本，防止中间 tool-call 块的文本被 final 块重复渲染
+        let mut emitted_visible: Option<String> = None;
 
         loop {
             let (system_messages, prepared_context, compacted) = self
@@ -448,10 +468,17 @@ impl AgentLoop {
 
                     if let Some(text) = completed_text {
                         if message_started {
-                            send_event(
-                                &event_tx,
-                                EventPayload::AssistantMessageCompleted { message_id, text },
-                            );
+                            let visible = strip_think_block(&text);
+                            let should_emit = emitted_visible.as_ref().is_none_or(|prev| {
+                                !prev.contains(visible.as_str()) && visible.len() > prev.len()
+                            });
+                            if should_emit {
+                                send_event(
+                                    &event_tx,
+                                    EventPayload::AssistantMessageCompleted { message_id, text },
+                                );
+                                emitted_visible = Some(visible);
+                            }
                         }
                     }
                 },
