@@ -588,7 +588,10 @@ async fn session_stream(
 }
 
 fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
-    let title = session_title(&summary.working_dir);
+    let title = summary
+        .first_user_message
+        .clone()
+        .unwrap_or_else(|| session_title(&summary.working_dir));
     SessionListItemDto {
         session_id: summary.session_id.into_string(),
         working_dir: summary.working_dir,
@@ -599,14 +602,18 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
         parent_storage_seq: None,
         phase: summary.phase,
+        first_user_message: summary.first_user_message,
     }
 }
 
 fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotResponseDto {
     let can_submit_prompt = matches!(session.phase, Phase::Idle | Phase::Error);
+    let title = session
+        .first_user_message()
+        .unwrap_or_else(|| session_title(&session.working_dir));
     ConversationSnapshotResponseDto {
         session_id: session.session_id.to_string(),
-        session_title: session_title(&session.working_dir),
+        session_title: title,
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
@@ -902,6 +909,7 @@ fn session_title(working_dir: &str) -> String {
         .unwrap_or(working_dir)
         .to_string()
 }
+
 
 #[cfg(test)]
 mod tests {

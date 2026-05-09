@@ -566,6 +566,7 @@ impl FileSystemSessionRepository {
             updated_at,
             phase: astrcode_core::event::Phase::default(),
             latest_cursor,
+            first_user_message: None,
         }))
     }
 }

@@ -253,6 +253,7 @@ function decodeSessionListItem(value: unknown): SessionListItem {
     parentSessionId: optionalString(object, 'parentSessionId'),
     parentStorageSeq: optionalNumber(object, 'parentStorageSeq'),
     phase: decodePhase(object.phase),
+    firstUserMessage: optionalString(object, 'firstUserMessage'),
   }
 }
 

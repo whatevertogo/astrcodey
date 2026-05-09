@@ -85,7 +85,7 @@ function SessionItem({
         />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] text-text-primary">
-            {session.title}
+            {session.firstUserMessage || '新会话'}
           </div>
           <div className="truncate text-[11px] text-text-muted">
             {session.workingDir}

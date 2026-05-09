@@ -266,6 +266,19 @@ impl SessionReadModel {
             .map(|seq| seq.to_string())
             .unwrap_or_else(|| "0".into())
     }
+
+    /// 首条用户消息的文本内容，无用户消息时返回 None。
+    pub fn first_user_message(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .find(|m| matches!(m.role, crate::llm::LlmRole::User))
+            .and_then(|m| {
+                m.content.iter().find_map(|c| match c {
+                    crate::llm::LlmContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+    }
 }
 
 /// 会话列表摘要读模型。
@@ -287,11 +300,14 @@ pub struct SessionSummary {
     pub phase: Phase,
     /// 最新 durable cursor。
     pub latest_cursor: Cursor,
+    /// 首条用户消息内容，无消息时为 None。
+    pub first_user_message: Option<String>,
 }
 
 impl From<SessionReadModel> for SessionSummary {
     fn from(model: SessionReadModel) -> Self {
         let latest_cursor = model.cursor();
+        let first_user_message = model.first_user_message();
         Self {
             session_id: model.session_id,
             created_at: model.created_at,
@@ -301,6 +317,7 @@ impl From<SessionReadModel> for SessionSummary {
             parent_session_id: model.parent_session_id,
             phase: model.phase,
             latest_cursor,
+            first_user_message,
         }
     }
 }

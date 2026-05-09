@@ -67,6 +67,7 @@ export interface SessionListItem {
   parentSessionId?: string
   parentStorageSeq?: number
   phase: Phase
+  firstUserMessage?: string
 }
 
 export interface SessionListResponse {
