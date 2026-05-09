@@ -76,10 +76,15 @@ impl InstanceCoordinator {
 
         match lock_file.try_lock_exclusive() {
             Ok(()) => Self::start_primary(lock_file).map(InstanceBootstrap::Primary),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::PermissionDenied) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::PermissionDenied
+                ) =>
+            {
                 Self::notify_existing()?;
                 Ok(InstanceBootstrap::ActivatedExisting)
-            }
+            },
             Err(e) => Err(e).with_context(|| format!("获取实例锁失败: {}", lock_path.display())),
         }
     }
@@ -187,7 +192,11 @@ impl InstanceCoordinator {
         if !self.pending_focus.swap(false, Ordering::SeqCst) {
             return;
         }
-        trigger_focus(&self.app_handle, &self.main_window_ready, &self.pending_focus);
+        trigger_focus(
+            &self.app_handle,
+            &self.main_window_ready,
+            &self.pending_focus,
+        );
     }
 }
 
@@ -241,13 +250,13 @@ fn run_listener(
                 if accepted {
                     trigger_focus(app_handle, main_window_ready, pending_focus);
                 }
-            }
+            },
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 std::thread::sleep(RETRY_INTERVAL);
-            }
+            },
             Err(_) => {
                 std::thread::sleep(RETRY_INTERVAL);
-            }
+            },
         }
     }
 }
@@ -280,13 +289,16 @@ fn trigger_focus(
     }
 
     let h = handle.clone();
-    if handle.run_on_main_thread(move || {
-        if let Some(w) = h.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-        }
-    }).is_err() {
+    if handle
+        .run_on_main_thread(move || {
+            if let Some(w) = h.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        })
+        .is_err()
+    {
         pending_focus.store(true, Ordering::SeqCst);
     }
 }

@@ -1,4 +1,7 @@
-#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 mod commands;
 mod instance;
@@ -61,7 +64,8 @@ fn run() -> anyhow::Result<()> {
         .run(move |app_handle, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
                 coord_run.shutdown();
-                if let Some(state) = app_handle.try_state::<std::sync::Arc<commands::SidecarState>>()
+                if let Some(state) =
+                    app_handle.try_state::<std::sync::Arc<commands::SidecarState>>()
                 {
                     // Send graceful shutdown to sidecar HTTP server
                     let port = state.port();
