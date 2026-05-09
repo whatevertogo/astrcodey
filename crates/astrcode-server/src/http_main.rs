@@ -3,6 +3,8 @@
 //! stdio JSON-RPC remains the default `astrcode-server` binary; this entry
 //! starts the additive HTTP surface.
 
+#![windows_subsystem = "windows"]
+
 use std::{net::SocketAddr, sync::Arc};
 
 #[tokio::main]
