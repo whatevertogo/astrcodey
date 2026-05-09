@@ -204,14 +204,16 @@ struct StreamScrollbackState {
 /// 子 agent 流式输出追踪器。
 ///
 /// 解析 `ToolOutputDelta` 中 "child " 前缀的结构化事件，
-/// 只将有意义的进展（工具指示器、错误）推入 scrollback，
-/// 抑制中间文本 token 和冗余状态行。
+/// 将有意义的进展（工具指示器、错误）推入 scrollback，
+/// 同时累积并整块输出助理文本，避免逐行碎片化。
 #[derive(Debug, Clone, Default)]
 struct ChildAgentTracker {
     /// 已完成的工具名称列表。
     completed_tools: Vec<String>,
     /// 正在运行的工具列表。
     running_tools: Vec<String>,
+    /// 累积的助理文本输出，达到阈值或遇工具事件时整块推入 scrollback。
+    pending_output: String,
 }
 
 impl StreamScrollbackState {
@@ -747,6 +749,10 @@ impl TuiState {
                     message.is_streaming = false;
                     let completed = message.clone();
                     if tool_name == "agent" {
+                        // 先刷新子 agent 残留的助理文本
+                        if let Some(tracker) = self.child_agents.get_mut(call_id.as_str()) {
+                            Self::flush_pending_output(tracker, &mut self.scrollback_queue);
+                        }
                         // 在完成消息前插入工具统计摘要
                         if let Some(tracker) = self.child_agents.remove(call_id.as_str()) {
                             if !tracker.completed_tools.is_empty() {
@@ -968,15 +974,15 @@ impl TuiState {
         }
     }
 
-    /// 处理子 agent 的 `ToolOutputDelta`，只推入有意义的进度到 scrollback。
+    /// 处理子 agent 的 `ToolOutputDelta`，将有意义的进度推入 scrollback。
     ///
     /// 子 agent 的 delta 包含 "child " 前缀的结构化事件和原始文本 token。
-    /// 此方法解析这些事件，只显示：
+    /// 此方法解析这些事件：
     /// - 工具启动的紧凑指示器（`  · tool_name`）
     /// - 错误信息
+    /// - 助理文本（累积后整块输出，避免逐行碎片化）
     ///
     /// 抑制的内容：
-    /// - 原始文本 token（中间产物，完成时由 ToolCallCompleted 显示摘要）
     /// - `assistant started` / `assistant completed` 状态行
     /// - `tool completed` 消息（由下一个 tool started 或最终 Done 隐含）
     /// - `tool output` 消息（工具输出细节）
@@ -994,6 +1000,14 @@ impl TuiState {
                 || trimmed.starts_with("tool output:")
             {
                 continue;
+            }
+
+            // 工具/错误事件前先刷新累积的助理文本
+            if trimmed.starts_with("tool started: ")
+                || trimmed.starts_with("tool completed: ")
+                || trimmed.starts_with("error: ")
+            {
+                Self::flush_pending_output(tracker, &mut self.scrollback_queue);
             }
 
             if let Some(tool_name) = trimmed.strip_prefix("tool started: ") {
@@ -1020,7 +1034,15 @@ impl TuiState {
                 continue;
             }
 
-            // 原始文本 token — 不推入 scrollback
+            // 原始助理文本：累积后整块输出，避免逐 token 碎片化
+            tracker.pending_output.push_str(clean);
+            if tracker.pending_output.len() >= 200 {
+                let text = std::mem::take(&mut tracker.pending_output);
+                self.scrollback_queue.push(ScrollbackEntry::StreamText {
+                    role: MessageRole::Assistant,
+                    text,
+                });
+            }
         }
 
         let progress = if tracker.running_tools.is_empty() {
@@ -1033,6 +1055,20 @@ impl TuiState {
             )
         };
         self.task_activity = Some(TaskActivity::with_detail("Running task", progress));
+    }
+
+    /// 将子 agent 累积的助理文本整块推入 scrollback，避免逐 token 碎片化。
+    fn flush_pending_output(
+        tracker: &mut ChildAgentTracker,
+        scrollback_queue: &mut Vec<ScrollbackEntry>,
+    ) {
+        let text = std::mem::take(&mut tracker.pending_output);
+        if !text.is_empty() {
+            scrollback_queue.push(ScrollbackEntry::StreamText {
+                role: MessageRole::Assistant,
+                text,
+            });
+        }
     }
 
     /// 按 key 反向查找消息，返回可变引用。
@@ -1429,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn child_agent_filters_text_tokens_and_shows_compact_tools() {
+    fn child_agent_accumulates_text_and_shows_compact_tools() {
         let mut state = TuiState::new();
 
         // 启动 agent 工具
@@ -1463,7 +1499,7 @@ mod tests {
                 delta: "child assistant started\n".into(),
             },
         );
-        // 原始文本 token — 应该被抑制
+        // 原始文本 token — 累积后在工具事件前整块输出
         apply_payload(
             &mut state,
             EventPayload::ToolOutputDelta {
@@ -1472,7 +1508,7 @@ mod tests {
                 delta: "我来系统地探索项目中的设计。\n".into(),
             },
         );
-        // 工具启动 — 应该显示为紧凑指示器
+        // 工具启动 — 触发 pending_output 刷新，再显示紧凑指示器
         apply_payload(
             &mut state,
             EventPayload::ToolOutputDelta {
@@ -1507,7 +1543,7 @@ mod tests {
             },
         );
 
-        // 验证：只有工具指示器，没有原始文本和状态行
+        // 验证：助理文本整块在工具指示器之前，共 3 条
         let stream_texts: Vec<&str> = state
             .scrollback_queue
             .iter()
@@ -1517,13 +1553,11 @@ mod tests {
             })
             .collect();
 
-        // 应该只有 "· find" 和 "· read"
-        assert_eq!(stream_texts.len(), 2);
-        assert_eq!(stream_texts[0], "  · find");
-        assert_eq!(stream_texts[1], "  · read");
+        assert_eq!(stream_texts.len(), 3);
+        assert_eq!(stream_texts[0], "我来系统地探索项目中的设计。");
+        assert_eq!(stream_texts[1], "  · find");
+        assert_eq!(stream_texts[2], "  · read");
 
-        // 不应该包含原始文本 token
-        assert!(!stream_texts.iter().any(|t| t.contains("系统地探索")));
         // 不应该包含 "assistant started/completed" 状态行
         assert!(!stream_texts.iter().any(|t| t.contains("assistant")));
         // 不应该包含 "tool completed" 消息

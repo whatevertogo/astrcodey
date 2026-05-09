@@ -97,6 +97,7 @@ export type ConversationBlock =
       kind: 'toolCall'
       id: string
       name: string
+      arguments: string
       text: string
       status: BlockStatus
     }
@@ -148,6 +149,7 @@ export type ConversationDelta =
       delta: string
     }
   | { kind: 'thinkingDelta'; delta: string }
+  | { kind: 'patchArguments'; blockId: string; arguments: string }
 
 // ── App State ──
 

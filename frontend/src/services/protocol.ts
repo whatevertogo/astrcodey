@@ -129,6 +129,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         kind,
         id,
         name: requiredString(object, 'name'),
+        arguments: requiredString(object, 'arguments'),
         text: requiredString(object, 'text'),
         status: decodeBlockStatus(object.status),
       }
@@ -201,6 +202,12 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     case 'thinkingDelta':
       return { kind, delta: requiredString(object, 'delta') }
+    case 'patchArguments':
+      return {
+        kind,
+        blockId: requiredString(object, 'blockId'),
+        arguments: requiredString(object, 'arguments'),
+      }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)
   }

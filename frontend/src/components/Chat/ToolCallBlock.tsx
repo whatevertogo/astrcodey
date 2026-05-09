@@ -36,10 +36,21 @@ function statusLabel(status: string): string {
   }
 }
 
+function compactLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
 function ToolCallBlock({ block }: ToolCallBlockProps) {
   const [isOpen, setIsOpen] = useState(false)
 
-  const displayText =
+  // 折叠摘要行：显示 LLM 调用的参数（如果有的话），否则回退到结果摘要
+  const summaryLine = compactLine(
+    block.arguments ||
+      block.text ||
+      (block.status === 'streaming' ? '等待输出...' : '')
+  )
+  // 展开区域：显示工具执行结果
+  const resultText =
     block.text || (block.status === 'streaming' ? '等待输出...' : '')
 
   return (
@@ -52,8 +63,11 @@ function ToolCallBlock({ block }: ToolCallBlockProps) {
         <span className={cn('shrink-0', statusPill(block.status))}>
           {block.name}
         </span>
-        <span className="min-w-0 flex-1 truncate text-text-primary">
-          {displayText.slice(0, 100)}
+        <span
+          className="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text-primary"
+          title={summaryLine}
+        >
+          {summaryLine}
         </span>
         <span className="shrink-0 text-text-muted">
           {statusLabel(block.status)}
@@ -77,7 +91,7 @@ function ToolCallBlock({ block }: ToolCallBlockProps) {
         <div className="min-w-0 overflow-y-auto overscroll-contain pr-1 max-h-[min(58vh,560px)]">
           <div className={codeBlockShell}>
             <pre className={codeBlockContent}>
-              <code>{displayText}</code>
+              <code>{resultText}</code>
             </pre>
           </div>
         </div>

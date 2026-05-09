@@ -231,6 +231,9 @@ pub enum ConversationBlockDto {
     ToolCall {
         id: String,
         name: String,
+        /// LLM 对本次调用的参数（用于折叠摘要行显示）。
+        arguments: String,
+        /// 工具执行结果（展开后显示）。
         text: String,
         status: ConversationBlockStatusDto,
     },
@@ -302,6 +305,13 @@ pub enum ConversationDeltaDto {
         parent_session_id: String,
         new_session_id: String,
         parent_cursor: ConversationCursorDto,
+    },
+    /// 更新 toolCall block 的 arguments 字段（用于折叠摘要行显示参数）。
+    PatchArguments {
+        /// 工具调用 block 的 ID。
+        block_id: String,
+        /// 参数的格式化文本。
+        arguments: String,
     },
     /// 工具输出流增量。
     ToolOutput {
@@ -431,7 +441,7 @@ mod tests {
         let envelopes: Vec<ConversationStreamEnvelopeDto> =
             serde_json::from_str(fixture).expect("fixture should deserialize");
 
-        assert_eq!(envelopes.len(), 4);
+        assert_eq!(envelopes.len(), 5);
 
         match &envelopes[0].delta {
             ConversationDeltaDto::PatchBlock {
@@ -451,6 +461,17 @@ mod tests {
                 assert_eq!(id, "assistant-1");
                 assert_eq!(text, "complete answer");
                 assert!(matches!(status, ConversationBlockStatusDto::Complete));
+            },
+            other => panic!("unexpected fixture delta: {other:?}"),
+        }
+
+        match &envelopes[4].delta {
+            ConversationDeltaDto::PatchArguments {
+                block_id,
+                arguments,
+            } => {
+                assert_eq!(block_id, "tool-1");
+                assert_eq!(arguments, "Cargo.toml");
             },
             other => panic!("unexpected fixture delta: {other:?}"),
         }

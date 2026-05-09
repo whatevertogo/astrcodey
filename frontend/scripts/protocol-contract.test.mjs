@@ -17,7 +17,7 @@ const fixturePath = path.resolve(
 
 const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'))
 
-assert.equal(fixture.length, 4)
+assert.equal(fixture.length, 5)
 
 const patch = decodeConversationStreamEnvelope(fixture[0])
 assert.equal(patch.delta.kind, 'patchBlock')
@@ -41,6 +41,11 @@ assert.equal(toolOutput.delta.kind, 'toolOutput')
 assert.equal(toolOutput.delta.callId, 'tool-1')
 assert.equal(toolOutput.delta.stream, 'stdout')
 assert.equal(toolOutput.delta.delta, 'tool output')
+
+const patchArguments = decodeConversationStreamEnvelope(fixture[4])
+assert.equal(patchArguments.delta.kind, 'patchArguments')
+assert.equal(patchArguments.delta.blockId, 'tool-1')
+assert.equal(patchArguments.delta.arguments, 'Cargo.toml')
 
 assert.throws(
   () =>

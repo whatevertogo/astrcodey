@@ -3,11 +3,11 @@
 //! 这层只做 wire 适配：命令统一进入 [`CommandHandler`]，读接口从 storage
 //! read model 映射到 `astrcode_protocol::http` DTO。
 
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, sync::Arc};
 
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
-    llm::{LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole},
     storage::{SessionReadModel, SessionSummary},
     types::SessionId,
 };
@@ -627,12 +627,7 @@ fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotRespons
             current_mode_id: None,
             active_turn_id: None,
         },
-        blocks: session
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(index, message)| message_to_block(index, message))
-            .collect(),
+        blocks: messages_to_blocks(&session.messages),
     }
 }
 
@@ -658,6 +653,7 @@ fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
                 block: ConversationBlockDto::ToolCall {
                     id: call_id.to_string(),
                     name: tool_name.clone(),
+                    arguments: String::new(),
                     text: String::new(),
                     status: ConversationBlockStatusDto::Streaming,
                 },
@@ -723,11 +719,23 @@ fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
             delta: delta.clone(),
         }],
 
+        // ToolCallRequested — 将参数写入 block.arguments 作为折叠摘要行
+        EventPayload::ToolCallRequested {
+            call_id,
+            tool_name,
+            arguments,
+        } => {
+            let args_text = format_args_inline(tool_name, arguments);
+            vec![ConversationDeltaDto::PatchArguments {
+                block_id: call_id.to_string(),
+                arguments: args_text,
+            }]
+        },
+
         // Events the client doesn't need as visible deltas
         EventPayload::SystemPromptConfigured { .. }
         | EventPayload::SessionContinuedFromCompaction { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. }
-        | EventPayload::ToolCallRequested { .. } => vec![],
+        | EventPayload::ToolCallArgumentsDelta { .. } => vec![],
         _ => vec![],
     }
 }
@@ -754,6 +762,7 @@ fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
         } => Some(ConversationBlockDto::ToolCall {
             id: call_id.to_string(),
             name: tool_name.clone(),
+            arguments: String::new(),
             text: result.content.clone(),
             status: if result.is_error {
                 ConversationBlockStatusDto::Error
@@ -832,29 +841,133 @@ fn control_from_phase(phase: Phase) -> ConversationControlStateDto {
     }
 }
 
-fn message_to_block(index: usize, message: &LlmMessage) -> ConversationBlockDto {
-    let id = format!("snapshot-message-{index}");
-    let text = message
+fn messages_to_blocks(messages: &[LlmMessage]) -> Vec<ConversationBlockDto> {
+    let mut blocks = Vec::new();
+    let mut tool_block_indices = BTreeMap::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        let id = format!("snapshot-message-{index}");
+        match message.role {
+            LlmRole::User => blocks.push(ConversationBlockDto::User {
+                id,
+                text: visible_message_text(message),
+            }),
+            LlmRole::Assistant => {
+                let text = assistant_visible_text(message);
+                if !text.trim().is_empty() {
+                    blocks.push(ConversationBlockDto::Assistant {
+                        id,
+                        text,
+                        status: ConversationBlockStatusDto::Complete,
+                    });
+                }
+                for content in &message.content {
+                    let LlmContent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    } = content
+                    else {
+                        continue;
+                    };
+                    let block_index = blocks.len();
+                    blocks.push(ConversationBlockDto::ToolCall {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        arguments: format_args_inline(name, arguments),
+                        text: String::new(),
+                        status: ConversationBlockStatusDto::Streaming,
+                    });
+                    tool_block_indices.insert(call_id.clone(), block_index);
+                }
+            },
+            LlmRole::Tool => push_tool_result_block(&mut blocks, &tool_block_indices, message, id),
+            LlmRole::System => blocks.push(ConversationBlockDto::SystemNote {
+                id,
+                text: visible_message_text(message),
+            }),
+        }
+    }
+
+    blocks
+}
+
+fn push_tool_result_block(
+    blocks: &mut Vec<ConversationBlockDto>,
+    tool_block_indices: &BTreeMap<String, usize>,
+    message: &LlmMessage,
+    fallback_id: String,
+) {
+    let fallback_name = message.name.clone().unwrap_or_else(|| "tool".into());
+    let mut pushed_result = false;
+
+    for content in &message.content {
+        let LlmContent::ToolResult {
+            tool_call_id,
+            content,
+            is_error,
+        } = content
+        else {
+            continue;
+        };
+        let status = if *is_error {
+            ConversationBlockStatusDto::Error
+        } else {
+            ConversationBlockStatusDto::Complete
+        };
+        if let Some(block_index) = tool_block_indices.get(tool_call_id) {
+            if let Some(ConversationBlockDto::ToolCall {
+                text,
+                status: block_status,
+                ..
+            }) = blocks.get_mut(*block_index)
+            {
+                *text = content.clone();
+                *block_status = status;
+                pushed_result = true;
+                continue;
+            }
+        }
+        blocks.push(ConversationBlockDto::ToolCall {
+            id: tool_call_id.clone(),
+            name: fallback_name.clone(),
+            arguments: String::new(),
+            text: content.clone(),
+            status,
+        });
+        pushed_result = true;
+    }
+
+    if !pushed_result {
+        blocks.push(ConversationBlockDto::ToolCall {
+            id: fallback_id,
+            name: fallback_name,
+            arguments: String::new(),
+            text: visible_message_text(message),
+            status: ConversationBlockStatusDto::Complete,
+        });
+    }
+}
+
+fn assistant_visible_text(message: &LlmMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            LlmContent::ToolCall { .. } => None,
+            other => Some(crate::handler::snapshot::content_to_text(other)),
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn visible_message_text(message: &LlmMessage) -> String {
+    message
         .content
         .iter()
         .map(crate::handler::snapshot::content_to_text)
         .collect::<Vec<_>>()
-        .join("");
-    match message.role {
-        LlmRole::User => ConversationBlockDto::User { id, text },
-        LlmRole::Assistant => ConversationBlockDto::Assistant {
-            id,
-            text,
-            status: ConversationBlockStatusDto::Complete,
-        },
-        LlmRole::Tool => ConversationBlockDto::ToolCall {
-            id,
-            name: message.name.clone().unwrap_or_else(|| "tool".into()),
-            text,
-            status: ConversationBlockStatusDto::Complete,
-        },
-        LlmRole::System => ConversationBlockDto::SystemNote { id, text },
-    }
+        .join("")
 }
 
 async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
@@ -910,6 +1023,91 @@ fn session_title(working_dir: &str) -> String {
         .to_string()
 }
 
+const MAX_ARGUMENT_SUMMARY_CHARS: usize = 140;
+
+/// 将工具调用参数 JSON 格式化为单行摘要文本。
+fn format_args_inline(tool_name: &str, args: &serde_json::Value) -> String {
+    if let Some(summary) = tool_argument_summary(tool_name, args) {
+        return compact_inline(&summary, MAX_ARGUMENT_SUMMARY_CHARS);
+    }
+
+    match args {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                return String::new();
+            }
+            let pairs = map
+                .iter()
+                .take(4)
+                .map(|(key, value)| {
+                    format!("{key}={}", compact_inline(&json_value_inline(value), 48))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            compact_inline(&pairs, MAX_ARGUMENT_SUMMARY_CHARS)
+        },
+        serde_json::Value::String(s) => compact_inline(s, MAX_ARGUMENT_SUMMARY_CHARS),
+        serde_json::Value::Null => String::new(),
+        other => compact_inline(&other.to_string(), MAX_ARGUMENT_SUMMARY_CHARS),
+    }
+}
+
+fn tool_argument_summary(tool_name: &str, args: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "agent" => {
+            let description = string_arg(args, "description");
+            let subagent_type = string_arg(args, "subagent_type");
+            match (description, subagent_type) {
+                (Some(description), Some(subagent_type)) => {
+                    Some(format!("{description} ({subagent_type})"))
+                },
+                (Some(description), None) => Some(description.to_string()),
+                (None, Some(subagent_type)) => Some(format!("subagent: {subagent_type}")),
+                (None, None) => string_arg(args, "prompt").map(str::to_string),
+            }
+        },
+        "shell" => string_arg(args, "command").map(|command| format!("$ {command}")),
+        "read" | "write" | "edit" => string_arg(args, "path").map(str::to_string),
+        "find" => string_arg(args, "pattern").map(|pattern| format!("pattern: {pattern}")),
+        "grep" => {
+            let pattern = string_arg(args, "pattern").or_else(|| string_arg(args, "query"));
+            let path = string_arg(args, "path").or_else(|| string_arg(args, "glob"));
+            match (pattern, path) {
+                (Some(pattern), Some(path)) => Some(format!("{pattern} in {path}")),
+                (Some(pattern), None) => Some(format!("pattern: {pattern}")),
+                (None, Some(path)) => Some(path.to_string()),
+                (None, None) => None,
+            }
+        },
+        "patch" => Some("workspace patch".into()),
+        _ => None,
+    }
+}
+
+fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn json_value_inline(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn compact_inline(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= max_chars {
+        return compact;
+    }
+
+    let mut preview = compact.chars().take(max_chars).collect::<String>();
+    preview.push('…');
+    preview
+}
 
 #[cfg(test)]
 mod tests {
@@ -926,6 +1124,76 @@ mod tests {
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);
+    }
+
+    #[test]
+    fn conversation_snapshot_renders_tool_call_as_structured_block() {
+        let mut session = astrcode_core::storage::SessionReadModel::empty("session-1".into());
+        session.working_dir = "D:/work/project".into();
+        session.messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "tool-1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "Cargo.toml" }),
+            }],
+            name: None,
+        });
+        session
+            .messages
+            .push(LlmMessage::tool("read", "tool-1", "file contents", false));
+
+        let dto = conversation_to_dto(session);
+
+        assert_eq!(dto.blocks.len(), 1);
+        match &dto.blocks[0] {
+            ConversationBlockDto::ToolCall {
+                id,
+                name,
+                arguments,
+                text,
+                status,
+            } => {
+                assert_eq!(id, "tool-1");
+                assert_eq!(name, "read");
+                assert_eq!(arguments, "Cargo.toml");
+                assert_eq!(text, "file contents");
+                assert!(matches!(status, ConversationBlockStatusDto::Complete));
+            },
+            other => panic!("unexpected block: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_request_patches_concise_arguments() {
+        let event = Event::new(
+            "session-1".into(),
+            None,
+            EventPayload::ToolCallRequested {
+                call_id: "tool-1".into(),
+                tool_name: "agent".into(),
+                arguments: serde_json::json!({
+                    "description": "Explore crate architecture",
+                    "prompt": "Read every module and provide a very long report that should not appear in the collapsed summary line.",
+                    "subagent_type": "explorer",
+                }),
+            },
+        );
+
+        let deltas = event_to_deltas(&event);
+
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            ConversationDeltaDto::PatchArguments {
+                block_id,
+                arguments,
+            } => {
+                assert_eq!(block_id, "tool-1");
+                assert_eq!(arguments, "Explore crate architecture (explorer)");
+                assert!(!arguments.contains("Read every module"));
+            },
+            other => panic!("unexpected delta: {other:?}"),
+        }
     }
 
     #[test]
@@ -983,19 +1251,21 @@ mod tests {
         let delta = deltas.into_iter().next().unwrap();
 
         match delta {
-            ConversationDeltaDto::FinalizeBlock {
-                block:
+            ConversationDeltaDto::FinalizeBlock { block } => {
+                let (tool_id, tool_name, tool_text, tool_status) = match block {
                     ConversationBlockDto::ToolCall {
                         id,
                         name,
                         text,
                         status,
-                    },
-            } => {
-                assert_eq!(id, "tool-1");
-                assert_eq!(name, "read");
-                assert_eq!(text, "file contents");
-                assert!(matches!(status, ConversationBlockStatusDto::Complete));
+                        ..
+                    } => (id, name, text, status),
+                    _ => panic!("expected ToolCall block"),
+                };
+                assert_eq!(tool_id, "tool-1");
+                assert_eq!(tool_name, "read");
+                assert_eq!(tool_text, "file contents");
+                assert!(matches!(tool_status, ConversationBlockStatusDto::Complete));
             },
             other => panic!("unexpected delta: {other:?}"),
         }

@@ -60,6 +60,9 @@ function mergeBlock(
     return {
       ...incoming,
       name: incoming.name ?? current.name,
+      arguments: incoming.arguments.trim()
+        ? incoming.arguments
+        : current.arguments,
       text: incoming.text ?? current.text,
     }
   }
@@ -314,6 +317,23 @@ export const useAppStore = create<ConversationState>((set, get) => ({
           thinkingText: (current.thinkingText ?? '') + delta.delta,
         }))
         break
+
+      case 'patchArguments': {
+        set((current) => {
+          const argumentsText = delta.arguments.trim()
+          if (!argumentsText) return {}
+          const idx = current.blocks.findIndex(
+            (b) => b.kind === 'toolCall' && b.id === delta.blockId
+          )
+          if (idx === -1) return {}
+          const block = current.blocks[idx]
+          if (block.kind !== 'toolCall') return {}
+          const next = [...current.blocks]
+          next[idx] = { ...block, arguments: argumentsText }
+          return { blocks: next }
+        })
+        break
+      }
 
       case 'toolOutput': {
         set((current) => {

@@ -40,5 +40,14 @@
       "stream": "stdout",
       "delta": "tool output"
     }
+  },
+  {
+    "sessionId": "session-1",
+    "cursor": { "value": "5" },
+    "delta": {
+      "kind": "patchArguments",
+      "blockId": "tool-1",
+      "arguments": "Cargo.toml"
+    }
   }
 ]
