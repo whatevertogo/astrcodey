@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react'
+import { useRef, useState, useCallback, useEffect } from 'react'
 import { useAppStore } from '../../store/conversation'
 import {
   composerShell,
@@ -7,7 +7,9 @@ import {
 } from '../../lib/styles'
 import { cn } from '../../lib/utils'
 import ModelSelector from './ModelSelector'
+import CommandSelector from './CommandSelector'
 import * as api from '../../services/api'
+import type { SlashCommandInfo } from '../../services/types'
 
 function isExecutionPhase(phase: string): boolean {
   return (
@@ -31,6 +33,126 @@ export default function InputBar() {
   const isBusy = isExecutionPhase(phase)
   const canSubmit = control?.canSubmitPrompt ?? false
 
+  // ── slash command panel state ──
+  const [slashTriggerVisible, setSlashTriggerVisible] = useState(false)
+  const [slashQuery, setSlashQuery] = useState('')
+  const [slashOptions, setSlashOptions] = useState<SlashCommandInfo[]>([])
+  const [slashLoading, setSlashLoading] = useState(false)
+  const slashTriggerStartRef = useRef(0)
+  const slashTriggerEndRef = useRef(0)
+  const slashAbortRef = useRef<AbortController | null>(null)
+
+  const closeSlashTrigger = useCallback(() => {
+    setSlashTriggerVisible(false)
+    setSlashQuery('')
+    setSlashOptions([])
+    setSlashLoading(false)
+    slashAbortRef.current?.abort()
+    slashAbortRef.current = null
+  }, [])
+
+  /** 在当前行找到光标位置的 `/` 触发上下文 */
+  function findSlashTrigger(
+    currentValue: string,
+    cursorPos: number,
+  ): { triggerStart: number; triggerEnd: number; query: string } | null {
+    const lineStart = Math.max(
+      0,
+      currentValue.lastIndexOf('\n', cursorPos - 1) + 1,
+    )
+    const segment = currentValue.slice(lineStart, cursorPos)
+    const slashIdx = segment.lastIndexOf('/')
+    if (slashIdx === -1) return null
+
+    const beforeSlash = slashIdx === 0 ? '' : segment[slashIdx - 1]
+    if (beforeSlash !== ' ' && slashIdx !== 0) return null
+
+    const afterSlash = segment.slice(slashIdx + 1)
+    if (/\s/.test(afterSlash)) return null
+
+    return {
+      triggerStart: lineStart + slashIdx,
+      triggerEnd: cursorPos,
+      query: afterSlash,
+    }
+  }
+
+  // ── slash trigger detection ──
+  useEffect(() => {
+    if (!activeSessionId) {
+      closeSlashTrigger()
+      return
+    }
+
+    const textarea = textareaRef.current
+    if (!textarea) return
+
+    const trigger = findSlashTrigger(value, textarea.selectionStart)
+    if (trigger) {
+      slashTriggerStartRef.current = trigger.triggerStart
+      slashTriggerEndRef.current = trigger.triggerEnd
+      setSlashQuery(trigger.query)
+      if (!slashTriggerVisible) {
+        setSlashTriggerVisible(true)
+      }
+      return
+    }
+
+    if (slashTriggerVisible) {
+      closeSlashTrigger()
+    }
+  }, [activeSessionId, slashTriggerVisible, value, closeSlashTrigger])
+
+  // ── fetch commands when panel opens ──
+  useEffect(() => {
+    if (!slashTriggerVisible || !activeSessionId) return
+
+    slashAbortRef.current?.abort()
+    const controller = new AbortController()
+    slashAbortRef.current = controller
+    setSlashLoading(true)
+
+    api
+      .listCommands(activeSessionId)
+      .then((res) => {
+        if (controller.signal.aborted) return
+        setSlashOptions(res.commands)
+        setSlashLoading(false)
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        console.error('[CommandSelector] 获取命令列表失败:', err)
+        setSlashOptions([])
+        setSlashLoading(false)
+      })
+
+    return () => {
+      controller.abort()
+    }
+  }, [activeSessionId, slashTriggerVisible])
+
+  const handleSlashCommandSelect = useCallback(
+    (option: SlashCommandInfo) => {
+      const before = value.slice(0, slashTriggerStartRef.current)
+      const after = value.slice(slashTriggerEndRef.current)
+      const insertText = `/${option.name}`
+      const nextValue = `${before}${insertText} ${after}`
+      setValue(nextValue)
+      closeSlashTrigger()
+
+      requestAnimationFrame(() => {
+        const textarea = textareaRef.current
+        if (!textarea) return
+        const nextCursor = before.length + insertText.length + 1
+        textarea.focus()
+        textarea.setSelectionRange(nextCursor, nextCursor)
+        textarea.style.height = 'auto'
+        textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+      })
+    },
+    [closeSlashTrigger, value],
+  )
+
   const handleInput = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
       setValue(event.target.value)
@@ -45,22 +167,37 @@ export default function InputBar() {
   const submit = useCallback(async () => {
     const trimmed = value.trim()
     if (!trimmed || !activeSessionId || !canSubmit) return
+    closeSlashTrigger()
     const accepted = await submitPrompt(trimmed)
     if (!accepted) return
     setValue('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, activeSessionId, canSubmit, submitPrompt])
+  }, [value, activeSessionId, canSubmit, submitPrompt, closeSlashTrigger])
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // 当命令面板可见时，放行导航键给 CommandSelector 的全局监听
+      if (slashTriggerVisible) {
+        switch (event.key) {
+          case 'Escape':
+            event.preventDefault()
+            closeSlashTrigger()
+            return
+          case 'ArrowUp':
+          case 'ArrowDown':
+            event.preventDefault()
+            return
+        }
+      }
+
       if (event.key === 'Enter' && !event.shiftKey && !isComposing) {
         event.preventDefault()
         submit().catch((err) => console.error('submit failed:', err))
       }
     },
-    [submit, isComposing]
+    [submit, isComposing, slashTriggerVisible, closeSlashTrigger],
   )
 
   return (
@@ -156,6 +293,16 @@ export default function InputBar() {
               </div>
             </div>
           </div>
+          {activeSessionId && slashTriggerVisible && (
+            <CommandSelector
+              visible={slashTriggerVisible}
+              options={slashOptions}
+              loading={slashLoading}
+              query={slashQuery}
+              onSelect={handleSlashCommandSelect}
+              onClose={closeSlashTrigger}
+            />
+          )}
         </div>
       </div>
       <div className="mx-auto mt-2.5 w-full max-w-[var(--chat-composer-max-width)] text-center text-xs text-text-muted">
