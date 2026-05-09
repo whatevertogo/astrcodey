@@ -2,7 +2,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~40k lines of Rust across 17 crates. It features an agent loop with tool execution, a streaming SSE-based LLM provider layer, a plugin/hook extension system, context window management with auto-compaction, and both a terminal UI and HTTP/SSE API.
+AstrCode is a full-stack AI coding assistant built from scratch in ~45k lines of Rust across 17 crates, plus a React + TypeScript web frontend (~4k lines). It features an agent loop with tool execution, a streaming SSE-based LLM provider layer, a plugin/hook extension system, context window management with auto-compaction, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, and an HTTP/SSE API.
 
 > **Why?** I wanted to understand how an AI coding agent works at every layer — from SSE stream parsing to context window compaction — so I built one. The architecture draws on engineering practices from several coding agents, but all code is original.
 
@@ -12,7 +12,7 @@ AstrCode is a full-stack AI coding assistant built from scratch in ~40k lines of
 # Nightly Rust required
 rustup toolchain install nightly
 
-# Build
+# Build backend
 cargo build
 
 # Interactive terminal UI
@@ -23,25 +23,38 @@ cargo run -- exec "explain the agent loop architecture"
 
 # HTTP/SSE server
 cargo run --bin astrcode-server
+
+# Web frontend (dev server)
+cd frontend && npm install && npm run dev
+
+# Tauri desktop app (dev mode)
+cd frontend && npm install && npm run tauri dev
 ```
 
 ## Architecture
 
 ```
-                    ┌─────────────┐
-                    │  astrcode-cli │  TUI / exec / server launcher
-                    └──────┬──────┘
-                           │
-                    ┌──────┴──────┐
-                    │ astrcode-server│  Agent loop, session manager, JSON-RPC + HTTP handler
-                    └──────┬──────┘
-              ┌────────────┼────────────┐
-              │            │            │
+           ┌──────────┐  ┌──────────────────┐
+           │   TUI    │  │ Web / Tauri Frontend │
+           │ (ratatui)│  │ React + TypeScript │
+           └────┬─────┘  └────────┬──────────┘
+                │                  │ SSE / JSON-RPC
+                └────────┬────────┘
+                    ┌─────┴──────┐
+                    │astrcode-cli │  TUI / exec / server launcher
+                    └─────┬──────┘
+                          │
+                    ┌─────┴──────┐
+                    │astrcode-   │  Agent loop, session manager, JSON-RPC + HTTP handler
+                    │server      │
+                    └─────┬──────┘
+              ┌───────────┼───────────┐
+              │           │           │
      ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
-     │ astrcode-ai │ │astrcode-  │ │ astrcode-    │
-     │             │ │extensions │ │ tools        │
+     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
+     │            │ │extensions │ │ tools        │
      │ LLM provider│ │Hook system│ │File/shell/   │
-     │ SSE+retry   │ │Plugin SDK │ │agent tools   │
+     │ SSE+retry  │ │Plugin SDK │ │agent tools   │
      └────────┬───┘ └─────┬─────┘ └──────────────┘
               │            │
     ┌─────────┴──┐  ┌──────┴──────────┐
@@ -71,17 +84,28 @@ cargo run --bin astrcode-server
 | `astrcode-context` | 2.1k | Token estimation, context window budgeting, auto-compact |
 | `astrcode-extension-mcp` | 1.8k | MCP protocol client via stdio, tool discovery |
 | `astrcode-ai` | 1.6k | OpenAI-compatible provider (Chat Completions + Responses API) |
+| `astrcode-extension-mode` | 1.1k | Agent running mode switching (Code / Plan), plan artifact, exit gate |
 | `astrcode-prompt` | 839 | System prompt composition from extension contributions |
 | `astrcode-protocol` | 848 | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
 | `astrcode-support` | 831 | Path resolution, shell detection, tool result persistence |
 | `astrcode-extension-skill` | 829 | Slash-command skill discovery and dispatch |
 | `astrcode-extension-todo-tool` | 743 | Progress tracking todo list tool |
-| `astrcode-extension-mode` | 1.1k | Agent running mode switching (Code / Plan), plan artifact, exit gate |
 | `astrcode-extension-agent-tools` | 586 | Sub-agent delegation (Agent tool) |
 | `astrcode-client` | 496 | Typed JSON-RPC client, transport, stream subscription |
 | `astrcode-log` | 344 | File rotation, stderr output, env-filter logging |
 
-**Total: ~41k lines across 18 crates, 135+ source files.**
+**Total: ~45k lines across 18 Rust crates, 145+ source files.**
+
+### Frontend & Desktop App
+
+| Component | Lines | Description |
+|---|---|---|
+| `frontend/` (React + TS) | ~3.8k | Web frontend — chat view, sidebar, session management, SSE streaming |
+| `src-tauri/` (Tauri v2) | ~586 | Desktop app shell — sidecar management, native dialogs, auto port binding |
+
+The web frontend (`frontend/`) is a React + TypeScript + Tailwind CSS v4 single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri dev`).
+
+The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides native file dialogs via `tauri-plugin-dialog`.
 
 ## Key Design Decisions
 
@@ -134,6 +158,8 @@ Large tool results are automatically persisted to disk and replaced with preview
 | **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands |
 | **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl` streaming output |
 | **Server** | `cargo run --bin astrcode-server` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
+| **Web** | `cd frontend && npm run dev` | Browser-based chat interface connected to the server via SSE |
+| **Desktop** | `cd frontend && npm run tauri dev` | Tauri desktop app (auto-launches server as sidecar) |
 
 ## Acknowledgments
 
@@ -146,4 +172,4 @@ This project drew inspiration and design patterns from several open-source proje
 
 ## License
 
-MIT
+AGPL-3.0

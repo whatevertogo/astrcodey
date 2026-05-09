@@ -10,8 +10,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Rust ──────────────────────────────────────────────────────────
+
   fmt:
-    name: Formatting
+    name: Rust fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,27 +42,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
-  contract-test:
-    name: Contract Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run test:contract
-        working-directory: frontend
-
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-audit
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-audit
       - run: cargo audit
 
   check:
@@ -75,6 +65,66 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
+
+  # ── Frontend ──────────────────────────────────────────────────────
+
+  frontend-lint:
+    name: Frontend lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+
+  frontend-typecheck:
+    name: Frontend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run typecheck
+        working-directory: frontend
+
+  frontend-format:
+    name: Frontend format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run format:check
+        working-directory: frontend
+
+  contract-test:
+    name: Contract Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run test:contract
+        working-directory: frontend
+
+  # ── Build ─────────────────────────────────────────────────────────
 
   build:
     name: Build (${{ matrix.target }})
