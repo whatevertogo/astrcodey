@@ -51,7 +51,7 @@ pub fn upsert_plan_tool_definition() -> ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
         description: "\
 Create or update the session plan artifact. The plan must contain all required headings: Context, \
-                      Goal, Scope, Non-Goals, Existing Code To Reuse, Implementation Steps, \
+                      Goal, Scope, Non-Goals, Existing Code to Reuse, Implementation Steps, \
                       Verification, Dependencies and Risks, Assumptions (defaults and open \
                       questions). Only available in plan mode."
             .into(),

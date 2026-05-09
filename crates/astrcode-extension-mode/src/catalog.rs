@@ -38,7 +38,7 @@ pub const PLAN_REQUIRED_HEADINGS: &[&str] = &[
     "Goal",
     "Scope",
     "Non-Goals",
-    "Existing Code To Reuse",
+    "Existing Code to Reuse",
     "Implementation Steps",
     "Verification",
     "Dependencies and Risks",
