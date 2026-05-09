@@ -279,6 +279,10 @@ export const useAppStore = create<ConversationState>((set, get) => ({
           blocks: upsertBlock(current.blocks, delta.block),
           ...(delta.block.kind === 'assistant' ? { thinkingText: null } : {}),
         }))
+        // 新用户消息到达时刷新侧边栏标题
+        if (delta.block.kind === 'user') {
+          void get().refreshSessions()
+        }
         break
 
       case 'patchBlock':

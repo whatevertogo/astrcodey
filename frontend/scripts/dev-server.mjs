@@ -1,23 +1,26 @@
 /**
  * Starts Vite dev server and blocks until the HTTP port responds.
- *
- * Uses the same host that Vite binds to (TAURI_DEV_HOST or localhost)
- * so polling always hits the right address.
  */
 
 import { spawn } from 'node:child_process';
 import { request } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FRONTEND_DIR = path.resolve(__dirname, '..');
 
 const HOST = process.env.TAURI_DEV_HOST || 'localhost';
 const PORT = 5173;
 const MAX_RETRIES = 120;
 const RETRY_MS = 500;
 
-console.log(`[dev-server] Starting Vite (host=${HOST}, port=${PORT})...`);
+console.log(`[dev-server] Starting Vite in ${FRONTEND_DIR} (host=${HOST}, port=${PORT})...`);
 
 const vite = spawn('npm', ['run', 'dev'], {
   stdio: 'inherit',
   shell: true,
+  cwd: FRONTEND_DIR,
 });
 
 function poll(retries = 0) {
@@ -37,10 +40,8 @@ function poll(retries = 0) {
     .end();
 }
 
-// Give Vite a head-start before the first poll
 setTimeout(poll, 1000);
 
-// Mirror Vite's exit code and forward signals
 vite.on('exit', (code) => process.exit(code ?? 0));
 process.on('SIGINT', () => { vite.kill(); });
 process.on('SIGTERM', () => { vite.kill(); });
