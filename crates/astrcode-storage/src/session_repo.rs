@@ -531,7 +531,8 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
         let log_path = Self::event_log_path(&dir, session_id);
-        let (first_event, last_event) = EventLog::read_first_and_last(&log_path).await?;
+        let (first_event, last_event, first_user_message) =
+            EventLog::read_first_and_last(&log_path).await?;
         let Some(first_event) = first_event else {
             return Ok(None);
         };
@@ -566,7 +567,7 @@ impl FileSystemSessionRepository {
             updated_at,
             phase: astrcode_core::event::Phase::default(),
             latest_cursor,
-            first_user_message: None,
+            first_user_message,
         }))
     }
 }

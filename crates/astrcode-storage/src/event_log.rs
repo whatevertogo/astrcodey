@@ -10,7 +10,7 @@ use std::{
     sync::Mutex,
 };
 
-use astrcode_core::{event::Event, storage::StorageError};
+use astrcode_core::{event::{Event, EventPayload}, storage::StorageError};
 
 /// An append-only JSONL event log.
 ///
@@ -184,21 +184,19 @@ impl EventLog {
         Ok(None)
     }
 
-    /// Read the first and last events from the log file in a single pass.
-    ///
-    /// Returns `(first, last)` — both may be `None` if the file is empty.
-    /// Only parses two events regardless of log size, keeping the bulk of
-    /// JSON deserialization work constant.
+    /// Read the first event, last event, and first user message from the log
+    /// in a single pass. Returns `(first, last, first_user_message)`.
     pub async fn read_first_and_last(
         path: &PathBuf,
-    ) -> Result<(Option<Event>, Option<Event>), StorageError> {
+    ) -> Result<(Option<Event>, Option<Event>, Option<String>), StorageError> {
         if !path.exists() {
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         let mut first: Option<Event> = None;
         let mut last: Option<Event> = None;
+        let mut first_user: Option<String> = None;
         for line in reader.lines() {
             let line = line?;
             if line.is_empty() {
@@ -208,10 +206,15 @@ impl EventLog {
                 if first.is_none() {
                     first = Some(event.clone());
                 }
+                if first_user.is_none() {
+                    if let EventPayload::UserMessage { text, .. } = &event.payload {
+                        first_user = Some(text.clone());
+                    }
+                }
                 last = Some(event);
             }
         }
-        Ok((first, last))
+        Ok((first, last, first_user))
     }
 
     fn flush_and_sync_writer(
