@@ -16,7 +16,8 @@ function resolveApiProxyTarget(): string | undefined {
   }
 }
 
-const host = process.env.TAURI_DEV_HOST
+const devHost = process.env.TAURI_DEV_HOST
+const host = devHost || '127.0.0.1'
 const apiProxyTarget = resolveApiProxyTarget()
 
 export default defineConfig({
@@ -25,8 +26,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    host: host || false,
-    hmr: host ? { protocol: 'ws', host, port: 5174 } : undefined,
+    host,
+    hmr: devHost ? { protocol: 'ws', host: devHost, port: 5174 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
     proxy: apiProxyTarget
       ? { '/api': { target: apiProxyTarget, changeOrigin: true } }
