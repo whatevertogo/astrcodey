@@ -157,9 +157,18 @@ impl Tool for FindFilesTool {
         meta.insert("root".into(), serde_json::json!(root.display().to_string()));
         meta.insert("pattern".into(), serde_json::json!(args.pattern));
         meta.insert("files".into(), serde_json::json!(files));
+        let content = if paths.is_empty() {
+            format!(
+                "No files found matching pattern {:?} in {}",
+                args.pattern,
+                root.display()
+            )
+        } else {
+            paths.join("\n")
+        };
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
-            content: paths.join("\n"),
+            content,
             is_error: false,
             error: None,
             metadata: meta,

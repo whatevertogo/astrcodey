@@ -270,9 +270,18 @@ impl Tool for GrepTool {
                 serde_json::json!(offset.saturating_add(matches.len())),
             );
         }
+        let content = if matches.is_empty() {
+            format!(
+                "No matches found for pattern {:?} in {}",
+                args.pattern,
+                root.display()
+            )
+        } else {
+            matches.join("\n")
+        };
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
-            content: matches.join("\n"),
+            content,
             is_error: false,
             error: None,
             metadata: meta,
