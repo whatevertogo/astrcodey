@@ -2,9 +2,6 @@
 
 use std::{collections::BTreeMap, path::PathBuf, process::Stdio, time::Instant};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
 use astrcode_core::{
     event::{EventPayload, ToolOutputStream},
     tool::*,
@@ -163,7 +160,7 @@ impl Tool for ShellTool {
             {
                 Ok(status) => (status, false),
                 Err(_) => {
-                    let _ = child.start_kill();
+                    terminate_child_tree(&mut child).await;
                     let status = child.wait().await;
                     (status, true)
                 },
@@ -251,6 +248,28 @@ fn hide_command_window(command: &mut Command) {
 
 #[cfg(not(windows))]
 fn hide_command_window(_: &mut Command) {}
+
+#[cfg(windows)]
+async fn terminate_child_tree(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        return;
+    };
+    let mut taskkill = Command::new("taskkill.exe");
+    taskkill
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    hide_command_window(&mut taskkill);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), taskkill.status()).await;
+    let _ = child.start_kill();
+}
+
+#[cfg(not(windows))]
+async fn terminate_child_tree(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+}
 
 #[derive(Default)]
 struct CapturedOutput {
