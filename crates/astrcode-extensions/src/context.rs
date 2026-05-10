@@ -13,7 +13,8 @@ use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
     extension::{
-        ExtensionContext, PostCompactInput, PostToolUseInput, PreCompactInput, PreToolUseInput,
+        ExtensionContext, PostCompactInput, PostToolUseFailureInput, PostToolUseInput,
+        PreCompactInput, PreToolUseInput,
     },
     llm::LlmMessage,
     tool::ToolDefinition,
@@ -41,6 +42,8 @@ pub struct ServerExtensionContext {
     pre_tool_use_input: Option<PreToolUseInput>,
     /// PostToolUse 钩子的输入数据
     post_tool_use_input: Option<PostToolUseInput>,
+    /// PostToolUseFailure 钩子的输入数据
+    post_tool_use_failure_input: Option<PostToolUseFailureInput>,
     /// PreCompact 钩子的输入数据
     pre_compact_input: Option<PreCompactInput>,
     /// PostCompact 钩子的输入数据
@@ -68,6 +71,7 @@ impl ServerExtensionContext {
             custom_event_tx: None,
             pre_tool_use_input: None,
             post_tool_use_input: None,
+            post_tool_use_failure_input: None,
             pre_compact_input: None,
             post_compact_input: None,
             pending_tools: Mutex::new(Vec::new()),
@@ -94,6 +98,7 @@ impl ServerExtensionContext {
     pub fn set_pre_tool_use_input(&mut self, input: PreToolUseInput) {
         self.pre_tool_use_input = Some(input);
         self.post_tool_use_input = None;
+        self.post_tool_use_failure_input = None;
         self.pre_compact_input = None;
         self.post_compact_input = None;
     }
@@ -102,6 +107,16 @@ impl ServerExtensionContext {
     pub fn set_post_tool_use_input(&mut self, input: PostToolUseInput) {
         self.pre_tool_use_input = None;
         self.post_tool_use_input = Some(input);
+        self.post_tool_use_failure_input = None;
+        self.pre_compact_input = None;
+        self.post_compact_input = None;
+    }
+
+    /// 附加当前工具调用失败的错误数据，供 PostToolUseFailure 钩子使用。
+    pub fn set_post_tool_use_failure_input(&mut self, input: PostToolUseFailureInput) {
+        self.pre_tool_use_input = None;
+        self.post_tool_use_input = None;
+        self.post_tool_use_failure_input = Some(input);
         self.pre_compact_input = None;
         self.post_compact_input = None;
     }
@@ -110,6 +125,7 @@ impl ServerExtensionContext {
     pub fn set_pre_compact_input(&mut self, input: PreCompactInput) {
         self.pre_tool_use_input = None;
         self.post_tool_use_input = None;
+        self.post_tool_use_failure_input = None;
         self.pre_compact_input = Some(input);
         self.post_compact_input = None;
     }
@@ -118,6 +134,7 @@ impl ServerExtensionContext {
     pub fn set_post_compact_input(&mut self, input: PostCompactInput) {
         self.pre_tool_use_input = None;
         self.post_tool_use_input = None;
+        self.post_tool_use_failure_input = None;
         self.pre_compact_input = None;
         self.post_compact_input = Some(input);
     }
@@ -148,6 +165,7 @@ pub struct ServerExtensionContextSnapshot {
     model_selection: ModelSelection,
     pre_tool_use_input: Option<PreToolUseInput>,
     post_tool_use_input: Option<PostToolUseInput>,
+    post_tool_use_failure_input: Option<PostToolUseFailureInput>,
     pre_compact_input: Option<PreCompactInput>,
     post_compact_input: Option<PostCompactInput>,
     provider_messages: Option<Vec<LlmMessage>>,
@@ -161,6 +179,7 @@ impl From<&ServerExtensionContext> for ServerExtensionContextSnapshot {
             model_selection: ctx.model_selection.clone(),
             pre_tool_use_input: ctx.pre_tool_use_input.clone(),
             post_tool_use_input: ctx.post_tool_use_input.clone(),
+            post_tool_use_failure_input: ctx.post_tool_use_failure_input.clone(),
             pre_compact_input: ctx.pre_compact_input.clone(),
             post_compact_input: ctx.post_compact_input.clone(),
             provider_messages: ctx.provider_messages.clone(),
@@ -194,6 +213,9 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
     }
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.post_tool_use_input.clone()
+    }
+    fn post_tool_use_failure_input(&self) -> Option<PostToolUseFailureInput> {
+        self.post_tool_use_failure_input.clone()
     }
     fn pre_compact_input(&self) -> Option<PreCompactInput> {
         self.pre_compact_input.clone()
@@ -252,6 +274,10 @@ impl ExtensionContext for ServerExtensionContext {
 
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.post_tool_use_input.clone()
+    }
+
+    fn post_tool_use_failure_input(&self) -> Option<PostToolUseFailureInput> {
+        self.post_tool_use_failure_input.clone()
     }
 
     fn pre_compact_input(&self) -> Option<PreCompactInput> {

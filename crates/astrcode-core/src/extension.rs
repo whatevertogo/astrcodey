@@ -123,6 +123,11 @@ pub enum ExtensionEvent {
     PreToolUse,
     /// 工具执行后。
     PostToolUse,
+    /// 工具执行失败后（is_error = true）。
+    ///
+    /// 在 `PostToolUse` 之后触发，仅当工具结果标记为错误时。
+    /// 扩展可以用于错误日志、告警通知、自动重试策略等。
+    PostToolUseFailure,
 
     // ── LLM 提供者钩子 ──
     /// LLM 请求发送前。
@@ -210,6 +215,21 @@ pub struct PostToolUseInput {
     /// 工具的输入参数。
     pub tool_input: serde_json::Value,
     /// 工具执行结果。
+    pub tool_result: ToolResult,
+}
+
+/// PostToolUseFailure 钩子的输入数据。
+///
+/// 仅当工具执行结果为错误时触发，携带结构化的错误信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostToolUseFailureInput {
+    /// 失败的工具名称。
+    pub tool_name: String,
+    /// 工具的输入参数。
+    pub tool_input: serde_json::Value,
+    /// 错误描述文本。
+    pub error: String,
+    /// 完整的工具执行结果（可能包含额外输出）。
     pub tool_result: ToolResult,
 }
 
@@ -463,6 +483,11 @@ pub trait ExtensionContext: Send + Sync {
 
     /// 获取当前 PostToolUse 载荷（仅在工具钩子上下文中可用）。
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
+        None
+    }
+
+    /// 获取当前 PostToolUseFailure 载荷（仅在工具失败钩子上下文中可用）。
+    fn post_tool_use_failure_input(&self) -> Option<PostToolUseFailureInput> {
         None
     }
 

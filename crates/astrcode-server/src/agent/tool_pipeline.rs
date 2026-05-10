@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use astrcode_core::{
     event::EventPayload,
-    extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
+    extension::{ExtensionEvent, PostToolUseFailureInput, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
     tool::{BackgroundTaskReader, ExecutionMode, ToolDefinition, ToolResult},
@@ -450,6 +450,24 @@ impl ToolPipeline {
                         result.error = Some(reason);
                     },
                     ToolHookOutcome::Allow | ToolHookOutcome::ModifiedInput { .. } => {},
+                }
+
+                // PostToolUseFailure: 仅当结果仍为错误时触发
+                if result.is_error {
+                    let mut fail_ctx = self.shared.ext_ctx_with_tools(input.tools);
+                    fail_ctx.set_post_tool_use_failure_input(PostToolUseFailureInput {
+                        tool_name: call.name.clone(),
+                        tool_input: call.tool_input.clone(),
+                        error: result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| result.content.clone()),
+                        tool_result: result.clone(),
+                    });
+
+                    self.extension_runner
+                        .dispatch_tool_hook(ExtensionEvent::PostToolUseFailure, &fail_ctx)
+                        .await?;
                 }
             }
 

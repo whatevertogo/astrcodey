@@ -165,6 +165,7 @@ pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
         ExtensionEvent::PreCompact => 10,
         ExtensionEvent::PostCompact => 11,
         ExtensionEvent::TurnAborted => 12,
+        ExtensionEvent::PostToolUseFailure => 13,
     }
 }
 
@@ -184,6 +185,7 @@ pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
         10 => Some(ExtensionEvent::PreCompact),
         11 => Some(ExtensionEvent::PostCompact),
         12 => Some(ExtensionEvent::TurnAborted),
+        13 => Some(ExtensionEvent::PostToolUseFailure),
         _ => None,
     }
 }
