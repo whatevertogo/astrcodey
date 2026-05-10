@@ -171,6 +171,18 @@ pub struct ConversationCursorDto {
     pub value: String,
 }
 
+/// 父会话派生的子 Agent 会话链接（HTTP DTO）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionLinkDto {
+    /// 子会话 ID。
+    pub child_session_id: String,
+    /// 子 Agent 名称。
+    pub agent_name: String,
+    /// 子 Agent 任务描述。
+    pub task: String,
+}
+
 /// conversation 全量快照响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -187,6 +199,9 @@ pub struct ConversationSnapshotResponseDto {
     pub control: ConversationControlStateDto,
     /// 对话块。
     pub blocks: Vec<ConversationBlockDto>,
+    /// 父会话派生的子 Agent 会话列表。
+    #[serde(default)]
+    pub agent_sessions: Vec<AgentSessionLinkDto>,
 }
 
 /// conversation 控制状态。

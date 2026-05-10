@@ -3,6 +3,7 @@ import * as api from '../services/api'
 import { consumeSseStream } from '../services/sse-stream'
 import { getHostBridge } from '../lib/hostBridge'
 import type {
+  AgentSessionLink,
   ConversationBlock,
   ConversationControlState,
   ConversationDelta,
@@ -28,6 +29,7 @@ interface ConversationState {
   streamAbortController: AbortController | null
   modelRefreshKey: number
   thinkingText: string | null
+  agentSessions: AgentSessionLink[]
 
   initServer: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -127,6 +129,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   streamAbortController: null,
   modelRefreshKey: 0,
   thinkingText: null,
+  agentSessions: [],
 
   initServer: async () => {
     set({ connectionStatus: 'connecting', connectionError: null })
@@ -187,6 +190,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         phase: 'idle',
         workingDir: null,
         thinkingText: null,
+        agentSessions: [],
       })
     }
     await get().refreshSessions()
@@ -213,6 +217,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         phase: 'idle',
         workingDir: null,
         thinkingText: null,
+        agentSessions: [],
       })
     }
     await get().refreshSessions()
@@ -234,6 +239,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
       cursor: null,
       phase: 'idle',
       thinkingText: null,
+      agentSessions: [],
     })
 
     try {
@@ -248,6 +254,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         phase: phaseFromControl(snapshot.control),
         activeSessionTitle: snapshot.sessionTitle,
         workingDir: sessionItem?.workingDir ?? null,
+        agentSessions: snapshot.agentSessions ?? [],
       })
 
       connectSse(sessionId, snapshot.cursor.value, get, set)

@@ -100,6 +100,17 @@ pub struct SessionListItem {
     pub parent_session_id: Option<String>,
 }
 
+/// 父会话派生的子 Agent 会话链接（线缆 DTO）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSessionLinkDto {
+    /// 子会话 ID。
+    pub child_session_id: String,
+    /// 子 Agent 名称。
+    pub agent_name: String,
+    /// 子 Agent 任务描述。
+    pub task: String,
+}
+
 /// 会话快照，用于客户端重连或状态恢复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -113,6 +124,9 @@ pub struct SessionSnapshot {
     pub model_id: String,
     /// 会话的工作目录路径。
     pub working_dir: String,
+    /// 父会话派生的子 Agent 会话列表。
+    #[serde(default)]
+    pub agent_sessions: Vec<AgentSessionLinkDto>,
 }
 
 /// 快照中的单条消息。

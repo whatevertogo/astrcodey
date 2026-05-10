@@ -76,6 +76,12 @@ export interface SessionListResponse {
 
 // ── Conversation Snapshot ──
 
+export interface AgentSessionLink {
+  childSessionId: string
+  agentName: string
+  task: string
+}
+
 export interface ConversationCursor {
   value: string
 }
@@ -120,6 +126,7 @@ export interface ConversationSnapshot {
   phase: Phase
   control: ConversationControlState
   blocks: ConversationBlock[]
+  agentSessions: AgentSessionLink[]
 }
 
 // ── SSE Stream ──

@@ -1,4 +1,5 @@
 import type {
+  AgentSessionLink,
   AvailableModel,
   CompactSessionResponse,
   ConfigView,
@@ -275,6 +276,16 @@ export function decodeConversationSnapshot(
     phase: decodePhase(object.phase),
     control: decodeConversationControlState(object.control),
     blocks: arrayField(object, 'blocks').map(decodeConversationBlock),
+    agentSessions: arrayField(object, 'agentSessions').map(decodeAgentSessionLink),
+  }
+}
+
+function decodeAgentSessionLink(value: unknown): AgentSessionLink {
+  const object = decodeObject(value, 'agent session link')
+  return {
+    childSessionId: requiredString(object, 'childSessionId'),
+    agentName: requiredString(object, 'agentName'),
+    task: requiredString(object, 'task'),
   }
 }
 

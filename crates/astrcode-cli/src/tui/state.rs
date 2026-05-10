@@ -572,6 +572,24 @@ impl TuiState {
                 self.status = "Session deleted".into();
                 self.mark_dirty();
             },
+            EventPayload::AgentSessionSpawned {
+                child_session_id,
+                agent_name,
+                task,
+            } => {
+                self.push_message(
+                    MessageRole::System,
+                    "Agent".into(),
+                    format!(
+                        "spawned {} — {} ({})",
+                        agent_name,
+                        task,
+                        super::short_id(child_session_id.as_str())
+                    ),
+                    false,
+                    None,
+                );
+            },
             EventPayload::TurnStarted => {
                 self.is_streaming = true;
                 self.error = None;

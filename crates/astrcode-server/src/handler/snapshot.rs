@@ -1,5 +1,5 @@
 use astrcode_core::llm::{LlmContent, LlmMessage};
-use astrcode_protocol::events::{MessageDto, SessionSnapshot};
+use astrcode_protocol::events::{AgentSessionLinkDto, MessageDto, SessionSnapshot};
 
 pub(super) fn session_snapshot(
     state: &astrcode_core::storage::SessionReadModel,
@@ -10,6 +10,15 @@ pub(super) fn session_snapshot(
         messages: state.messages.iter().map(message_to_dto).collect(),
         model_id: state.model_id.clone(),
         working_dir: state.working_dir.clone(),
+        agent_sessions: state
+            .agent_sessions
+            .iter()
+            .map(|link| AgentSessionLinkDto {
+                child_session_id: link.child_session_id.to_string(),
+                agent_name: link.agent_name.clone(),
+                task: link.task.clone(),
+            })
+            .collect(),
     }
 }
 
