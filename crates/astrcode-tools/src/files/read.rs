@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use super::shared::{
     DEFAULT_MAX_CHARS, binary, directory, error_result, image_media_type, is_binary, not_found,
-    read_image_file, slice_chars, tool_call_id,
+    read_image_file, remember_file_observation, slice_chars, tool_call_id,
 };
 
 const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
@@ -147,6 +147,9 @@ impl Tool for ReadFileTool {
         let rendered = lines.join("\n");
         let rendered = slice_chars(&rendered, char_offset, max_chars);
         let line_truncated = offset.saturating_add(lines.len()) < total_lines;
+
+        // 记录文件观察快照，供后续 edit 工具做 stale file 检测
+        let _ = remember_file_observation(ctx, &path);
 
         let mut meta = BTreeMap::new();
         meta.insert("path".into(), serde_json::json!(path.display().to_string()));

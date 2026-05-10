@@ -120,6 +120,7 @@ async fn execute_tool_call_blocking(
             available_tools: Some(runtime.tools),
             tool_result_reader: runtime.tool_result_reader,
             background_task_reader: runtime.background_task_reader,
+            file_observation_store: runtime.file_observation_store,
         },
     };
 
@@ -197,6 +198,7 @@ async fn execute_tool_call_with_background(
             available_tools: Some(runtime.tools.clone()),
             tool_result_reader: runtime.tool_result_reader.clone(),
             background_task_reader: runtime.background_task_reader.clone(),
+            file_observation_store: runtime.file_observation_store.clone(),
         },
     };
 

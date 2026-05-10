@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeMap,
+    hash::Hasher,
+    io::Read as IoRead,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -406,4 +408,97 @@ pub(super) fn trunc(s: &str, max: usize) -> String {
 pub(super) fn clean_quotes(s: &str) -> String {
     s.replace(['\u{201C}', '\u{201D}'], "\"")
         .replace(['\u{2018}', '\u{2019}'], "'")
+}
+
+// ─── File observation helpers ──────────────────────────────────────────────
+
+const FILE_OBSERVATION_HASH_BUFFER_BYTES: usize = 16 * 1024;
+
+/// 读取文件并计算观察快照（大小 + 修改时间 + 内容指纹）。
+pub(super) fn capture_file_observation(path: &Path) -> std::io::Result<FileObservation> {
+    let metadata = std::fs::metadata(path)?;
+    let modified_unix_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64);
+
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buffer = [0u8; FILE_OBSERVATION_HASH_BUFFER_BYTES];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..bytes_read]);
+    }
+
+    Ok(FileObservation {
+        path: path.to_string_lossy().to_string(),
+        bytes: metadata.len(),
+        modified_unix_nanos,
+        content_fingerprint: format!("{:016x}", hasher.finish()),
+    })
+}
+
+/// 比较两个观察快照是否一致。
+fn observation_matches(previous: &FileObservation, current: &FileObservation) -> bool {
+    previous.path == current.path
+        && previous.bytes == current.bytes
+        && previous.modified_unix_nanos == current.modified_unix_nanos
+        && previous.content_fingerprint == current.content_fingerprint
+}
+
+/// 记录文件观察快照到 store。
+pub(super) fn remember_file_observation(
+    ctx: &ToolExecutionContext,
+    path: &Path,
+) -> std::io::Result<FileObservation> {
+    let observation = capture_file_observation(path)?;
+    if let Some(store) = &ctx.capabilities.file_observation_store {
+        store.remember(observation.clone());
+    }
+    Ok(observation)
+}
+
+/// 检查文件是否在上次观察后被外部修改。
+///
+/// 如果存在之前的观察记录且当前文件与记录不一致，返回错误提示。
+/// 如果没有之前的观察记录，返回 `Ok(None)` 允许编辑继续。
+pub(super) fn stale_file_guard_result(
+    ctx: &ToolExecutionContext,
+    path: &Path,
+    started_at: Instant,
+) -> Result<Option<ToolResult>, ToolError> {
+    let Some(store) = &ctx.capabilities.file_observation_store else {
+        return Ok(None);
+    };
+    let Some(previous) = store.load(&path.to_string_lossy()) else {
+        return Ok(None);
+    };
+    let current =
+        capture_file_observation(path).map_err(|e| ToolError::Execution(format!("read: {e}")))?;
+    if observation_matches(&previous, &current) {
+        return Ok(None);
+    }
+
+    Ok(Some(ToolResult {
+        call_id: tool_call_id(ctx),
+        content: format!(
+            "File changed on disk after the last read in this session. Call read on '{}' first, \
+             then retry edit.",
+            path.display()
+        ),
+        is_error: true,
+        error: Some(format!(
+            "file changed on disk after the last read in this session: {}",
+            path.display()
+        )),
+        metadata: BTreeMap::from([
+            ("path".into(), serde_json::json!(path.display().to_string())),
+            ("staleFile".into(), serde_json::json!(true)),
+        ]),
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }))
 }

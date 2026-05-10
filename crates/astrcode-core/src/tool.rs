@@ -126,6 +126,32 @@ pub enum BackgroundPolicy {
     AutoAfter { threshold_secs: u64 },
 }
 
+/// 文件观察快照，用于 read-before-edit 的乐观并发保护。
+///
+/// `read` 成功后记录当前文件版本，`edit` 写入前用它检测文件是否已被外部修改。
+#[derive(Debug, Clone)]
+pub struct FileObservation {
+    /// 规范化后的文件路径。
+    pub path: String,
+    /// 文件大小（字节）。
+    pub bytes: u64,
+    /// 文件修改时间（Unix 纳秒）。
+    pub modified_unix_nanos: Option<u64>,
+    /// 文件内容的哈希指纹。
+    pub content_fingerprint: String,
+}
+
+/// 文件观察快照的进程内存储。
+///
+/// 由 agent loop 创建并以 `Arc` 共享注入到 `ToolCapabilities`。
+/// `read` 和 `edit` 工具通过它协作实现 read-before-edit 守卫。
+pub trait FileObservationStore: Send + Sync {
+    /// 记录一次文件观察。
+    fn remember(&self, observation: FileObservation);
+    /// 获取指定路径的最近一次观察快照。
+    fn load(&self, path: &str) -> Option<FileObservation>;
+}
+
 /// 工具调用时按需注入的会话能力。
 ///
 /// 大多数工具不需要这些能力；`Default::default()` 产生全部为 `None` 的空集。
@@ -140,6 +166,8 @@ pub struct ToolCapabilities {
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前 session 的后台任务查询能力（仅 `task` 工具需要）。
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
+    /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
+    pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
 }
 
 /// 每次工具调用时传递的上下文。

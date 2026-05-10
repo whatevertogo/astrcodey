@@ -3,7 +3,10 @@ use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 use astrcode_core::tool::*;
 use serde::Deserialize;
 
-use super::shared::{clean_quotes, find_unique_occurrence, resolve_sandboxed_path, tool_call_id};
+use super::shared::{
+    clean_quotes, find_unique_occurrence, remember_file_observation, resolve_sandboxed_path,
+    stale_file_guard_result, tool_call_id,
+};
 // ─── edit ────────────────────────────────────────────────────────────────
 
 /// 文件精确编辑工具，对已有文件执行窄范围的字符串替换。
@@ -55,8 +58,11 @@ impl Tool for EditFileTool {
         ToolDefinition {
             name: "edit".into(),
             description: "Apply one or more narrow exact string replacements inside an existing \
-                          file. oldStr must appear exactly once unless replaceAll is true. Use \
-                          edits for atomic multiEdit-style changes."
+                          file. You MUST read the file first (using the read tool) to get the \
+                          exact current content, then copy the text you want to change as oldStr. \
+                          Never write oldStr from memory — always paste it from the read result. \
+                          oldStr must match exactly once unless replaceAll is true. Use edits for \
+                          atomic multiEdit-style changes."
                 .into(),
             origin: ToolOrigin::Builtin,
             execution_mode: ExecutionMode::Sequential,
@@ -69,7 +75,7 @@ impl Tool for EditFileTool {
                     },
                     "oldStr": {
                         "type": "string",
-                        "description": "Exact text to replace. Include enough surrounding context to match once."
+                        "description": "Exact text to replace. Copy this from the read tool output — never guess or reconstruct from memory."
                     },
                     "newStr": {
                         "type": "string",
@@ -113,7 +119,7 @@ impl Tool for EditFileTool {
         }
     }
 
-    /// 执行文件编辑：解析参数 → 清理引号 → 查找匹配 → 执行替换 → 写回文件。
+    /// 执行文件编辑：解析参数 → stale file guard → 查找匹配 → 替换 → 写回 → 刷新观察快照。
     async fn execute(
         &self,
         args: serde_json::Value,
@@ -126,12 +132,22 @@ impl Tool for EditFileTool {
         let Ok(path) = path else {
             return Ok(path.unwrap_err());
         };
+
+        // 检查文件是否在上次观察后被外部修改
+        if let Some(stale_result) = stale_file_guard_result(ctx, &path, started_at)? {
+            return Ok(stale_result);
+        }
+
         let operations = normalize_edit_operations(args)?;
 
         let original = std::fs::read_to_string(&path)
             .map_err(|e| ToolError::Execution(format!("read: {e}")))?;
         let (updated, replacements) = apply_edit_operations(&original, &path, &operations)?;
         std::fs::write(&path, &updated).map_err(|e| ToolError::Execution(format!("write: {e}")))?;
+
+        // 编辑成功后刷新观察快照，允许同一 session 在未发生外部改动时继续连续 edit
+        let _ = remember_file_observation(ctx, &path);
+
         let metadata = BTreeMap::from([
             ("path".into(), serde_json::json!(path.display().to_string())),
             ("operationCount".into(), serde_json::json!(operations.len())),

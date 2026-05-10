@@ -44,9 +44,11 @@ pub(in crate::agent) struct ToolPipeline {
     background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
     background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
+    file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
 }
 
 impl ToolPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         shared: SharedTurnContext,
         tool_registry: Arc<ToolRegistry>,
@@ -55,6 +57,7 @@ impl ToolPipeline {
         background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
         background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
         background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
+        file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
     ) -> Self {
         Self {
             shared,
@@ -64,6 +67,7 @@ impl ToolPipeline {
             background_result_tx,
             background_tasks,
             background_task_reader,
+            file_observation_store,
         }
     }
 
@@ -89,6 +93,7 @@ impl ToolPipeline {
             background_result_tx: self.background_result_tx.clone(),
             background_tasks: self.background_tasks.clone(),
             background_task_reader: self.background_task_reader.clone(),
+            file_observation_store: self.file_observation_store.clone(),
         }
     }
 

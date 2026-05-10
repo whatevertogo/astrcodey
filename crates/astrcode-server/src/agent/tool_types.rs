@@ -121,6 +121,8 @@ pub(crate) struct ToolCallRuntimeContext {
     pub(super) background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
     /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
     pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
+    /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
+    pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
 }
 
 impl PreparedToolCall {

@@ -383,6 +383,10 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
          context and inspect it with `read` chunks instead of asking the tool to inline the whole \
          result again."
             .to_string(),
+        "Before using `edit` on any file, you MUST `read` that file first to get the exact \
+         current content. Always copy oldStr from the read output — never write it from memory or \
+         guess."
+            .to_string(),
         String::new(),
     ];
 

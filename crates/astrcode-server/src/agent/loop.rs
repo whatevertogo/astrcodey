@@ -21,7 +21,7 @@ use astrcode_core::{
     extension::{CompactTrigger, ExtensionEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::CompactSnapshotInput,
-    tool::{BackgroundTaskReader, ToolDefinition},
+    tool::{BackgroundTaskReader, FileObservation, FileObservationStore, ToolDefinition},
     types::*,
 };
 use astrcode_extensions::{
@@ -339,6 +339,8 @@ impl AgentLoop {
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
             super::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
         ));
+        let file_observation_store: Option<Arc<dyn FileObservationStore>> =
+            Some(Arc::new(InMemoryFileObservationStore::default()));
         let tools = ToolPipeline::new(
             shared.clone(),
             services.tool_registry,
@@ -347,6 +349,7 @@ impl AgentLoop {
             services.background_result_tx,
             services.background_tasks,
             background_task_reader,
+            file_observation_store,
         );
         Self {
             system_prompt,
@@ -857,3 +860,26 @@ use super::shared_context::{TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 #[cfg(test)]
 #[path = "loop_tests.rs"]
 mod tests;
+
+// ─── File observation store ──────────────────────────────────────────────────
+
+/// 进程内文件观察存储，用于 read/edit 工具的 read-before-edit 守卫。
+///
+/// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
+/// 生命周期与 session 一致（由 `AgentLoop::new` 创建，随 `AgentLoop` 销毁）。
+#[derive(Default)]
+struct InMemoryFileObservationStore {
+    observations: std::sync::Mutex<std::collections::HashMap<String, FileObservation>>,
+}
+
+impl FileObservationStore for InMemoryFileObservationStore {
+    fn remember(&self, observation: FileObservation) {
+        let mut map = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(observation.path.clone(), observation);
+    }
+
+    fn load(&self, path: &str) -> Option<FileObservation> {
+        let map = self.observations.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(path).cloned()
+    }
+}

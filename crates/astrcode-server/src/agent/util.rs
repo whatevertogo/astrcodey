@@ -381,7 +381,10 @@ mod tests {
         // Simulates what weak LLMs produce: real newlines inside JSON string values
         let input = "{\"newStr\": \"use std::sync::Arc;\n\nuse agent::AgentConfig;\"}";
         let result = parse_and_repair_json(input, "edit");
-        assert_eq!(result["newStr"], "use std::sync::Arc;\n\nuse agent::AgentConfig;");
+        assert_eq!(
+            result["newStr"],
+            "use std::sync::Arc;\n\nuse agent::AgentConfig;"
+        );
     }
 
     #[test]
@@ -415,9 +418,13 @@ mod tests {
     fn parse_and_repair_json_handles_backslash_before_newline_in_large_edit() {
         // Simulates the actual failure scenario from logs:
         // LLM generates large edit JSON with \+real-newline in string values
-        let input = "{\"edits\": [{\"newStr\": \"use std::sync::Arc;\\\n\\\nuse agent::AgentConfig;\", \"oldStr\": \"use std::sync::Arc;\"}]}";
+        let input = "{\"edits\": [{\"newStr\": \"use std::sync::Arc;\\\n\\\nuse \
+                     agent::AgentConfig;\", \"oldStr\": \"use std::sync::Arc;\"}]}";
         let result = parse_and_repair_json(input, "edit");
-        assert_eq!(result["edits"][0]["newStr"], "use std::sync::Arc;\n\nuse agent::AgentConfig;");
+        assert_eq!(
+            result["edits"][0]["newStr"],
+            "use std::sync::Arc;\n\nuse agent::AgentConfig;"
+        );
         assert_eq!(result["edits"][0]["oldStr"], "use std::sync::Arc;");
     }
 
