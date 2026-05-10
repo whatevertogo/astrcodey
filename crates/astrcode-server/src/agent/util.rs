@@ -195,13 +195,13 @@ fn escape_control_chars_in_json_strings(s: &str) -> String {
             if ch.is_control() {
                 has_changes = true;
                 match ch {
-                    '\n' => result.push_str("n"),
-                    '\r' => result.push_str("r"),
-                    '\t' => result.push_str("t"),
-                    '\u{0008}' => result.push_str("b"),
-                    '\u{000C}' => result.push_str("f"),
+                    '\n' => result.push('n'),
+                    '\r' => result.push('r'),
+                    '\t' => result.push('t'),
+                    '\u{0008}' => result.push('b'),
+                    '\u{000C}' => result.push('f'),
                     c => {
-                        // 已经有一个 \ 前缀，追加 uXXXX（去掉 \u 前缀的 u）
+                        // 已经有一个 \ 前缀，追加 uXXXX
                         result.push_str(&format!("u{:04x}", c as u32));
                     },
                 }
@@ -282,6 +282,12 @@ fn close_truncated_json(s: &str) -> String {
                 _ => {},
             }
         }
+    }
+
+    // 如果末尾有未完成的转义序列（如截断在 \ 后），先移除尾部的 \
+    // 否则后续补的 " 会被 \" 转义掉，导致字符串未真正闭合
+    if escape_next && result.ends_with('\\') {
+        result.pop();
     }
 
     // 补上缺失的闭合引号
@@ -393,5 +399,34 @@ mod tests {
         // The \n between { and "key" are outside strings — should be preserved as-is
         let result = escape_control_chars_in_json_strings(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn escape_control_chars_handles_backslash_before_control_char() {
+        // LLM outputs \ followed by real newline inside string → should become \n
+        let input = "{\"text\": \"line1\\\nline2\"}";
+        let result = escape_control_chars_in_json_strings(input);
+        assert_eq!(result, r#"{"text": "line1\nline2"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["text"], "line1\nline2");
+    }
+
+    #[test]
+    fn parse_and_repair_json_handles_backslash_before_newline_in_large_edit() {
+        // Simulates the actual failure scenario from logs:
+        // LLM generates large edit JSON with \+real-newline in string values
+        let input = "{\"edits\": [{\"newStr\": \"use std::sync::Arc;\\\n\\\nuse agent::AgentConfig;\", \"oldStr\": \"use std::sync::Arc;\"}]}";
+        let result = parse_and_repair_json(input, "edit");
+        assert_eq!(result["edits"][0]["newStr"], "use std::sync::Arc;\n\nuse agent::AgentConfig;");
+        assert_eq!(result["edits"][0]["oldStr"], "use std::sync::Arc;");
+    }
+
+    #[test]
+    fn close_truncated_json_handles_trailing_backslash() {
+        // Truncated right after a backslash inside a string
+        let result = close_truncated_json(r#"{"text": "abc\"#);
+        assert_eq!(result, r#"{"text": "abc"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["text"], "abc");
     }
 }
