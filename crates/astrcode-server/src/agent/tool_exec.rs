@@ -121,7 +121,7 @@ async fn execute_tool_call_blocking(
         background_task_reader: runtime.background_task_reader,
     };
 
-    let mut result = match tool_registry
+    let result = match tool_registry
         .execute(&call.name, call.tool_input.clone(), &tool_ctx)
         .await
     {
@@ -142,10 +142,6 @@ async fn execute_tool_call_blocking(
     if let Some((tool_tx, bridge)) = tool_event_bridge {
         drop(tool_tx);
         let _ = bridge.await;
-    }
-
-    if result.call_id.is_empty() {
-        result.call_id = call.call_id.clone();
     }
 
     if result.is_error {
@@ -230,9 +226,6 @@ async fn execute_tool_call_with_background(
                 Ok(mut r) => {
                     r.call_id = call_id.clone();
                     r.duration_ms = Some(started_at.elapsed().as_millis() as u64);
-                    if r.call_id.is_empty() {
-                        r.call_id = call_id.clone();
-                    }
                     tracing::debug!(
                         tool_name,
                         call_id,
@@ -306,19 +299,21 @@ async fn background_tool_call(
     send_event(
         &runtime.event_tx,
         EventPayload::ToolCallBackgrounded {
-            call_id: ToolCallId::from(call_id.clone()),
+            call_id: ToolCallId::from(call_id.as_str()),
             tool_name: tool_name.clone(),
             task_id: task_id.clone(),
             reason: bg_reason,
         },
     );
 
+    // 闭包专用的变量，之后由 watcher move 消费
     let bg_call_id = call_id.clone();
     let bg_tool_name = tool_name.clone();
     let bg_task_id = task_id.clone();
     let bg_session_id = runtime.session_id.clone();
     let bg_result_tx = runtime.background_result_tx.clone();
     let bg_manager = runtime.background_tasks.clone();
+    let register_task_id = task_id.clone();
 
     let watcher_handle = tokio::spawn(async move {
         // 等待 exec 完成（或被 cancel abort 导致 oneshot 断开）
@@ -343,14 +338,10 @@ async fn background_tool_call(
             ),
         };
 
-        if result.call_id.is_empty() {
-            result.call_id = bg_call_id.clone();
-        }
-
-        // 在结果元数据中标记后台来源，快照重建时可据此恢复 taskId
+        // 在结果元数据中标记后台来源，快照重建时可据此恢复 task_id
         result
             .metadata
-            .insert("taskId".into(), serde_json::json!(bg_task_id.to_string()));
+            .insert("task_id".into(), serde_json::json!(bg_task_id.to_string()));
 
         tracing::info!(
             tool_name = bg_tool_name,
@@ -363,7 +354,7 @@ async fn background_tool_call(
         // 通过 background_result_tx 通知 handler 进行持久化和广播
         if let Some(tx) = bg_result_tx {
             let _ = tx.send(BackgroundTaskCompletion {
-                session_id: bg_session_id.clone(),
+                session_id: bg_session_id,
                 task_id: bg_task_id.clone(),
                 call_id: ToolCallId::from(bg_call_id),
                 tool_name: bg_tool_name,
@@ -378,7 +369,7 @@ async fn background_tool_call(
     // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）
     if let Ok(mut mgr) = runtime.background_tasks.lock() {
         mgr.register(
-            task_id.clone(),
+            register_task_id,
             runtime.session_id.clone(),
             exec_handle,
             watcher_handle,
@@ -391,7 +382,6 @@ async fn background_tool_call(
         .get("command")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let placeholder =
-        backgrounded_placeholder_result(&call_id, &task_id, &tool_name, command.as_deref());
+    let placeholder = backgrounded_placeholder_result(&call_id, &task_id, command.as_deref());
     (call_index, placeholder)
 }

@@ -257,6 +257,12 @@ impl CommandHandler {
                 }
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
+                        // 中止该会话的活跃回合（包括后台任务）
+                        if let Some(turn) = self.active_turns.remove(&session_id) {
+                            if !turn.handle.is_finished() {
+                                turn.handle.abort();
+                            }
+                        }
                         self.session_tool_registries.remove(&session_id);
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;

@@ -803,7 +803,7 @@ fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
             },
             task_id: result
                 .metadata
-                .get("taskId")
+                .get("task_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
         }),

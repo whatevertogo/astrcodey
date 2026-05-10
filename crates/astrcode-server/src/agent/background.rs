@@ -165,7 +165,6 @@ pub fn complete_background_task(
 pub fn backgrounded_placeholder_result(
     call_id: &str,
     task_id: &BackgroundTaskId,
-    _tool_name: &str,
     command: Option<&str>,
 ) -> ToolResult {
     let mut content = format!(
@@ -178,7 +177,7 @@ pub fn backgrounded_placeholder_result(
 
     let mut meta = std::collections::BTreeMap::new();
     meta.insert("backgrounded".into(), serde_json::json!(true));
-    meta.insert("taskId".into(), serde_json::json!(task_id.to_string()));
+    meta.insert("task_id".into(), serde_json::json!(task_id.to_string()));
 
     ToolResult {
         call_id: call_id.to_string(),

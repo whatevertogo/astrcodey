@@ -71,6 +71,27 @@ impl ToolPipeline {
         self.tool_registry.list_definitions()
     }
 
+    /// 构建工具调用的运行时上下文。
+    fn make_runtime_context(
+        &self,
+        tools: &[ToolDefinition],
+        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+    ) -> ToolCallRuntimeContext {
+        ToolCallRuntimeContext {
+            session_id: self.shared.session_id.clone(),
+            working_dir: self.shared.working_dir.clone(),
+            model_id: self.shared.model_id.clone(),
+            tools: tools.to_vec(),
+            tool_result_reader: Some(
+                Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>
+            ),
+            event_tx,
+            background_result_tx: self.background_result_tx.clone(),
+            background_tasks: self.background_tasks.clone(),
+            background_task_reader: self.background_task_reader.clone(),
+        }
+    }
+
     /// 预处理工具调用列表。
     ///
     /// 对每个待执行的工具调用依次执行：
@@ -221,18 +242,7 @@ impl ToolPipeline {
                     );
                     let (index, result) = execute_tool_call(
                         Arc::clone(&self.tool_registry),
-                        ToolCallRuntimeContext {
-                            session_id: self.shared.session_id.clone(),
-                            working_dir: self.shared.working_dir.clone(),
-                            model_id: self.shared.model_id.clone(),
-                            tools: input.tools.to_vec(),
-                            tool_result_reader: Some(Arc::clone(&self.session_manager)
-                                as Arc<dyn ToolResultArtifactReader>),
-                            event_tx: input.event_tx.clone(),
-                            background_result_tx: self.background_result_tx.clone(),
-                            background_tasks: self.background_tasks.clone(),
-                            background_task_reader: self.background_task_reader.clone(),
-                        },
+                        self.make_runtime_context(input.tools, input.event_tx.clone()),
                         executable,
                     )
                     .await;
@@ -374,34 +384,9 @@ impl ToolPipeline {
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
-        let session_id = self.shared.session_id.clone();
-        let working_dir = self.shared.working_dir.clone();
-        let model_id = self.shared.model_id.clone();
-        let tools = tools.to_vec();
-        let tool_result_reader =
-            Some(Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>);
-        let background_result_tx = self.background_result_tx.clone();
-        let background_tasks = self.background_tasks.clone();
-        let background_task_reader = self.background_task_reader.clone();
+        let ctx = self.make_runtime_context(tools, event_tx);
 
-        join_set.spawn(async move {
-            execute_tool_call(
-                tool_registry,
-                ToolCallRuntimeContext {
-                    session_id,
-                    working_dir,
-                    model_id,
-                    tools,
-                    tool_result_reader,
-                    event_tx,
-                    background_result_tx,
-                    background_tasks,
-                    background_task_reader,
-                },
-                call,
-            )
-            .await
-        });
+        join_set.spawn(async move { execute_tool_call(tool_registry, ctx, call).await });
     }
 
     /// 提交工具执行结果。
