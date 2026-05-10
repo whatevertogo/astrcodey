@@ -5,23 +5,22 @@
 
 mod agent;
 
-use std::{collections::BTreeMap, sync::Arc};
-
-use agent::AgentConfig;
 use astrcode_core::{
     extension::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, ExtensionToolOutcome,
         HookEffect, HookMode, HookSubscription, PromptContributions,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
+use serde::Deserialize;
+use serde_json::json;
 
 // ─── 内置扩展入口 ─────────────────────────────────────────────────────
 
 /// 返回内置 Agent 工具扩展。
-pub fn extension() -> Arc<dyn Extension> {
-    Arc::new(AgentToolsExtension)
+pub fn extension() -> std::sync::Arc<dyn Extension> {
+    std::sync::Arc::new(AgentToolsExtension)
 }
 
 struct AgentToolsExtension;
@@ -76,23 +75,42 @@ impl Extension for AgentToolsExtension {
         let run = build_agent_run(&arguments, &agents).map_err(ExtensionError::Internal)?;
         let outcome_json = serde_json::to_value(&run.outcome)
             .map_err(|e| ExtensionError::Internal(format!("serialize agent outcome: {e}")))?;
-        let render_json = serde_json::to_value(run.render)
+        let render_json = serde_json::to_value(&run.render)
             .map_err(|e| ExtensionError::Internal(format!("serialize agent render: {e}")))?;
-        let mut metadata = BTreeMap::new();
-        metadata.insert("extension_tool_outcome".into(), outcome_json);
-        metadata.insert(UI_RENDER_METADATA_KEY.into(), render_json);
-        Ok(ToolResult {
-            call_id: String::new(),
-            content: String::new(),
-            is_error: false,
-            error: None,
-            metadata,
-            duration_ms: None,
-        })
+
+        Ok(ToolResult::text(
+            String::new(),
+            false,
+            tool_metadata([
+                ("extension_tool_outcome", outcome_json),
+                (UI_RENDER_METADATA_KEY, render_json),
+            ]),
+        ))
     }
 }
 
 // ─── 工具实现 ────────────────────────────────────────────────────────
+
+/// LLM tool call 参数类型。
+///
+/// JSON schema 定义了 LLM 的调用契约，因此 `rename_all = "camelCase"` 是合理的。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentArgs {
+    prompt: String,
+    description: String,
+    subagent_type: Option<String>,
+    #[serde(default)]
+    mode: AgentMode,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum AgentMode {
+    #[default]
+    Single,
+    Chain,
+}
 
 struct AgentRun {
     outcome: ExtensionToolOutcome,
@@ -100,37 +118,38 @@ struct AgentRun {
 }
 
 /// 解析输入 + 可用 Agent 列表，返回声明式 RunSession 结果和 UI 渲染提示。
-fn build_agent_run(input: &serde_json::Value, agents: &[AgentConfig]) -> Result<AgentRun, String> {
-    let prompt = input["prompt"].as_str().ok_or("prompt required")?;
-    let agent_name = input["subagent_type"].as_str().unwrap_or("");
-    let mode = input["mode"].as_str().unwrap_or("single");
+fn build_agent_run(
+    input: &serde_json::Value,
+    agents: &[agent::AgentConfig],
+) -> Result<AgentRun, String> {
+    let args: AgentArgs =
+        serde_json::from_value(input.clone()).map_err(|e| format!("invalid agent args: {e}"))?;
 
-    match mode {
-        "chain" => Err(
+    match args.mode {
+        AgentMode::Chain => Err(
             "chain mode is not yet supported — use single mode or list each agent step manually"
                 .into(),
         ),
-        _ => {
-            let agent = if agent_name.is_empty() {
-                agents.first().ok_or("no agents configured")?
-            } else {
-                agents
+        AgentMode::Single => {
+            let agent = match args.subagent_type.as_deref() {
+                None | Some("") => agents.first().ok_or("no agents configured")?,
+                Some(name) => agents
                     .iter()
-                    .find(|a| a.name == agent_name)
+                    .find(|a| a.name == name || a.id == name)
                     .ok_or_else(|| {
                         format!(
-                            "agent '{agent_name}' not found.\n\n{}",
+                            "agent '{name}' not found.\n\n{}",
                             format_agents_for_model(agents)
                         )
-                    })?
+                    })?,
             };
 
             Ok(AgentRun {
-                render: agent_run_render_spec(input, agent, prompt),
+                render: agent_run_render_spec(&args, agent),
                 outcome: ExtensionToolOutcome::RunSession {
                     name: agent.name.clone(),
                     system_prompt: agent.body.clone(),
-                    user_prompt: prompt.to_string(),
+                    user_prompt: args.prompt,
                     model_preference: agent.model.clone(),
                 },
             })
@@ -138,14 +157,7 @@ fn build_agent_run(input: &serde_json::Value, agents: &[AgentConfig]) -> Result<
     }
 }
 
-fn agent_run_render_spec(
-    input: &serde_json::Value,
-    agent: &AgentConfig,
-    prompt: &str,
-) -> RenderSpec {
-    let description = input["description"]
-        .as_str()
-        .unwrap_or(agent.description.as_str());
+fn agent_run_render_spec(args: &AgentArgs, agent: &agent::AgentConfig) -> RenderSpec {
     let model = agent.model.as_deref().unwrap_or("inherit/default");
 
     RenderSpec::Box {
@@ -156,7 +168,7 @@ fn agent_run_render_spec(
                 entries: vec![
                     RenderKeyValue {
                         key: "task".into(),
-                        value: description.into(),
+                        value: args.description.clone(),
                         tone: RenderTone::Accent,
                     },
                     RenderKeyValue {
@@ -173,7 +185,7 @@ fn agent_run_render_spec(
                 tone: RenderTone::Default,
             },
             RenderSpec::Text {
-                text: format!("prompt: {}", compact_inline(prompt, 180)),
+                text: format!("prompt: {}", compact_inline(&args.prompt, 180)),
                 tone: RenderTone::Muted,
             },
         ],
@@ -200,19 +212,15 @@ fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "agent".into(),
         description: AGENT_TOOL_DESCRIPTION.into(),
-        parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS).unwrap_or_else(|_| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-            })
-        }),
+        parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS)
+            .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }
 }
 
 /// 将 Agent 列表格式化为模型可读的文本。
-fn format_agents_for_model(agents: &[AgentConfig]) -> String {
+fn format_agents_for_model(agents: &[agent::AgentConfig]) -> String {
     if agents.is_empty() {
         return String::from("No agents configured.");
     }
@@ -271,5 +279,49 @@ mod tests {
 
         assert_eq!(modes, vec!["single"]);
         assert!(!properties.contains_key("chain"));
+    }
+
+    #[test]
+    fn agent_args_deserialize_camel_case() {
+        let input = json!({
+            "prompt": "find the bug",
+            "description": "bug hunt",
+            "subagent_type": "explore"
+        });
+        let args: AgentArgs = serde_json::from_value(input).unwrap();
+        assert_eq!(args.prompt, "find the bug");
+        assert_eq!(args.description, "bug hunt");
+        assert_eq!(args.subagent_type.as_deref(), Some("explore"));
+        assert!(matches!(args.mode, AgentMode::Single));
+    }
+
+    #[test]
+    fn agent_args_reject_missing_prompt() {
+        let input = json!({ "description": "test" });
+        let result = serde_json::from_value::<AgentArgs>(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_agent_run_matches_by_id_or_name() {
+        let agents = vec![agent::AgentConfig {
+            id: String::from("code-reviewer"),
+            name: String::from("Code Reviewer"),
+            description: String::from("review code"),
+            model: None,
+            body: String::from("Review."),
+        }];
+
+        let by_name =
+            json!({ "prompt": "review", "description": "test", "subagent_type": "Code Reviewer" });
+        assert!(build_agent_run(&by_name, &agents).is_ok());
+
+        let by_id =
+            json!({ "prompt": "review", "description": "test", "subagent_type": "code-reviewer" });
+        assert!(build_agent_run(&by_id, &agents).is_ok());
+
+        let by_unknown =
+            json!({ "prompt": "review", "description": "test", "subagent_type": "unknown" });
+        assert!(build_agent_run(&by_unknown, &agents).is_err());
     }
 }

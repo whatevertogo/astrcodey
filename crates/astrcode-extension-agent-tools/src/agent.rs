@@ -29,36 +29,27 @@ pub struct AgentConfig {
 
 // ─── 内置 Agent ─────────────────────────────────────────────────────
 
-/// 内置 Agent 定义
-struct BuiltinAgent {
-    /// 内置路径标识
-    path: &'static str,
-    /// Agent markdown 内容
-    content: &'static str,
-}
-
 /// 返回所有内置 Agent 配置。
 ///
 /// 内置 Agent 包括 explore（探索）、reviewer（审查）和 execute（执行）。
 pub fn builtin_agents() -> Vec<AgentConfig> {
-    let builtins: &[BuiltinAgent] = &[
-        BuiltinAgent {
-            path: "builtin://explore.md",
-            content: include_str!("builtin_agents/explore.md"),
-        },
-        BuiltinAgent {
-            path: "builtin://reviewer.md",
-            content: include_str!("builtin_agents/reviewer.md"),
-        },
-        BuiltinAgent {
-            path: "builtin://execute.md",
-            content: include_str!("builtin_agents/execute.md"),
-        },
-    ];
-    builtins
-        .iter()
-        .filter_map(|b| parse(b.path, b.content).ok())
-        .collect()
+    [
+        (
+            "builtin://explore.md",
+            include_str!("builtin_agents/explore.md"),
+        ),
+        (
+            "builtin://reviewer.md",
+            include_str!("builtin_agents/reviewer.md"),
+        ),
+        (
+            "builtin://execute.md",
+            include_str!("builtin_agents/execute.md"),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(path, content)| parse(path, content).ok())
+    .collect()
 }
 
 // ─── 发现 ───────────────────────────────────────────────────────────
