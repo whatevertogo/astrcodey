@@ -93,7 +93,7 @@ pub fn router(
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed_origins))
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::CACHE_CONTROL]);
 
     let app = Router::new()
         .route("/api/sessions", post(create_session).get(list_sessions))

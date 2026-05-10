@@ -23,7 +23,6 @@ export async function consumeSseStream(
     response = await fetch(url, {
       headers: {
         Accept: 'text/event-stream',
-        'Cache-Control': 'no-cache',
         ...authHeaders(),
       },
       signal,
