@@ -78,6 +78,10 @@ pub enum EventPayload {
     ///
     /// 写入父 Session 的事件日志，表达"从父看子"的关系。
     /// 子侧通过 `SessionStarted.parent_session_id` 表达"从子看父"。
+    ///
+    /// 注意：`child_session_id` 指向最初被委托的子 Session，
+    /// 而非 compact continuation 后的 leaf Session。
+    /// `SpawnResult.child_session_id` 才指向最终完成输出的 leaf Session。
     AgentSessionSpawned {
         child_session_id: SessionId,
         agent_name: String,

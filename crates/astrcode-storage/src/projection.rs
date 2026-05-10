@@ -44,6 +44,7 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.context_messages.clear();
             model.system_prompt = None;
             model.pending_tool_calls.clear();
+            model.agent_sessions.clear();
         },
         EventPayload::AgentSessionSpawned {
             child_session_id,
