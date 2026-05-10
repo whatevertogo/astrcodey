@@ -23,7 +23,7 @@ use super::{
 };
 use crate::{
     agent::{
-        AgentLoop, AgentServices, AgentSignal, AutoCompactFailureTracker,
+        AgentLoop, AgentServices, AgentSignal, AutoCompactFailureTracker, BackgroundTaskManager,
         compact::compact_trigger_name, drive_agent, tool_types::BackgroundTaskCompletion,
     },
     bootstrap::{build_system_prompt_snapshot, build_tool_registry_snapshot, prompt_fingerprint},
@@ -39,6 +39,7 @@ pub(crate) struct ServerSessionSpawner {
     pub(crate) llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) auto_compact_failures: Arc<AutoCompactFailureTracker>,
+    pub(crate) background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     pub(crate) read_timeout_secs: u64,
 }
@@ -165,22 +166,28 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             while let Some(completion) = child_bg_result_rx.recv().await {
                 let sid = child_bg_final_sid.lock().await.clone();
                 // 持久化 ToolCallCompleted 到子会话
-                let _ = append_child_payload(
+                if let Err(e) = append_child_payload(
                     child_bg_sm.as_ref(),
                     &sid,
                     Some(&child_bg_turn_id),
                     completion.to_tool_call_completed(),
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(session_id = %sid, error = %e, "failed to persist ToolCallCompleted for background task");
+                }
                 // 持久化 BackgroundTaskCompleted + 转发给父会话进度
                 let bg_event = completion.to_background_task_completed();
-                let _ = append_child_payload(
+                if let Err(e) = append_child_payload(
                     child_bg_sm.as_ref(),
                     &sid,
                     Some(&child_bg_turn_id),
                     bg_event.clone(),
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(session_id = %sid, error = %e, "failed to persist BackgroundTaskCompleted");
+                }
                 child_bg_progress.forward(&bg_event);
             }
         });
@@ -198,7 +205,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 session_manager: Arc::clone(&self.session_manager),
                 auto_compact_failures: Arc::clone(&self.auto_compact_failures),
                 background_result_tx: Some(child_bg_result_tx),
-                background_tasks: Default::default(),
+                background_tasks: Arc::clone(&self.background_tasks),
             },
         );
 
@@ -576,6 +583,7 @@ mod tests {
             llm,
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
+            background_tasks: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(
                 Duration::from_secs(1),
                 Arc::new(ExtensionRuntime::new()),

@@ -278,20 +278,34 @@ impl CommandHandler {
             },
             CommandMessage::BackgroundTaskCompleted(completion) => {
                 // 持久化后台任务完成事件并广播给客户端
-                let _ = self
+                if let Err(e) = self
                     .record_and_broadcast(
                         &completion.session_id,
                         None,
                         completion.to_tool_call_completed(),
                     )
-                    .await;
-                let _ = self
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %completion.session_id,
+                        error = %e,
+                        "failed to persist ToolCallCompleted for background task"
+                    );
+                }
+                if let Err(e) = self
                     .record_and_broadcast(
                         &completion.session_id,
                         None,
                         completion.to_background_task_completed(),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %completion.session_id,
+                        error = %e,
+                        "failed to persist BackgroundTaskCompleted"
+                    );
+                }
             },
         }
     }
