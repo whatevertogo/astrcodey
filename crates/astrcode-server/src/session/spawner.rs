@@ -77,6 +77,21 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             .map_err(|e| format!("create child session: {e}"))?;
 
         let child_sid = create_event.session_id.clone();
+
+        // 向父 session 记录派生关系
+        self.session_manager
+            .append_event(Event::new(
+                parent_session_id.clone(),
+                None,
+                EventPayload::AgentSessionSpawned {
+                    child_session_id: child_sid.clone(),
+                    agent_name: child_name.clone(),
+                    task: user_prompt.clone(),
+                },
+            ))
+            .await
+            .map_err(|e| format!("append parent spawn event: {e}"))?;
+
         let child_turn_id = new_turn_id();
 
         let tool_registry = build_tool_registry_snapshot(
@@ -587,5 +602,20 @@ mod tests {
             }
         }
         assert!(saw_continued_progress);
+
+        // 父 session 应记录派生的子 Agent
+        let parent_model = session_manager
+            .read_model(&parent.session_id)
+            .await
+            .unwrap();
+        assert_eq!(parent_model.agent_sessions.len(), 1);
+        assert_eq!(parent_model.agent_sessions[0].agent_name, "nested");
+        assert_eq!(parent_model.agent_sessions[0].task, "current nested prompt");
+        // child_session_id 指向最初的子会话（不是 compact 后的 leaf）
+        let first_child_id = &parent_model.agent_sessions[0].child_session_id;
+        assert_eq!(
+            first_child_id, &previous_child_id,
+            "spawned link should point to the original child, not the compact leaf"
+        );
     }
 }

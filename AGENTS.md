@@ -33,6 +33,9 @@
 - 不要为了“未来可能用”添加 `Option<T>` 字段。但是可以留下TODO注释说明未来可能添加。
 - 不要把内部 enum 直接暴露成线缆契约，除非它本来就是稳定协议。
 - `serde(rename_all = "camelCase")` 只应出现在 protocol / wire 类型中，不要随意加到内部结构体上。
+  例外：LLM tool call 参数类型（如 `ShellArgs`、`WriteFileArgs`）虽然只在内部使用，
+  但其 JSON schema 定义了 LLM 的调用契约（`camelCase` 字段名），
+  因此 `rename_all = "camelCase"` 在这些类型上是合理的。
 
 ## Rust 实现
 

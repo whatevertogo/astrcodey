@@ -197,27 +197,39 @@ async fn consume_llm_stream(
                 name,
                 arguments,
             } => {
-                send_event(
-                    event_tx,
-                    EventPayload::ToolCallStarted {
-                        call_id: call_id.clone().into(),
-                        tool_name: name.clone(),
-                    },
-                );
-                if !arguments.is_empty() {
+                // Replace duplicate call_id entries from buggy providers
+                // instead of silently merging arguments.
+                if let Some(existing) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
+                    tracing::warn!(
+                        call_id,
+                        name,
+                        "duplicate ToolCallStart with same call_id, replacing previous entry"
+                    );
+                    existing.name = name.clone();
+                    existing.arguments = arguments.clone();
+                } else {
                     send_event(
                         event_tx,
-                        EventPayload::ToolCallArgumentsDelta {
+                        EventPayload::ToolCallStarted {
                             call_id: call_id.clone().into(),
-                            delta: arguments.clone(),
+                            tool_name: name.clone(),
                         },
                     );
+                    if !arguments.is_empty() {
+                        send_event(
+                            event_tx,
+                            EventPayload::ToolCallArgumentsDelta {
+                                call_id: call_id.clone().into(),
+                                delta: arguments.clone(),
+                            },
+                        );
+                    }
+                    tool_calls.push(PendingToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    });
                 }
-                tool_calls.push(PendingToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                });
             },
             LlmEvent::ToolCallDelta { call_id, delta } => {
                 if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
@@ -277,19 +289,37 @@ async fn consume_llm_stream(
 
 /// 从文本中剥离 `<think-block>...</think-block>`，返回纯可见文本。
 /// 兼容kimi
-fn strip_think_block(mut text: &str) -> String {
+///
+/// 使用深度计数正确处理嵌套标签。
+fn strip_think_block(text: &str) -> String {
+    let open_tag = "<think-block>";
+    let close_tag = "</think-block>";
     let mut result = String::with_capacity(text.len());
-    while let Some(start) = text.find("<think-block>") {
-        result.push_str(&text[..start]);
-        let after_open = &text[start + "<think-block>".len()..];
-        if let Some(end) = after_open.find("</think-block>") {
-            text = &after_open[end + "</think-block>".len()..];
-        } else {
-            // 未闭合标签：把剩余文本原样保留
-            break;
+    let mut depth = 0usize;
+    let mut pos = 0;
+    let bytes = text.as_bytes();
+
+    while pos < text.len() {
+        // Check for opening tag
+        if bytes[pos..].starts_with(open_tag.as_bytes()) {
+            depth += 1;
+            pos += open_tag.len();
+            continue;
         }
+        // Check for closing tag
+        if bytes[pos..].starts_with(close_tag.as_bytes()) {
+            depth = depth.saturating_sub(1);
+            pos += close_tag.len();
+            continue;
+        }
+        // Only emit characters outside any think-block
+        let ch = text[pos..].chars().next().unwrap();
+        if depth == 0 {
+            result.push(ch);
+        }
+        pos += ch.len_utf8();
     }
-    result.push_str(text);
+
     result.trim().to_string()
 }
 

@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicI32, Ordering},
-};
+use std::sync::Arc;
 
 use tauri::State;
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
@@ -9,33 +6,44 @@ use tauri_plugin_shell::{ShellExt, process::CommandChild};
 const SIDECAR_NAME: &str = "astrcode-http-server";
 const SIDECAR_ADDR_ENV: &str = "ASTRCODE_HTTP_ADDR";
 
+/// sidecar 进程的运行时状态：port 和 child 绑定在同一个锁内，
+/// 避免单独操作 port / child 时出现竞态。
+struct Inner {
+    port: i32,
+    child: Option<CommandChild>,
+}
+
 pub struct SidecarState {
-    port: AtomicI32,
     startup: tokio::sync::Mutex<()>,
-    child: tokio::sync::Mutex<Option<CommandChild>>,
+    inner: std::sync::Mutex<Inner>,
 }
 
 impl SidecarState {
     pub fn new() -> Self {
         Self {
-            port: AtomicI32::new(0),
             startup: tokio::sync::Mutex::new(()),
-            child: tokio::sync::Mutex::new(None),
+            inner: std::sync::Mutex::new(Inner {
+                port: 0,
+                child: None,
+            }),
         }
     }
 
     pub fn port(&self) -> i32 {
-        self.port.load(Ordering::SeqCst)
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).port
     }
 
     pub fn shutting_down(&self) {
-        self.port.store(0, Ordering::SeqCst);
-        if let Ok(mut guard) = self.child.try_lock() {
-            if let Some(child) = guard.take() {
-                let _ = child.kill();
-            }
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.port = 0;
+        if let Some(child) = guard.child.take() {
+            let _ = child.kill();
         }
     }
+}
+
+fn lock_inner(state: &SidecarState) -> std::sync::MutexGuard<'_, Inner> {
+    state.inner.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[tauri::command]
@@ -49,36 +57,38 @@ pub async fn start_server(
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-    // Single lock acquisition: check and cleanup atomically
-    {
-        let mut child_guard = state.child.lock().await;
-        let current_port = state.port.load(Ordering::SeqCst);
-        if current_port > 0 && child_guard.is_some() {
-            return Ok(current_port);
+    // Hold inner lock through the entire check + cleanup + spawn sequence
+    // to prevent stop_server from racing between the steps.
+    let port = {
+        let mut inner = lock_inner(&state);
+        if inner.port > 0 && inner.child.is_some() {
+            return Ok(inner.port);
         }
-        if let Some(child) = child_guard.take() {
+        if let Some(child) = inner.child.take() {
             let _ = child.kill();
         }
-    }
-    state.port.store(0, Ordering::SeqCst);
+        inner.port = 0;
 
-    let port =
-        portpicker::pick_unused_port().ok_or_else(|| "No available port found".to_string())?;
+        let port =
+            portpicker::pick_unused_port().ok_or_else(|| "No available port found".to_string())?;
 
-    let addr = format!("127.0.0.1:{port}");
+        let addr = format!("127.0.0.1:{port}");
 
-    let sidecar_command = app
-        .shell()
-        .sidecar(SIDECAR_NAME)
-        .map_err(|e| format!("Failed to resolve sidecar `{SIDECAR_NAME}`: {e}"))?
-        .env(SIDECAR_ADDR_ENV, &addr);
+        let sidecar_command = app
+            .shell()
+            .sidecar(SIDECAR_NAME)
+            .map_err(|e| format!("Failed to resolve sidecar `{SIDECAR_NAME}`: {e}"))?
+            .env(SIDECAR_ADDR_ENV, &addr);
 
-    let (mut rx, child) = sidecar_command
-        .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
+        let (mut rx, child) = sidecar_command
+            .spawn()
+            .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
 
-    state.port.store(port as i32, Ordering::SeqCst);
-    *state.child.lock().await = Some(child);
+        inner.port = port as i32;
+        inner.child = Some(child);
+        // Release the inner lock before the health check loop.
+        port
+    };
 
     let sidecar_state = Arc::clone(&state);
     tauri::async_runtime::spawn(async move {
@@ -93,14 +103,16 @@ pub async fn start_server(
                 },
                 CommandEvent::Terminated(status) => {
                     tracing::warn!("[sidecar] exited with status: {status:?}");
-                    sidecar_state.port.store(0, Ordering::SeqCst);
-                    let _ = sidecar_state.child.lock().await.take();
+                    let mut inner = lock_inner(&sidecar_state);
+                    inner.port = 0;
+                    inner.child.take();
                     break;
                 },
                 CommandEvent::Error(err) => {
                     tracing::error!("[sidecar error] {err}");
-                    sidecar_state.port.store(0, Ordering::SeqCst);
-                    let _ = sidecar_state.child.lock().await.take();
+                    let mut inner = lock_inner(&sidecar_state);
+                    inner.port = 0;
+                    inner.child.take();
                     break;
                 },
                 _ => {},
@@ -108,31 +120,35 @@ pub async fn start_server(
         }
     });
 
-    let health_url = format!("http://{addr}/api/sessions");
+    let health_url = format!("http://127.0.0.1:{port}/api/sessions");
     for attempt in 0..40 {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let still_tracked =
-            state.port.load(Ordering::SeqCst) == port as i32 && state.child.lock().await.is_some();
+        let inner = lock_inner(&state);
+        let still_tracked = inner.port == port && inner.child.is_some();
+        drop(inner);
         if still_tracked && client.get(&health_url).send().await.is_ok() {
-            tracing::info!("Server ready at {addr} (attempt {})", attempt + 1);
-            return Ok(port as i32);
+            tracing::info!("Server ready (attempt {})", attempt + 1);
+            return Ok(port);
         }
     }
 
     {
-        let mut child_guard = state.child.lock().await;
-        if let Some(child) = child_guard.take() {
+        let mut inner = lock_inner(&state);
+        if let Some(child) = inner.child.take() {
             let _ = child.kill();
         }
+        inner.port = 0;
     }
-    state.port.store(0, Ordering::SeqCst);
 
-    Err(format!("Server did not become ready at {addr} within 10s"))
+    Err(format!("Server did not become ready within 10s"))
 }
 
 #[tauri::command]
 pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), String> {
-    let port = state.port.load(Ordering::SeqCst);
+    let port = {
+        let inner = lock_inner(&state);
+        inner.port
+    };
 
     // Try graceful shutdown via HTTP first
     if port > 0 {
@@ -148,11 +164,11 @@ pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), Stri
     }
 
     // Force kill if still running
-    let mut guard = state.child.lock().await;
-    if let Some(child) = guard.take() {
+    let mut inner = lock_inner(&state);
+    if let Some(child) = inner.child.take() {
         let _ = child.kill();
     }
-    state.port.store(0, Ordering::SeqCst);
+    inner.port = 0;
     Ok(())
 }
 

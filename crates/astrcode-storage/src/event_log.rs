@@ -489,6 +489,13 @@ fn validate_event(event: &Event, line_number: usize, path: &Path) -> Result<(), 
 ///
 /// 缓冲追加请求，在可配置的时间窗口内批量刷盘。
 /// 适用于高频事件写入场景，减少磁盘 I/O 次数。
+///
+/// # 所有权
+///
+/// `BatchAppender` 通过值获取 `EventLog` 的所有权。
+/// 创建后不得再通过原始引用调用 `EventLog::append()`，
+/// 否则会导致序列号冲突和数据损坏。
+/// 使用 [`BatchAppender::into_inner`] 可以回收底层日志。
 pub struct BatchAppender {
     /// 底层事件日志
     log: EventLog,
@@ -501,8 +508,10 @@ pub struct BatchAppender {
 impl BatchAppender {
     /// 创建新的批量追加器。
     ///
+    /// 接管 `log` 的所有权，调用方不应再持有或使用该 `EventLog`。
+    ///
     /// # 参数
-    /// - `log`: 底层事件日志
+    /// - `log`: 底层事件日志（所有权转移）
     /// - `flush_window_ms`: 刷盘时间窗口（毫秒）
     pub fn new(log: EventLog, flush_window_ms: u64) -> Self {
         Self {
@@ -513,7 +522,7 @@ impl BatchAppender {
     }
 
     /// 将事件推入缓冲区，等待后续刷盘。
-    pub async fn push(&mut self, event: Event) -> Result<(), StorageError> {
+    pub fn push(&mut self, event: Event) -> Result<(), StorageError> {
         self.buffer.push(event);
         Ok(())
     }
@@ -522,7 +531,7 @@ impl BatchAppender {
     ///
     /// 返回本次刷盘的事件数量。刷盘成功后才更新 seq 和清空缓冲区，
     /// 避免部分写入导致事件丢失。
-    pub async fn flush(&mut self) -> Result<usize, StorageError> {
+    pub fn flush(&mut self) -> Result<usize, StorageError> {
         if self.buffer.is_empty() {
             return Ok(0);
         }
@@ -566,6 +575,21 @@ impl BatchAppender {
     /// 获取配置的刷盘时间窗口（毫秒）。
     pub fn flush_window_ms(&self) -> u64 {
         self.flush_window_ms
+    }
+
+    /// 回收底层 `EventLog`，丢弃未刷盘的缓冲区事件。
+    ///
+    /// 返回前会尝试刷盘。如果刷盘失败，仍然返回 `EventLog`
+    /// （未刷盘的事件会丢失）。
+    pub fn into_inner(mut self) -> EventLog {
+        if let Err(error) = self.flush() {
+            tracing::warn!(
+                path = %self.log.path.display(),
+                %error,
+                "BatchAppender::into_inner: flush failed, buffered events may be lost"
+            );
+        }
+        self.log
     }
 }
 
@@ -660,5 +684,84 @@ mod tests {
             }
             .is_durable()
         );
+    }
+
+    #[tokio::test]
+    async fn batch_appender_push_and_flush_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("batch.jsonl");
+        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
+            .await
+            .unwrap();
+
+        assert_eq!(start.seq, Some(0));
+
+        let mut appender = BatchAppender::new(log, 100);
+        appender
+            .push(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnStarted,
+            ))
+            .unwrap();
+        appender
+            .push(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnCompleted {
+                    finish_reason: "stop".into(),
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(appender.flush().unwrap(), 2);
+
+        let log = appender.into_inner();
+        let events = log.replay_all().await.unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].seq, Some(0)); // start
+        assert_eq!(events[1].seq, Some(1)); // batch event 1
+        assert_eq!(events[2].seq, Some(2)); // batch event 2
+    }
+
+    #[tokio::test]
+    async fn batch_appender_flush_empty_is_noop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.jsonl");
+        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
+            .await
+            .unwrap();
+
+        let mut appender = BatchAppender::new(log, 100);
+        assert_eq!(appender.flush().unwrap(), 0);
+
+        let log = appender.into_inner();
+        let events = log.replay_all().await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, Some(start.seq.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn batch_appender_into_inner_flushes_remaining() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("drop.jsonl");
+        let (log, _) = EventLog::create(path.clone(), make_start_event("s1"))
+            .await
+            .unwrap();
+
+        let mut appender = BatchAppender::new(log, 100);
+        appender
+            .push(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnStarted,
+            ))
+            .unwrap();
+        // Don't call flush — into_inner should flush for us.
+        let log = appender.into_inner();
+
+        let events = log.replay_all().await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].seq, Some(1));
     }
 }

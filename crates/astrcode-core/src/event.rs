@@ -74,6 +74,16 @@ pub enum EventPayload {
     /// 会话已删除。
     SessionDeleted,
 
+    /// 父会话记录派生了子 Agent 会话。
+    ///
+    /// 写入父 Session 的事件日志，表达"从父看子"的关系。
+    /// 子侧通过 `SessionStarted.parent_session_id` 表达"从子看父"。
+    AgentSessionSpawned {
+        child_session_id: SessionId,
+        agent_name: String,
+        task: String,
+    },
+
     /// Agent 运行开始。
     AgentRunStarted,
 
@@ -524,5 +534,25 @@ mod tests {
         assert!(!start.is_durable(), "ToolCallStarted is live UI state only");
         assert!(request.is_durable());
         assert_ne!(start, request);
+    }
+
+    #[test]
+    fn agent_session_spawned_serializes_and_is_durable() {
+        let payload = EventPayload::AgentSessionSpawned {
+            child_session_id: "child-1".into(),
+            agent_name: "reviewer".into(),
+            task: "review current diff".into(),
+        };
+
+        assert!(payload.is_durable());
+
+        let value = serde_json::to_value(&payload).unwrap();
+        assert_eq!(value["type"], "agent_session_spawned");
+        assert_eq!(value["child_session_id"], "child-1");
+        assert_eq!(value["agent_name"], "reviewer");
+        assert_eq!(value["task"], "review current diff");
+
+        let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(round_trip, payload);
     }
 }

@@ -5,7 +5,7 @@
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::SessionReadModel,
+    storage::{AgentSessionLinkView, SessionReadModel},
     types::SessionId,
 };
 
@@ -44,6 +44,17 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.context_messages.clear();
             model.system_prompt = None;
             model.pending_tool_calls.clear();
+        },
+        EventPayload::AgentSessionSpawned {
+            child_session_id,
+            agent_name,
+            task,
+        } => {
+            model.agent_sessions.push(AgentSessionLinkView {
+                child_session_id: child_session_id.clone(),
+                agent_name: agent_name.clone(),
+                task: task.clone(),
+            });
         },
         EventPayload::SystemPromptConfigured { text, .. } => {
             model.system_prompt = Some(text.clone());

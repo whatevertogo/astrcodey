@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn test_resolve_api_key_plain_text() {
         assert_eq!(
-            resolve_api_key("sk-cp-as4tt4umyhkgeyur").unwrap(),
-            "sk-cp-as4tt4umyhkgeyur"
+            resolve_api_key("sk-test-placeholder-not-a-real-key").unwrap(),
+            "sk-test-placeholder-not-a-real-key"
         );
     }
 

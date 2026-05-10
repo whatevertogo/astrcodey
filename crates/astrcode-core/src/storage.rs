@@ -193,6 +193,19 @@ pub struct ToolResultArtifactSlice {
     pub content: String,
 }
 
+/// 父会话派生的子 Agent 会话链接。
+///
+/// 由 `AgentSessionSpawned` 事件投影而来，表达"从父看子"的关系。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSessionLinkView {
+    /// 子会话 ID。
+    pub child_session_id: SessionId,
+    /// 子 Agent 名称（来自 RunSession 的 name）。
+    pub agent_name: String,
+    /// 子 Agent 任务描述（来自 RunSession 的 user_prompt）。
+    pub task: String,
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -221,6 +234,9 @@ pub struct SessionReadModel {
     pub updated_at: String,
     /// 父会话 ID。
     pub parent_session_id: Option<SessionId>,
+    /// 父会话派生的子 Agent 会话列表。
+    #[serde(default)]
+    pub agent_sessions: Vec<AgentSessionLinkView>,
     /// 最新 durable 事件 seq。
     pub latest_seq: Option<u64>,
 }
@@ -240,6 +256,7 @@ impl SessionReadModel {
             created_at: String::new(),
             updated_at: String::new(),
             parent_session_id: None,
+            agent_sessions: Vec::new(),
             latest_seq: None,
         }
     }

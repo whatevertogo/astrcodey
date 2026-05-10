@@ -118,6 +118,7 @@ v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 
 - `astrcode-core`：共享领域类型与核心 trait，例如 tool、LLM provider、config 抽象、extension contract
 - `astrcode-support`：宿主环境集成辅助能力，例如路径解析、shell 检测、tool result 持久化工具
+- `astrcode-log`：结构化日志初始化与格式化工具，无内部依赖，被上层 crate 直接引用
 
 ### Layer 1：Services
 
@@ -149,6 +150,7 @@ v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 - `astrcode-tui`：交互式终端前端
 - `astrcode-exec`：无头单次执行前端
 - `astrcode-cli`：用户入口，负责分发到 server、tui 或 exec 流程
+- `src-tauri`：Tauri 桌面应用前端，通过 HTTP 与 `astrcode-server` sidecar 通信
 
 ## 核心运行模型
 
