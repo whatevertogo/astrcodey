@@ -347,6 +347,11 @@ async fn background_tool_call(
             result.call_id = bg_call_id.clone();
         }
 
+        // 在结果元数据中标记后台来源，快照重建时可据此恢复 taskId
+        result
+            .metadata
+            .insert("taskId".into(), serde_json::json!(bg_task_id.to_string()));
+
         tracing::info!(
             tool_name = bg_tool_name,
             call_id = bg_call_id,

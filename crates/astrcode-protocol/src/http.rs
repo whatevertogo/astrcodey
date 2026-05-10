@@ -256,6 +256,9 @@ pub enum ConversationBlockDto {
         /// 工具执行结果（展开后显示）。
         text: String,
         status: ConversationBlockStatusDto,
+        /// 后台任务 ID（仅后台化任务携带，用于前端面板追踪）。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     /// 错误。
     Error { id: String, message: String },

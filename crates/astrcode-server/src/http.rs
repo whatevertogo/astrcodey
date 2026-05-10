@@ -675,6 +675,7 @@ fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
                     arguments: String::new(),
                     text: String::new(),
                     status: ConversationBlockStatusDto::Streaming,
+                    task_id: None,
                 },
             }]
         },
@@ -800,6 +801,11 @@ fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
             } else {
                 ConversationBlockStatusDto::Complete
             },
+            task_id: result
+                .metadata
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         }),
         EventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
@@ -919,6 +925,7 @@ fn messages_to_blocks(messages: &[LlmMessage]) -> Vec<ConversationBlockDto> {
                         arguments: format_args_inline(name, arguments),
                         text: String::new(),
                         status: ConversationBlockStatusDto::Streaming,
+                        task_id: None,
                     });
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }
@@ -976,6 +983,7 @@ fn push_tool_result_block(
             arguments: String::new(),
             text: content.clone(),
             status,
+            task_id: None,
         });
         pushed_result = true;
     }
@@ -987,6 +995,7 @@ fn push_tool_result_block(
             arguments: String::new(),
             text: visible_message_text(message),
             status: ConversationBlockStatusDto::Complete,
+            task_id: None,
         });
     }
 }
@@ -1186,6 +1195,7 @@ mod tests {
                 arguments,
                 text,
                 status,
+                task_id: _,
             } => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(name, "read");
