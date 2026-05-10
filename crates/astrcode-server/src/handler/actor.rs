@@ -243,9 +243,17 @@ impl CommandHandler {
                 payload,
             } => {
                 if self.active_turn_matches(&session_id, &turn_id) {
-                    let _ = self
+                    if let Err(e) = self
                         .record_and_broadcast(&session_id, Some(&turn_id), payload)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            turn_id = %turn_id,
+                            error = %e,
+                            "failed to persist/broadcast agent event"
+                        );
+                    }
                 }
             },
             CommandMessage::AgentTurnFinished {
