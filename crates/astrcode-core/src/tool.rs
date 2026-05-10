@@ -16,6 +16,25 @@ use tokio::sync::mpsc;
 
 use crate::{event::EventPayload, storage::ToolResultArtifactReader, types::SessionId};
 
+// Re-export BackgroundTaskReader from astrcode-tools via a forward declaration.
+// The actual trait lives in astrcode-tools::task_tool, but ToolExecutionContext
+// references it by Arc<dyn>. We use a minimal local trait to avoid the dependency.
+
+/// 后台任务的只读查询能力。
+///
+/// 工具通过此 trait 查询当前会话的后台任务状态。
+/// 由 agent loop 在构建 ToolExecutionContext 时注入。
+pub trait BackgroundTaskReader: Send + Sync {
+    /// 列出指定会话的所有活跃后台任务。
+    fn list_active(
+        &self,
+        session_id: &SessionId,
+    ) -> Vec<(crate::types::BackgroundTaskId, SessionId)>;
+
+    /// 取消指定任务。返回 true 表示成功取消。
+    fn cancel(&self, session_id: &SessionId, task_id: &crate::types::BackgroundTaskId) -> bool;
+}
+
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +149,8 @@ pub struct ToolExecutionContext {
     pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     /// 当前 session 的工具结果 artifact 读取能力。
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
+    /// 当前 session 的后台任务查询能力。
+    pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
 }
 
 /// Build a metadata map from key-value pairs.
@@ -174,6 +195,10 @@ impl std::fmt::Debug for ToolExecutionContext {
             .field(
                 "tool_result_reader",
                 &self.tool_result_reader.as_ref().map(|_| "<reader>"),
+            )
+            .field(
+                "background_task_reader",
+                &self.background_task_reader.as_ref().map(|_| "<bg_reader>"),
             )
             .finish()
     }

@@ -118,6 +118,7 @@ async fn execute_tool_call_blocking(
         tool_call_id: Some(call.call_id.clone()),
         event_tx: tool_event_tx,
         tool_result_reader: runtime.tool_result_reader,
+        background_task_reader: runtime.background_task_reader,
     };
 
     let mut result = match tool_registry
@@ -196,6 +197,7 @@ async fn execute_tool_call_with_background(
         tool_call_id: Some(call.call_id.clone()),
         event_tx: tool_event_tx,
         tool_result_reader: runtime.tool_result_reader.clone(),
+        background_task_reader: runtime.background_task_reader.clone(),
     };
 
     // 共享结果槽：exec task 写入，主线程或 watcher 读取

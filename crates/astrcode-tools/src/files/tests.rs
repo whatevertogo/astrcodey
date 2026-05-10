@@ -21,6 +21,7 @@ fn empty_ctx() -> ToolExecutionContext {
         tool_call_id: None,
         event_tx: None,
         tool_result_reader: None,
+        background_task_reader: None,
     }
 }
 

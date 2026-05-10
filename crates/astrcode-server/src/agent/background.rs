@@ -1,7 +1,7 @@
 //! 后台任务管理器与占位结果构造。
 //!
 //! 管理被自动后台化的工具调用（主要是长时间运行的 shell 命令）。
-//! 提供注册、取消和清理能力。
+//! 提供注册、取消、查询和清理能力。
 
 use std::{
     collections::HashMap,
@@ -9,7 +9,7 @@ use std::{
 };
 
 use astrcode_core::{
-    tool::ToolResult,
+    tool::{BackgroundTaskReader, ToolResult},
     types::{BackgroundTaskId, SessionId},
 };
 
@@ -85,6 +85,60 @@ impl BackgroundTaskManager {
                 task.exec_handle.abort();
                 task.watcher_handle.abort();
             }
+        }
+    }
+
+    /// 列出指定会话的所有活跃后台任务 ID。
+    pub fn list_active(&self, session_id: &SessionId) -> Vec<BackgroundTaskId> {
+        self.tasks
+            .iter()
+            .filter(|(_, task)| &task.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+}
+
+/// 将 `BackgroundTaskManager` 适配为 `BackgroundTaskReader` trait。
+///
+/// 这个薄包装器让 `TaskTool` 能通过 `ToolExecutionContext` 读取后台任务状态，
+/// 而不暴露 `BackgroundTaskManager` 的内部方法（如 `register`、`cleanup_session`）。
+pub struct BackgroundTaskReaderImpl {
+    manager: Arc<Mutex<BackgroundTaskManager>>,
+}
+
+impl BackgroundTaskReaderImpl {
+    pub fn new(manager: Arc<Mutex<BackgroundTaskManager>>) -> Self {
+        Self { manager }
+    }
+}
+
+impl BackgroundTaskReader for BackgroundTaskReaderImpl {
+    fn list_active(&self, session_id: &SessionId) -> Vec<(BackgroundTaskId, SessionId)> {
+        match self.manager.lock() {
+            Ok(mgr) => mgr
+                .list_active(session_id)
+                .into_iter()
+                .map(|id| (id, session_id.clone()))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn cancel(&self, session_id: &SessionId, task_id: &BackgroundTaskId) -> bool {
+        match self.manager.lock() {
+            Ok(mut mgr) => {
+                // 只取消属于当前会话的任务
+                if mgr
+                    .tasks
+                    .get(task_id)
+                    .is_some_and(|t| &t.session_id == session_id)
+                {
+                    mgr.cancel(task_id)
+                } else {
+                    false
+                }
+            },
+            Err(_) => false,
         }
     }
 }

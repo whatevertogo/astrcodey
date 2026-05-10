@@ -121,6 +121,7 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
             working_dir,
             timeout_secs,
         }) as Arc<dyn Tool>,
+        Arc::new(super::task_tool::TaskTool) as Arc<dyn Tool>,
     ]
 }
 

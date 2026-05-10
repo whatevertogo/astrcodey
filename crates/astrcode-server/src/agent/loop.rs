@@ -21,7 +21,7 @@ use astrcode_core::{
     extension::{CompactTrigger, ExtensionEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::CompactSnapshotInput,
-    tool::ToolDefinition,
+    tool::{BackgroundTaskReader, ToolDefinition},
     types::*,
 };
 use astrcode_extensions::{
@@ -336,6 +336,9 @@ impl AgentLoop {
         services: AgentServices,
     ) -> Self {
         let shared = SharedTurnContext::new(session_id, working_dir, model_id);
+        let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
+            super::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
+        ));
         let tools = ToolPipeline::new(
             shared.clone(),
             services.tool_registry,
@@ -343,6 +346,7 @@ impl AgentLoop {
             services.session_manager.clone(),
             services.background_result_tx,
             services.background_tasks,
+            background_task_reader,
         );
         Self {
             system_prompt,

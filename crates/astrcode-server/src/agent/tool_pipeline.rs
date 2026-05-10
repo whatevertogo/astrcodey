@@ -8,7 +8,7 @@ use astrcode_core::{
     extension::{ExtensionEvent, PostToolUseInput, PreToolUseInput},
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    tool::{BackgroundTaskReader, ExecutionMode, ToolDefinition, ToolResult},
 };
 use astrcode_extensions::runner::{ExtensionRunner, ToolHookOutcome};
 use astrcode_support::tool_results::{
@@ -43,6 +43,7 @@ pub(in crate::agent) struct ToolPipeline {
     session_manager: Arc<SessionManager>,
     background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+    background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
 }
 
 impl ToolPipeline {
@@ -53,6 +54,7 @@ impl ToolPipeline {
         session_manager: Arc<SessionManager>,
         background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
         background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+        background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     ) -> Self {
         Self {
             shared,
@@ -61,6 +63,7 @@ impl ToolPipeline {
             session_manager,
             background_result_tx,
             background_tasks,
+            background_task_reader,
         }
     }
 
@@ -228,6 +231,7 @@ impl ToolPipeline {
                             event_tx: input.event_tx.clone(),
                             background_result_tx: self.background_result_tx.clone(),
                             background_tasks: self.background_tasks.clone(),
+                            background_task_reader: self.background_task_reader.clone(),
                         },
                         executable,
                     )
@@ -378,6 +382,7 @@ impl ToolPipeline {
             Some(Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>);
         let background_result_tx = self.background_result_tx.clone();
         let background_tasks = self.background_tasks.clone();
+        let background_task_reader = self.background_task_reader.clone();
 
         join_set.spawn(async move {
             execute_tool_call(
@@ -391,6 +396,7 @@ impl ToolPipeline {
                     event_tx,
                     background_result_tx,
                     background_tasks,
+                    background_task_reader,
                 },
                 call,
             )

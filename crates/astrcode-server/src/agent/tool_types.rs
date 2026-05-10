@@ -8,7 +8,7 @@ use astrcode_core::{
     event::EventPayload,
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    tool::{BackgroundTaskReader, ExecutionMode, ToolDefinition, ToolResult},
     types::*,
 };
 use tokio::sync::mpsc;
@@ -99,6 +99,8 @@ pub(crate) struct ToolCallRuntimeContext {
     pub(super) background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     /// 后台任务管理器，用于注册 watcher handle 以支持取消。
     pub(super) background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+    /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
+    pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
 }
 
 impl PreparedToolCall {
