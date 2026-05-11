@@ -204,7 +204,20 @@ pub fn handle_switch_mode(
     state.previous_mode = Some(state.current_mode.clone());
     state.current_mode = target_id.as_str().to_string();
     state.exit_review_passes_completed = 0;
-    state.pending_transition_context = transition_context(&current_id, &target_id);
+    let mut context = transition_context(&current_id, &target_id);
+
+    // When exiting plan mode, append the plan content so the agent can present it to the user.
+    if current_id.as_str() == "plan" {
+        if let Some(plan_content) = store::load_plan(plan_dir)? {
+            context = context.map(|ctx| {
+                format!(
+                    "{ctx}\n\n---\n\n{plan_content}"
+                )
+            });
+        }
+    }
+
+    state.pending_transition_context = context;
     store::save_mode_state(mode_root, &state)?;
 
     Ok(ToolResult::text(
