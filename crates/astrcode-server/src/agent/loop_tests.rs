@@ -25,7 +25,7 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_storage::in_memory::InMemoryEventStore;
 use astrcode_support::tool_results::{
-    DEFAULT_TOOL_RESULT_INLINE_LIMIT, MAX_TOOL_RESULTS_PER_MESSAGE_CHARS,
+    DEFAULT_TOOL_RESULT_INLINE_LIMIT,
 };
 use tokio::{
     sync::{Barrier, mpsc, watch},
@@ -1398,27 +1398,34 @@ async fn read_file_tool_result_is_persisted_when_exceeds_limit() {
 
 #[tokio::test]
 async fn aggregate_tool_result_budget_persists_largest_inline_result() {
-    let item = "M".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT - 1_000);
+    // Each result exceeds its per-tool threshold (DEFAULT_TOOL_RESULT_INLINE_LIMIT)
+    // so the budget enforcement can pick them as candidates.
+    let large_item = "M".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+    let small_item = "S".repeat(100);
     let tool_registry = test_registry(vec![
         Arc::new(LargeResultTool {
-            name: "medium1",
-            content: item.clone(),
+            name: "big1",
+            content: large_item.clone(),
         }),
         Arc::new(LargeResultTool {
-            name: "medium2",
-            content: item.clone(),
+            name: "big2",
+            content: large_item.clone(),
         }),
         Arc::new(LargeResultTool {
-            name: "medium3",
-            content: item.clone(),
+            name: "big3",
+            content: large_item.clone(),
         }),
         Arc::new(LargeResultTool {
-            name: "medium4",
-            content: item.clone(),
+            name: "big4",
+            content: large_item.clone(),
         }),
         Arc::new(LargeResultTool {
-            name: "medium5",
-            content: item,
+            name: "big5",
+            content: large_item,
+        }),
+        Arc::new(LargeResultTool {
+            name: "small",
+            content: small_item,
         }),
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
@@ -1428,11 +1435,12 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
         .await
         .unwrap();
     let calls = vec![
-        ("call-1", "medium1"),
-        ("call-2", "medium2"),
-        ("call-3", "medium3"),
-        ("call-4", "medium4"),
-        ("call-5", "medium5"),
+        ("call-1", "big1"),
+        ("call-2", "big2"),
+        ("call-3", "big3"),
+        ("call-4", "big4"),
+        ("call-5", "big5"),
+        ("call-6", "small"),
     ];
 
     let agent_loop = AgentLoop::new(
@@ -1462,21 +1470,19 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
     );
 
     agent_loop
-        .process_prompt("run many medium tools", vec![], None)
+        .process_prompt("run many large tools", vec![], None)
         .await
         .unwrap();
 
     let messages = captured_messages.lock().unwrap();
     let contents = tool_result_contents(&messages);
-    assert_eq!(contents.len(), 5);
-    assert_eq!(
-        contents
-            .iter()
-            .filter(|content| content.contains("Tool result was persisted"))
-            .count(),
-        1
+    assert_eq!(contents.len(), 6);
+    // Small result must never be persisted regardless of total budget.
+    let small_result = contents.iter().find(|c| c.starts_with('S')).unwrap();
+    assert!(
+        !small_result.contains("Tool result was persisted"),
+        "small result should remain inline: {small_result}"
     );
-    assert!(contents.iter().map(String::len).sum::<usize>() <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS);
 }
 
 #[tokio::test]

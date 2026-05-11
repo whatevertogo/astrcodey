@@ -586,7 +586,8 @@ impl ToolPipeline {
             .iter()
             .enumerate()
             .filter_map(|(index, pending)| {
-                let can_persist = tool_result_inline_limit(&pending.tool_name).is_some()
+                let can_persist = tool_result_inline_limit(&pending.tool_name)
+                    .is_some_and(|limit| should_persist_tool_result(&pending.result.content, limit))
                     && !pending.result.metadata.contains_key("persistedToolResult")
                     && !is_artifact_read(&pending.result);
                 can_persist.then_some(index)
