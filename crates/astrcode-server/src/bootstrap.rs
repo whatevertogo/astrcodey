@@ -353,6 +353,7 @@ pub(crate) async fn build_system_prompt_snapshot(
     model_id: &str,
     tools: &[ToolDefinition],
     extra_system_prompt: Option<&str>,
+    tool_prompt_metadata: std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>,
 ) -> Result<(String, String), ExtensionError> {
     let mut ext_ctx = ServerExtensionContext::new(
         session_id.to_string(),
@@ -404,6 +405,10 @@ pub(crate) async fn build_system_prompt_snapshot(
     let user_rules = pipeline::load_user_rules(&pipeline::user_agents_md_path());
     let project_rules = pipeline::load_project_rules(std::path::Path::new(working_dir));
 
+    // Merge extension prompt metadata with caller-provided metadata.
+    let mut merged_metadata = tool_prompt_metadata;
+    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata().await);
+
     let input = SystemPromptInput {
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
@@ -413,6 +418,7 @@ pub(crate) async fn build_system_prompt_snapshot(
         user_rules,
         project_rules,
         tools: tools.to_vec(),
+        tool_prompt_metadata: merged_metadata,
         extension_blocks,
         extra_instructions,
     };
@@ -498,6 +504,7 @@ mod tests {
             "mock",
             &[],
             Some("child body"),
+            std::collections::HashMap::new(),
         )
         .await
         .unwrap();

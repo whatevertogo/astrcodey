@@ -827,7 +827,12 @@ impl CommandHandler {
         tool_registry: &ToolRegistry,
         extra_system_prompt: Option<&str>,
     ) -> Result<String, String> {
-        let tools = tool_registry.list_definitions();
+        let tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
+        let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
+        let tool_prompt_metadata = tools_with_meta
+            .into_iter()
+            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
+            .collect();
         let model_id = self.runtime.read_effective().llm.model_id.clone();
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.runtime.extension_runner,
@@ -836,6 +841,7 @@ impl CommandHandler {
             &model_id,
             &tools,
             extra_system_prompt,
+            tool_prompt_metadata,
         )
         .await
         .map_err(|e| e.to_string())?;

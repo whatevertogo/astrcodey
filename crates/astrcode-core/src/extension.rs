@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ModelSelection,
-    tool::{ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
@@ -93,6 +93,14 @@ pub trait Extension: Send + Sync {
         _ctx: &dyn ExtensionContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         Err(ExtensionError::NotFound(command_name.into()))
+    }
+
+    /// 返回此扩展注册工具的结构化提示词元数据。
+    ///
+    /// 键必须与 `tools()` 或 `tools_for()` 返回的工具名匹配。
+    /// 默认返回空 HashMap。
+    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, ToolPromptMetadata> {
+        std::collections::HashMap::new()
     }
 }
 

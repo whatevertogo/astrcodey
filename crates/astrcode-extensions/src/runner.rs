@@ -383,6 +383,18 @@ impl ExtensionRunner {
         tools
     }
 
+    /// 从所有已注册的扩展收集工具提示词元数据。
+    pub async fn collect_tool_prompt_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+        let exts = self.extensions.read().await;
+        let mut map = std::collections::HashMap::new();
+        for ext in exts.iter() {
+            map.extend(ext.tool_prompt_metadata());
+        }
+        map
+    }
+
     /// 从所有已注册的扩展收集可执行的工具适配器。
     pub async fn collect_tool_adapters(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
         let exts: Vec<Arc<dyn Extension>> = { self.extensions.read().await.clone() };
@@ -516,11 +528,20 @@ impl Tool for ExtensionTool {
         arguments: serde_json::Value,
         _ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
-        let mut result = self
+        let mut result = match self
             .extension
             .execute_tool(&self.definition.name, arguments, &self.working_dir, _ctx)
             .await
-            .map_err(extension_error_to_tool_error)?;
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(extension_error_result(
+                    &self.definition.name,
+                    self.extension.id(),
+                    err,
+                ));
+            }
+        };
 
         // 处理声明式结果: RunSession → 派生子会话
         if let Some(outcome_value) = result.metadata.remove("extension_tool_outcome") {
@@ -561,14 +582,46 @@ impl Tool for ExtensionTool {
     }
 }
 
-/// 将 [`ExtensionError`] 转换为 [`ToolError`]。
-fn extension_error_to_tool_error(err: ExtensionError) -> ToolError {
-    match err {
-        ExtensionError::NotFound(name) => ToolError::NotFound(name),
-        ExtensionError::Timeout(ms) => ToolError::Timeout(ms),
-        ExtensionError::Blocked { reason } => ToolError::Blocked(reason),
-        ExtensionError::Internal(message) => ToolError::Execution(message),
+/// 将 [`ExtensionError`] 转换为结构化的错误 [`ToolResult`]，供 agent 理解和恢复。
+///
+/// 与 `ToolError`（纯字符串）不同，`ToolResult` 携带 metadata，
+/// agent 可以据此判断是重试、换工具还是报告给用户。
+fn extension_error_result(
+    tool_name: &str,
+    extension_id: &str,
+    err: ExtensionError,
+) -> ToolResult {
+    use astrcode_core::tool::tool_metadata;
+
+    let (content, suggestion) = match &err {
+        ExtensionError::NotFound(_) => (
+            format!("Tool `{tool_name}` is not available."),
+            "This tool may have been unregistered. Try `tool_search_tool` to discover available tools, or proceed without it.",
+        ),
+        ExtensionError::Timeout(ms) => (
+            format!("Tool `{tool_name}` timed out after {ms}ms."),
+            "The extension is still processing. Try again with a simpler request, or proceed without this tool.",
+        ),
+        ExtensionError::Blocked { reason } => (
+            format!("Tool `{tool_name}` was blocked: {reason}"),
+            "A hook policy prevented this operation. Check the reason above and adjust your approach.",
+        ),
+        ExtensionError::Internal(message) => (
+            format!("Tool `{tool_name}` failed: {message}"),
+            "The extension encountered an internal error. Try again with different arguments, or use a builtin tool as an alternative.",
+        ),
+    };
+
+    let mut metadata = tool_metadata([
+        ("extensionId", serde_json::json!(extension_id)),
+        ("toolName", serde_json::json!(tool_name)),
+        ("suggestion", serde_json::json!(suggestion)),
+    ]);
+    if let ExtensionError::Timeout(ms) = &err {
+        metadata.insert("timeoutMs".into(), serde_json::json!(ms));
     }
+
+    ToolResult::text(content, true, metadata)
 }
 
 /// 工具级别钩子分发的结果。

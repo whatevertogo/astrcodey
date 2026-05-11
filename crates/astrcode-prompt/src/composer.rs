@@ -43,6 +43,7 @@ mod tests {
             tools: vec![],
             extension_blocks: vec![],
             extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
         }
     }
 

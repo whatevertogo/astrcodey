@@ -107,6 +107,17 @@ impl Tool for ShellTool {
         }
     }
 
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "Use `shell` for commands that need the OS or project toolchain: package managers, build tools, git, docker, etc.",
+            )
+            .caveat("Default timeout varies by config. Prefer the timeout parameter for long-running commands.")
+            .prompt_tag("system")
+            .always_include(true),
+        )
+    }
+
     /// 执行 shell 命令：解析参数 → 构建子进程 → 并发读取 stdout/stderr → 等待完成或超时。
     ///
     /// 超时后会强制终止子进程并返回 `ToolError::Timeout`。

@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use astrcode_core::{
     event::EventPayload,
-    tool::{BackgroundPolicy, ToolCapabilities, ToolExecutionContext, ToolResult},
+    tool::{BackgroundPolicy, ToolCapabilities, ToolError, ToolExecutionContext, ToolResult},
     types::*,
 };
 use astrcode_tools::registry::ToolRegistry;
@@ -20,15 +20,49 @@ use super::{
 
 fn error_tool_result(
     call_id: String,
-    message: String,
+    tool_name: &str,
+    err: ToolError,
     duration: std::time::Duration,
 ) -> ToolResult {
+    use astrcode_core::tool::tool_metadata;
+
+    let (message, suggestion): (String, String) = match &err {
+        ToolError::NotFound(name) => (
+            format!("Tool `{name}` not found."),
+            "Use `tool_search_tool` to discover available tools, or proceed without it.".to_string(),
+        ),
+        ToolError::InvalidArguments(detail) => (
+            format!("Invalid arguments for `{tool_name}`: {detail}"),
+            "Check the parameter schema and try again with corrected arguments.".to_string(),
+        ),
+        ToolError::Execution(detail) => (
+            format!("`{tool_name}` failed: {detail}"),
+            "Review the error above. Try different arguments, or use a different approach to accomplish the same goal.".to_string(),
+        ),
+        ToolError::Blocked(reason) => (
+            format!("`{tool_name}` was blocked: {reason}"),
+            "A hook policy prevented this operation. Check the reason above and adjust your approach.".to_string(),
+        ),
+        ToolError::Timeout(ms) => (
+            format!("`{tool_name}` timed out after {ms}ms."),
+            "The operation is still running in the background. Use `task` to check on it, or try again with a smaller scope.".to_string(),
+        ),
+    };
+
+    let mut metadata = tool_metadata([
+        ("toolName", serde_json::json!(tool_name)),
+        ("suggestion", serde_json::json!(suggestion)),
+    ]);
+    if let ToolError::Timeout(ms) = &err {
+        metadata.insert("timeoutMs".into(), serde_json::json!(ms));
+    }
+
     ToolResult {
         call_id,
         content: message.clone(),
         is_error: true,
         error: Some(message),
-        metadata: Default::default(),
+        metadata,
         duration_ms: Some(duration.as_millis() as u64),
     }
 }
@@ -135,7 +169,8 @@ async fn execute_tool_call_blocking(
         },
         Err(e) => error_tool_result(
             call.call_id.clone(),
-            format!("Error: {e}"),
+            &tool_name,
+            e,
             started_at.elapsed(),
         ),
     };
@@ -242,7 +277,7 @@ async fn execute_tool_call_with_background(
                 },
                 Err(e) => (
                     call_index,
-                    error_tool_result(call_id.clone(), format!("Error: {e}"), started_at.elapsed()),
+                    error_tool_result(call_id.clone(), &tool_name, e, started_at.elapsed()),
                 ),
             }
         },
@@ -253,7 +288,8 @@ async fn execute_tool_call_with_background(
                 call_index,
                 error_tool_result(
                     call_id.clone(),
-                    "Tool task failed: oneshot dropped".into(),
+                    &tool_name,
+                    ToolError::Execution("tool task panicked before completion".into()),
                     started_at.elapsed(),
                 ),
             )
@@ -334,12 +370,14 @@ async fn background_tool_call(
             },
             Some(Err(e)) => error_tool_result(
                 bg_call_id.clone(),
-                format!("Error: {e}"),
+                &bg_tool_name,
+                e,
                 started_at.elapsed(),
             ),
             None => error_tool_result(
                 bg_call_id.clone(),
-                "Background task completed but no result available".into(),
+                &bg_tool_name,
+                ToolError::Execution("background task completed but no result available".into()),
                 started_at.elapsed(),
             ),
         };

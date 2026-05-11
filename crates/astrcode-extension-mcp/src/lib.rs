@@ -14,7 +14,7 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         HookSubscription, PromptContributions,
     },
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult, tool_metadata},
 };
 use serde_json::{Value, json};
 
@@ -111,7 +111,7 @@ impl Extension for McpExtension {
         else {
             return Ok(error_result(
                 format!("MCP server '{}' is not configured", parsed.server),
-                metadata([("server", json!(parsed.server))]),
+                tool_metadata([("server", json!(parsed.server))]),
             ));
         };
 
@@ -123,7 +123,7 @@ impl Extension for McpExtension {
                         "MCP tool '{tool_name}' is no longer exposed by server '{}'",
                         server.name
                     ),
-                    metadata([("server", json!(server.name))]),
+                    tool_metadata([("server", json!(server.name))]),
                 ));
             },
             Err(error) => {
@@ -132,7 +132,7 @@ impl Extension for McpExtension {
                         "failed to refresh MCP tool list for server '{}': {error}",
                         server.name
                     ),
-                    metadata([("server", json!(server.name))]),
+                    tool_metadata([("server", json!(server.name))]),
                 ));
             },
         };
@@ -144,12 +144,25 @@ impl Extension for McpExtension {
             Ok(result) => Ok(call_result(&server.name, &original_tool, result)),
             Err(error) => Ok(error_result(
                 format!("failed to call MCP tool '{}': {error}", original_tool),
-                metadata([
+                tool_metadata([
                     ("server", json!(server.name)),
                     ("tool", json!(original_tool)),
                 ]),
             )),
         }
+    }
+
+    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            TOOL_SEARCH_TOOL_NAME.to_string(),
+            astrcode_core::tool::ToolPromptMetadata::new(
+                "Builtin tools do not need discovery. Use `tool_search_tool` only when builtin tools are not enough and you need the schema of an external MCP tool.",
+            )
+            .caveat("After `tool_search_tool` returns candidate tools and schemas, call the matching concrete `mcp__...` tool directly.")
+            .prompt_tag("discovery"),
+        );
+        map
     }
 }
 
@@ -307,7 +320,7 @@ fn mcp_discovery_instructions() -> &'static str {
 
 fn call_result(server: &str, tool: &str, result: CallToolResult) -> ToolResult {
     let content = protocol::render_call_content(&result);
-    let mut metadata = metadata([("server", json!(server)), ("tool", json!(tool))]);
+    let mut metadata = tool_metadata([("server", json!(server)), ("tool", json!(tool))]);
     if let Some(structured) = result.structured_content {
         metadata.insert("structuredContent".into(), structured);
     }
@@ -340,13 +353,6 @@ fn text_result(
         metadata,
         duration_ms: None,
     }
-}
-
-fn metadata<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {
-    entries
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect()
 }
 
 fn warn_diagnostics(diagnostics: &[String]) {

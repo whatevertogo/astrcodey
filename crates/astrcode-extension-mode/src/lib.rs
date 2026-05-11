@@ -167,4 +167,24 @@ impl Extension for ModeExtension {
             _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
     }
+
+    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+        use astrcode_core::tool::ToolPromptMetadata;
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            SWITCH_MODE_TOOL_NAME.to_string(),
+            ToolPromptMetadata::new(
+                "Use `switchMode` to enter plan mode for read-only exploration, or return to code mode for execution.",
+            )
+            .prompt_tag("planning"),
+        );
+        map.insert(
+            UPSERT_PLAN_TOOL_NAME.to_string(),
+            ToolPromptMetadata::new(
+                "Only available in plan mode. The plan must contain all required headings.",
+            )
+            .prompt_tag("planning"),
+        );
+        map
+    }
 }

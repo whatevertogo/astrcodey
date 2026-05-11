@@ -104,7 +104,15 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         )
         .await;
 
-        let prompt_tools = tool_registry.list_definitions();
+        let prompt_tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
+        let prompt_tools: Vec<_> = prompt_tools_with_meta
+            .iter()
+            .map(|(def, _)| def.clone())
+            .collect();
+        let tool_prompt_metadata = prompt_tools_with_meta
+            .into_iter()
+            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
+            .collect();
         let (system_prompt, fingerprint) = build_system_prompt_snapshot(
             &self.extension_runner,
             child_sid.as_str(),
@@ -112,6 +120,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             &model_id,
             &prompt_tools,
             Some(&request.system_prompt),
+            tool_prompt_metadata,
         )
         .await
         .map_err(|e| format!("build child system prompt: {e}"))?;

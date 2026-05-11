@@ -8,6 +8,7 @@
 //! - [`ToolDefinition`]：发送给 LLM 的工具函数调用 schema
 //! - [`ToolResult`]：工具执行结果
 //! - [`ToolExecutionContext`]：每次工具调用的上下文
+//! - [`ToolPromptMetadata`]：结构化工具提示词元数据
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -60,6 +61,59 @@ pub struct ToolDefinition {
     /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。
     #[serde(default)]
     pub execution_mode: ExecutionMode,
+}
+
+/// 结构化工具提示词元数据，用于 system prompt 的分层展示。
+///
+/// 补充 `ToolDefinition.description`（单行摘要）之外的结构化指导信息：
+/// guide、caveats、examples 和分类标签。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPromptMetadata {
+    /// 详细使用说明，仅 discovery/collaboration 工具展示。
+    #[serde(default)]
+    pub guide: String,
+    /// 注意事项和限制。
+    #[serde(default)]
+    pub caveats: Vec<String>,
+    /// 使用示例。
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// 分类标签（"filesystem", "collaboration", "discovery", "planning", "system"）。
+    #[serde(default)]
+    pub prompt_tags: Vec<String>,
+    /// 是否始终出现在 prompt 中。
+    #[serde(default)]
+    pub always_include: bool,
+}
+
+impl ToolPromptMetadata {
+    pub fn new(guide: impl Into<String>) -> Self {
+        Self {
+            guide: guide.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn caveat(mut self, caveat: impl Into<String>) -> Self {
+        self.caveats.push(caveat.into());
+        self
+    }
+
+    pub fn example(mut self, example: impl Into<String>) -> Self {
+        self.examples.push(example.into());
+        self
+    }
+
+    pub fn prompt_tag(mut self, tag: impl Into<String>) -> Self {
+        self.prompt_tags.push(tag.into());
+        self
+    }
+
+    pub fn always_include(mut self, val: bool) -> Self {
+        self.always_include = val;
+        self
+    }
 }
 
 /// 工具执行结果。
@@ -268,6 +322,14 @@ pub trait Tool: Send + Sync {
     /// 自己在执行时间过长时可以自动转入后台。
     fn background_policy(&self) -> BackgroundPolicy {
         BackgroundPolicy::Never
+    }
+
+    /// 返回工具的结构化提示词元数据。
+    ///
+    /// 用于 system prompt 的分层展示（summary、guide、caveats、examples、tags）。
+    /// 默认返回 `None`，不提供元数据的工具回退到 `definition().description`。
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        None
     }
 
     /// 使用给定参数和调用上下文执行工具。

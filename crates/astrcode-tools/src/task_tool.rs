@@ -100,4 +100,13 @@ impl Tool for TaskTool {
             ))),
         }
     }
+
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "Use `task` to check on long-running shell commands or cancel them.",
+            )
+            .prompt_tag("system"),
+        )
+    }
 }

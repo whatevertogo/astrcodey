@@ -131,6 +131,18 @@ impl Extension for SkillExtension {
             ctx.session_id.as_str(),
         ))
     }
+
+    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            SKILL_TOOL_NAME.to_string(),
+            astrcode_core::tool::ToolPromptMetadata::new(
+                "Call the Skill tool with the exact skill name before continuing when a task matches one of the listed skills.",
+            )
+            .prompt_tag("discovery"),
+        );
+        map
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

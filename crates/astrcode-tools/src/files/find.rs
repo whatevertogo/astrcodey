@@ -175,6 +175,16 @@ impl Tool for FindFilesTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "Use `find` for path discovery, `grep` for content search, and `read` to inspect a known file.",
+            )
+            .prompt_tag("filesystem")
+            .always_include(true),
+        )
+    }
 }
 
 fn modified_unix_ms(modified: SystemTime) -> u128 {

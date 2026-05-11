@@ -10,7 +10,7 @@ use std::{
 
 use astrcode_core::{
     prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
-    tool::{ToolDefinition, ToolOrigin},
+    tool::{ToolDefinition, ToolOrigin, ToolPromptMetadata},
 };
 use astrcode_support::hostpaths::astrcode_dir;
 
@@ -270,7 +270,7 @@ fn rules_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
 
 fn tool_summary_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
     let mut sections = Vec::new();
-    if let Some(tool_summary) = tool_summary_section(&input.tools) {
+    if let Some(tool_summary) = tool_summary_section(input) {
         sections.push(PromptSection::new(
             PromptSectionOrder::ToolSummary,
             "Tool Summary",
@@ -367,8 +367,8 @@ fn indent_body(body: &str) -> String {
         .join("\n")
 }
 
-fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
-    if tools.is_empty() {
+fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
+    if input.tools.is_empty() {
         return None;
     }
 
@@ -383,23 +383,44 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
          context and inspect it with `read` chunks instead of asking the tool to inline the whole \
          result again."
             .to_string(),
-        "Before using `edit` on any file, you MUST `read` that file first to get the exact \
-         current content. Always copy oldStr from the read output — never write it from memory or \
-         guess."
-            .to_string(),
         String::new(),
     ];
 
-    push_tool_group(&mut lines, "Builtin Tools", tools, |tool| {
-        tool.origin == ToolOrigin::Builtin
-            || matches!(tool.name.as_str(), "Skill" | "agent" | "tool_search_tool")
-    });
-
-    let agent_tools = tools
+    // Builtin tools + bundled tools with prompt tags (sorted by rank).
+    let mut builtin: Vec<&ToolDefinition> = input
+        .tools
         .iter()
-        .filter(|tool| tool.name == "agent")
-        .collect::<Vec<_>>();
-    if !agent_tools.is_empty() {
+        .filter(|tool| {
+            tool.origin == ToolOrigin::Builtin
+                || input
+                    .tool_prompt_metadata
+                    .contains_key(&tool.name)
+        })
+        .collect();
+    builtin.sort_by_key(|tool| (tool_summary_rank(&tool.name), tool.name.clone()));
+
+    // Separate collaboration-tagged tools from regular builtin.
+    let is_collab = |tool: &&ToolDefinition| {
+        input
+            .tool_prompt_metadata
+            .get(&tool.name)
+            .map(|m| m.prompt_tags.iter().any(|t| t == "collaboration"))
+            .unwrap_or(false)
+    };
+    let (collab, regular): (Vec<_>, Vec<_>) = builtin.into_iter().partition(is_collab);
+
+    if !regular.is_empty() {
+        lines.push("Builtin Tools".into());
+        for tool in &regular {
+            lines.push(format!(
+                "- `{}`: {}",
+                tool.name,
+                one_line(&tool.description)
+            ));
+        }
+    }
+
+    if !collab.is_empty() {
         lines.push(String::new());
         lines.push("Agent Collaboration Tools".into());
         lines.push(
@@ -407,7 +428,7 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
              identifier byte-for-byte across related calls."
                 .into(),
         );
-        for tool in agent_tools {
+        for tool in &collab {
             lines.push(format!(
                 "- `{}`: {}",
                 tool.name,
@@ -416,14 +437,15 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
         }
     }
 
-    let mcp_tools = tools
+    let mcp_tools: Vec<_> = input
+        .tools
         .iter()
         .filter(|tool| is_mcp_tool(tool))
-        .collect::<Vec<_>>();
+        .collect();
     if !mcp_tools.is_empty() {
         lines.push(String::new());
         lines.push("External MCP Tools".into());
-        for tool in mcp_tools {
+        for tool in &mcp_tools {
             lines.push(format!(
                 "- `{}`: {}",
                 tool.name,
@@ -432,10 +454,11 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
         }
     }
 
-    let plugin_tools = tools
+    let plugin_tools: Vec<_> = input
+        .tools
         .iter()
         .filter(|tool| is_plugin_tool(tool))
-        .collect::<Vec<_>>();
+        .collect();
     if !plugin_tools.is_empty() {
         lines.push(String::new());
         lines.push("Plugin Tools".into());
@@ -445,7 +468,7 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
              plugin-tool discovery."
                 .into(),
         );
-        for tool in plugin_tools {
+        for tool in &plugin_tools {
             lines.push(format!(
                 "- `{}`: {}",
                 tool.name,
@@ -454,31 +477,88 @@ fn tool_summary_section(tools: &[ToolDefinition]) -> Option<String> {
         }
     }
 
+    // Append detailed guides for discovery/collaboration tools.
+    let detailed_guides: Vec<_> = input
+        .tools
+        .iter()
+        .filter_map(|tool| {
+            let meta = input.tool_prompt_metadata.get(&tool.name)?;
+            if should_render_detailed_guide(meta) {
+                build_detailed_guide(tool, meta)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !detailed_guides.is_empty() {
+        lines.push(String::new());
+        for guide in &detailed_guides {
+            lines.push(String::new());
+            lines.push(guide.clone());
+        }
+    }
+
     Some(lines.join("\n").trim().to_string())
 }
 
-fn push_tool_group(
-    lines: &mut Vec<String>,
-    title: &str,
-    tools: &[ToolDefinition],
-    include: impl Fn(&ToolDefinition) -> bool,
-) {
-    let mut selected = tools
-        .iter()
-        .filter(|tool| include(tool))
-        .collect::<Vec<_>>();
-    selected.sort_by(|left, right| left.name.cmp(&right.name));
-    if selected.is_empty() {
-        return;
+/// Tool prompt display ordering: lower → shown earlier.
+///
+/// Keep in sync when adding/removing/renaming tools.
+/// 0–9 = high-frequency, 50 = default, 90+ = last-resort.
+fn tool_summary_rank(name: &str) -> u8 {
+    match name {
+        "read" => 0,
+        "find" => 1,
+        "grep" => 2,
+        "shell" => 3,
+        "tool_search_tool" => 4,
+        "task" => 5,
+        "Skill" => 6,
+        "todoWrite" => 7,
+        "switchMode" => 8,
+        "upsertSessionPlan" => 9,
+        "agent" => 10,
+        "patch" => 90,
+        "edit" => 91,
+        "write" => 92,
+        _ => 50,
     }
+}
 
-    lines.push(title.into());
-    for tool in selected {
-        lines.push(format!(
-            "- `{}`: {}",
-            tool.name,
-            one_line(&tool.description)
+fn should_render_detailed_guide(meta: &ToolPromptMetadata) -> bool {
+    meta.prompt_tags
+        .iter()
+        .any(|tag| tag == "discovery" || tag == "collaboration")
+}
+
+fn build_detailed_guide(_tool: &ToolDefinition, meta: &ToolPromptMetadata) -> Option<String> {
+    let mut parts = vec![meta.guide.clone()];
+    if !meta.caveats.is_empty() {
+        parts.push(format!(
+            "Caveats:\n{}",
+            meta.caveats
+                .iter()
+                .map(|c| format!("- {c}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         ));
+    }
+    if !meta.examples.is_empty() {
+        parts.push(format!(
+            "Examples:\n{}",
+            meta.examples
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    let body = parts.join("\n\n");
+    if body.trim().is_empty() {
+        None
+    } else {
+        Some(body)
     }
 }
 
@@ -488,9 +568,7 @@ fn is_mcp_tool(tool: &ToolDefinition) -> bool {
 
 fn is_plugin_tool(tool: &ToolDefinition) -> bool {
     tool.origin == ToolOrigin::Extension
-        || (tool.origin == ToolOrigin::Bundled
-            && !tool.name.starts_with("mcp__")
-            && !matches!(tool.name.as_str(), "Skill" | "agent" | "tool_search_tool"))
+        || (tool.origin == ToolOrigin::Bundled && !tool.name.starts_with("mcp__"))
 }
 
 fn one_line(text: &str) -> String {
@@ -614,6 +692,7 @@ mod tests {
                 },
             ],
             extra_instructions: Some("extra body".into()),
+            tool_prompt_metadata: std::collections::HashMap::new(),
         };
 
         let prompt = build_system_prompt(&input);
@@ -677,6 +756,7 @@ mod tests {
             tools: vec![],
             extension_blocks: vec![],
             extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
         };
 
         let prompt = build_system_prompt(&input);
@@ -722,6 +802,7 @@ mod tests {
             ],
             extension_blocks: vec![],
             extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
         };
 
         let prompt = build_system_prompt(&input);
@@ -758,6 +839,7 @@ mod tests {
                 },
             ],
             extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
         };
         let mut changed = base.clone();
         changed.working_dir = "/two".into();

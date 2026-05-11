@@ -189,6 +189,17 @@ impl Tool for ApplyPatchTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "Use `patch` for multi-file changes, distant hunks, file creation, or deletion. Use `edit` for a single exact replacement.",
+            )
+            .caveat("If some hunks fail to apply, already-applied changes are kept (partial commit).")
+            .prompt_tag("filesystem")
+            .always_include(true),
+        )
+    }
 }
 
 /// 解析统一差异格式的补丁文本，返回每个文件的补丁列表。

@@ -288,6 +288,16 @@ impl Tool for GrepTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "Use `grep` for content search. Use `find` for path glob search. Switch to `outputMode=content` only when matching lines are needed.",
+            )
+            .prompt_tag("filesystem")
+            .always_include(true),
+        )
+    }
 }
 
 /// grep 搜索配置。

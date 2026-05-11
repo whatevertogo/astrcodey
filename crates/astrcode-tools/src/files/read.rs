@@ -193,6 +193,17 @@ impl Tool for ReadFileTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+
+    fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+        Some(
+            ToolPromptMetadata::new(
+                "`read` reads files, not directories. Use it after `find`, `grep`, or user-provided paths identify a file. Use `offset` + `limit` for normal source files and `charOffset` + `maxChars` for persisted large tool results.",
+            )
+            .caveat("If output is truncated, continue from the next range or chunk instead of rereading the whole file.")
+            .prompt_tag("filesystem")
+            .always_include(true),
+        )
+    }
 }
 
 async fn read_persisted_tool_result_path(

@@ -113,6 +113,18 @@ impl Extension for TodoToolExtension {
             ),
         })
     }
+
+    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            TODO_WRITE_TOOL_NAME.to_string(),
+            astrcode_core::tool::ToolPromptMetadata::new(
+                "Use proactively for complex multi-step work. Keep at most one item in_progress while actively working.",
+            )
+            .prompt_tag("planning"),
+        );
+        map
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -4,7 +4,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use astrcode_core::tool::{
     BackgroundPolicy, ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-    ToolResult,
+    ToolPromptMetadata, ToolResult,
 };
 
 /// Registry of available tools (built-in + extension-registered).
@@ -33,17 +33,27 @@ impl ToolRegistry {
 
     /// 返回所有已注册工具的定义列表。
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions = self
+        self.list_definitions_with_prompt_metadata()
+            .into_iter()
+            .map(|(def, _)| def)
+            .collect()
+    }
+
+    /// 返回所有已注册工具的定义及提示词元数据。
+    pub fn list_definitions_with_prompt_metadata(
+        &self,
+    ) -> Vec<(ToolDefinition, Option<ToolPromptMetadata>)> {
+        let mut results: Vec<_> = self
             .tools
             .values()
             .map(|tool| {
                 let mut definition = tool.definition();
                 definition.execution_mode = tool.execution_mode();
-                definition
+                (definition, tool.prompt_metadata())
             })
-            .collect::<Vec<_>>();
-        definitions.sort_by(|left, right| left.name.cmp(&right.name));
-        definitions
+            .collect();
+        results.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        results
     }
 
     /// 按名称执行已注册的工具。

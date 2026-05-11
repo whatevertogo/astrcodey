@@ -30,7 +30,7 @@ pub trait PromptProvider: Send + Sync {
 
 // ─── Pipeline 类型 ─────────────────────────────────────────────────────
 
-use crate::tool::ToolDefinition;
+use crate::tool::{ToolDefinition, ToolPromptMetadata};
 
 /// `build_system_prompt()` 的结构化输入。
 #[derive(Debug, Clone)]
@@ -45,6 +45,8 @@ pub struct SystemPromptInput {
     pub project_rules: Option<String>,
     /// 当前 session 固定下来的工具定义快照。
     pub tools: Vec<ToolDefinition>,
+    /// 工具的结构化提示词元数据。键为工具名，与 `tools[].name` 匹配。
+    pub tool_prompt_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
     /// 扩展贡献的文本块，按 section 归类。
     pub extension_blocks: Vec<ExtensionPromptBlock>,
     /// 额外的系统指令（如子会话 prompt）。
