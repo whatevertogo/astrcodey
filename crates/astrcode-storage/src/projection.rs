@@ -95,17 +95,14 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
         },
         EventPayload::AssistantMessageCompleted {
             text,
-            thinking_text,
+            reasoning_content,
             ..
         } => {
             let mut msg = LlmMessage::assistant(text);
-            msg.thinking_text = thinking_text.clone();
+            msg.reasoning_content = reasoning_content.clone();
             model.messages.push(msg);
             model.phase = Phase::Idle;
         },
-        // ToolCallStarted is non-durable and only used for live UI state.
-        // Retained for backwards compatibility with existing JSONL files.
-        EventPayload::ToolCallStarted { .. } => {},
         EventPayload::ToolCallRequested {
             call_id,
             tool_name,
@@ -134,7 +131,7 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                         role: LlmRole::Assistant,
                         content: vec![tool_call],
                         name: None,
-                        thinking_text: None,
+                        reasoning_content: None,
                     });
                 }
             } else {
@@ -142,7 +139,7 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                     role: LlmRole::Assistant,
                     content: vec![tool_call],
                     name: None,
-                    thinking_text: None,
+                    reasoning_content: None,
                 });
             }
             model.phase = Phase::CallingTool;
@@ -178,7 +175,7 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                     is_error: result.is_error,
                 }],
                 name: Some(tool_name.clone()),
-                thinking_text: None,
+                reasoning_content: None,
             });
             model.phase = if model.pending_tool_calls.is_empty() {
                 Phase::Thinking
@@ -186,11 +183,9 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                 Phase::CallingTool
             };
         },
-        // Non-durable events below: never persisted to JSONL, only broadcast for
-        // live UI. Kept as no-op arms to maintain exhaustive matching for
-        // backwards compatibility with existing JSONL files that may contain
-        // ToolCallStarted / ToolCallBackgrounded / BackgroundTaskCompleted.
-        EventPayload::CompactionStarted
+        // Non-durable events: never persisted to JSONL, only broadcast for live UI.
+        EventPayload::ToolCallStarted { .. }
+        | EventPayload::CompactionStarted
         | EventPayload::AssistantTextDelta { .. }
         | EventPayload::ThinkingDelta { .. }
         | EventPayload::ToolCallArgumentsDelta { .. }

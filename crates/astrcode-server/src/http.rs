@@ -764,7 +764,7 @@ fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
                 block: ConversationBlockDto::Assistant {
                     id: message_id.to_string(),
                     text: String::new(),
-                    thinking_text: None,
+                    reasoning_content: None,
                     status: ConversationBlockStatusDto::Streaming,
                 },
             }]
@@ -894,11 +894,11 @@ fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
         EventPayload::AssistantMessageCompleted {
             message_id,
             text,
-            thinking_text,
+            reasoning_content,
         } => Some(ConversationBlockDto::Assistant {
             id: message_id.to_string(),
             text: text.clone(),
-            thinking_text: thinking_text.clone(),
+            reasoning_content: reasoning_content.clone(),
             status: ConversationBlockStatusDto::Complete,
         }),
         EventPayload::ToolCallCompleted {
@@ -1025,11 +1025,11 @@ fn messages_to_blocks(
             }),
             LlmRole::Assistant => {
                 let text = visible_message_text(message);
-                if !text.trim().is_empty() || message.thinking_text.is_some() {
+                if !text.trim().is_empty() || message.reasoning_content.is_some() {
                     blocks.push(ConversationBlockDto::Assistant {
                         id,
                         text,
-                        thinking_text: message.thinking_text.clone(),
+                        reasoning_content: message.reasoning_content.clone(),
                         status: ConversationBlockStatusDto::Complete,
                     });
                 }
@@ -1379,7 +1379,7 @@ mod tests {
                 arguments: serde_json::json!({ "path": "Cargo.toml" }),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         });
         session
             .messages
@@ -1419,7 +1419,7 @@ mod tests {
                 arguments: serde_json::json!({ "command": "npm run dev" }),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         });
         session.messages.push(LlmMessage::tool(
             "shell",
@@ -1488,7 +1488,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: "assistant-1".into(),
                 text: "complete answer".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         );
 
@@ -1506,7 +1506,7 @@ mod tests {
                     ConversationBlockDto::Assistant {
                         id,
                         text,
-                        thinking_text: _,
+                        reasoning_content: _,
                         status,
                     },
             } => {

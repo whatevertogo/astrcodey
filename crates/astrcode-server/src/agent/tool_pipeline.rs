@@ -505,7 +505,7 @@ impl ToolPipeline {
                     is_error: pending.result.is_error,
                 }],
                 name: Some(pending.tool_name),
-                thinking_text: None,
+                reasoning_content: None,
             });
             input.all_tool_results.push(pending.result);
         }

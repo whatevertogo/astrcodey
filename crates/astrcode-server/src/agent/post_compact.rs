@@ -340,7 +340,7 @@ mod tests {
                 arguments: json!({ "path": path }),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         }
     }
 
@@ -411,7 +411,7 @@ mod tests {
                     arguments: json!({ "description": "inspect compact" }),
                 }],
                 name: None,
-                thinking_text: None,
+                reasoning_content: None,
             },
             LlmMessage::tool("agent", "agent-1", "agent output", false),
         ];

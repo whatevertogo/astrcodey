@@ -395,7 +395,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "foo.rs"}),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         };
         let json = AnthropicMapper::map_assistant(&msg);
         let block = &json["content"][0];

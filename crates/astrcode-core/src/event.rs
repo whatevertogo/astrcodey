@@ -160,7 +160,7 @@ pub enum EventPayload {
         text: String,
         /// 推理模型的思维链内容。
         #[serde(skip_serializing_if = "Option::is_none")]
-        thinking_text: Option<String>,
+        reasoning_content: Option<String>,
     },
 
     /// 思考过程的文本增量（用于推理模型的思维链）。

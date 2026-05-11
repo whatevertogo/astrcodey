@@ -91,6 +91,7 @@ impl Config {
                 .and_then(|c| c.supports_prompt_cache_key)
                 .unwrap_or(false),
             prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
+            reasoning: model.reasoning.unwrap_or(false),
         };
 
         Ok(EffectiveConfig {
@@ -211,6 +212,7 @@ mod tests {
                     id: "test-model".into(),
                     max_tokens: Some(1024),
                     context_limit: Some(4096),
+                    reasoning: None,
                 }],
             }],
             active_profile: "test".into(),
@@ -236,6 +238,7 @@ mod tests {
                     id: "deepseek-chat".into(),
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
+                    reasoning: None,
                 }],
             }],
             active_profile: "deepseek".into(),
@@ -260,6 +263,7 @@ mod tests {
                     id: "deepseek-chat".into(),
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
+                    reasoning: None,
                 }],
             }],
             active_profile: "deepseek".into(),

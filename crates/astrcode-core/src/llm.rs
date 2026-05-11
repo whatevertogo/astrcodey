@@ -80,9 +80,9 @@ pub struct LlmMessage {
     /// 可选的工具消息名称。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// 推理模型的思维链内容（仅 assistant 消息，不发送给 LLM provider）。
+    /// 推理内容（仅 assistant 消息）。部分 provider（如 DeepSeek）要求将此字段回传。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_text: Option<String>,
+    pub reasoning_content: Option<String>,
 }
 
 impl LlmMessage {
@@ -92,7 +92,7 @@ impl LlmMessage {
             role: LlmRole::User,
             content: vec![LlmContent::Text { text: text.into() }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         }
     }
 
@@ -102,7 +102,7 @@ impl LlmMessage {
             role: LlmRole::Assistant,
             content: vec![LlmContent::Text { text: text.into() }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         }
     }
 
@@ -112,7 +112,7 @@ impl LlmMessage {
             role: LlmRole::System,
             content: vec![LlmContent::Text { text: text.into() }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         }
     }
 
@@ -136,13 +136,12 @@ impl LlmMessage {
                 is_error,
             }],
             name: Some(name.into()),
-            thinking_text: None,
+            reasoning_content: None,
         }
     }
 
-    /// 返回 provider 可见版本，去掉仅用于本地展示的元数据。
-    pub fn provider_visible(mut self) -> Self {
-        self.thinking_text = None;
+    /// 返回 provider 可见版本，保留需要回传给 provider 的字段（如 reasoning_content）。
+    pub fn provider_visible(self) -> Self {
         self
     }
 

@@ -47,6 +47,8 @@ pub struct LlmSettings {
     pub supports_prompt_cache_key: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
+    /// 是否启用推理模式（如 DeepSeek reasoner）。
+    pub reasoning: bool,
 }
 
 // ─── Context Settings ────────────────────────────────────────────────────

@@ -58,14 +58,14 @@ use super::{
 enum StreamOutcome {
     Complete {
         text: String,
-        thinking_text: String,
+        reasoning_content: String,
         finish_reason: String,
         message_id: MessageId,
         message_started: bool,
     },
     ToolCalls {
         text: Option<String>,
-        thinking_text: String,
+        reasoning_content: String,
         tool_calls: Vec<PendingToolCall>,
         message_id: MessageId,
         message_started: bool,
@@ -161,7 +161,7 @@ async fn consume_llm_stream(
     message_id: MessageId,
 ) -> Result<StreamOutcome, AgentError> {
     let mut current_text = String::new();
-    let mut thinking_text = String::new();
+    let mut reasoning_content = String::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut message_started = false;
 
@@ -187,7 +187,7 @@ async fn consume_llm_stream(
                         delta: delta.clone(),
                     },
                 );
-                thinking_text.push_str(&delta);
+                reasoning_content.push_str(&delta);
             },
             LlmEvent::ToolCallStart {
                 call_id,
@@ -244,7 +244,7 @@ async fn consume_llm_stream(
                 if tool_calls.is_empty() {
                     return Ok(StreamOutcome::Complete {
                         text: current_text,
-                        thinking_text: std::mem::take(&mut thinking_text),
+                        reasoning_content: std::mem::take(&mut reasoning_content),
                         finish_reason,
                         message_id,
                         message_started,
@@ -257,7 +257,7 @@ async fn consume_llm_stream(
                 };
                 return Ok(StreamOutcome::ToolCalls {
                     text,
-                    thinking_text: std::mem::take(&mut thinking_text),
+                    reasoning_content: std::mem::take(&mut reasoning_content),
                     tool_calls,
                     message_id,
                     message_started,
@@ -298,17 +298,17 @@ fn ensure_assistant_message_started(
     *message_started = true;
 }
 
-fn non_empty_thinking_text(thinking_text: String) -> Option<String> {
-    if thinking_text.is_empty() {
+fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> {
+    if reasoning_content.is_empty() {
         None
     } else {
-        Some(thinking_text)
+        Some(reasoning_content)
     }
 }
 
-fn assistant_message_with_thinking(text: &str, thinking_text: Option<String>) -> LlmMessage {
+fn assistant_message_with_thinking(text: &str, reasoning_content: Option<String>) -> LlmMessage {
     let mut message = LlmMessage::assistant(text);
-    message.thinking_text = thinking_text;
+    message.reasoning_content = reasoning_content;
     message
 }
 
@@ -438,16 +438,16 @@ impl AgentLoop {
             match outcome {
                 StreamOutcome::Complete {
                     text,
-                    thinking_text,
+                    reasoning_content,
                     finish_reason,
                     message_id,
                     message_started,
                 } => {
-                    let thinking_text = non_empty_thinking_text(thinking_text);
-                    if !text.is_empty() || thinking_text.is_some() {
+                    let reasoning_content = non_empty_reasoning_content(reasoning_content);
+                    if !text.is_empty() || reasoning_content.is_some() {
                         messages.push(assistant_message_with_thinking(
                             &text,
-                            thinking_text.clone(),
+                            reasoning_content.clone(),
                         ));
                         final_text.push_str(&text);
                         if message_started {
@@ -456,7 +456,7 @@ impl AgentLoop {
                                 EventPayload::AssistantMessageCompleted {
                                     message_id,
                                     text,
-                                    thinking_text,
+                                    reasoning_content,
                                 },
                             );
                         }
@@ -474,20 +474,20 @@ impl AgentLoop {
                 },
                 StreamOutcome::ToolCalls {
                     text,
-                    thinking_text,
+                    reasoning_content,
                     tool_calls,
                     message_id,
                     message_started,
                 } => {
-                    let thinking_text = non_empty_thinking_text(thinking_text);
+                    let reasoning_content = non_empty_reasoning_content(reasoning_content);
                     let visible_text = text.as_deref().unwrap_or_default();
                     if !visible_text.is_empty() {
                         final_text.push_str(visible_text);
                     }
-                    if text.is_some() || thinking_text.is_some() {
+                    if text.is_some() || reasoning_content.is_some() {
                         messages.push(assistant_message_with_thinking(
                             visible_text,
-                            thinking_text.clone(),
+                            reasoning_content.clone(),
                         ));
                     }
 
@@ -497,7 +497,7 @@ impl AgentLoop {
                             EventPayload::AssistantMessageCompleted {
                                 message_id,
                                 text: visible_text.to_string(),
-                                thinking_text,
+                                reasoning_content,
                             },
                         );
                     }

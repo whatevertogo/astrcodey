@@ -38,7 +38,28 @@ pub(super) struct FileCollectOptions {
     pub(super) recursive: bool,
     pub(super) include_hidden: bool,
     pub(super) respect_gitignore: bool,
-    pub(super) skip_git_dir: bool,
+    pub(super) skip_vcs_dirs: bool,
+    pub(super) skip_build_output: bool,
+}
+
+const VCS_DIR_NAMES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+
+const BUILD_OUTPUT_DIR_NAMES: &[&str] = &[
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".gradle",
+    ".dart_tool",
+    "Pods",
+    ".swiftbuild",
+];
+
+fn path_contains_component(path: &Path, names: &[&str]) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|name| names.contains(&name))
+    })
 }
 
 pub(super) fn collect_candidate_files(
@@ -60,8 +81,9 @@ pub(super) fn collect_candidate_files(
     if !options.recursive {
         builder.max_depth(Some(1));
     }
-    let skip_git_dir = options.skip_git_dir;
-    builder.filter_entry(move |entry| !should_skip_entry(entry, skip_git_dir));
+    let skip_vcs = options.skip_vcs_dirs;
+    let skip_build = options.skip_build_output && !path_contains_component(root, BUILD_OUTPUT_DIR_NAMES);
+    builder.filter_entry(move |entry| !should_skip_entry(entry, skip_vcs, skip_build));
 
     let mut files = Vec::new();
     for entry in builder.build() {
@@ -117,7 +139,8 @@ pub(super) fn collect_grep_files(
             recursive,
             include_hidden: true,
             respect_gitignore: true,
-            skip_git_dir: true,
+            skip_vcs_dirs: true,
+            skip_build_output: true,
         },
     )?;
     Ok(candidates
@@ -127,12 +150,23 @@ pub(super) fn collect_grep_files(
         .collect())
 }
 
-fn should_skip_entry(entry: &DirEntry, skip_git_dir: bool) -> bool {
-    skip_git_dir
-        && entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_dir())
-        && entry.file_name().to_str() == Some(".git")
+fn should_skip_entry(entry: &DirEntry, skip_vcs: bool, skip_build: bool) -> bool {
+    let Some(file_type) = entry.file_type() else {
+        return false;
+    };
+    if !file_type.is_dir() {
+        return false;
+    }
+    let Some(name) = entry.file_name().to_str() else {
+        return false;
+    };
+    if skip_vcs && VCS_DIR_NAMES.contains(&name) {
+        return true;
+    }
+    if skip_build && BUILD_OUTPUT_DIR_NAMES.contains(&name) {
+        return true;
+    }
+    false
 }
 
 fn build_globset(pattern: &str) -> std::io::Result<GlobSet> {

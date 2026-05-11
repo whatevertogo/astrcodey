@@ -751,7 +751,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: new_message_id(),
                 text: "answer".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         ))
         .await
@@ -828,7 +828,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: new_message_id(),
                 text: "answer".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         ))
         .await
@@ -886,7 +886,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: new_message_id(),
                 text: "answer".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         ))
         .await

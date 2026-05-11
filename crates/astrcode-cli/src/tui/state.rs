@@ -591,7 +591,7 @@ impl TuiState {
             EventPayload::AssistantMessageCompleted {
                 message_id,
                 text,
-                thinking_text: _,
+                reasoning_content: _,
             } => {
                 self.apply_assistant_message_completed(message_id.as_str(), text);
             },
@@ -1483,7 +1483,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: "msg-1".into(),
                 text: "first line\nsecond".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         );
 
@@ -1531,7 +1531,7 @@ mod tests {
             EventPayload::AssistantMessageCompleted {
                 message_id: "msg-1".into(),
                 text: "# Title\n- item".into(),
-                thinking_text: None,
+                reasoning_content: None,
             },
         );
 

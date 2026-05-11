@@ -86,11 +86,15 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                     _ => None,
                 })
                 .collect();
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "role": "assistant",
                 "content": "",
                 "tool_calls": tool_calls
-            })
+            });
+            if let Some(ref rc) = message.reasoning_content {
+                obj["reasoning_content"] = serde_json::json!(rc);
+            }
+            obj
         },
         _ => {
             let role = match message.role {
@@ -103,6 +107,11 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                 "role": role,
                 "content": chat_content_to_json(&message.content),
             });
+            if matches!(message.role, LlmRole::Assistant) {
+                if let Some(ref rc) = message.reasoning_content {
+                    obj["reasoning_content"] = serde_json::json!(rc);
+                }
+            }
             if matches!(message.role, LlmRole::Tool) {
                 if let Some(ref name) = message.name {
                     obj["name"] = serde_json::json!(name);

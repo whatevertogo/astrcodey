@@ -266,6 +266,7 @@ fn test_runtime_with_settings(
                 temperature: None,
                 supports_prompt_cache_key: false,
                 prompt_cache_retention: None,
+                reasoning: false,
             },
             context: ContextSettings {
                 auto_compact_enabled: context_settings.auto_compact_enabled,
@@ -1087,7 +1088,7 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
                 EventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(20)),
-                    thinking_text: None,
+                    reasoning_content: None,
                 },
             ))
             .await

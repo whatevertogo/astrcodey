@@ -326,7 +326,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "foo.rs"}),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         };
         let json = GeminiMapper::map_assistant(&msg);
         let fc = &json["parts"][0]["functionCall"];

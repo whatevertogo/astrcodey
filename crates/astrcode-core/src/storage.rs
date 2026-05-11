@@ -476,7 +476,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "a.rs"}),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         });
         model.messages.push(LlmMessage {
             role: LlmRole::Assistant,
@@ -486,7 +486,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "b.rs"}),
             }],
             name: None,
-            thinking_text: None,
+            reasoning_content: None,
         });
         model.messages.push(LlmMessage {
             role: LlmRole::Tool,
@@ -496,7 +496,7 @@ mod tests {
                 is_error: false,
             }],
             name: Some("read".into()),
-            thinking_text: None,
+            reasoning_content: None,
         });
         model.messages.push(LlmMessage {
             role: LlmRole::Tool,
@@ -506,7 +506,7 @@ mod tests {
                 is_error: false,
             }],
             name: Some("read".into()),
-            thinking_text: None,
+            reasoning_content: None,
         });
 
         let messages = model.provider_messages();
@@ -530,11 +530,11 @@ mod tests {
         model.messages.push(LlmMessage::user("hello"));
 
         let mut thinking_only = LlmMessage::assistant("");
-        thinking_only.thinking_text = Some("private reasoning".into());
+        thinking_only.reasoning_content = Some("private reasoning".into());
         model.messages.push(thinking_only);
 
         let mut visible_answer = LlmMessage::assistant("answer");
-        visible_answer.thinking_text = Some("more reasoning".into());
+        visible_answer.reasoning_content = Some("more reasoning".into());
         model.messages.push(visible_answer);
 
         let messages = model.provider_messages();
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, LlmRole::User);
         assert_eq!(messages[1].role, LlmRole::Assistant);
-        assert_eq!(messages[1].thinking_text, None);
+        assert_eq!(messages[1].reasoning_content, Some("more reasoning".into()));
         assert!(matches!(
             &messages[1].content[0],
             LlmContent::Text { text } if text == "answer"

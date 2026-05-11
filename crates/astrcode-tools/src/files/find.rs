@@ -88,7 +88,8 @@ impl Tool for FindFilesTool {
                 recursive: true,
                 include_hidden: args.include_hidden,
                 respect_gitignore: args.respect_gitignore,
-                skip_git_dir: true,
+                skip_vcs_dirs: true,
+                skip_build_output: true,
             },
         )
         .map_err(|e| ToolError::Execution(format!("find: {e}")))?;

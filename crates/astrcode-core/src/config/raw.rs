@@ -98,6 +98,9 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// 上下文窗口大小限制（token 数）。
     pub context_limit: Option<usize>,
+    /// 是否启用推理模式（如 DeepSeek reasoner）。启用后会正确回传 reasoning_content。
+    #[serde(default)]
+    pub reasoning: Option<bool>,
 }
 
 // ─── Runtime Section (placeholder for future use) ────────────────────────
@@ -206,11 +209,13 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "deepseek-chat".into(),
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
+                    reasoning: None,
                 },
                 ModelConfig {
                     id: "deepseek-reasoner".into(),
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
+                    reasoning: Some(true),
                 },
             ],
         },
@@ -229,6 +234,7 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                 id: "gpt-4.1".into(),
                 max_tokens: Some(16384),
                 context_limit: Some(1000000),
+                reasoning: None,
             }],
         },
         Profile {
@@ -243,11 +249,13 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "claude-sonnet-4-6".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(200_000),
+                    reasoning: None,
                 },
                 ModelConfig {
                     id: "claude-opus-4-7".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(200_000),
+                    reasoning: None,
                 },
             ],
         },
@@ -263,11 +271,13 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "gemini-2.5-pro".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(1_048_576),
+                    reasoning: None,
                 },
                 ModelConfig {
                     id: "gemini-2.5-flash".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(1_048_576),
+                    reasoning: None,
                 },
             ],
         },

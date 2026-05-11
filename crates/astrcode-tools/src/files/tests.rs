@@ -653,6 +653,95 @@ async fn grep_respects_gitignore_and_skips_binary_files() {
 }
 
 #[tokio::test]
+async fn find_skips_build_output_dirs_by_default() {
+    let temp = unique_temp_dir("find-skip-build");
+    std::fs::create_dir_all(temp.path().join("src")).expect("create src");
+    std::fs::write(temp.path().join("src").join("main.rs"), "fn main() {}").expect("seed src");
+    std::fs::create_dir_all(temp.path().join("target").join("debug")).expect("create target");
+    std::fs::write(
+        temp.path().join("target").join("debug").join("app.exe"),
+        "binary",
+    )
+    .expect("seed target");
+    std::fs::create_dir_all(temp.path().join("node_modules").join("pkg")).expect("create nm");
+    std::fs::write(
+        temp.path().join("node_modules").join("pkg").join("index.js"),
+        "",
+    )
+    .expect("seed nm");
+    let tool = FindFilesTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({ "pattern": "**/*" }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("find should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains("main.rs"));
+    assert!(!result.content.contains("target"));
+    assert!(!result.content.contains("node_modules"));
+}
+
+#[tokio::test]
+async fn find_allows_build_dir_when_root_is_inside() {
+    let temp = unique_temp_dir("find-build-bypass");
+    let target_dir = temp.path().join("target").join("debug");
+    std::fs::create_dir_all(&target_dir).expect("create target");
+    std::fs::write(target_dir.join("app.exe"), "binary").expect("seed target");
+    std::fs::create_dir_all(target_dir.join("deps")).expect("create deps");
+    std::fs::write(target_dir.join("deps").join("lib.rlib"), "").expect("seed deps");
+    let tool = FindFilesTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "**/*",
+                "root": "target/debug"
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("find should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.content.contains("app.exe"));
+    assert!(result.content.contains("lib.rlib"));
+}
+
+#[tokio::test]
+async fn grep_skips_build_output_dirs() {
+    let temp = unique_temp_dir("grep-skip-build");
+    std::fs::write(temp.path().join("src.rs"), "needle\n").expect("seed src");
+    std::fs::create_dir_all(temp.path().join("target")).expect("create target");
+    std::fs::write(temp.path().join("target").join("gen.rs"), "needle\n").expect("seed target");
+    let tool = GrepTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "needle",
+                "literal": true,
+                "outputMode": "files_with_matches"
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("grep should execute");
+
+    assert!(result.content.contains("src.rs"));
+    assert!(!result.content.contains("target"));
+}
+
+#[tokio::test]
 async fn grep_multiline_matches_across_line_breaks() {
     let temp = unique_temp_dir("grep-multiline");
     std::fs::write(

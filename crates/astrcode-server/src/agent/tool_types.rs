@@ -166,7 +166,7 @@ pub(crate) fn assistant_tool_call_message(prepared: &[PreparedToolCall]) -> LlmM
             })
             .collect(),
         name: None,
-        thinking_text: None,
+        reasoning_content: None,
     }
 }
 

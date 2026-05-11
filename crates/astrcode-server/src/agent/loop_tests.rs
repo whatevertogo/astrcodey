@@ -1079,8 +1079,8 @@ async fn thinking_only_tool_call_turn_completes_scoped_assistant_block() {
             AgentSignal::Event(EventPayload::AssistantMessageCompleted {
                 message_id,
                 text,
-                thinking_text,
-            }) if thinking_text.as_deref() == Some("checking before tool") => {
+                reasoning_content,
+            }) if reasoning_content.as_deref() == Some("checking before tool") => {
                 assert_eq!(text, "");
                 assert_eq!(Some(&message_id), thinking_message_id.as_ref());
                 completed_thinking_block = true;
@@ -1098,7 +1098,7 @@ async fn thinking_only_tool_call_turn_completes_scoped_assistant_block() {
     assert!(
         captured
             .iter()
-            .all(|message| message.thinking_text.is_none()),
+            .all(|message| message.reasoning_content.is_none()),
         "provider-visible follow-up messages must not contain display-only thinking"
     );
     assert!(

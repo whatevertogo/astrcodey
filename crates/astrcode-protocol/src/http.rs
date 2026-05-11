@@ -207,7 +207,7 @@ pub enum ConversationBlockDto {
         id: String,
         text: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        thinking_text: Option<String>,
+        reasoning_content: Option<String>,
         status: ConversationBlockStatusDto,
     },
     ToolCall {
@@ -444,7 +444,7 @@ mod tests {
                     ConversationBlockDto::Assistant {
                         id,
                         text,
-                        thinking_text: _,
+                        reasoning_content: _,
                         status,
                     },
             } => {
