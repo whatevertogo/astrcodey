@@ -1,4 +1,6 @@
-//! InMemoryEventStore — 纯内存事件存储和投影，用于测试。
+//! InMemoryEventStore — 纯内存事件存储和投影，仅用于测试。
+//! 
+//! 注: 仅用于测试
 
 use std::collections::HashMap;
 
