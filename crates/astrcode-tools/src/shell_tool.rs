@@ -110,9 +110,13 @@ impl Tool for ShellTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "Use `shell` for commands that need the OS or project toolchain: package managers, build tools, git, docker, etc.",
+                "Use `shell` for commands that need the OS or project toolchain: package \
+                 managers, build tools, git, docker, etc.",
             )
-            .caveat("Default timeout varies by config. Prefer the timeout parameter for long-running commands.")
+            .caveat(
+                "Default timeout varies by config. Prefer the timeout parameter for long-running \
+                 commands.",
+            )
             .prompt_tag("system")
             .always_include(true),
         )

@@ -29,7 +29,8 @@ fn error_tool_result(
     let (message, suggestion): (String, String) = match &err {
         ToolError::NotFound(name) => (
             format!("Tool `{name}` not found."),
-            "Use `tool_search_tool` to discover available tools, or proceed without it.".to_string(),
+            "Use `tool_search_tool` to discover available tools, or proceed without it."
+                .to_string(),
         ),
         ToolError::InvalidArguments(detail) => (
             format!("Invalid arguments for `{tool_name}`: {detail}"),
@@ -37,15 +38,21 @@ fn error_tool_result(
         ),
         ToolError::Execution(detail) => (
             format!("`{tool_name}` failed: {detail}"),
-            "Review the error above. Try different arguments, or use a different approach to accomplish the same goal.".to_string(),
+            "Review the error above. Try different arguments, or use a different approach to \
+             accomplish the same goal."
+                .to_string(),
         ),
         ToolError::Blocked(reason) => (
             format!("`{tool_name}` was blocked: {reason}"),
-            "A hook policy prevented this operation. Check the reason above and adjust your approach.".to_string(),
+            "A hook policy prevented this operation. Check the reason above and adjust your \
+             approach."
+                .to_string(),
         ),
         ToolError::Timeout(ms) => (
             format!("`{tool_name}` timed out after {ms}ms."),
-            "The operation is still running in the background. Use `task` to check on it, or try again with a smaller scope.".to_string(),
+            "The operation is still running in the background. Use `task` to check on it, or try \
+             again with a smaller scope."
+                .to_string(),
         ),
     };
 
@@ -167,12 +174,7 @@ async fn execute_tool_call_blocking(
             result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
             result
         },
-        Err(e) => error_tool_result(
-            call.call_id.clone(),
-            &tool_name,
-            e,
-            started_at.elapsed(),
-        ),
+        Err(e) => error_tool_result(call.call_id.clone(), &tool_name, e, started_at.elapsed()),
     };
     // Release the tool-side sender before awaiting the bridge; otherwise the
     // bridge keeps waiting for more tool progress events and this call hangs.
@@ -368,12 +370,9 @@ async fn background_tool_call(
                 r.duration_ms = Some(started_at.elapsed().as_millis() as u64);
                 r
             },
-            Some(Err(e)) => error_tool_result(
-                bg_call_id.clone(),
-                &bg_tool_name,
-                e,
-                started_at.elapsed(),
-            ),
+            Some(Err(e)) => {
+                error_tool_result(bg_call_id.clone(), &bg_tool_name, e, started_at.elapsed())
+            },
             None => error_tool_result(
                 bg_call_id.clone(),
                 &bg_tool_name,

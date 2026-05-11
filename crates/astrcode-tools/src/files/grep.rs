@@ -292,7 +292,8 @@ impl Tool for GrepTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "Use `grep` for content search. Use `find` for path glob search. Switch to `outputMode=content` only when matching lines are needed.",
+                "Use `grep` for content search. Use `find` for path glob search. Switch to \
+                 `outputMode=content` only when matching lines are needed.",
             )
             .prompt_tag("filesystem")
             .always_include(true),

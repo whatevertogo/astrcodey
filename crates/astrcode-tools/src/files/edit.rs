@@ -168,10 +168,17 @@ impl Tool for EditFileTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "Use `edit` for small edits when you know the exact old text. Prefer `patch` for multi-file changes, distant hunks, or create/delete work.",
+                "Use `edit` for small edits when you know the exact old text. Prefer `patch` for \
+                 multi-file changes, distant hunks, or create/delete work.",
             )
-            .caveat("You MUST `read` the file first before editing. Always copy oldStr from the read output — never write from memory or guess.")
-            .caveat("`oldStr` must match exactly once — including whitespace, newlines, trailing spaces, tabs, and line endings. If rejected, `read` the region again.")
+            .caveat(
+                "You MUST `read` the file first before editing. Always copy oldStr from the read \
+                 output — never write from memory or guess.",
+            )
+            .caveat(
+                "`oldStr` must match exactly once — including whitespace, newlines, trailing \
+                 spaces, tabs, and line endings. If rejected, `read` the region again.",
+            )
             .prompt_tag("filesystem")
             .always_include(true),
         )

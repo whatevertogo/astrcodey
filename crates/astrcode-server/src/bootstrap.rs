@@ -353,7 +353,10 @@ pub(crate) async fn build_system_prompt_snapshot(
     model_id: &str,
     tools: &[ToolDefinition],
     extra_system_prompt: Option<&str>,
-    tool_prompt_metadata: std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>,
+    tool_prompt_metadata: std::collections::HashMap<
+        String,
+        astrcode_core::tool::ToolPromptMetadata,
+    >,
 ) -> Result<(String, String), ExtensionError> {
     let mut ext_ctx = ServerExtensionContext::new(
         session_id.to_string(),

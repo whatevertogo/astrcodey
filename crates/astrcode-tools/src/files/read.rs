@@ -197,9 +197,14 @@ impl Tool for ReadFileTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "`read` reads files, not directories. Use it after `find`, `grep`, or user-provided paths identify a file. Use `offset` + `limit` for normal source files and `charOffset` + `maxChars` for persisted large tool results.",
+                "`read` reads files, not directories. Use it after `find`, `grep`, or \
+                 user-provided paths identify a file. Use `offset` + `limit` for normal source \
+                 files and `charOffset` + `maxChars` for persisted large tool results.",
             )
-            .caveat("If output is truncated, continue from the next range or chunk instead of rereading the whole file.")
+            .caveat(
+                "If output is truncated, continue from the next range or chunk instead of \
+                 rereading the whole file.",
+            )
             .prompt_tag("filesystem")
             .always_include(true),
         )

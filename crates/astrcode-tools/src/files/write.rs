@@ -118,9 +118,13 @@ impl Tool for WriteFileTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "Use `write` for file creation, regeneration, or full rewrites. Prefer `edit` or `patch` for narrow edits to existing files.",
+                "Use `write` for file creation, regeneration, or full rewrites. Prefer `edit` or \
+                 `patch` for narrow edits to existing files.",
             )
-            .caveat("This replaces the entire file. For partial changes, use `edit` or `patch` instead.")
+            .caveat(
+                "This replaces the entire file. For partial changes, use `edit` or `patch` \
+                 instead.",
+            )
             .prompt_tag("filesystem")
             .always_include(true),
         )

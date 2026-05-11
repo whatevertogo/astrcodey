@@ -14,7 +14,9 @@ use astrcode_core::{
         Extension, ExtensionContext, ExtensionError, ExtensionEvent, HookEffect, HookMode,
         HookSubscription, PromptContributions,
     },
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult, tool_metadata,
+    },
 };
 use serde_json::{Value, json};
 
@@ -152,14 +154,20 @@ impl Extension for McpExtension {
         }
     }
 
-    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+    fn tool_prompt_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
         let mut map = std::collections::HashMap::new();
         map.insert(
             TOOL_SEARCH_TOOL_NAME.to_string(),
             astrcode_core::tool::ToolPromptMetadata::new(
-                "Builtin tools do not need discovery. Use `tool_search_tool` only when builtin tools are not enough and you need the schema of an external MCP tool.",
+                "Builtin tools do not need discovery. Use `tool_search_tool` only when builtin \
+                 tools are not enough and you need the schema of an external MCP tool.",
             )
-            .caveat("After `tool_search_tool` returns candidate tools and schemas, call the matching concrete `mcp__...` tool directly.")
+            .caveat(
+                "After `tool_search_tool` returns candidate tools and schemas, call the matching \
+                 concrete `mcp__...` tool directly.",
+            )
             .prompt_tag("discovery"),
         );
         map

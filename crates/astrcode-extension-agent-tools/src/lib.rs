@@ -88,14 +88,20 @@ impl Extension for AgentToolsExtension {
         ))
     }
 
-    fn tool_prompt_metadata(&self) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+    fn tool_prompt_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
         let mut map = std::collections::HashMap::new();
         map.insert(
             "agent".to_string(),
             astrcode_core::tool::ToolPromptMetadata::new(
-                "Use `agent` for isolated responsibilities that benefit from parallel execution or context separation. Give the child one narrow task.",
+                "Use `agent` for isolated responsibilities that benefit from parallel execution \
+                 or context separation. Give the child one narrow task.",
             )
-            .caveat("If your next step depends on the result, doing it yourself is usually faster; only spawn when parallel or isolation value is clear.")
+            .caveat(
+                "If your next step depends on the result, doing it yourself is usually faster; \
+                 only spawn when parallel or isolation value is clear.",
+            )
             .prompt_tag("collaboration"),
         );
         map

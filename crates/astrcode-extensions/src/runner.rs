@@ -540,7 +540,7 @@ impl Tool for ExtensionTool {
                     self.extension.id(),
                     err,
                 ));
-            }
+            },
         };
 
         // 处理声明式结果: RunSession → 派生子会话
@@ -586,29 +586,29 @@ impl Tool for ExtensionTool {
 ///
 /// 与 `ToolError`（纯字符串）不同，`ToolResult` 携带 metadata，
 /// agent 可以据此判断是重试、换工具还是报告给用户。
-fn extension_error_result(
-    tool_name: &str,
-    extension_id: &str,
-    err: ExtensionError,
-) -> ToolResult {
+fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionError) -> ToolResult {
     use astrcode_core::tool::tool_metadata;
 
     let (content, suggestion) = match &err {
         ExtensionError::NotFound(_) => (
             format!("Tool `{tool_name}` is not available."),
-            "This tool may have been unregistered. Try `tool_search_tool` to discover available tools, or proceed without it.",
+            "This tool may have been unregistered. Try `tool_search_tool` to discover available \
+             tools, or proceed without it.",
         ),
         ExtensionError::Timeout(ms) => (
             format!("Tool `{tool_name}` timed out after {ms}ms."),
-            "The extension is still processing. Try again with a simpler request, or proceed without this tool.",
+            "The extension is still processing. Try again with a simpler request, or proceed \
+             without this tool.",
         ),
         ExtensionError::Blocked { reason } => (
             format!("Tool `{tool_name}` was blocked: {reason}"),
-            "A hook policy prevented this operation. Check the reason above and adjust your approach.",
+            "A hook policy prevented this operation. Check the reason above and adjust your \
+             approach.",
         ),
         ExtensionError::Internal(message) => (
             format!("Tool `{tool_name}` failed: {message}"),
-            "The extension encountered an internal error. Try again with different arguments, or use a builtin tool as an alternative.",
+            "The extension encountered an internal error. Try again with different arguments, or \
+             use a builtin tool as an alternative.",
         ),
     };
 

@@ -179,7 +179,8 @@ impl Tool for FindFilesTool {
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
         Some(
             ToolPromptMetadata::new(
-                "Use `find` for path discovery, `grep` for content search, and `read` to inspect a known file.",
+                "Use `find` for path discovery, `grep` for content search, and `read` to inspect \
+                 a known file.",
             )
             .prompt_tag("filesystem")
             .always_include(true),
