@@ -21,7 +21,7 @@ use astrcode_core::{
     extension::{CompactTrigger, ExtensionEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::CompactSnapshotInput,
-    tool::{BackgroundTaskReader, FileObservation, FileObservationStore, ToolDefinition},
+    tool::{BackgroundTaskReader, FileObservationStore, ToolDefinition},
     types::*,
 };
 use astrcode_extensions::{
@@ -45,7 +45,8 @@ use super::{
     },
     tool_pipeline::ToolPipeline,
     tool_types::{
-        BackgroundTaskCompletion, ExecuteToolCalls, PendingToolCall, assistant_tool_call_message,
+        BackgroundTaskCompletion, ExecuteToolCalls, InMemoryFileObservationStore, PendingToolCall,
+        assistant_tool_call_message,
     },
     util::{
         activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
@@ -867,26 +868,3 @@ use super::shared_context::{TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 #[cfg(test)]
 #[path = "loop_tests.rs"]
 mod tests;
-
-// ─── File observation store ──────────────────────────────────────────────────
-
-/// 进程内文件观察存储，用于 read/edit 工具的 read-before-edit 守卫。
-///
-/// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
-/// 生命周期与 session 一致（由 `AgentLoop::new` 创建，随 `AgentLoop` 销毁）。
-#[derive(Default)]
-struct InMemoryFileObservationStore {
-    observations: parking_lot::Mutex<std::collections::HashMap<String, FileObservation>>,
-}
-
-impl FileObservationStore for InMemoryFileObservationStore {
-    fn remember(&self, observation: FileObservation) {
-        let mut map = self.observations.lock();
-        map.insert(observation.path.clone(), observation);
-    }
-
-    fn load(&self, path: &str) -> Option<FileObservation> {
-        let map = self.observations.lock();
-        map.get(path).cloned()
-    }
-}
