@@ -147,12 +147,15 @@ impl LlmMessage {
 
     /// 判断该消息在去掉展示元数据后是否仍应发送给 provider。
     pub fn has_provider_visible_content(&self) -> bool {
-        self.content.iter().any(|content| match content {
+        if self.content.iter().any(|content| match content {
             LlmContent::Text { text } => !text.trim().is_empty(),
             LlmContent::Image { .. }
             | LlmContent::ToolCall { .. }
             | LlmContent::ToolResult { .. } => true,
-        })
+        }) {
+            return true;
+        }
+        self.reasoning_content.as_ref().map_or(false, |r| !r.trim().is_empty())
     }
 }
 

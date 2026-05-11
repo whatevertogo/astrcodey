@@ -525,13 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_messages_strip_display_only_thinking() {
+    fn provider_messages_preserve_reasoning_content() {
         let mut model = SessionReadModel::empty("session-test".into());
         model.messages.push(LlmMessage::user("hello"));
 
-        let mut thinking_only = LlmMessage::assistant("");
-        thinking_only.reasoning_content = Some("private reasoning".into());
-        model.messages.push(thinking_only);
+        let mut reasoning_only = LlmMessage::assistant("");
+        reasoning_only.reasoning_content = Some("private reasoning".into());
+        model.messages.push(reasoning_only);
 
         let mut visible_answer = LlmMessage::assistant("answer");
         visible_answer.reasoning_content = Some("more reasoning".into());
@@ -539,12 +539,15 @@ mod tests {
 
         let messages = model.provider_messages();
 
-        assert_eq!(messages.len(), 2);
+        // reasoning_content must be preserved for providers like DeepSeek
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, LlmRole::User);
         assert_eq!(messages[1].role, LlmRole::Assistant);
-        assert_eq!(messages[1].reasoning_content, Some("more reasoning".into()));
+        assert_eq!(messages[1].reasoning_content, Some("private reasoning".into()));
+        assert_eq!(messages[2].role, LlmRole::Assistant);
+        assert_eq!(messages[2].reasoning_content, Some("more reasoning".into()));
         assert!(matches!(
-            &messages[1].content[0],
+            &messages[2].content[0],
             LlmContent::Text { text } if text == "answer"
         ));
     }

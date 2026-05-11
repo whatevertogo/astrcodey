@@ -325,8 +325,7 @@ impl EventStore for FileSystemSessionRepository {
         session_id: &SessionId,
         cursor: &Cursor,
     ) -> Result<Vec<Event>, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        // session_id 验证由 get_or_open_meta 统一守卫
         let meta = self.get_or_open_meta(session_id).await?;
         let Ok(seq) = cursor.parse::<u64>() else {
             return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
@@ -398,8 +397,6 @@ impl EventStore for FileSystemSessionRepository {
         session_id: &SessionId,
         snapshot: CompactSnapshotInput,
     ) -> Result<Option<String>, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
         let meta = self.get_or_open_meta(session_id).await?;
 
         let dir = meta.dir.join("compact-snapshots");
@@ -449,8 +446,6 @@ impl EventStore for FileSystemSessionRepository {
         session_id: &SessionId,
         artifact: ToolResultArtifactInput,
     ) -> Result<ToolResultArtifactRef, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
         let meta = self.get_or_open_meta(session_id).await?;
 
         let dir = meta.dir.join("tool-results");
@@ -468,8 +463,6 @@ impl EventStore for FileSystemSessionRepository {
         char_offset: usize,
         max_chars: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
         let meta = self.get_or_open_meta(session_id).await?;
 
         let path = PathBuf::from(path);
