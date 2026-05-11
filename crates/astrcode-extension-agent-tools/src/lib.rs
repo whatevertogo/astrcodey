@@ -100,9 +100,9 @@ impl Extension for AgentToolsExtension {
             )
             .caveat(
                 "When NOT to use: (1) If you need the result immediately for your next step, \
-                 doing it yourself is faster. (2) For simple file reads or targeted searches, \
-                 use Read/Grep tools directly. (3) Only spawn when parallel execution or \
-                 isolation provides clear value.",
+                 doing it yourself is faster. (2) For simple file reads or targeted searches, use \
+                 Read/Grep tools directly. (3) Only spawn when parallel execution or isolation \
+                 provides clear value.",
             )
             .prompt_tag("collaboration"),
         );
@@ -227,8 +227,8 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
 const AGENT_TOOL_DESCRIPTION: &str =
     "Launch a specialized subagent for one narrow, delegated task. Use when parallel execution, \
      isolation, or context separation provides clear value. If your next step depends on the \
-     result, doing it yourself is usually faster. See the [Agents] section in the system \
-     prompt for available agent types and their use cases.";
+     result, doing it yourself is usually faster. See the [Agents] section in the system prompt \
+     for available agent types and their use cases.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"mode":{"type":"string","enum":["single"],"default":"single"}},"required":["prompt","description"]}"#;
 
@@ -256,12 +256,11 @@ fn format_agents_for_model(agents: &[agent::AgentConfig]) -> String {
 
     let mut lines = Vec::with_capacity(agents.len() + 2);
     lines.push(String::from("Available agents:"));
-    lines.push(String::from("Use the agent name (first word before the colon) as subagentType."));
+    lines.push(String::from(
+        "Use the agent name (first word before the colon) as subagentType.",
+    ));
     for agent in agents {
-        lines.push(format!(
-            "- {}: {}",
-            agent.name, agent.description
-        ));
+        lines.push(format!("- {}: {}", agent.name, agent.description));
     }
     lines.join("\n")
 }
