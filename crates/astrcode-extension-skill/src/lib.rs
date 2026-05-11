@@ -139,6 +139,7 @@ impl Extension for SkillExtension {
             astrcode_core::tool::ToolPromptMetadata::new(
                 "Call the Skill tool with the exact skill name before continuing when a task matches one of the listed skills.",
             )
+            .caveat("Users may also refer to skills as slash commands, such as /commit.")
             .prompt_tag("discovery"),
         );
         map
