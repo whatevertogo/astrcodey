@@ -209,11 +209,7 @@ pub fn handle_switch_mode(
     // When exiting plan mode, append the plan content so the agent can present it to the user.
     if current_id.as_str() == "plan" {
         if let Some(plan_content) = store::load_plan(plan_dir)? {
-            context = context.map(|ctx| {
-                format!(
-                    "{ctx}\n\n---\n\n{plan_content}"
-                )
-            });
+            context = context.map(|ctx| format!("{ctx}\n\n---\n\n{plan_content}"));
         }
     }
 
