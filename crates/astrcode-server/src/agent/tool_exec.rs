@@ -410,14 +410,13 @@ async fn background_tool_call(
     });
 
     // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）
-    if let Ok(mut mgr) = runtime.background_tasks.lock() {
-        mgr.register(
-            register_task_id,
-            runtime.session_id.clone(),
-            exec_handle,
-            watcher_handle,
-        );
-    }
+    let mut mgr = runtime.background_tasks.lock();
+    mgr.register(
+        register_task_id,
+        runtime.session_id.clone(),
+        exec_handle,
+        watcher_handle,
+    );
 
     // 返回占位结果
     let command = call

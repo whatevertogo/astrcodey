@@ -129,7 +129,7 @@ impl NativeExtension {
         if ptr.is_null() || len == 0 {
             return;
         }
-        let callback = self.output_free.lock().and_then(|free| *free);
+        let callback = *self.output_free.lock();
         if let Some(callback) = callback {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                 callback(ptr, len)

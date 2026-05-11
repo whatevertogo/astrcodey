@@ -118,7 +118,7 @@ pub(crate) struct ToolCallRuntimeContext {
     /// 后台任务完成后的通知通道。
     pub(super) background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     /// 后台任务管理器，用于注册 watcher handle 以支持取消。
-    pub(super) background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+    pub(super) background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
     /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
     pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。

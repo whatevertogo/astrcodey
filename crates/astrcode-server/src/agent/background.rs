@@ -3,10 +3,9 @@
 //! 管理被自动后台化的工具调用（主要是长时间运行的 shell 命令）。
 //! 提供注册、取消、查询和清理能力。
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
+
+use parking_lot::Mutex;
 
 use astrcode_core::{
     tool::{BackgroundTaskReader, ToolResult},
@@ -114,27 +113,19 @@ impl BackgroundTaskReaderImpl {
 
 impl BackgroundTaskReader for BackgroundTaskReaderImpl {
     fn list_active(&self, session_id: &SessionId) -> Vec<BackgroundTaskId> {
-        match self.manager.lock() {
-            Ok(mgr) => mgr.list_active(session_id),
-            Err(_) => Vec::new(),
-        }
+        self.manager.lock().list_active(session_id)
     }
 
     fn cancel(&self, session_id: &SessionId, task_id: &BackgroundTaskId) -> bool {
-        match self.manager.lock() {
-            Ok(mut mgr) => {
-                // 只取消属于当前会话的任务
-                if mgr
-                    .tasks
-                    .get(task_id)
-                    .is_some_and(|t| &t.session_id == session_id)
-                {
-                    mgr.cancel(task_id)
-                } else {
-                    false
-                }
-            },
-            Err(_) => false,
+        let mut mgr = self.manager.lock();
+        if mgr
+            .tasks
+            .get(task_id)
+            .is_some_and(|t| &t.session_id == session_id)
+        {
+            mgr.cancel(task_id)
+        } else {
+            false
         }
     }
 }
@@ -150,9 +141,7 @@ pub fn complete_background_task(
     manager: &Arc<Mutex<BackgroundTaskManager>>,
     task_id: &BackgroundTaskId,
 ) {
-    if let Ok(mut mgr) = manager.lock() {
-        mgr.remove(task_id);
-    }
+    manager.lock().remove(task_id);
 }
 
 /// 为后台化的工具调用构造占位 `ToolResult`。

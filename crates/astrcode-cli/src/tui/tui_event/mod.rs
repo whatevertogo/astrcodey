@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn test_event_broker_starts_in_start_state() {
         let broker = EventBroker::new();
-        let state = broker.state.lock().unwrap();
+        let state = broker.state.lock();
         assert!(matches!(*state, BrokerState::Start));
     }
 

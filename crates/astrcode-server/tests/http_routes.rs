@@ -726,7 +726,7 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     Arc::new(ServerRuntime {
         session_manager: Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new()))),
-        llm_provider: Arc::new(std::sync::RwLock::new(llm_provider)),
+        llm_provider: Arc::new(parking_lot::RwLock::new(llm_provider)),
         context_assembler: Arc::new(LlmContextAssembler::new(ContextWindowSettings::default())),
         auto_compact_failures: Arc::new(
             astrcode_server::agent::AutoCompactFailureTracker::default(),
@@ -740,8 +740,8 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-config.json"),
         )),
-        raw_config: std::sync::RwLock::new(astrcode_core::config::Config::default()),
-        effective: std::sync::RwLock::new(EffectiveConfig {
+        raw_config: parking_lot::RwLock::new(astrcode_core::config::Config::default()),
+        effective: parking_lot::RwLock::new(EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),
                 base_url: String::new(),

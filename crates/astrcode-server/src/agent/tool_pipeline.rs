@@ -42,7 +42,7 @@ pub(in crate::agent) struct ToolPipeline {
     extension_runner: Arc<ExtensionRunner>,
     session_manager: Arc<SessionManager>,
     background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-    background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+    background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
     background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
 }
@@ -55,7 +55,7 @@ impl ToolPipeline {
         extension_runner: Arc<ExtensionRunner>,
         session_manager: Arc<SessionManager>,
         background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-        background_tasks: Arc<std::sync::Mutex<BackgroundTaskManager>>,
+        background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
         background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
         file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
     ) -> Self {

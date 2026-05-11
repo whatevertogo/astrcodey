@@ -632,7 +632,7 @@ mod tests {
         let llm_provider: Arc<dyn LlmProvider> = llm;
         ServerSessionSpawner {
             session_manager,
-            llm_provider: Arc::new(std::sync::RwLock::new(llm_provider)),
+            llm_provider: Arc::new(RwLock::new(llm_provider)),
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Default::default(),
@@ -744,7 +744,7 @@ mod tests {
         let session_manager = Arc::new(SessionManager::new(Arc::new(InMemoryEventStore::new())));
         let parent = session_manager.create(".", "mock", None).await.unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
-        let llm_provider = Arc::new(std::sync::RwLock::new(initial_provider));
+        let llm_provider = Arc::new(RwLock::new(initial_provider));
         let spawner = ServerSessionSpawner {
             session_manager,
             llm_provider: Arc::clone(&llm_provider),
@@ -757,7 +757,7 @@ mod tests {
             )),
             read_timeout_secs: 1,
         };
-        *llm_provider.write().unwrap() = Arc::new(StaticTextLlm { text: "new" });
+        *llm_provider.write() = Arc::new(StaticTextLlm { text: "new" });
 
         let result = spawner
             .spawn(
