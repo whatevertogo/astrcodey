@@ -366,7 +366,6 @@ pub(crate) async fn build_system_prompt_snapshot_with_files(
         working_dir: working_dir.to_string(),
         model: ModelSelection::simple(model_id),
         tools: tools.to_vec(),
-        config: std::collections::HashMap::new(),
     };
 
     let contributions = extension_runner

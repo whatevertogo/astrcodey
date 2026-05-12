@@ -458,7 +458,6 @@ impl ToolPipeline {
                         tool_input: call.tool_input.clone(),
                         error: result.error.clone().unwrap_or_else(|| result.content.clone()),
                         tool_result: result.clone(),
-                        config: std::collections::HashMap::new(),
                     };
                     self.extension_runner
                         .emit_post_tool_use_failure(fail_ctx)

@@ -264,7 +264,6 @@ impl CommandHandler {
                         session_id: session_id.to_string(),
                         working_dir: String::new(),
                         model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
-                        config: std::collections::HashMap::new(),
                     };
                     if let Err(e) = self
                         .runtime
@@ -377,7 +376,6 @@ impl CommandHandler {
                     session_id: event.session_id.to_string(),
                     working_dir: working_dir.clone(),
                     model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
-                    config: std::collections::HashMap::new(),
                 };
                 if let Err(e) = self
                     .runtime
@@ -576,7 +574,6 @@ impl CommandHandler {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
             model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
-            config: std::collections::HashMap::new(),
         };
 
         match self
@@ -721,7 +718,6 @@ impl CommandHandler {
             session_id: active_turn.session_id.to_string(),
             working_dir: active_turn.working_dir.clone(),
             model: ModelSelection::simple(active_turn.model_id.clone()),
-            config: std::collections::HashMap::new(),
         };
         if let Err(e) = self
             .runtime
@@ -813,7 +809,6 @@ impl CommandHandler {
             session_id: sid.to_string(),
             working_dir: wd.clone(),
             model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
-            config: std::collections::HashMap::new(),
         };
         self.runtime
             .extension_runner
