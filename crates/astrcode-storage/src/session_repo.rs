@@ -178,9 +178,8 @@ impl FileSystemSessionRepository {
         log: &EventLog,
         snapshot_mgr: &SnapshotManager,
     ) -> Result<SessionReadModel, StorageError> {
+        // Snapshot first because it's faster than replaying the full event log.
         if let Some(snapshot) = snapshot_mgr.latest_snapshot().await? {
-            // Try snapshot restore first because it can make recovery much
-            // faster than replaying the entire event log from the beginning.
             match restore_from_snapshot(log, snapshot).await {
                 Ok(model) => return Ok(model),
                 Err(error) => {
@@ -996,27 +995,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_continuation_child_projection_uses_summary_context() {
+    async fn same_session_compact_projection_uses_summary_context() {
         let temp_dir = tempfile::tempdir().unwrap();
         let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
-        let parent_id = SessionId::from("parent-session");
-        let child_id = SessionId::from("child-session");
-        repo.create_session(&parent_id, ".", "mock", None)
+        let session_id = SessionId::from("test-session");
+        repo.create_session(&session_id, ".", "mock", None)
             .await
             .unwrap();
         repo.append_event(Event::new(
-            parent_id.clone(),
+            session_id.clone(),
             None,
             EventPayload::UserMessage {
                 message_id: new_message_id(),
-                text: "visible".into(),
+                text: "old message".into(),
             },
         ))
         .await
         .unwrap();
         repo.append_event(Event::new(
-            parent_id.clone(),
+            session_id.clone(),
+            None,
+            EventPayload::AssistantMessageCompleted {
+                message_id: new_message_id(),
+                text: "old reply".into(),
+                reasoning_content: None,
+            },
+        ))
+        .await
+        .unwrap();
+        repo.append_event(Event::new(
+            session_id.clone(),
             None,
             EventPayload::CompactBoundaryCreated {
                 trigger: "manual_command".into(),
@@ -1024,20 +1033,17 @@ mod tests {
                 post_tokens: 20,
                 summary: "summary".into(),
                 transcript_path: Some("compact.jsonl".into()),
-                continued_session_id: child_id.clone(),
+                continued_session_id: session_id.clone(),
             },
         ))
         .await
         .unwrap();
-        repo.create_session(&child_id, ".", "mock", Some(&parent_id))
-            .await
-            .unwrap();
         repo.append_event(Event::new(
-            child_id.clone(),
+            session_id.clone(),
             None,
             EventPayload::SessionContinuedFromCompaction {
-                parent_session_id: parent_id.clone(),
-                parent_cursor: "1".into(),
+                parent_session_id: session_id.clone(),
+                parent_cursor: "2".into(),
                 summary: "summary".into(),
                 transcript_path: Some("compact.jsonl".into()),
                 context_messages: vec![LlmMessage::system("hidden summary")],
@@ -1046,24 +1052,27 @@ mod tests {
         ))
         .await
         .unwrap();
-        repo.checkpoint(&child_id, &"1".into()).await.unwrap();
 
-        let parent = repo.session_read_model(&parent_id).await.unwrap();
-        assert_eq!(parent.messages.len(), 1);
-        assert!(parent.context_messages.is_empty());
-
-        let reopened = test_repo(base_path);
-        let child = reopened.session_read_model(&child_id).await.unwrap();
+        let state = repo.session_read_model(&session_id).await.unwrap();
         assert_eq!(
-            child.parent_session_id.as_ref().map(SessionId::as_str),
-            Some(parent_id.as_str())
-        );
-        assert_eq!(
-            child.context_messages,
+            state.context_messages,
             vec![LlmMessage::system("hidden summary")]
         );
-        assert_eq!(child.messages, vec![LlmMessage::user("recent")]);
-        assert_eq!(child.provider_messages().len(), 2);
+        assert_eq!(state.messages, vec![LlmMessage::user("recent")]);
+        let provider = state.provider_messages();
+        assert_eq!(provider.len(), 2);
+        assert_eq!(provider[0].role, LlmRole::System);
+        assert_eq!(provider[1].role, LlmRole::User);
+
+        // Reopen and verify projection restores from compact boundary.
+        let reopened = test_repo(base_path);
+        let restored = reopened.session_read_model(&session_id).await.unwrap();
+        assert_eq!(
+            restored.context_messages,
+            vec![LlmMessage::system("hidden summary")]
+        );
+        assert_eq!(restored.messages, vec![LlmMessage::user("recent")]);
+        assert_eq!(restored.provider_messages().len(), 2);
     }
 
     fn test_repo(projects_base: PathBuf) -> FileSystemSessionRepository {

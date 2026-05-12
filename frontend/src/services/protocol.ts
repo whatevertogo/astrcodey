@@ -131,6 +131,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         kind,
         id,
         text: requiredString(object, 'text'),
+        reasoningContent: optionalString(object, 'reasoningContent'),
         status: decodeBlockStatus(object.status),
       }
     case 'toolCall':

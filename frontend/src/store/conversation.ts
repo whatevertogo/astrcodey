@@ -54,7 +54,7 @@ function mergeBlock(
     return {
       ...incoming,
       text: incoming.text ?? current.text,
-      thinkingText: incoming.thinkingText ?? current.thinkingText,
+      reasoningContent: incoming.reasoningContent ?? current.reasoningContent,
     }
   }
 
@@ -131,7 +131,7 @@ function patchAssistantThinking(
         kind: 'assistant',
         id: blockId,
         text: '',
-        thinkingText: delta,
+        reasoningContent: delta,
         status: 'streaming',
       },
     ]
@@ -143,7 +143,7 @@ function patchAssistantThinking(
   const next = [...blocks]
   next[idx] = {
     ...block,
-    thinkingText: (block.thinkingText ?? '') + delta,
+    reasoningContent: (block.reasoningContent ?? '') + delta,
   }
   return next
 }
@@ -408,6 +408,9 @@ export const useAppStore = create<ConversationState>((set, get) => ({
 
       case 'sessionContinued': {
         void get().refreshSessions()
+        // Same-session compact: newSessionId == parentSessionId.
+        // switchSession clears blocks and reloads from API, which returns
+        // the compacted conversation snapshot — effectively refreshing the view.
         void get().switchSession(delta.newSessionId)
         break
       }

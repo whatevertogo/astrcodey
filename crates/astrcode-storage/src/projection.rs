@@ -5,7 +5,10 @@
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{AgentSessionLinkView, AgentSessionStatus, BackgroundToolCallView, SessionReadModel},
+    storage::{
+        AgentSessionLinkView, AgentSessionStatus, BackgroundToolCallView, CompactBoundaryView,
+        SessionReadModel,
+    },
     types::SessionId,
 };
 
@@ -45,6 +48,7 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.system_prompt = None;
             model.pending_tool_calls.clear();
             model.background_tool_calls.clear();
+            model.compact_boundaries.clear();
             model.agent_sessions.clear();
         },
         EventPayload::AgentSessionSpawned {
@@ -177,6 +181,36 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                 Phase::CallingTool
             };
         },
+        EventPayload::CompactBoundaryCreated {
+            trigger,
+            pre_tokens,
+            post_tokens,
+            summary,
+            transcript_path,
+            ..
+        } => {
+            model.compact_boundaries.push(CompactBoundaryView {
+                trigger: trigger.clone(),
+                pre_tokens: *pre_tokens,
+                post_tokens: *post_tokens,
+                summary: summary.clone(),
+                transcript_path: transcript_path.clone(),
+                seq: event.seq.unwrap_or_default(),
+            });
+            model.phase = Phase::Idle;
+        },
+        EventPayload::SessionContinuedFromCompaction {
+            context_messages,
+            retained_messages,
+            ..
+        } => {
+            model.context_messages = context_messages.clone();
+            model.messages = retained_messages.clone();
+            model.phase = Phase::Idle;
+        },
+        EventPayload::ErrorOccurred { .. } => {
+            model.phase = Phase::Error;
+        },
         // Non-durable events: never persisted to JSONL, only broadcast for live UI.
         EventPayload::ToolCallStarted { .. }
         | EventPayload::CompactionStarted
@@ -189,25 +223,6 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::ToolCallBackgrounded { .. }
         | EventPayload::BackgroundTaskOutput { .. }
         | EventPayload::BackgroundTaskCompleted { .. } => {},
-        EventPayload::CompactBoundaryCreated { .. } => {
-            model.phase = Phase::Idle;
-        },
-        EventPayload::SessionContinuedFromCompaction {
-            context_messages,
-            retained_messages,
-            ..
-        } => {
-            // A compact continuation child session is rebuilt from the compacted
-            // parent state. The compacted summary/context is preserved in
-            // `context_messages`, while only the retained transcript becomes the
-            // new visible `messages` list.
-            model.context_messages = context_messages.clone();
-            model.messages = retained_messages.clone();
-            model.phase = Phase::Idle;
-        },
-        EventPayload::ErrorOccurred { .. } => {
-            model.phase = Phase::Error;
-        },
         EventPayload::Custom { .. } => {},
     }
 }

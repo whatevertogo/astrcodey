@@ -837,6 +837,7 @@ impl AgentLoop {
 }
 
 /// Agent 回合的输出结果。
+#[derive(Debug)]
 pub struct AgentTurnOutput {
     pub text: String,
     pub finish_reason: String,
@@ -845,6 +846,7 @@ pub struct AgentTurnOutput {
 }
 
 /// Agent loop 发现 auto compact 后交给 command owner 执行的 continuation 计划。
+#[derive(Debug)]
 pub struct AgentCompactContinuation {
     pub trigger: CompactTrigger,
     pub compaction: CompactResult,

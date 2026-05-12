@@ -60,19 +60,6 @@ impl AutoCompactFailureTracker {
         *count
     }
 
-    pub(crate) fn transfer_session(
-        &self,
-        parent_session_id: &SessionId,
-        child_session_id: &SessionId,
-    ) {
-        let mut counts = self.counts();
-        if let Some(count) = counts.remove(parent_session_id) {
-            if count > 0 {
-                counts.insert(child_session_id.clone(), count);
-            }
-        }
-    }
-
     fn counts(&self) -> MutexGuard<'_, HashMap<SessionId, usize>> {
         self.counts
             .lock()
@@ -165,6 +152,7 @@ pub(crate) struct ForkedProviderRequest {
     pub(crate) max_turns: usize,
 }
 
+#[derive(Debug)]
 pub(crate) struct ForkedProviderOutput {
     pub(crate) text: String,
     pub(crate) finish_reason: String,
@@ -333,19 +321,176 @@ pub(crate) fn counts_as_auto_compact_provider_failure(error: &CompactError) -> b
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::llm::ModelLimits;
+
     use super::*;
 
+    struct ToolCallingLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ToolCallingLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ToolCallStart {
+                call_id: "compact-call".into(),
+                name: "shell".into(),
+                arguments: "{}".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            });
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    struct StreamErrorLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StreamErrorLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::Error {
+                message: "provider crashed".into(),
+            });
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    struct DanglingStreamCompactLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DanglingStreamCompactLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "partial".into(),
+            });
+            // Drop sender without Done — simulates stream close
+            drop(tx);
+            Ok(rx)
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn forked_runner_rejects_unexpected_tool_call() {
+        let runner = ForkedProviderRunner::new(Arc::new(ToolCallingLlm));
+        let result = runner
+            .run_one_turn(ForkedProviderRequest {
+                base_messages: vec![LlmMessage::user("compact")],
+                prompt_messages: vec![],
+                tools: vec![],
+                max_turns: 1,
+            })
+            .await;
+
+        match result {
+            Err(ForkedRunError::UnexpectedToolCall { name }) => {
+                assert_eq!(name, "shell");
+            },
+            other => panic!("expected UnexpectedToolCall, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn forked_runner_propagates_stream_error() {
+        let runner = ForkedProviderRunner::new(Arc::new(StreamErrorLlm));
+        let result = runner
+            .run_one_turn(ForkedProviderRequest {
+                base_messages: vec![LlmMessage::user("compact")],
+                prompt_messages: vec![],
+                tools: vec![],
+                max_turns: 1,
+            })
+            .await;
+
+        match result {
+            Err(ForkedRunError::Llm(LlmError::StreamParse(msg))) => {
+                assert!(msg.contains("provider crashed"));
+            },
+            other => panic!("expected StreamParse error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn forked_runner_returns_stream_closed_when_sender_drops() {
+        let runner = ForkedProviderRunner::new(Arc::new(DanglingStreamCompactLlm));
+        let result = runner
+            .run_one_turn(ForkedProviderRequest {
+                base_messages: vec![LlmMessage::user("compact")],
+                prompt_messages: vec![],
+                tools: vec![],
+                max_turns: 1,
+            })
+            .await
+            .expect("dangling stream should return Ok with stream_closed");
+
+        assert_eq!(result.finish_reason, "stream_closed");
+        assert_eq!(result.text, "partial");
+    }
+
+    #[tokio::test]
+    async fn forked_runner_rejects_unsupported_max_turns() {
+        let runner = ForkedProviderRunner::new(Arc::new(StreamErrorLlm));
+        let result = runner
+            .run_one_turn(ForkedProviderRequest {
+                base_messages: vec![],
+                prompt_messages: vec![],
+                tools: vec![],
+                max_turns: 3,
+            })
+            .await;
+
+        match result {
+            Err(ForkedRunError::UnsupportedMaxTurns { max_turns }) => {
+                assert_eq!(max_turns, 3);
+            },
+            other => panic!("expected UnsupportedMaxTurns, got: {other:?}"),
+        }
+    }
+
     #[test]
-    fn auto_compact_failure_tracker_transfers_continuation_count() {
+    fn auto_compact_failure_tracker_resets_on_success() {
         let tracker = AutoCompactFailureTracker::default();
-        let parent = SessionId::from("parent-session");
-        let child = SessionId::from("child-session");
+        let session = SessionId::from("test-session");
 
-        tracker.record_provider_failure(&parent);
-        tracker.record_provider_failure(&parent);
-        tracker.transfer_session(&parent, &child);
+        tracker.record_provider_failure(&session);
+        tracker.record_provider_failure(&session);
+        assert_eq!(tracker.consecutive_failures(&session), 2);
 
-        assert_eq!(tracker.consecutive_failures(&parent), 0);
-        assert_eq!(tracker.consecutive_failures(&child), 2);
+        tracker.record_provider_success(&session);
+        assert_eq!(tracker.consecutive_failures(&session), 0);
     }
 }

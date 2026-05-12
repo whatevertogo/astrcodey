@@ -172,3 +172,106 @@ pub fn backgrounded_placeholder_result(
         duration_ms: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_handles() -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let exec = tokio::spawn(async {});
+        let watcher = tokio::spawn(async {});
+        (exec, watcher)
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_task_and_returns_true() {
+        let mut mgr = BackgroundTaskManager::new();
+        let task_id = BackgroundTaskId::from("task-1");
+        let session_id = SessionId::from("session-1");
+        let (exec, watcher) = fake_handles();
+        mgr.register(task_id.clone(), session_id.clone(), exec, watcher);
+
+        assert!(mgr.cancel(&task_id));
+        assert!(mgr.list_active(&session_id).is_empty());
+    }
+
+    #[test]
+    fn cancel_returns_false_for_unknown_task() {
+        let mut mgr = BackgroundTaskManager::new();
+        let task_id = BackgroundTaskId::from("nonexistent");
+        assert!(!mgr.cancel(&task_id));
+    }
+
+    #[tokio::test]
+    async fn cleanup_session_removes_all_tasks_for_session() {
+        let mut mgr = BackgroundTaskManager::new();
+        let session_a = SessionId::from("session-a");
+        let session_b = SessionId::from("session-b");
+
+        for i in 0..3 {
+            let (exec, watcher) = fake_handles();
+            mgr.register(
+                BackgroundTaskId::from(format!("task-a-{i}")),
+                session_a.clone(),
+                exec,
+                watcher,
+            );
+        }
+        let (exec, watcher) = fake_handles();
+        mgr.register(
+            BackgroundTaskId::from("task-b-0"),
+            session_b.clone(),
+            exec,
+            watcher,
+        );
+
+        mgr.cleanup_session(&session_a);
+        assert!(mgr.list_active(&session_a).is_empty());
+        assert_eq!(mgr.list_active(&session_b).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_active_returns_only_matching_session_tasks() {
+        let mut mgr = BackgroundTaskManager::new();
+        let session_1 = SessionId::from("s1");
+        let session_2 = SessionId::from("s2");
+
+        let (exec1, watcher1) = fake_handles();
+        let (exec2, watcher2) = fake_handles();
+        mgr.register(
+            BackgroundTaskId::from("t1"),
+            session_1.clone(),
+            exec1,
+            watcher1,
+        );
+        mgr.register(
+            BackgroundTaskId::from("t2"),
+            session_2.clone(),
+            exec2,
+            watcher2,
+        );
+
+        let active = mgr.list_active(&session_1);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0], BackgroundTaskId::from("t1"));
+    }
+
+    #[tokio::test]
+    async fn reader_cancel_rejects_wrong_session() {
+        let manager = Arc::new(Mutex::new(BackgroundTaskManager::new()));
+        let reader = BackgroundTaskReaderImpl::new(Arc::clone(&manager));
+
+        let task_id = BackgroundTaskId::from("task-x");
+        let session_correct = SessionId::from("correct");
+        let session_wrong = SessionId::from("wrong");
+
+        let (exec, watcher) = fake_handles();
+        manager
+            .lock()
+            .register(task_id.clone(), session_correct.clone(), exec, watcher);
+
+        assert!(!reader.cancel(&session_wrong, &task_id));
+        // Correct session can cancel
+        assert!(reader.cancel(&session_correct, &task_id));
+    }
+}

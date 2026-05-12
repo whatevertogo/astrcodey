@@ -51,7 +51,7 @@ Compact 使用独立的 `ForkedProviderRunner` 执行 LLM 调用：
 
 - 优先使用 LLM 驱动的 provider-backed compact
 - 连续失败 3 次后自动降级到确定性 fallback（基于规则的摘要）
-- 失败计数跟随 session fork 转移（`transfer_session`），不会在新 session 里重复踩坑
+- 失败计数基于 session ID 在全局 `AutoCompactFailureTracker` 中跟踪，compact continuation children 共享同一条 session 线
 
 ### Post-compact 上下文恢复
 

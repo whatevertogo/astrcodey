@@ -7,6 +7,7 @@ import UserMessage from './UserMessage'
 import ToolCallBlock from './ToolCallBlock'
 import ErrorBlock from './ErrorBlock'
 import SystemNote from './SystemNote'
+import CompactSummaryCard from './CompactSummaryCard'
 
 interface MessageListProps {
   blocks: ConversationBlock[]
@@ -64,7 +65,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
         {block.kind === 'assistant' ? (
           <AssistantMessage
             block={block}
-            reasoningText={block.thinkingText ?? null}
+            reasoningText={block.reasoningContent ?? null}
           />
         ) : block.kind === 'user' ? (
           <UserMessage block={block} />
@@ -74,6 +75,8 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
           <ErrorBlock block={block} />
         ) : block.kind === 'systemNote' ? (
           <SystemNote block={block} />
+        ) : block.kind === 'compactSummary' ? (
+          <CompactSummaryCard block={block} />
         ) : null}
       </div>
     )

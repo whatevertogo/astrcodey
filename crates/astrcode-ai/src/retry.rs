@@ -46,3 +46,69 @@ impl RetryPolicy {
         Duration::from_millis(base.saturating_sub(jitter) + offset)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_values() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.max_retries, 2);
+        assert_eq!(policy.base_delay_ms, 250);
+    }
+
+    #[test]
+    fn should_retry_returns_true_for_retryable_status_codes() {
+        let policy = RetryPolicy::default();
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                policy.should_retry(1, code),
+                "expected {code} to be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn should_retry_returns_false_for_non_retryable_status_codes() {
+        let policy = RetryPolicy::default();
+        for code in [400, 401, 403, 404, 405, 409, 422] {
+            assert!(
+                !policy.should_retry(1, code),
+                "expected {code} to NOT be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn should_retry_returns_false_after_max_retries_exceeded() {
+        let policy = RetryPolicy::default();
+        // max_retries=2, attempt=3 is beyond limit
+        assert!(!policy.should_retry(3, 429));
+        assert!(!policy.should_retry(99, 500));
+        // attempt <= max_retries should still retry
+        assert!(policy.should_retry(1, 429));
+        assert!(policy.should_retry(2, 429));
+    }
+
+    #[test]
+    fn delay_grows_exponentially() {
+        let policy = RetryPolicy {
+            max_retries: 5,
+            base_delay_ms: 100,
+        };
+        let d1 = policy.delay(1).as_millis();
+        let d2 = policy.delay(2).as_millis();
+        let d3 = policy.delay(3).as_millis();
+
+        // base: 100, 200, 400 (before jitter ±25%)
+        // d2 should be roughly 2× d1, d3 roughly 4× d1
+        assert!(d2 > d1, "delay should grow: d2({d2}) > d1({d1})");
+        assert!(d3 > d2, "delay should grow: d3({d3}) > d2({d2})");
+        // With jitter, d2 should be within [150, 250] (200 ± 25%)
+        assert!(
+            (150..=250).contains(&(d2 as u64)),
+            "d2 ({d2}) should be roughly 200 ± 25%"
+        );
+    }
+}

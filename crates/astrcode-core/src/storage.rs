@@ -231,6 +231,23 @@ pub struct BackgroundToolCallView {
     pub completed: bool,
 }
 
+/// compact boundary 在会话投影中的元数据。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactBoundaryView {
+    /// compact 触发来源。
+    pub trigger: String,
+    /// 压缩前 token 数。
+    pub pre_tokens: usize,
+    /// 压缩后 token 数。
+    pub post_tokens: usize,
+    /// 压缩生成的摘要。
+    pub summary: String,
+    /// compact 前 transcript snapshot 路径。
+    pub transcript_path: Option<String>,
+    /// boundary 事件的 seq。
+    pub seq: u64,
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -265,6 +282,9 @@ pub struct SessionReadModel {
     /// 父会话派生的子 Agent 会话列表。
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkView>,
+    /// compact boundary 元数据列表，按 seq 递增排列。
+    #[serde(default)]
+    pub compact_boundaries: Vec<CompactBoundaryView>,
     /// 最新 durable 事件 seq。
     pub latest_seq: Option<u64>,
 }
@@ -286,6 +306,7 @@ impl SessionReadModel {
             updated_at: String::new(),
             parent_session_id: None,
             agent_sessions: Vec::new(),
+            compact_boundaries: Vec::new(),
             latest_seq: None,
         }
     }

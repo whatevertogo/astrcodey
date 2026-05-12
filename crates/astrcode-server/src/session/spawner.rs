@@ -20,9 +20,8 @@ use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, mpsc};
 
 use super::{
-    CompactContinuationAppendInput, CompactContinuationCreateInput, SessionManager,
-    agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
-    append_compact_continuation_events, create_compact_continuation_session,
+    SameSessionCompactionInput, SessionManager, agent_turn_completed_payloads,
+    agent_turn_failed_payloads, agent_turn_started_payloads, append_same_session_compaction,
 };
 use crate::{
     agent::{
@@ -216,20 +215,14 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let cti = child_turn_id.clone();
         let sm = Arc::clone(&self.session_manager);
         let pf = progress.clone();
-        let wd = request.working_dir.clone();
         let sp = system_prompt.clone();
-        let mid = model_id.clone();
-        let auto_compact_failures = Arc::clone(&self.auto_compact_failures);
         let (output, emitted_error) =
             drive_agent(&agent, &user_prompt, Vec::new(), move |signal| {
                 let sm = sm.clone();
                 let current_child_sid = Arc::clone(&current_child_sid);
                 let cti = cti.clone();
                 let p = pf.clone();
-                let wd = wd.clone();
                 let sp = sp.clone();
-                let mid = mid.clone();
-                let auto_compact_failures = Arc::clone(&auto_compact_failures);
                 async move {
                     match signal {
                         AgentSignal::Event(payload) => {
@@ -249,37 +242,23 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                             reply,
                         } => {
                             let parent_sid = current_child_sid.lock().await.clone();
-                            let result = async {
-                                let continuation = create_compact_continuation_session(
-                                    &sm,
-                                    CompactContinuationCreateInput {
-                                        parent_session_id: parent_sid.clone(),
-                                        working_dir: wd,
-                                        model_id: mid,
-                                    },
-                                )
-                                .await?;
-                                append_compact_continuation_events(
-                                    &sm,
-                                    CompactContinuationAppendInput {
-                                        session: continuation,
-                                        system_prompt_fingerprint: prompt_fingerprint(&sp),
-                                        system_prompt: sp,
-                                        trigger_name: compact_trigger_name(trigger).into(),
-                                        compaction,
-                                    },
-                                )
-                                .await
-                                .map(|events| events.child_session_id)
-                            }
-                            .await;
-                            if let Ok(child_sid) = &result {
-                                auto_compact_failures.transfer_session(&parent_sid, child_sid);
+                            let result = append_same_session_compaction(
+                                &sm,
+                                SameSessionCompactionInput {
+                                    session_id: parent_sid.clone(),
+                                    system_prompt_fingerprint: prompt_fingerprint(&sp),
+                                    system_prompt: sp,
+                                    trigger_name: compact_trigger_name(trigger).into(),
+                                    compaction,
+                                },
+                            )
+                            .await
+                            .map(|_| parent_sid.clone());
+                            if result.is_ok() {
                                 p.emit(
                                     ToolOutputStream::Stdout,
-                                    format!("child agent continued: {child_sid}\n"),
+                                    format!("child agent compacted: {parent_sid}\n"),
                                 );
-                                *current_child_sid.lock().await = child_sid.clone();
                             }
                             let _ = reply.send(result);
                         },

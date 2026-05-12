@@ -105,7 +105,7 @@ export type ConversationBlock =
       kind: 'assistant'
       id: string
       text: string
-      thinkingText?: string
+      reasoningContent?: string
       status: BlockStatus
     }
   | {

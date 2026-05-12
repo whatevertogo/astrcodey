@@ -192,8 +192,6 @@ struct ActiveTurn {
     working_dir: String,
     model_id: String,
     system_prompt: String,
-    tool_registry: Arc<ToolRegistry>,
-    switch_active_on_continuation: bool,
     /// Oneshot sender resolved when this turn is removed from active_turns.
     /// None means no caller is waiting for completion.
     completion_tx: Option<oneshot::Sender<TurnCompletion>>,
@@ -525,7 +523,6 @@ impl CommandHandler {
         .await
         .map_err(HandlerError::Other)?;
 
-        let switch_active_on_continuation = self.active_session_id.as_ref() == Some(&sid);
         let handle = self.spawn_agent_turn(AgentTurnInput {
             sid: sid.clone(),
             turn_id: turn_id.clone(),
@@ -546,8 +543,6 @@ impl CommandHandler {
                 working_dir,
                 model_id,
                 system_prompt,
-                tool_registry,
-                switch_active_on_continuation,
                 completion_tx,
             },
         );
@@ -562,7 +557,7 @@ impl CommandHandler {
     ) -> Result<PromptSubmission, HandlerError> {
         if command.name == "compact" {
             return match self.compact_session(&sid).await? {
-                ManualCompactOutcome::Created { .. } => Ok(PromptSubmission::Handled {
+                ManualCompactOutcome::Compacted { .. } => Ok(PromptSubmission::Handled {
                     message: "compact accepted".into(),
                 }),
                 ManualCompactOutcome::Skipped { message } => {

@@ -305,11 +305,11 @@ fn write_project_skill(workspace: &Path, id: &str, content: &str) {
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 }
 
-fn compact_child_id(outcome: ManualCompactOutcome) -> SessionId {
+fn compacted_session_id(outcome: ManualCompactOutcome) -> SessionId {
     match outcome {
-        ManualCompactOutcome::Created { child_session_id } => child_session_id,
+        ManualCompactOutcome::Compacted { session_id } => session_id,
         ManualCompactOutcome::Skipped { message } => {
-            panic!("expected compact child, compact was skipped: {message}")
+            panic!("expected compact, compact was skipped: {message}")
         },
     }
 }
@@ -773,36 +773,32 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-    let parent_id = handler.create_session(".".into()).await.unwrap();
+    let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
         handler
-            .submit_prompt_for_session(parent_id.clone(), text.into())
+            .submit_prompt_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     }
 
-    let child_id = handler
-        .compact_session(parent_id.clone())
+    let compacted_id = handler
+        .compact_session(session_id.clone())
         .await
-        .map(compact_child_id)
+        .map(compacted_session_id)
         .unwrap();
-    let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
-    assert_eq!(child_id, continued_session_id);
-
-    let parent_state = runtime
-        .session_manager
-        .read_model(&parent_id)
-        .await
-        .unwrap();
-    assert!(parent_state.context_messages.is_empty());
-    assert!(!parent_state.messages.is_empty());
-
-    let state = runtime.session_manager.read_model(&child_id).await.unwrap();
     assert_eq!(
-        state.parent_session_id.as_ref().map(SessionId::as_str),
-        Some(parent_id.as_str())
+        compacted_id, session_id,
+        "same-session compact keeps session_id"
     );
+    let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
+    assert_eq!(continued_session_id, session_id);
+
+    let state = runtime
+        .session_manager
+        .read_model(&session_id)
+        .await
+        .unwrap();
     assert!(!state.context_messages.is_empty());
     assert!(state.provider_messages().iter().any(|message| {
         message_to_dto(message)
@@ -825,39 +821,30 @@ async fn slash_compact_uses_backend_command_without_user_message() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-    let parent_id = handler.create_session(".".into()).await.unwrap();
+    let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
         handler
-            .submit_prompt_for_session(parent_id.clone(), text.into())
+            .submit_prompt_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     }
 
     let result = handler
-        .submit_input_for_session(parent_id.clone(), "/compact".into())
+        .submit_input_for_session(session_id.clone(), "/compact".into())
         .await
         .unwrap();
     assert!(matches!(result, PromptSubmission::Handled { .. }));
     let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
+    assert_eq!(continued_session_id, session_id, "same-session compact");
 
-    let continued = runtime
+    let state = runtime
         .session_manager
-        .read_model(&continued_session_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        continued.parent_session_id.as_ref().map(SessionId::as_str),
-        Some(parent_id.as_str())
-    );
-
-    let parent = runtime
-        .session_manager
-        .read_model(&parent_id)
+        .read_model(&session_id)
         .await
         .unwrap();
     assert!(
-        parent
+        state
             .messages
             .iter()
             .all(|message| message_to_dto(message).content != "/compact")
@@ -995,51 +982,53 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-    let first_session_id = handler.create_session(".".into()).await.unwrap();
+    let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three", "four"] {
         handler
-            .submit_prompt_for_session(first_session_id.clone(), text.into())
+            .submit_prompt_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     }
 
-    let first_child_id = handler
-        .compact_session(first_session_id)
+    let first_compacted = handler
+        .compact_session(session_id.clone())
         .await
-        .map(compact_child_id)
+        .map(compacted_session_id)
         .unwrap();
+    assert_eq!(first_compacted, session_id, "same-session compact");
     assert_eq!(
-        first_child_id,
+        session_id,
         drain_until_compact_boundary(&mut event_rx).await
     );
     let first_summary = {
         let state = runtime
             .session_manager
-            .read_model(&first_child_id)
+            .read_model(&session_id)
             .await
             .unwrap();
         message_to_dto(&state.context_messages[0]).content
     };
 
     handler
-        .submit_prompt_for_session(first_child_id.clone(), "five".into())
+        .submit_prompt_for_session(session_id.clone(), "five".into())
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
-    let second_child_id = handler
-        .compact_session(first_child_id)
+    let second_compacted = handler
+        .compact_session(session_id.clone())
         .await
-        .map(compact_child_id)
+        .map(compacted_session_id)
         .unwrap();
+    assert_eq!(second_compacted, session_id, "same-session compact again");
     assert_eq!(
-        second_child_id,
+        session_id,
         drain_until_compact_boundary(&mut event_rx).await
     );
 
     let state = runtime
         .session_manager
-        .read_model(&second_child_id)
+        .read_model(&session_id)
         .await
         .unwrap();
     let second_summary = message_to_dto(&state.context_messages[0]).content;
@@ -1054,7 +1043,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
 }
 
 #[tokio::test]
-async fn auto_compact_switches_active_session_to_continuation_child() {
+async fn auto_compact_applies_same_session_boundary() {
     let settings = astrcode_context::ContextSettings {
         compact_threshold_percent: 0.0,
         ..Default::default()
@@ -1063,12 +1052,12 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
-    let parent_id = handler.create_session(".".into()).await.unwrap();
+    let session_id = handler.create_session(".".into()).await.unwrap();
     for index in 0..3 {
         runtime
             .session_manager
             .append_event(Event::new(
-                parent_id.clone(),
+                session_id.clone(),
                 None,
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
@@ -1080,7 +1069,7 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
         runtime
             .session_manager
             .append_event(Event::new(
-                parent_id.clone(),
+                session_id.clone(),
                 None,
                 EventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
@@ -1093,12 +1082,12 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
     }
 
     handler
-        .submit_prompt_for_session(parent_id.clone(), "current".into())
+        .submit_prompt_for_session(session_id.clone(), "current".into())
         .await
         .unwrap();
     let mut compaction_started_count = 0;
-    let mut child_id = None;
-    let mut turn_completed_session = None;
+    let mut compact_boundary_seen = false;
+    let mut turn_completed = false;
     loop {
         let notification = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await
@@ -1110,23 +1099,28 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
         match event.payload {
             EventPayload::CompactionStarted => {
                 compaction_started_count += 1;
-                assert_eq!(event.session_id, parent_id);
+                assert_eq!(event.session_id, session_id);
             },
             EventPayload::CompactBoundaryCreated {
                 continued_session_id,
                 ..
             } => {
                 assert!(
-                    turn_completed_session.is_none(),
+                    !turn_completed,
                     "compact boundary should be created before turn completion"
                 );
-                assert_eq!(event.session_id, parent_id);
-                child_id = Some(continued_session_id);
+                assert_eq!(event.session_id, session_id);
+                assert_eq!(continued_session_id, session_id, "same-session compact");
+                compact_boundary_seen = true;
             },
             EventPayload::TurnCompleted { finish_reason } => {
                 assert_eq!(finish_reason, "stop");
-                turn_completed_session = Some(event.session_id);
-                if child_id.is_some() {
+                assert_eq!(
+                    event.session_id, session_id,
+                    "turn completes on same session"
+                );
+                turn_completed = true;
+                if compact_boundary_seen {
                     break;
                 }
             },
@@ -1134,25 +1128,15 @@ async fn auto_compact_switches_active_session_to_continuation_child() {
         }
     }
     assert_eq!(compaction_started_count, 1);
-    let child_id = child_id.expect("compact boundary should create a child session");
-    assert_eq!(
-        turn_completed_session.as_ref().map(SessionId::as_str),
-        Some(child_id.as_str())
-    );
+    assert!(compact_boundary_seen);
 
-    let parent = runtime
+    let state = runtime
         .session_manager
-        .read_model(&parent_id)
+        .read_model(&session_id)
         .await
         .unwrap();
-    assert!(parent.context_messages.is_empty());
-    let child = runtime.session_manager.read_model(&child_id).await.unwrap();
-    assert_eq!(
-        child.parent_session_id.as_ref().map(SessionId::as_str),
-        Some(parent_id.as_str())
-    );
-    assert!(!child.context_messages.is_empty());
-    assert!(child.messages.iter().any(|message| {
+    assert!(!state.context_messages.is_empty());
+    assert!(state.messages.iter().any(|message| {
         message_to_dto(message)
             .content
             .contains("Compacted conversation summary")

@@ -1908,3 +1908,115 @@ async fn prompt_too_long_returns_recoverable_error_without_same_session_compact(
     }
     assert!(saw_recoverable_error);
 }
+
+// ── T-2: stream ended unexpectedly ──────────────────────────────────────
+
+struct DanglingStreamLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for DanglingStreamLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Drop sender without sending Done or Error — simulates stream interruption
+        drop(tx);
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 1024,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[tokio::test]
+async fn stream_ended_unexpectedly_returns_internal_error() {
+    let agent_loop = AgentLoop::new(
+        "dangling-session".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            Arc::new(DanglingStreamLlm),
+            Arc::new(ToolRegistry::new()),
+            default_extension_runner(),
+        ),
+    );
+
+    let error = agent_loop
+        .process_prompt("hello", vec![], None)
+        .await
+        .expect_err("dangling stream should produce an error");
+
+    assert!(
+        error.to_string().contains("ended unexpectedly"),
+        "expected 'ended unexpectedly' in error, got: {error}"
+    );
+}
+
+// ── T-7: BeforeProviderRequest Blocked ───────────────────────────────────
+
+struct BlockingProviderExtension;
+
+#[async_trait::async_trait]
+impl Extension for BlockingProviderExtension {
+    fn id(&self) -> &str {
+        "blocking-provider"
+    }
+
+    fn hook_subscriptions(&self) -> Vec<HookSubscription> {
+        vec![HookSubscription {
+            event: ExtensionEvent::BeforeProviderRequest,
+            mode: HookMode::Blocking,
+            priority: 0,
+        }]
+    }
+
+    async fn on_event(
+        &self,
+        event: ExtensionEvent,
+        _ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        if event == ExtensionEvent::BeforeProviderRequest {
+            return Ok(HookEffect::Block {
+                reason: "model not allowed".into(),
+            });
+        }
+        Ok(HookEffect::Allow)
+    }
+}
+
+#[tokio::test]
+async fn before_provider_request_blocked_returns_internal_error() {
+    let runner = default_extension_runner();
+    runner.register(Arc::new(BlockingProviderExtension)).await;
+
+    let agent_loop = AgentLoop::new(
+        "blocked-provider-session".into(),
+        ".".into(),
+        String::new(),
+        "mock".into(),
+        test_services(
+            Arc::new(CapturingLlm {
+                messages: Arc::new(Mutex::new(Vec::new())),
+            }),
+            Arc::new(ToolRegistry::new()),
+            runner,
+        ),
+    );
+
+    let error = agent_loop
+        .process_prompt("hello", vec![], None)
+        .await
+        .expect_err("blocked provider request should produce an error");
+
+    assert!(
+        error.to_string().contains("model not allowed"),
+        "expected 'model not allowed' in error, got: {error}"
+    );
+}

@@ -517,7 +517,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
 }
 
 #[tokio::test]
-async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
+async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     let runtime = runtime(Arc::new(SummaryLlm));
     let (event_tx, _) = broadcast::channel(64);
     let (app, token) = router(Arc::clone(&runtime), event_tx);
@@ -611,22 +611,16 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
-    let child_id = body.new_session_id.expect("compact should create a child");
+    let returned_session_id = body
+        .new_session_id
+        .expect("compact should return session_id");
+    assert_eq!(returned_session_id, session_id, "same-session compact");
     let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
-    assert!(sse.contains(&child_id));
+    assert!(sse.contains(&session_id));
 
-    let parent = runtime.session_manager.read_model(&sid).await.unwrap();
-    assert!(parent.context_messages.is_empty());
-    assert_eq!(parent.messages.len(), 8);
-
-    let child_id = SessionId::from(child_id);
-    let child = runtime.session_manager.read_model(&child_id).await.unwrap();
-    assert_eq!(
-        child.parent_session_id.as_ref().map(SessionId::as_str),
-        Some(sid.as_str())
-    );
-    assert!(!child.context_messages.is_empty());
-    let restored_context = child
+    let state = runtime.session_manager.read_model(&sid).await.unwrap();
+    assert!(!state.context_messages.is_empty());
+    let restored_context = state
         .context_messages
         .iter()
         .flat_map(|message| &message.content)
@@ -642,12 +636,12 @@ async fn compact_route_returns_child_session_and_child_snapshot_hydrates() {
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
         app,
-        &format!("/api/sessions/{child_id}/conversation"),
+        &format!("/api/sessions/{session_id}/conversation"),
         &token,
     )
     .await;
-    assert_eq!(snapshot.session_id, child_id.as_str());
-    assert_eq!(snapshot.cursor.value, child.cursor());
+    assert_eq!(snapshot.session_id, session_id);
+    assert_eq!(snapshot.cursor.value, state.cursor());
     let _ = fs::remove_file(read_fixture);
 }
 

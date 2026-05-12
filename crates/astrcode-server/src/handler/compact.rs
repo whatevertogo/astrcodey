@@ -1,18 +1,13 @@
-use std::sync::Arc;
-
 use astrcode_context::compaction::{
     CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
 };
 use astrcode_core::{
-    config::ModelSelection,
     event::EventPayload,
-    extension::{CompactTrigger, ExtensionEvent},
+    extension::CompactTrigger,
     storage::CompactSnapshotInput,
     types::{SessionId, TurnId},
 };
-use astrcode_extensions::context::ServerExtensionContext;
 use astrcode_protocol::events::ClientNotification;
-use astrcode_tools::registry::ToolRegistry;
 
 use super::{CommandHandler, HandlerError, session_snapshot};
 use crate::{
@@ -168,18 +163,8 @@ impl CommandHandler {
             &self.runtime.session_manager,
             SameSessionCompactionInput {
                 session_id: sid.clone(),
+                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
                 system_prompt,
-                system_prompt_fingerprint: prompt_fingerprint(
-                    &self
-                        .runtime
-                        .session_manager
-                        .read_model(sid)
-                        .await
-                        .map_err(|e| HandlerError::Other(e.to_string()))?
-                        .system_prompt
-                        .clone()
-                        .unwrap_or_default(),
-                ),
                 trigger_name: compact_trigger_name(CompactTrigger::ManualCommand).into(),
                 compaction,
             },
