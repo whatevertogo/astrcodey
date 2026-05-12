@@ -554,6 +554,7 @@ impl Tool for ExtensionTool {
                 system_prompt,
                 user_prompt,
                 model_preference,
+                wait_for_result,
             }) = serde_json::from_value(outcome_value)
             {
                 let request = SpawnRequest {
@@ -564,6 +565,7 @@ impl Tool for ExtensionTool {
                     model_preference,
                     tool_call_id: _ctx.tool_call_id.clone(),
                     event_tx: _ctx.event_tx.clone(),
+                    wait_for_result,
                 };
 
                 match self.runtime.spawn(_ctx.session_id.as_str(), request).await {
@@ -572,6 +574,14 @@ impl Tool for ExtensionTool {
                         result
                             .metadata
                             .insert("child_session_id".into(), output.child_session_id.into());
+                        if let Some(task_id) = output.background_task_id {
+                            result
+                                .metadata
+                                .insert("backgrounded".into(), serde_json::json!(true));
+                            result
+                                .metadata
+                                .insert("task_id".into(), serde_json::json!(task_id));
+                        }
                     },
                     Err(e) => {
                         result.content = format!("Failed to spawn child session: {e}");

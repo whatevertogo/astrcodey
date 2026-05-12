@@ -95,14 +95,17 @@ impl Extension for AgentToolsExtension {
         map.insert(
             "agent".to_string(),
             astrcode_core::tool::ToolPromptMetadata::new(
-                "Use `agent` for isolated responsibilities that benefit from parallel execution \
-                 or context separation. Give the child one narrow, well-defined task.",
+                "Use `agent` to delegate isolated tasks to specialized subagents. By default, the \
+                 agent runs synchronously and blocks until completion — use this when your next \
+                 step depends on the result. Set waitForResult to false to run the agent in the \
+                 background and continue working. Background agent results arrive as a \
+                 notification in the next turn.",
             )
             .caveat(
-                "When NOT to use: (1) If you need the result immediately for your next step, \
-                 doing it yourself is faster. (2) For simple file reads or targeted searches, use \
-                 Read/Grep tools directly. (3) Only spawn when parallel execution or isolation \
-                 provides clear value.",
+                "For simple file reads or targeted searches, use Read/Grep directly instead of \
+                 spawning an agent. When running agents in the background (waitForResult: false), \
+                 avoid duplicating their work — work on non-overlapping tasks. Background agents \
+                 are automatically cancelled if the session ends.",
             )
             .prompt_tag("collaboration"),
         );
@@ -121,16 +124,13 @@ struct AgentArgs {
     prompt: String,
     description: String,
     subagent_type: Option<String>,
-    #[serde(default)]
-    mode: AgentMode,
+    /// 是否同步阻塞等待子 agent 完成。默认 `true`。
+    #[serde(default = "default_wait_for_result")]
+    wait_for_result: bool,
 }
 
-#[derive(Debug, Default, Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-enum AgentMode {
-    #[default]
-    Single,
-    Chain,
+const fn default_wait_for_result() -> bool {
+    true
 }
 
 struct AgentRun {
@@ -146,40 +146,38 @@ fn build_agent_run(
     let args: AgentArgs =
         serde_json::from_value(input.clone()).map_err(|e| format!("invalid agent args: {e}"))?;
 
-    match args.mode {
-        AgentMode::Chain => Err(
-            "chain mode is not yet supported — use single mode or list each agent step manually"
-                .into(),
-        ),
-        AgentMode::Single => {
-            let agent = match args.subagent_type.as_deref() {
-                None | Some("") => agents.first().ok_or("no agents configured")?,
-                Some(name) => agents
-                    .iter()
-                    .find(|a| a.name == name || a.id == name)
-                    .ok_or_else(|| {
-                        format!(
-                            "agent '{name}' not found.\n\n{}",
-                            format_agents_for_model(agents)
-                        )
-                    })?,
-            };
+    let matched = match args.subagent_type.as_deref() {
+        None | Some("") => agents.first().ok_or("no agents configured")?,
+        Some(name) => agents
+            .iter()
+            .find(|a| a.name == name || a.id == name)
+            .ok_or_else(|| {
+                format!(
+                    "agent '{name}' not found.\n\n{}",
+                    format_agents_for_model(agents)
+                )
+            })?,
+    };
 
-            Ok(AgentRun {
-                render: agent_run_render_spec(&args, agent),
-                outcome: ExtensionToolOutcome::RunSession {
-                    name: agent.name.clone(),
-                    system_prompt: agent.body.clone(),
-                    user_prompt: args.prompt,
-                    model_preference: agent.model.clone(),
-                },
-            })
+    Ok(AgentRun {
+        render: agent_run_render_spec(&args, matched),
+        outcome: ExtensionToolOutcome::RunSession {
+            name: matched.name.clone(),
+            system_prompt: matched.body.clone(),
+            user_prompt: args.prompt,
+            model_preference: matched.model.clone(),
+            wait_for_result: args.wait_for_result,
         },
-    }
+    })
 }
 
 fn agent_run_render_spec(args: &AgentArgs, agent: &agent::AgentConfig) -> RenderSpec {
     let model = agent.model.as_deref().unwrap_or("inherit/default");
+    let mode_label = if args.wait_for_result {
+        "sync"
+    } else {
+        "async"
+    };
 
     RenderSpec::Box {
         title: None,
@@ -200,6 +198,11 @@ fn agent_run_render_spec(args: &AgentArgs, agent: &agent::AgentConfig) -> Render
                     RenderKeyValue {
                         key: "model".into(),
                         value: model.into(),
+                        tone: RenderTone::Muted,
+                    },
+                    RenderKeyValue {
+                        key: "mode".into(),
+                        value: mode_label.into(),
                         tone: RenderTone::Muted,
                     },
                 ],
@@ -225,12 +228,12 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
 }
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Launch a specialized subagent for one narrow, delegated task. Use when parallel execution, \
-     isolation, or context separation provides clear value. If your next step depends on the \
-     result, doing it yourself is usually faster. See the [Agents] section in the system prompt \
-     for available agent types and their use cases.";
+    "Launch a specialized subagent for one narrow, delegated task. By default, blocks until the \
+     agent completes and returns its result. Set waitForResult to false to run the agent in the \
+     background — you can continue working and the result will be available in the next turn. See \
+     the [Agents] section in the system prompt for available agent types.";
 
-const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"mode":{"type":"string","enum":["single"],"default":"single"}},"required":["prompt","description"]}"#;
+const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description of the task"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"waitForResult":{"type":"boolean","default":true,"description":"If true (default), block until the agent completes. If false, run in the background and return immediately."}},"required":["prompt","description"]}"#;
 
 fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -239,7 +242,7 @@ fn agent_tool_definition() -> ToolDefinition {
         parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS)
             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
         origin: ToolOrigin::Bundled,
-        execution_mode: ExecutionMode::Sequential,
+        execution_mode: ExecutionMode::Parallel,
     }
 }
 
@@ -283,7 +286,6 @@ mod tests {
         assert!(output.contains("Available agents"));
         assert!(output.contains("code-reviewer"));
         assert!(output.contains("Use for behavior-focused code review"));
-        // 格式应该有清晰的指示说明如何选择 agent
         assert!(output.contains("subagentType"));
     }
 
@@ -293,21 +295,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_tool_schema_exposes_only_supported_modes() {
+    fn agent_tool_schema_has_wait_for_result() {
         let definition = agent_tool_definition();
         let properties = definition.parameters["properties"]
             .as_object()
             .expect("tool schema properties");
 
-        let modes: Vec<&str> = properties["mode"]["enum"]
-            .as_array()
-            .expect("mode enum")
-            .iter()
-            .map(|value| value.as_str().expect("mode value"))
-            .collect();
-
-        assert_eq!(modes, vec!["single"]);
-        assert!(!properties.contains_key("chain"));
+        assert!(properties.contains_key("waitForResult"));
+        assert_eq!(
+            properties["waitForResult"]["default"],
+            serde_json::json!(true)
+        );
+        // 旧 mode 字段已移除
+        assert!(!properties.contains_key("mode"));
     }
 
     #[test]
@@ -321,7 +321,19 @@ mod tests {
         assert_eq!(args.prompt, "find the bug");
         assert_eq!(args.description, "bug hunt");
         assert_eq!(args.subagent_type.as_deref(), Some("explore"));
-        assert!(matches!(args.mode, AgentMode::Single));
+        // 默认同步
+        assert!(args.wait_for_result);
+    }
+
+    #[test]
+    fn agent_args_async_mode() {
+        let input = json!({
+            "prompt": "find the bug",
+            "description": "bug hunt",
+            "waitForResult": false
+        });
+        let args: AgentArgs = serde_json::from_value(input).unwrap();
+        assert!(!args.wait_for_result);
     }
 
     #[test]
@@ -352,5 +364,42 @@ mod tests {
         let by_unknown =
             json!({ "prompt": "review", "description": "test", "subagentType": "unknown" });
         assert!(build_agent_run(&by_unknown, &agents).is_err());
+    }
+
+    #[test]
+    fn build_agent_run_passes_wait_for_result() {
+        let agents = vec![agent::AgentConfig {
+            id: String::from("explore"),
+            name: String::from("explore"),
+            description: String::from("explore code"),
+            model: None,
+            body: String::from("Explore."),
+        }];
+
+        let sync_input = json!({
+            "prompt": "search", "description": "test", "waitForResult": true
+        });
+        let run = build_agent_run(&sync_input, &agents).unwrap();
+        match run.outcome {
+            ExtensionToolOutcome::RunSession {
+                wait_for_result, ..
+            } => {
+                assert!(wait_for_result);
+            },
+            _ => panic!("expected RunSession"),
+        }
+
+        let async_input = json!({
+            "prompt": "search", "description": "test", "waitForResult": false
+        });
+        let run = build_agent_run(&async_input, &agents).unwrap();
+        match run.outcome {
+            ExtensionToolOutcome::RunSession {
+                wait_for_result, ..
+            } => {
+                assert!(!wait_for_result);
+            },
+            _ => panic!("expected RunSession"),
+        }
     }
 }

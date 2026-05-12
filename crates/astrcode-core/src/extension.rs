@@ -581,5 +581,17 @@ pub enum ExtensionToolOutcome {
         /// 建议使用的模型（v1 中仅为建议）。
         #[serde(default)]
         model_preference: Option<String>,
+        /// 是否同步阻塞等待子 agent 完成。
+        ///
+        /// `true`（默认）：阻塞直到子 agent 完成并返回结果。
+        /// `false`：立即返回占位结果，子 agent 在后台运行，完成后
+        /// 结果通过 durable event 机制在下一轮对话中可见。
+        #[serde(default = "default_wait_for_result")]
+        wait_for_result: bool,
     },
+}
+
+/// `wait_for_result` 的 serde 默认值——`true`（同步阻塞）。
+const fn default_wait_for_result() -> bool {
+    true
 }

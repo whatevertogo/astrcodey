@@ -102,6 +102,21 @@ impl ToolRegistry {
         self.tools.into_values().collect()
     }
 
+    /// 按名称移除一个已注册的工具。
+    ///
+    /// 用于子 agent 场景：从工具列表中排除不允许递归调用的工具
+    /// （如 `agent`），使递归在架构层面不可能发生。
+    pub fn unregister(&mut self, name: &str) {
+        if self.tools.remove(name).is_some() {
+            if let Ok(idx) = self
+                .definitions
+                .binary_search_by(|(def, _)| def.name.as_str().cmp(name))
+            {
+                self.definitions.remove(idx);
+            }
+        }
+    }
+
     fn upsert_cached_definition(
         &mut self,
         definition: ToolDefinition,
