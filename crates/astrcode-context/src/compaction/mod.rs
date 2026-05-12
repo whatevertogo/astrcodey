@@ -758,6 +758,52 @@ scratchpad that should be ignored
     }
 
     #[tokio::test]
+    async fn compact_request_renders_tool_results_as_transcript_text() {
+        let settings = ContextWindowSettings::default();
+        let messages = vec![
+            LlmMessage::user("read a file"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call-read".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "src/lib.rs" }),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::tool("read", "call-read", "pub fn compact_fixture() {}", false),
+            LlmMessage::assistant("The file defines compact_fixture."),
+        ];
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_request = Arc::clone(&captured);
+
+        compact_messages_with_request(
+            &messages,
+            None,
+            &settings,
+            &[],
+            &CompactSummaryRenderOptions::default(),
+            move |request| {
+                *captured_for_request.lock().unwrap() = request;
+                async { Ok(valid_compact_summary().to_string()) }
+            },
+        )
+        .await
+        .unwrap();
+
+        let request = captured.lock().unwrap();
+        assert!(
+            request.iter().all(|message| message.role != LlmRole::Tool),
+            "compact request should be plain transcript text, not provider tool protocol"
+        );
+        assert!(request.iter().any(|message| {
+            visible_message_text(message).contains("tool read result")
+                && visible_message_text(message).contains("pub fn compact_fixture()")
+        }));
+    }
+
+    #[tokio::test]
     async fn compact_prompt_too_long_drops_oldest_api_round_and_retries() {
         let settings = ContextWindowSettings::default();
         let messages = vec![

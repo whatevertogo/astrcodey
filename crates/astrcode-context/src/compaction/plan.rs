@@ -78,7 +78,7 @@ fn latest_previous_summary(messages: &[LlmMessage]) -> Option<String> {
     })
 }
 
-/// 去掉 system/synthetic message，并把工具消息归一化为普通 tool result。
+/// 去掉 system/synthetic message，并把 provider 协议消息渲染成纯 transcript 文本。
 fn normalize_compaction_message(message: &LlmMessage) -> Option<LlmMessage> {
     match message.role {
         LlmRole::System => None,
@@ -93,15 +93,23 @@ fn normalize_compaction_message(message: &LlmMessage) -> Option<LlmMessage> {
         },
         LlmRole::Tool => {
             let text = collapse_compaction_whitespace(&visible_message_text(message));
-            (!text.is_empty()).then(|| {
-                LlmMessage::tool(
-                    message.name.clone().unwrap_or_else(|| "tool".to_string()),
-                    first_tool_call_id(message).unwrap_or_else(|| "tool-result".to_string()),
-                    text,
-                    first_tool_is_error(message),
-                )
-            })
+            (!text.is_empty())
+                .then(|| LlmMessage::user(tool_result_transcript_text(message, &text)))
         },
+    }
+}
+
+fn tool_result_transcript_text(message: &LlmMessage, text: &str) -> String {
+    let tool_name = message.name.as_deref().unwrap_or("tool");
+    let call_id = first_tool_call_id(message);
+    let status = if first_tool_is_error(message) {
+        "error"
+    } else {
+        "result"
+    };
+    match call_id {
+        Some(call_id) => format!("tool {tool_name} {status} ({call_id}):\n{text}"),
+        None => format!("tool {tool_name} {status}:\n{text}"),
     }
 }
 
