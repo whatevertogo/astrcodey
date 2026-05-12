@@ -78,6 +78,14 @@ pub enum PromptSubmission {
     Handled { message: String },
 }
 
+/// Turn completion outcome, sent via oneshot channel when a turn is removed from active_turns.
+#[derive(Debug)]
+pub(crate) enum TurnCompletion {
+    Completed { finish_reason: String },
+    Failed { error: String },
+    Aborted,
+}
+
 /// Structured handler error, replacing ad-hoc string matching.
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerError {
@@ -186,6 +194,17 @@ struct ActiveTurn {
     system_prompt: String,
     tool_registry: Arc<ToolRegistry>,
     switch_active_on_continuation: bool,
+    /// Oneshot sender resolved when this turn is removed from active_turns.
+    /// None means no caller is waiting for completion.
+    completion_tx: Option<oneshot::Sender<TurnCompletion>>,
+}
+
+impl ActiveTurn {
+    fn resolve_completion(&mut self, completion: TurnCompletion) {
+        if let Some(tx) = self.completion_tx.take() {
+            let _ = tx.send(completion);
+        }
+    }
 }
 
 impl CommandHandler {
@@ -263,10 +282,11 @@ impl CommandHandler {
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
                         // 中止该会话的活跃回合（包括后台任务）
-                        if let Some(turn) = self.active_turns.remove(&session_id) {
+                        if let Some(mut turn) = self.active_turns.remove(&session_id) {
                             if !turn.handle.is_finished() {
                                 turn.handle.abort();
                             }
+                            turn.resolve_completion(TurnCompletion::Aborted);
                         }
                         self.cleanup_background_tasks_for_session(&session_id);
                         self.session_tool_registries.remove(&session_id);
@@ -437,8 +457,22 @@ impl CommandHandler {
         sid: SessionId,
         text: String,
     ) -> Result<TurnId, HandlerError> {
-        self.start_turn_for_session(sid, text.clone(), text, None)
+        self.start_turn_for_session(sid, text.clone(), text, None, None)
             .await
+    }
+
+    /// Submit a prompt with a completion oneshot channel.
+    /// Returns the turn ID and a receiver that resolves when the turn ends.
+    pub(super) async fn submit_prompt_for_session_with_completion(
+        &mut self,
+        sid: SessionId,
+        text: String,
+    ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
+        let (tx, rx) = oneshot::channel();
+        let turn_id = self
+            .start_turn_for_session(sid, text.clone(), text, None, Some(tx))
+            .await?;
+        Ok((turn_id, rx))
     }
 
     async fn start_turn_for_session(
@@ -447,6 +481,7 @@ impl CommandHandler {
         visible_text: String,
         user_text: String,
         transient_instructions: Option<String>,
+        completion_tx: Option<oneshot::Sender<TurnCompletion>>,
     ) -> Result<TurnId, HandlerError> {
         tracing::info!(session_id = %sid, text_len = user_text.len(), "submit_prompt_for_session");
         if self.active_turns.contains_key(&sid) {
@@ -513,6 +548,7 @@ impl CommandHandler {
                 system_prompt,
                 tool_registry,
                 switch_active_on_continuation,
+                completion_tx,
             },
         );
         Ok(turn_id)
@@ -574,7 +610,13 @@ impl CommandHandler {
                 Ok(PromptSubmission::Handled { message })
             },
             Ok(ExtensionCommandResult::StartTurn { instructions }) => self
-                .start_turn_for_session(sid, visible_text.clone(), visible_text, Some(instructions))
+                .start_turn_for_session(
+                    sid,
+                    visible_text.clone(),
+                    visible_text,
+                    Some(instructions),
+                    None,
+                )
                 .await
                 .map(|turn_id| PromptSubmission::Accepted { turn_id }),
             Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
@@ -674,7 +716,7 @@ impl CommandHandler {
 
     /// 中止指定会话的活跃回合。
     pub async fn abort_session(&mut self, session_id: &SessionId) -> Result<(), HandlerError> {
-        let Some(active_turn) = self.active_turns.remove(session_id) else {
+        let Some(mut active_turn) = self.active_turns.remove(session_id) else {
             self.send_error(40400, "No active turn");
             return Err(HandlerError::NoActiveTurn);
         };
@@ -706,6 +748,8 @@ impl CommandHandler {
         )
         .await
         .map_err(HandlerError::Other)?;
+
+        active_turn.resolve_completion(TurnCompletion::Aborted);
         Ok(())
     }
 
@@ -1108,7 +1152,8 @@ impl CommandHandler {
         if !self.active_turn_matches(&session_id, &turn_id) {
             return;
         }
-        self.active_turns.remove(&session_id);
+        let mut turn = self.active_turns.remove(&session_id).unwrap();
+        let finish_reason = output.finish_reason.clone();
         let _ = self
             .record_turn_payloads(
                 &session_id,
@@ -1116,6 +1161,7 @@ impl CommandHandler {
                 agent_turn_completed_payloads(output.finish_reason),
             )
             .await;
+        turn.resolve_completion(TurnCompletion::Completed { finish_reason });
     }
 
     async fn fail_agent_turn(
@@ -1128,7 +1174,8 @@ impl CommandHandler {
         if !self.active_turn_matches(&session_id, &turn_id) {
             return;
         }
-        self.active_turns.remove(&session_id);
+        let mut turn = self.active_turns.remove(&session_id).unwrap();
+        let error_message = error.to_string();
         let _ = self
             .record_turn_payloads(
                 &session_id,
@@ -1139,6 +1186,9 @@ impl CommandHandler {
                 ),
             )
             .await;
+        turn.resolve_completion(TurnCompletion::Failed {
+            error: error_message,
+        });
     }
 
     /// 通过广播通道发送错误通知给客户端。

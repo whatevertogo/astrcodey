@@ -8,7 +8,10 @@ use astrcode_core::{
     event::EventPayload,
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
-    tool::{BackgroundTaskReader, ExecutionMode, FileObservation, FileObservationStore, ToolDefinition, ToolResult},
+    tool::{
+        BackgroundTaskReader, ExecutionMode, FileObservation, FileObservationStore, ToolDefinition,
+        ToolResult,
+    },
     types::*,
 };
 use tokio::sync::mpsc;

@@ -9,7 +9,7 @@ use astrcode_core::{
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission};
+use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
 use crate::{
     agent::{AgentError, AgentTurnOutput, tool_types::BackgroundTaskCompletion},
     bootstrap::ServerRuntime,
@@ -55,6 +55,23 @@ impl CommandHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(CommandMessage::SubmitPromptForSession {
+                session_id,
+                text,
+                reply,
+            })
+            .map_err(|_| HandlerError::Other("command actor is unavailable".into()))?;
+        rx.await
+            .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
+    }
+
+    pub(crate) async fn submit_prompt_with_completion(
+        &self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::SubmitPromptWithCompletion {
                 session_id,
                 text,
                 reply,
@@ -173,6 +190,11 @@ pub(super) enum CommandMessage {
     },
     /// 后台任务完成，需要持久化事件并广播给客户端。
     BackgroundTaskCompleted(BackgroundTaskCompletion),
+    SubmitPromptWithCompletion {
+        session_id: SessionId,
+        text: String,
+        reply: oneshot::Sender<Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError>>,
+    },
 }
 
 impl CommandHandler {
@@ -322,6 +344,16 @@ impl CommandHandler {
                         "failed to persist BackgroundTaskCompleted"
                     );
                 }
+            },
+            CommandMessage::SubmitPromptWithCompletion {
+                session_id,
+                text,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.submit_prompt_for_session_with_completion(session_id, text)
+                        .await,
+                );
             },
         }
     }

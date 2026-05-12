@@ -6,7 +6,7 @@
 
 mod events;
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc};
 
 use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectionTo, Dispatch, Error, Responder,
@@ -23,7 +23,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
     bootstrap::ServerRuntime,
-    handler::{CommandHandle, HandlerError},
+    handler::{CommandHandle, HandlerError, TurnCompletion},
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.
@@ -128,67 +128,96 @@ async fn handle_prompt(
     let text = prompt_to_text(&req.prompt)?;
     let mut event_rx = event_tx.subscribe();
 
-    let turn_id = command_handle
-        .submit_prompt_for_session(session_id.clone(), text)
+    let (turn_id, mut completion_rx) = command_handle
+        .submit_prompt_with_completion(session_id.clone(), text)
         .await
         .map_err(handler_error_to_acp)?;
 
+    let mut accepted_sessions = HashSet::new();
+    accepted_sessions.insert(session_id.clone());
+    let acp_session_id = session_id;
+
     loop {
-        match event_rx.recv().await {
-            Ok(ClientNotification::Event(event)) => {
-                if !event_belongs_to_prompt(&event, &session_id, &turn_id) {
-                    continue;
+        tokio::select! {
+            result = event_rx.recv() => {
+                match result {
+                    Ok(ClientNotification::Event(event)) => {
+                        if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
+                            if let astrcode_core::event::EventPayload::CompactBoundaryCreated { continued_session_id, .. } = &event.payload {
+                                accepted_sessions.insert(continued_session_id.clone());
+                            }
+                            forward_event(&event, &acp_session_id, cx);
+                        }
+                    },
+                    Ok(_) => {},
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(count, "ACP event subscriber lagged");
+                    },
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Ok(StopReason::EndTurn);
+                    },
                 }
-
-                if let astrcode_core::event::EventPayload::TurnCompleted { finish_reason } =
-                    &event.payload
-                {
-                    drain_events(&mut event_rx, &session_id, &turn_id, cx).await;
-                    return Ok(stop_reason_from_finish_reason(finish_reason));
-                }
-
-                forward_event(&event, cx);
             },
-            Ok(_) => {
-                // Non-Event notifications (SessionResumed, etc.) are not part of ACP turns.
-            },
-            Err(broadcast::error::RecvError::Lagged(count)) => {
-                tracing::warn!(count, "ACP event subscriber lagged");
-            },
-            Err(broadcast::error::RecvError::Closed) => {
-                return Ok(StopReason::EndTurn);
+            completion = &mut completion_rx => {
+                flush_queued_events(
+                    &mut event_rx,
+                    &mut accepted_sessions,
+                    &turn_id,
+                    &acp_session_id,
+                    cx,
+                );
+                return match completion {
+                    Ok(TurnCompletion::Completed { finish_reason }) => {
+                        Ok(stop_reason_from_finish_reason(&finish_reason))
+                    },
+                    Ok(TurnCompletion::Failed { error }) => {
+                        tracing::warn!(error, "ACP prompt turn failed");
+                        Ok(StopReason::Cancelled)
+                    },
+                    Ok(TurnCompletion::Aborted) => Ok(StopReason::Cancelled),
+                    Err(_) => Ok(StopReason::EndTurn),
+                };
             },
         }
     }
 }
 
-/// Drain remaining events from the broadcast channel for this session
-/// and forward them as ACP notifications before the prompt response.
-async fn drain_events(
+/// Deterministic flush of queued events in the broadcast channel after
+/// completion signal. Uses `try_recv` to drain without blocking.
+fn flush_queued_events(
     event_rx: &mut broadcast::Receiver<ClientNotification>,
-    session_id: &SessionId,
+    accepted_sessions: &mut HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
+    acp_session_id: &SessionId,
     cx: &ConnectionTo<Client>,
 ) {
     loop {
-        match tokio::time::timeout(Duration::from_millis(100), event_rx.recv()).await {
-            Ok(Ok(ClientNotification::Event(event))) => {
-                if event_belongs_to_prompt(&event, session_id, turn_id) {
-                    forward_event(&event, cx);
+        match event_rx.try_recv() {
+            Ok(ClientNotification::Event(event)) => {
+                if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
+                    if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
+                        continued_session_id,
+                        ..
+                    } = &event.payload
+                    {
+                        accepted_sessions.insert(continued_session_id.clone());
+                    }
+                    forward_event(&event, acp_session_id, cx);
                 }
             },
-            Ok(Ok(_)) => {},
-            Ok(Err(broadcast::error::RecvError::Lagged(count))) => {
-                tracing::warn!(count, "ACP event subscriber lagged while draining");
+            Ok(_) => {},
+            Err(broadcast::error::TryRecvError::Empty)
+            | Err(broadcast::error::TryRecvError::Closed) => break,
+            Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                tracing::warn!(count, "ACP event subscriber lagged during flush");
             },
-            Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
         }
     }
 }
 
-fn forward_event(event: &Event, cx: &ConnectionTo<Client>) {
+fn forward_event(event: &Event, acp_session_id: &SessionId, cx: &ConnectionTo<Client>) {
     if let Some(acp_notif) =
-        events::to_session_notification(event.session_id.as_str(), &event.payload)
+        events::to_session_notification(acp_session_id.as_str(), &event.payload)
     {
         let agent_notif = AgentNotification::SessionNotification(acp_notif);
         let _ = cx.send_notification(agent_notif);
@@ -197,10 +226,10 @@ fn forward_event(event: &Event, cx: &ConnectionTo<Client>) {
 
 fn event_belongs_to_prompt(
     event: &Event,
-    session_id: &SessionId,
+    accepted_sessions: &HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
 ) -> bool {
-    if event.session_id != *session_id {
+    if !accepted_sessions.contains(&event.session_id) {
         return false;
     }
 
@@ -345,6 +374,58 @@ mod tests {
             },
         );
 
-        assert!(!event_belongs_to_prompt(&event, &session_id, &turn_id));
+        let mut accepted = HashSet::new();
+        accepted.insert(session_id);
+        assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
+    }
+
+    #[test]
+    fn event_filter_accepts_child_session_after_compact_boundary() {
+        let parent_session = SessionId::from("parent-1");
+        let child_session = SessionId::from("child-1");
+        let turn_id = TurnId::from("turn-1");
+
+        let mut accepted = HashSet::new();
+        accepted.insert(parent_session.clone());
+
+        // Parent session event passes
+        let parent_event = Event::new(
+            parent_session.clone(),
+            Some(turn_id.clone()),
+            EventPayload::AssistantTextDelta {
+                message_id: "msg-1".into(),
+                delta: "hello".into(),
+            },
+        );
+        assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
+
+        // Child session event is rejected before boundary
+        let child_event = Event::new(
+            child_session.clone(),
+            Some(turn_id.clone()),
+            EventPayload::AssistantTextDelta {
+                message_id: "msg-2".into(),
+                delta: "world".into(),
+            },
+        );
+        assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
+
+        // After learning compact boundary, child events pass
+        accepted.insert(child_session.clone());
+        assert!(event_belongs_to_prompt(&child_event, &accepted, &turn_id));
+    }
+
+    #[test]
+    fn event_filter_rejects_unrelated_session_with_none_turn_id() {
+        let session_id = SessionId::from("session-1");
+        let unrelated_session = SessionId::from("session-2");
+        let turn_id = TurnId::from("turn-1");
+
+        let mut accepted = HashSet::new();
+        accepted.insert(session_id);
+
+        // Event from unrelated session with None turn_id should be rejected
+        let event = Event::new(unrelated_session, None, EventPayload::TurnStarted);
+        assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
     }
 }
