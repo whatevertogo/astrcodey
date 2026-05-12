@@ -332,7 +332,12 @@ impl AgentLoop {
         model_id: String,
         services: AgentServices,
     ) -> Self {
-        let shared = SharedTurnContext::new(session_id, working_dir, model_id);
+        let shared = SharedTurnContext::new(
+            session_id,
+            working_dir,
+            model_id,
+            Some(services.extension_runner.event_bus().clone()),
+        );
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
             super::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
         ));
@@ -368,6 +373,9 @@ impl AgentLoop {
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<AgentTurnOutput, AgentError> {
         let mut ext_ctx = self.shared.ext_ctx();
+        let session_history = history.clone();
+        ext_ctx.set_system_prompt(self.system_prompt.clone());
+        ext_ctx.set_session_history(session_history.clone());
         let all_tools = self.tools.list_definitions();
         let mut active_mcp_tools = std::collections::HashSet::new();
         let mut tool_indexes = provider_visible_tool_indexes(&all_tools, &active_mcp_tools);
@@ -425,7 +433,12 @@ impl AgentLoop {
             );
 
             let send_messages = self
-                .apply_before_provider_request_hook(system_messages, context_messages, &tools)
+                .apply_before_provider_request_hook(
+                    system_messages,
+                    context_messages,
+                    &tools,
+                    session_history.clone(),
+                )
                 .await?;
 
             let rx = self
@@ -699,10 +712,13 @@ impl AgentLoop {
         system_messages: Vec<LlmMessage>,
         context_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
+        session_history: Vec<LlmMessage>,
     ) -> Result<Vec<LlmMessage>, AgentError> {
         let mut send_messages =
             provider_visible_messages([system_messages, context_messages].concat());
         let mut ext_ctx = self.shared.ext_ctx_with_tools(tools);
+        ext_ctx.set_system_prompt(self.system_prompt.clone());
+        ext_ctx.set_session_history(session_history);
         ext_ctx.set_provider_messages(send_messages.clone());
         match self
             .extension_runner

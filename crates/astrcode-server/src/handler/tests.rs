@@ -243,7 +243,6 @@ fn test_runtime_with_settings(
         background_tasks: Default::default(),
         extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
             Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
         )),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(

@@ -682,7 +682,7 @@ mod tests {
     };
     use astrcode_extensions::{
         runner::ExtensionRunner,
-        runtime::{ExtensionRuntime, SessionSpawner, SpawnRequest},
+        runtime::{SessionSpawner, SpawnRequest},
     };
     use astrcode_storage::in_memory::InMemoryEventStore;
 
@@ -778,10 +778,7 @@ mod tests {
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Default::default(),
-            extension_runner: Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(ExtensionRuntime::new()),
-            )),
+            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
         }
     }
@@ -850,10 +847,7 @@ mod tests {
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Default::default(),
-            extension_runner: Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(ExtensionRuntime::new()),
-            )),
+            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
         };
         *llm_provider.write() = Arc::new(StaticTextLlm { text: "new" });
@@ -893,10 +887,7 @@ mod tests {
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Arc::clone(&background_tasks),
-            extension_runner: Arc::new(ExtensionRunner::new(
-                Duration::from_secs(1),
-                Arc::new(ExtensionRuntime::new()),
-            )),
+            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
         };
 
@@ -962,6 +953,4 @@ mod tests {
             astrcode_core::storage::AgentSessionStatus::Completed
         );
     }
-
-    
 }

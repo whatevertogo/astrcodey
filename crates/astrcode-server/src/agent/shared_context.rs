@@ -2,8 +2,8 @@
 //! types shared across agent sub-objects.
 
 use astrcode_core::{
-    config::ModelSelection, event::EventPayload, extension::ExtensionEvent, llm::LlmRole,
-    tool::ToolDefinition, types::*,
+    config::ModelSelection, event::EventPayload, event_bus::EventBus, extension::ExtensionEvent,
+    llm::LlmRole, tool::ToolDefinition, types::*,
 };
 use astrcode_extensions::{context::ServerExtensionContext, runner::ExtensionRunner};
 use tokio::sync::{mpsc, oneshot};
@@ -58,23 +58,39 @@ pub(super) struct SharedTurnContext {
     pub(super) session_id: SessionId,
     pub(super) working_dir: String,
     pub(super) model_id: String,
+    /// 扩展间通信的事件总线引用
+    event_bus: Option<EventBus>,
 }
 
 impl SharedTurnContext {
-    pub(super) fn new(session_id: SessionId, working_dir: String, model_id: String) -> Self {
+    pub(super) fn new(
+        session_id: SessionId,
+        working_dir: String,
+        model_id: String,
+        event_bus: Option<EventBus>,
+    ) -> Self {
         Self {
             session_id,
             working_dir,
             model_id,
+            event_bus,
+        }
+    }
+
+    fn apply_session_data(&self, ctx: &mut ServerExtensionContext) {
+        if let Some(bus) = &self.event_bus {
+            ctx.set_event_bus(bus.clone());
         }
     }
 
     pub(super) fn ext_ctx(&self) -> ServerExtensionContext {
-        ServerExtensionContext::new(
+        let mut ctx = ServerExtensionContext::new(
             self.session_id.to_string(),
             self.working_dir.clone(),
             ModelSelection::simple(self.model_id.clone()),
-        )
+        );
+        self.apply_session_data(&mut ctx);
+        ctx
     }
 
     pub(super) fn ext_ctx_with_tools(&self, tools: &[ToolDefinition]) -> ServerExtensionContext {

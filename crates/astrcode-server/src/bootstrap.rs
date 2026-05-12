@@ -239,10 +239,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
     let cwd_str = cwd.to_string_lossy().to_string();
     let load_result = ExtensionLoader::load_all(Some(&cwd_str)).await;
-    let extension_runner = Arc::new(ExtensionRunner::new(
-        Duration::from_secs(30),
-        load_result.runtime,
-    ));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
     extension_runner
         .register(astrcode_extension_agent_tools::extension())
         .await;
@@ -268,7 +265,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 7. 给扩展运行时绑定“创建子会话”的宿主能力。
     //
     // 扩展本身不能直接拿到 SessionManager；当扩展工具返回 RunSession 声明式结果时，
-    // ExtensionRuntime 会回调这个 ServerSessionSpawner，让服务器创建子 session。
+    // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
     extension_runner.bind(Arc::new(ServerSessionSpawner {
         session_manager: Arc::clone(&session_manager),
@@ -519,10 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn child_extra_system_prompt_participates_in_snapshot_build() {
-        let runner = ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        );
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         let prompt_files = load_system_prompt_files(".").await;
         let (system_prompt, fingerprint) =
             build_system_prompt_snapshot_with_files(SystemPromptSnapshotInput {
@@ -544,10 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_snapshot_precedence_is_explicit() {
-        let runner = ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-        );
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
             .register(Arc::new(StaticToolExtension {
                 id: "first",

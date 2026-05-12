@@ -4,7 +4,7 @@
 //! 以及扩展运行时的工具注册和取出功能，FFI 判别值的往返转换。
 
 use astrcode_core::extension::ExtensionManifest;
-use astrcode_extensions::{loader::ExtensionLoader, runtime::ExtensionRuntime};
+use astrcode_extensions::loader::ExtensionLoader;
 
 /// 测试加载器在不存在的路径下返回空结果且不报错
 #[tokio::test]
@@ -22,32 +22,6 @@ async fn loader_returns_empty_result_for_none_working_dir() {
     // 全局目录可能存在也可能不存在，但不应崩溃
     // 当 working_dir 为 None 时跳过项目目录扫描
     assert!(result.errors.is_empty());
-}
-
-/// 测试运行时初始状态下没有待处理的工具
-#[tokio::test]
-async fn runtime_starts_with_empty_tools() {
-    let runtime = ExtensionRuntime::new();
-    assert!(runtime.take_pending_tools().is_empty());
-}
-
-/// 测试运行时的工具注册和取出功能
-#[tokio::test]
-async fn runtime_queues_and_flushes_tools() {
-    let runtime = ExtensionRuntime::new();
-    let def = astrcode_core::tool::ToolDefinition {
-        name: "test_tool".into(),
-        description: "test".into(),
-        parameters: serde_json::json!({}),
-        origin: astrcode_core::tool::ToolOrigin::Extension,
-        execution_mode: astrcode_core::tool::ExecutionMode::Sequential,
-    };
-    runtime.register_tool(def.clone());
-    let tools = runtime.take_pending_tools();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "test_tool");
-    // 取出后队列应为空
-    assert!(runtime.take_pending_tools().is_empty());
 }
 
 /// 测试 FFI 事件和模式的判别值能够正确往返转换

@@ -1,26 +1,12 @@
-//! 共享扩展运行时 — 借鉴自 pi-mono 的延迟绑定模式。
-//!
-//! 扩展在服务器完全启动之前就已加载。它们的注册（工具、命令）
-//! 会被排队到此运行时中。当服务器就绪后，调用 `bind()` 注入
-//! 实际的会话创建能力。
+//! 会话创建和服务派生原语。
 
-use std::sync::Arc;
-
-use astrcode_core::{event::EventPayload, tool::ToolDefinition};
-use parking_lot::{Mutex, RwLock};
+use astrcode_core::event::EventPayload;
 use tokio::sync::mpsc;
 
 /// 通用的会话创建原语。由服务器实现，由 runner 持有，扩展不可见。
 #[async_trait::async_trait]
 pub trait SessionSpawner: Send + Sync {
     /// 创建一个子会话并执行一轮对话。
-    ///
-    /// # 参数
-    /// - `parent_session_id`: 父会话 ID
-    /// - `request`: 子会话启动请求
-    ///
-    /// # 返回
-    /// 成功时返回子会话的执行结果，失败时返回错误描述。
     async fn spawn(
         &self,
         parent_session_id: &str,
@@ -46,9 +32,6 @@ pub struct SpawnRequest {
     /// 父 agent 的事件发送器，子 agent 的进度事件由此通道转发。
     pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     /// 是否同步阻塞等待子 agent 完成。
-    ///
-    /// `true`：`spawn()` 阻塞到子 agent 完成并返回最终结果。
-    /// `false`：`spawn()` 立即返回占位结果，子 agent 在后台运行。
     pub wait_for_result: bool,
 }
 
@@ -59,75 +42,5 @@ pub struct SpawnResult {
     /// 子会话 ID
     pub child_session_id: String,
     /// 后台任务 ID（仅异步模式有值）。
-    ///
-    /// 当 `wait_for_result == false` 时，此字段为 `Some(task_id)`，
-    /// 表示子 agent 在后台运行，结果将通过 durable event 机制
-    /// 在下一轮对话中注入。
     pub background_task_id: Option<String>,
-}
-
-/// 所有已加载扩展的共享状态。
-///
-/// 由 loader 创建，服务器就绪后调用 `bind()` 注入实际的会话创建能力。
-pub struct ExtensionRuntime {
-    /// 扩展在加载阶段注册的工具
-    pending_tools: Mutex<Vec<ToolDefinition>>,
-    /// 注入的会话创建器。在 `bind()` 调用前为 None。
-    /// 使用 Arc 以支持 clone-then-drop-guard-before-await 模式。
-    spawner: RwLock<Option<Arc<dyn SessionSpawner>>>,
-}
-
-impl Default for ExtensionRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ExtensionRuntime {
-    /// 创建新的扩展运行时实例。
-    pub fn new() -> Self {
-        Self {
-            pending_tools: Mutex::new(Vec::new()),
-            spawner: RwLock::new(None),
-        }
-    }
-
-    /// 绑定实际的会话创建器。在服务器启动后调用一次。
-    pub fn bind(&self, spawner: Arc<dyn SessionSpawner>) {
-        *self.spawner.write() = Some(spawner);
-    }
-
-    /// 将工具注册加入队列。在 NativeExtension 的 factory() 调用期间使用。
-    pub fn register_tool(&self, def: ToolDefinition) {
-        self.pending_tools.lock().push(def);
-    }
-
-    /// 取出所有待处理的工具注册（消费式取出）。
-    pub fn take_pending_tools(&self) -> Vec<ToolDefinition> {
-        std::mem::take(&mut *self.pending_tools.lock())
-    }
-
-    /// 执行子会话的一轮对话。如果 `bind()` 尚未调用则返回错误。
-    ///
-    /// 递归防护由 `SessionSpawner` 实现负责——
-    /// 子 agent 的工具列表中不包含 `agent` 工具，使递归在架构层面不可能。
-    pub async fn spawn(
-        &self,
-        parent_session_id: &str,
-        request: SpawnRequest,
-    ) -> Result<SpawnResult, String> {
-        let spawner = {
-            let guard = self.spawner.read();
-            match &*guard {
-                Some(s) => Arc::clone(s),
-                None => {
-                    return Err("ExtensionRuntime not bound — bind() must be called before \
-                                spawn()"
-                        .into());
-                },
-            }
-        };
-
-        spawner.spawn(parent_session_id, request).await
-    }
 }

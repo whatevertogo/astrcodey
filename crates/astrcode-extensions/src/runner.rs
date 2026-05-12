@@ -5,17 +5,21 @@
 //! - NonBlocking: 以即发即弃方式派生任务，使用快照上下文
 //! - Advisory: 结果仅记录日志，不强制执行
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, RwLock as StdRwLock},
+    time::Duration,
+};
 
 use astrcode_core::{
     config::ModelSelection,
+    event_bus::EventBus,
     extension::*,
     llm::LlmMessage,
     tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
 use tokio::sync::RwLock;
 
-use crate::runtime::{ExtensionRuntime, SessionSpawner, SpawnRequest};
+use crate::runtime::{SessionSpawner, SpawnRequest, SpawnResult};
 
 /// 将生命周期事件分发到所有已注册的扩展。
 ///
@@ -26,8 +30,10 @@ use crate::runtime::{ExtensionRuntime, SessionSpawner, SpawnRequest};
 pub struct ExtensionRunner {
     /// 已注册的扩展列表（读写锁保护）
     extensions: RwLock<Vec<Arc<dyn Extension>>>,
-    /// 共享的扩展运行时
-    runtime: Arc<ExtensionRuntime>,
+    /// 会话创建器（在 bind() 调用前为 None）
+    spawner: Arc<StdRwLock<Option<Arc<dyn SessionSpawner>>>>,
+    /// 扩展间共享的事件总线
+    event_bus: EventBus,
     /// 钩子执行超时时间
     timeout: Duration,
 }
@@ -48,11 +54,11 @@ impl ExtensionRunner {
     ///
     /// # 参数
     /// - `timeout`: 阻塞钩子的执行超时时间
-    /// - `runtime`: 共享的扩展运行时实例
-    pub fn new(timeout: Duration, runtime: Arc<ExtensionRuntime>) -> Self {
+    pub fn new(timeout: Duration) -> Self {
         Self {
             extensions: RwLock::new(Vec::new()),
-            runtime,
+            spawner: Arc::new(StdRwLock::new(None)),
+            event_bus: EventBus::new(),
             timeout,
         }
     }
@@ -63,10 +69,15 @@ impl ExtensionRunner {
         exts.push(ext);
     }
 
-    /// 绑定会话创建能力到共享运行时。
+    /// 绑定会话创建能力。
     /// 在服务器启动后、任何工具执行之前调用一次。
     pub fn bind(&self, spawner: Arc<dyn SessionSpawner>) {
-        self.runtime.bind(spawner);
+        *self.spawner.write().unwrap() = Some(spawner);
+    }
+
+    /// 返回共享的事件总线引用，用于扩展间通信。
+    pub fn event_bus(&self) -> &EventBus {
+        &self.event_bus
     }
 
     /// 将事件分发到所有订阅的扩展。
@@ -82,13 +93,7 @@ impl ExtensionRunner {
 
             match ordered.mode {
                 HookMode::Blocking => {
-                    // 带超时的同步执行
-                    let result =
-                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), ctx))
-                            .await
-                            .map_err(|_| {
-                                ExtensionError::Timeout(self.timeout.as_millis() as u64)
-                            })??;
+                    let result = self.call_ext(ext.as_ref(), event.clone(), ctx).await?;
 
                     if let HookEffect::Block { reason } = result {
                         return Err(ExtensionError::Blocked { reason });
@@ -148,12 +153,7 @@ impl ExtensionRunner {
 
             match ordered.mode {
                 HookMode::Blocking => {
-                    let result =
-                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), ctx))
-                            .await
-                            .map_err(|_| {
-                                ExtensionError::Timeout(self.timeout.as_millis() as u64)
-                            })??;
+                    let result = self.call_ext(ext.as_ref(), event.clone(), ctx).await?;
 
                     match result {
                         HookEffect::Block { reason } => {
@@ -211,17 +211,15 @@ impl ExtensionRunner {
             let ext = ordered.ext;
             let hook_ctx = ProviderMessagesContext {
                 base: ctx,
+                snap: ctx.snapshot(),
                 messages: current_messages.clone(),
             };
 
             match ordered.mode {
                 HookMode::Blocking => {
-                    let result =
-                        tokio::time::timeout(self.timeout, ext.on_event(event.clone(), &hook_ctx))
-                            .await
-                            .map_err(|_| {
-                                ExtensionError::Timeout(self.timeout.as_millis() as u64)
-                            })??;
+                    let result = self
+                        .call_ext(ext.as_ref(), event.clone(), &hook_ctx)
+                        .await?;
 
                     match result {
                         HookEffect::Block { reason } => {
@@ -279,12 +277,9 @@ impl ExtensionRunner {
 
             match ordered.mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(
-                        self.timeout,
-                        ext.on_event(ExtensionEvent::PromptBuild, ctx),
-                    )
-                    .await
-                    .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+                    let result = self
+                        .call_ext(ext.as_ref(), ExtensionEvent::PromptBuild, ctx)
+                        .await?;
 
                     match result {
                         HookEffect::PromptContributions(contributions) => {
@@ -331,12 +326,9 @@ impl ExtensionRunner {
 
             match ordered.mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(
-                        self.timeout,
-                        ext.on_event(ExtensionEvent::PreCompact, ctx),
-                    )
-                    .await
-                    .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+                    let result = self
+                        .call_ext(ext.as_ref(), ExtensionEvent::PreCompact, ctx)
+                        .await?;
 
                     match result {
                         HookEffect::CompactContributions(contributions) => {
@@ -405,7 +397,7 @@ impl ExtensionRunner {
                     extension: Arc::clone(ext),
                     definition: def,
                     working_dir: working_dir.to_string(),
-                    runtime: Arc::clone(&self.runtime),
+                    spawner: Arc::clone(&self.spawner),
                 }));
             }
         }
@@ -491,6 +483,18 @@ impl ExtensionRunner {
             .map(|(_, _, mode, ext)| OrderedExtension { ext, mode })
             .collect()
     }
+
+    /// 带超时执行扩展的 on_event，统一处理 Timeout 错误映射。
+    async fn call_ext(
+        &self,
+        ext: &dyn Extension,
+        event: ExtensionEvent,
+        ctx: &dyn ExtensionContext,
+    ) -> Result<HookEffect, ExtensionError> {
+        tokio::time::timeout(self.timeout, ext.on_event(event, ctx))
+            .await
+            .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))?
+    }
 }
 
 fn command_dispatch_priority(extension_id: &str) -> u8 {
@@ -509,8 +513,26 @@ struct ExtensionTool {
     definition: ToolDefinition,
     /// 工作目录
     working_dir: String,
-    /// 共享运行时（用于处理 RunSession 声明式结果）
-    runtime: Arc<ExtensionRuntime>,
+    /// 会话创建器（用于处理 RunSession 声明式结果）
+    spawner: Arc<StdRwLock<Option<Arc<dyn SessionSpawner>>>>,
+}
+
+impl ExtensionTool {
+    /// 通过会话创建器派生子会话。
+    async fn spawn(
+        &self,
+        parent_session_id: &str,
+        request: SpawnRequest,
+    ) -> Result<SpawnResult, String> {
+        let spawner = {
+            let guard = self.spawner.read().unwrap();
+            match &*guard {
+                Some(s) => Arc::clone(s),
+                None => return Err("Session spawner not bound".into()),
+            }
+        };
+        spawner.spawn(parent_session_id, request).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -568,7 +590,7 @@ impl Tool for ExtensionTool {
                     wait_for_result,
                 };
 
-                match self.runtime.spawn(_ctx.session_id.as_str(), request).await {
+                match self.spawn(_ctx.session_id.as_str(), request).await {
                     Ok(output) => {
                         result.content = output.content;
                         result
@@ -664,8 +686,13 @@ pub enum ProviderHookOutcome {
     },
 }
 
+/// 为 BeforeProviderRequest/AfterProviderResponse 钩子准备的上下文包装器，
+/// 重写 `provider_messages()` 使其反映链式调用中已修改的消息。
+///
+/// 使用借用的基上下文（带工具），以及一份预创建的快照（用于非阻塞分支）。
 struct ProviderMessagesContext<'a> {
     base: &'a dyn ExtensionContext,
+    snap: Arc<dyn ExtensionContext>,
     messages: Option<Vec<LlmMessage>>,
 }
 
@@ -674,67 +701,78 @@ impl ExtensionContext for ProviderMessagesContext<'_> {
     fn session_id(&self) -> &str {
         self.base.session_id()
     }
-
     fn working_dir(&self) -> &str {
         self.base.working_dir()
     }
-
     fn model_selection(&self) -> ModelSelection {
         self.base.model_selection()
     }
-
     fn config_value(&self, key: &str) -> Option<String> {
         self.base.config_value(key)
     }
-
     async fn emit_custom_event(&self, name: &str, data: serde_json::Value) {
         self.base.emit_custom_event(name, data).await;
     }
-
     fn find_tool(&self, name: &str) -> Option<ToolDefinition> {
         self.base.find_tool(name)
     }
-
     fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
         self.base.pre_tool_use_input()
     }
-
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.base.post_tool_use_input()
     }
-
+    fn post_tool_use_failure_input(&self) -> Option<PostToolUseFailureInput> {
+        self.base.post_tool_use_failure_input()
+    }
     fn pre_compact_input(&self) -> Option<PreCompactInput> {
         self.base.pre_compact_input()
     }
-
     fn post_compact_input(&self) -> Option<PostCompactInput> {
         self.base.post_compact_input()
     }
-
     fn register_tool(&self, def: ToolDefinition) {
         self.base.register_tool(def);
     }
-
     fn drain_registered_tools(&self) -> Vec<ToolDefinition> {
         self.base.drain_registered_tools()
     }
-
     fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
         self.messages.clone()
     }
-
     fn log_warn(&self, msg: &str) {
         self.base.log_warn(msg);
     }
-
+    fn event_bus(&self) -> Option<&EventBus> {
+        self.base.event_bus()
+    }
+    fn session_history(&self) -> &[LlmMessage] {
+        self.base.session_history()
+    }
+    fn system_prompt(&self) -> Option<&str> {
+        self.base.system_prompt()
+    }
+    async fn send_message(&self, content: &str) -> Result<(), String> {
+        self.base.send_message(content).await
+    }
+    fn set_model(&self, model_id: &str) -> Result<(), String> {
+        self.base.set_model(model_id)
+    }
+    fn compact(&self) -> Result<(), String> {
+        self.base.compact()
+    }
+    fn broadcast(&self, channel: &str, data: serde_json::Value) {
+        self.base.broadcast(channel, data);
+    }
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
         Arc::new(ProviderMessagesSnapshot {
-            base: self.base.snapshot(),
+            base: self.snap.clone(),
             messages: self.messages.clone(),
         })
     }
 }
 
+/// 即发即弃分支使用的消息上下文快照。
 struct ProviderMessagesSnapshot {
     base: Arc<dyn ExtensionContext>,
     messages: Option<Vec<LlmMessage>>,
@@ -745,51 +783,63 @@ impl ExtensionContext for ProviderMessagesSnapshot {
     fn session_id(&self) -> &str {
         self.base.session_id()
     }
-
     fn working_dir(&self) -> &str {
         self.base.working_dir()
     }
-
     fn model_selection(&self) -> ModelSelection {
         self.base.model_selection()
     }
-
     fn config_value(&self, key: &str) -> Option<String> {
         self.base.config_value(key)
     }
-
     async fn emit_custom_event(&self, name: &str, data: serde_json::Value) {
         self.base.emit_custom_event(name, data).await;
     }
-
     fn find_tool(&self, name: &str) -> Option<ToolDefinition> {
         self.base.find_tool(name)
     }
-
     fn pre_tool_use_input(&self) -> Option<PreToolUseInput> {
         self.base.pre_tool_use_input()
     }
-
     fn post_tool_use_input(&self) -> Option<PostToolUseInput> {
         self.base.post_tool_use_input()
     }
-
+    fn post_tool_use_failure_input(&self) -> Option<PostToolUseFailureInput> {
+        self.base.post_tool_use_failure_input()
+    }
     fn pre_compact_input(&self) -> Option<PreCompactInput> {
         self.base.pre_compact_input()
     }
-
     fn post_compact_input(&self) -> Option<PostCompactInput> {
         self.base.post_compact_input()
     }
-
     fn provider_messages(&self) -> Option<Vec<LlmMessage>> {
         self.messages.clone()
     }
-
     fn log_warn(&self, msg: &str) {
         self.base.log_warn(msg);
     }
-
+    fn event_bus(&self) -> Option<&EventBus> {
+        self.base.event_bus()
+    }
+    fn session_history(&self) -> &[LlmMessage] {
+        self.base.session_history()
+    }
+    fn system_prompt(&self) -> Option<&str> {
+        self.base.system_prompt()
+    }
+    async fn send_message(&self, content: &str) -> Result<(), String> {
+        self.base.send_message(content).await
+    }
+    fn set_model(&self, model_id: &str) -> Result<(), String> {
+        self.base.set_model(model_id)
+    }
+    fn compact(&self) -> Result<(), String> {
+        self.base.compact()
+    }
+    fn broadcast(&self, channel: &str, data: serde_json::Value) {
+        self.base.broadcast(channel, data);
+    }
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
         Arc::new(ProviderMessagesSnapshot {
             base: self.base.snapshot(),
@@ -1016,8 +1066,7 @@ mod tests {
 
     #[tokio::test]
     async fn collect_prompt_contributions_merges_prompt_build_hook_output() {
-        let runner =
-            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner.register(Arc::new(PromptContributionExtension)).await;
 
         let contributions = runner
@@ -1033,8 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_message_hooks_replace_then_append() {
-        let runner =
-            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner.register(Arc::new(ProviderReplaceExtension)).await;
         runner.register(Arc::new(ProviderAppendExtension)).await;
 
@@ -1051,8 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_hooks_use_priority_before_registration_order() {
-        let runner =
-            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
             .register(Arc::new(OrderedProviderAppendExtension {
                 id: "low",
@@ -1081,8 +1128,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_hooks_keep_registration_order_for_equal_priority() {
-        let runner =
-            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
             .register(Arc::new(OrderedProviderAppendExtension {
                 id: "first",
@@ -1111,8 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_hooks_stop_after_higher_priority_block() {
-        let runner =
-            ExtensionRunner::new(Duration::from_secs(1), Arc::new(ExtensionRuntime::new()));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
         let seen = Arc::new(Mutex::new(Vec::new()));
         runner
             .register(Arc::new(OrderedToolExtension {

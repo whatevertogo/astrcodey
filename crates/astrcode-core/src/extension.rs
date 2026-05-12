@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ModelSelection,
+    event_bus::EventBus,
     tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
 };
 
@@ -529,6 +530,76 @@ pub trait ExtensionContext: Send + Sync {
 
     /// 创建此上下文的快照，适用于即发即弃钩子中使用。
     fn snapshot(&self) -> std::sync::Arc<dyn ExtensionContext>;
+
+    // ── 扩展间通信 ──────────────────────────────────────────────────
+
+    /// 返回共享的事件总线，用于扩展间通信。
+    ///
+    /// 通过事件总线，扩展可以广播自定义事件并监听其他扩展的事件。
+    /// 例如，模式扩展可以在模式切换时广播 `"mode_changed"` 事件，
+    /// 其他扩展监听到后可以调整自身行为。
+    ///
+    /// 默认实现返回 `None`（代表上下文未连接事件总线）。
+    /// 只有在服务器提供的完整上下文中才可用。
+    fn event_bus(&self) -> Option<&EventBus> {
+        None
+    }
+
+    // ── 会话信息（仅完整上下文可用） ────────────────────────────────
+
+    /// 获取当前会话的消息历史快照。
+    ///
+    /// 包含当前 turn 开始时的消息列表。扩展可以通过此方法读取
+    /// 过去的用户消息、助手回复和工具执行结果。
+    ///
+    /// 默认实现返回空切片。只有在服务器提供的完整上下文中才有内容。
+    fn session_history(&self) -> &[crate::llm::LlmMessage] {
+        &[]
+    }
+
+    /// 获取当前会话的 system prompt。
+    ///
+    /// 默认实现返回 `None`。只有在服务器提供的完整上下文中才可用。
+    fn system_prompt(&self) -> Option<&str> {
+        None
+    }
+
+    // ── 会话操作（仅完整上下文可用） ────────────────────────────────
+
+    /// 向当前会话发送一条用户消息。
+    ///
+    /// 消息会被追加到会话历史中，并在下一轮 agent turn 中被处理。
+    /// 默认实现返回错误——此方法仅在服务器提供的完整上下文中有效。
+    async fn send_message(&self, _content: &str) -> Result<(), String> {
+        Err("send_message is only available in server-side extension context".into())
+    }
+
+    /// 切换当前会话使用的模型。
+    ///
+    /// # 参数
+    /// - `model_id`: 模型标识符（如 `"claude-sonnet-4-6"`）
+    fn set_model(&self, _model_id: &str) -> Result<(), String> {
+        Err("set_model is only available in server-side extension context".into())
+    }
+
+    /// 触发当前会话的上下文压缩。
+    fn compact(&self) -> Result<(), String> {
+        Err("compact is only available in server-side extension context".into())
+    }
+
+    /// 广播一个自定义事件到事件总线。
+    ///
+    /// 如果事件总线可用，将数据发射到指定通道上的所有监听器。
+    /// 如果事件总线不可用（如在快照中），此方法无操作。
+    ///
+    /// # 参数
+    /// - `channel`: 事件通道名
+    /// - `data`: 事件载荷
+    fn broadcast(&self, channel: &str, data: serde_json::Value) {
+        if let Some(bus) = self.event_bus() {
+            bus.emit(channel, &data);
+        }
+    }
 }
 
 // ─── Extension Error ─────────────────────────────────────────────────────

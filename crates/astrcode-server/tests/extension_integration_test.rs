@@ -13,7 +13,6 @@ use astrcode_core::{
 use astrcode_extensions::{
     context::ServerExtensionContext,
     runner::{ExtensionRunner, ToolHookOutcome},
-    runtime::ExtensionRuntime,
 };
 use astrcode_tools::registry::ToolRegistry;
 
@@ -245,7 +244,7 @@ fn context_with_pre_tool_input(command: &str) -> ServerExtensionContext {
 
 #[tokio::test]
 async fn duplicate_extension_tools_keep_first_registration() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner
         .register(Arc::new(FixedToolExtension {
             id: "project",
@@ -284,7 +283,7 @@ async fn duplicate_extension_tools_keep_first_registration() {
 
 #[tokio::test]
 async fn extension_registration_and_count() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     assert_eq!(runner.count().await, 0);
 
     runner.register(Arc::new(SecurityExtension)).await;
@@ -293,7 +292,7 @@ async fn extension_registration_and_count() {
 
 #[tokio::test]
 async fn extension_tools_are_adapted_into_tool_registry() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(EchoToolExtension)).await;
 
     let tools = runner.collect_tool_adapters("/workspace").await;
@@ -326,7 +325,7 @@ async fn extension_tools_are_adapted_into_tool_registry() {
 
 #[tokio::test]
 async fn blocking_extension_returns_block_outcome() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(AlwaysBlockExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");
@@ -340,7 +339,7 @@ async fn blocking_extension_returns_block_outcome() {
 
 #[tokio::test]
 async fn allow_extension_returns_allow_outcome() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(SecurityExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");
@@ -354,7 +353,7 @@ async fn allow_extension_returns_allow_outcome() {
 
 #[tokio::test]
 async fn pre_tool_use_extension_can_inspect_tool_payload() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(SecurityExtension)).await;
 
     let ctx = context_with_pre_tool_input("rm -rf /");
@@ -368,7 +367,7 @@ async fn pre_tool_use_extension_can_inspect_tool_payload() {
 
 #[tokio::test]
 async fn extension_context_snapshot_works_for_nonblocking() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
 
     // A fire-and-forget extension
     struct FireAndForgetExt;
@@ -417,7 +416,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
 
 #[tokio::test]
 async fn dispatch_with_no_registered_extensions_is_noop() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     let ctx = ServerExtensionContext::new(
         "empty".into(),
         "/tmp".into(),
@@ -438,7 +437,7 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
 
 #[tokio::test]
 async fn extension_subscribes_only_to_matching_events() {
-    let runner = ExtensionRunner::new(Duration::from_secs(5), Arc::new(ExtensionRuntime::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(AlwaysBlockExtension)).await;
 
     let ctx = context_with_pre_tool_input("pwd");

@@ -12,7 +12,7 @@ use std::{
 use astrcode_core::extension::Extension;
 use astrcode_support::hostpaths;
 
-use crate::{native_ext::NativeExtension, runtime::ExtensionRuntime};
+use crate::native_ext::NativeExtension;
 
 /// 从磁盘加载所有扩展的结果。
 pub struct LoadExtensionsResult {
@@ -20,8 +20,6 @@ pub struct LoadExtensionsResult {
     pub extensions: Vec<Arc<dyn Extension>>,
     /// 加载过程中的错误信息列表
     pub errors: Vec<String>,
-    /// 共享的扩展运行时
-    pub runtime: Arc<ExtensionRuntime>,
 }
 
 /// 从全局和项目级目录加载扩展。
@@ -36,9 +34,8 @@ impl ExtensionLoader {
     /// - `working_dir`: 可选的项目工作目录路径，用于发现项目级扩展
     ///
     /// # 返回
-    /// 包含已加载扩展、错误信息和运行时的结果
+    /// 包含已加载扩展和错误信息的结果
     pub async fn load_all(working_dir: Option<&str>) -> LoadExtensionsResult {
-        let runtime = Arc::new(ExtensionRuntime::new());
         let mut extensions: Vec<Arc<dyn Extension>> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
@@ -61,11 +58,7 @@ impl ExtensionLoader {
             }
         }
 
-        LoadExtensionsResult {
-            extensions,
-            errors,
-            runtime,
-        }
+        LoadExtensionsResult { extensions, errors }
     }
 
     /// 从指定目录加载所有扩展。

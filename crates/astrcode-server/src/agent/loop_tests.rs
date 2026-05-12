@@ -820,10 +820,7 @@ fn test_context_assembler() -> Arc<astrcode_context::manager::LlmContextAssemble
 }
 
 fn default_extension_runner() -> Arc<ExtensionRunner> {
-    Arc::new(ExtensionRunner::new(
-        Duration::from_secs(1),
-        Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-    ))
+    Arc::new(ExtensionRunner::new(Duration::from_secs(1)))
 }
 
 fn test_services<L>(
@@ -1530,10 +1527,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
         executed: Arc::clone(&executed),
     })]);
 
-    let extension_runner = Arc::new(ExtensionRunner::new(
-        Duration::from_secs(1),
-        Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-    ));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(Arc::new(BlockingPreToolExtension))
         .await;
@@ -1623,10 +1617,7 @@ async fn session_system_prompt_is_sent_to_llm() {
 #[tokio::test]
 async fn provider_hooks_receive_tools_and_chain_message_updates() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let extension_runner = Arc::new(ExtensionRunner::new(
-        Duration::from_secs(1),
-        Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-    ));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(Arc::new(ProviderMessageExtension {
             id: "provider-first",
@@ -1685,10 +1676,7 @@ async fn auto_compact_uses_forked_runner_with_tools() {
     });
     let compact_pre_seen = Arc::new(AtomicBool::new(false));
     let compact_post_seen = Arc::new(AtomicBool::new(false));
-    let extension_runner = Arc::new(ExtensionRunner::new(
-        Duration::from_secs(1),
-        Arc::new(astrcode_extensions::runtime::ExtensionRuntime::new()),
-    ));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(Arc::new(CompactInstructionExtension {
             pre_seen: Arc::clone(&compact_pre_seen),

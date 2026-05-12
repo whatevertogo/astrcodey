@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
+    event_bus::EventBus,
     extension::{
         ExtensionContext, PostCompactInput, PostToolUseFailureInput, PostToolUseInput,
         PreCompactInput, PreToolUseInput,
@@ -50,6 +51,12 @@ pub struct ServerExtensionContext {
     pending_tools: Mutex<Vec<ToolDefinition>>,
     /// LLM 提供者消息列表
     provider_messages: Option<Vec<LlmMessage>>,
+    /// 扩展间通信的事件总线
+    event_bus: Option<EventBus>,
+    /// 当前 turn 的消息历史快照
+    session_history: Vec<LlmMessage>,
+    /// 当前会话的 system prompt
+    system_prompt: Option<String>,
 }
 
 impl ServerExtensionContext {
@@ -74,7 +81,35 @@ impl ServerExtensionContext {
             post_compact_input: None,
             pending_tools: Mutex::new(Vec::new()),
             provider_messages: None,
+            event_bus: None,
+            session_history: Vec::new(),
+            system_prompt: None,
         }
+    }
+
+    /// 为上下文绑定事件总线，使扩展可以通信。
+    pub fn set_event_bus(&mut self, event_bus: EventBus) {
+        self.event_bus = Some(event_bus);
+    }
+
+    /// 设置当前 turn 的消息历史，供扩展通过 `session_history()` 读取。
+    pub fn set_session_history(&mut self, messages: Vec<LlmMessage>) {
+        self.session_history = messages;
+    }
+
+    /// 设置当前会话的 system prompt，供扩展通过 `system_prompt()` 读取。
+    pub fn set_system_prompt(&mut self, prompt: String) {
+        self.system_prompt = Some(prompt);
+    }
+
+    /// 清除所有阶段性输入数据（PreToolUse/PostToolUse/compact/provider）。
+    /// 每次设置新输入前调用，确保上下文状态互斥。
+    fn clear_phase_inputs(&mut self) {
+        self.pre_tool_use_input = None;
+        self.post_tool_use_input = None;
+        self.post_tool_use_failure_input = None;
+        self.pre_compact_input = None;
+        self.post_compact_input = None;
     }
 
     /// 设置扩展可访问的配置值。
@@ -94,46 +129,31 @@ impl ServerExtensionContext {
 
     /// 附加当前工具调用的输入数据，供 PreToolUse 钩子使用。
     pub fn set_pre_tool_use_input(&mut self, input: PreToolUseInput) {
+        self.clear_phase_inputs();
         self.pre_tool_use_input = Some(input);
-        self.post_tool_use_input = None;
-        self.post_tool_use_failure_input = None;
-        self.pre_compact_input = None;
-        self.post_compact_input = None;
     }
 
     /// 附加当前工具调用的结果数据，供 PostToolUse 钩子使用。
     pub fn set_post_tool_use_input(&mut self, input: PostToolUseInput) {
-        self.pre_tool_use_input = None;
+        self.clear_phase_inputs();
         self.post_tool_use_input = Some(input);
-        self.post_tool_use_failure_input = None;
-        self.pre_compact_input = None;
-        self.post_compact_input = None;
     }
 
     /// 附加当前工具调用失败的错误数据，供 PostToolUseFailure 钩子使用。
     pub fn set_post_tool_use_failure_input(&mut self, input: PostToolUseFailureInput) {
-        self.pre_tool_use_input = None;
-        self.post_tool_use_input = None;
+        self.clear_phase_inputs();
         self.post_tool_use_failure_input = Some(input);
-        self.pre_compact_input = None;
-        self.post_compact_input = None;
     }
 
     /// 附加当前 compact 前置数据，供 PreCompact 钩子使用。
     pub fn set_pre_compact_input(&mut self, input: PreCompactInput) {
-        self.pre_tool_use_input = None;
-        self.post_tool_use_input = None;
-        self.post_tool_use_failure_input = None;
+        self.clear_phase_inputs();
         self.pre_compact_input = Some(input);
-        self.post_compact_input = None;
     }
 
     /// 附加当前 compact 结果数据，供 PostCompact 钩子使用。
     pub fn set_post_compact_input(&mut self, input: PostCompactInput) {
-        self.pre_tool_use_input = None;
-        self.post_tool_use_input = None;
-        self.post_tool_use_failure_input = None;
-        self.pre_compact_input = None;
+        self.clear_phase_inputs();
         self.post_compact_input = Some(input);
     }
 
@@ -167,6 +187,8 @@ pub struct ServerExtensionContextSnapshot {
     pre_compact_input: Option<PreCompactInput>,
     post_compact_input: Option<PostCompactInput>,
     provider_messages: Option<Vec<LlmMessage>>,
+    session_history: Vec<LlmMessage>,
+    system_prompt: Option<String>,
 }
 
 impl From<&ServerExtensionContext> for ServerExtensionContextSnapshot {
@@ -181,6 +203,8 @@ impl From<&ServerExtensionContext> for ServerExtensionContextSnapshot {
             pre_compact_input: ctx.pre_compact_input.clone(),
             post_compact_input: ctx.post_compact_input.clone(),
             provider_messages: ctx.provider_messages.clone(),
+            session_history: ctx.session_history.clone(),
+            system_prompt: ctx.system_prompt.clone(),
         }
     }
 }
@@ -229,6 +253,15 @@ impl ExtensionContext for ServerExtensionContextSnapshot {
     }
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
         Arc::new(self.clone())
+    }
+    fn event_bus(&self) -> Option<&EventBus> {
+        None // snapshot 不携带 event_bus
+    }
+    fn session_history(&self) -> &[LlmMessage] {
+        &self.session_history
+    }
+    fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
     }
 }
 
@@ -306,5 +339,27 @@ impl ExtensionContext for ServerExtensionContext {
 
     fn snapshot(&self) -> Arc<dyn ExtensionContext> {
         Arc::new(ServerExtensionContextSnapshot::from(self))
+    }
+
+    fn event_bus(&self) -> Option<&EventBus> {
+        self.event_bus.as_ref()
+    }
+
+    fn session_history(&self) -> &[LlmMessage] {
+        &self.session_history
+    }
+
+    fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    /// 发送一条消息到当前会话（通过自定义事件）。
+    /// 注意：这会在会话日志中创建一条 Custom 事件，而非直接的 user message。
+    /// 真正的消息注入需要服务器层面的 send_message 实现。
+    async fn send_message(&self, content: &str) -> Result<(), String> {
+        // 通过自定义事件将消息投递到会话日志
+        self.emit_custom_event("send_message", serde_json::json!({"content": content}))
+            .await;
+        Ok(())
     }
 }

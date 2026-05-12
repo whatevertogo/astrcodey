@@ -8,7 +8,7 @@ use astrcode_core::{
     tool::{ToolDefinition, ToolResult},
     types::{SessionId, new_message_id},
 };
-use astrcode_extensions::{runner::ExtensionRunner, runtime::ExtensionRuntime};
+use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
@@ -726,10 +726,7 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             astrcode_server::agent::AutoCompactFailureTracker::default(),
         ),
         background_tasks: Default::default(),
-        extension_runner: Arc::new(ExtensionRunner::new(
-            Duration::from_secs(1),
-            Arc::new(ExtensionRuntime::new()),
-        )),
+        extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-config.json"),
