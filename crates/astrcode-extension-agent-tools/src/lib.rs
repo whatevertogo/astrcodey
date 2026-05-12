@@ -255,10 +255,7 @@ fn format_agents_for_model(agents: &[agent::AgentConfig]) -> String {
     }
 
     let mut lines = Vec::with_capacity(agents.len() + 2);
-    lines.push(String::from("Available agents:"));
-    lines.push(String::from(
-        "Use the agent name (first word before the colon) as subagentType.",
-    ));
+    lines.push(String::from("Available agents (use the name before the colon as subagentType):"));
     for agent in agents {
         lines.push(format!("- {}: {}", agent.name, agent.description));
     }
@@ -281,8 +278,7 @@ mod tests {
 
         let output = format_agents_for_model(&agents);
 
-        assert!(output.contains("Available agents:"));
-        assert!(output.contains("Use the agent name"));
+        assert!(output.contains("Available agents"));
         assert!(output.contains("code-reviewer"));
         assert!(output.contains("Use for behavior-focused code review"));
         // 格式应该有清晰的指示说明如何选择 agent
