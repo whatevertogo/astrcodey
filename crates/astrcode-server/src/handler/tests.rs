@@ -282,10 +282,7 @@ fn test_runtime_with_settings(
 }
 
 fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
-    test_runtime_with_settings(
-        llm_provider,
-        astrcode_context::ContextSettings::default(),
-    )
+    test_runtime_with_settings(llm_provider, astrcode_context::ContextSettings::default())
 }
 
 fn test_runtime() -> Arc<ServerRuntime> {

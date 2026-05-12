@@ -24,26 +24,12 @@ use crate::{
         post_compact::enrich_post_compact_context,
     },
     bootstrap::prompt_fingerprint,
-    session::{
-        CompactContinuationAppendInput, CompactContinuationCreateInput,
-        append_compact_continuation_events, create_compact_continuation_session,
-    },
+    session::{SameSessionCompactionInput, append_same_session_compaction},
 };
-
-struct PendingCompactContinuation {
-    parent_session_id: SessionId,
-    working_dir: String,
-    model_id: String,
-    system_prompt: String,
-    tool_registry: Arc<ToolRegistry>,
-    trigger: CompactTrigger,
-    compaction: CompactResult,
-    switch_active: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactOutcome {
-    Created { child_session_id: SessionId },
+    Compacted { session_id: SessionId },
     Skipped { message: String },
 }
 
@@ -54,7 +40,7 @@ impl CommandHandler {
             return Ok(());
         };
         match self.compact_session(&sid).await {
-            Ok(ManualCompactOutcome::Created { .. }) => Ok(()),
+            Ok(ManualCompactOutcome::Compacted { .. }) => Ok(()),
             Ok(ManualCompactOutcome::Skipped { message }) => {
                 self.send_error(40000, &message);
                 Ok(())
@@ -172,140 +158,100 @@ impl CommandHandler {
                 .await
                 .map_err(HandlerError::Other)?,
         };
-        let child_session_id = self
-            .create_compact_continuation_child(PendingCompactContinuation {
-                parent_session_id: sid.clone(),
-                working_dir: state.working_dir.clone(),
-                model_id: state.model_id.clone(),
-                system_prompt,
-                tool_registry,
-                trigger: CompactTrigger::ManualCommand,
-                compaction,
-                switch_active: true,
-            })
-            .await?;
-        Ok(ManualCompactOutcome::Created { child_session_id })
-    }
 
-
-    async fn create_compact_continuation_child(
-        &mut self,
-        input: PendingCompactContinuation,
-    ) -> Result<SessionId, HandlerError> {
-        let working_dir = input.working_dir.clone();
-        let model_id = input.model_id.clone();
-        let system_prompt = input.system_prompt.clone();
-        let parent_session_id = input.parent_session_id.clone();
-        let is_manual_compact = input.trigger == CompactTrigger::ManualCommand;
-        let continuation = create_compact_continuation_session(
-            &self.runtime.session_manager,
-            CompactContinuationCreateInput {
-                parent_session_id: input.parent_session_id,
-                working_dir: input.working_dir,
-                model_id: input.model_id,
-            },
-        )
-        .await
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
-        let child_session_id = continuation.child_session_id.clone();
-        self.session_tool_registries
-            .insert(child_session_id.clone(), Arc::clone(&input.tool_registry));
-        let _ = self.event_tx.send(ClientNotification::Event(
-            continuation.child_started.clone(),
-        ));
-
-        let ext_ctx = ServerExtensionContext::new(
-            child_session_id.to_string(),
-            working_dir,
-            ModelSelection::simple(model_id),
-        );
-        self.runtime
-            .extension_runner
-            .dispatch(ExtensionEvent::SessionStart, &ext_ctx)
+        // Manual compact has no agent loop, so emit CompactionStarted here.
+        self.record_and_broadcast(sid, None, EventPayload::CompactionStarted)
             .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            .map_err(HandlerError::Other)?;
 
-        let events = append_compact_continuation_events(
+        let events = append_same_session_compaction(
             &self.runtime.session_manager,
-            CompactContinuationAppendInput {
-                session: continuation,
-                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
+            SameSessionCompactionInput {
+                session_id: sid.clone(),
                 system_prompt,
-                trigger_name: compact_trigger_name(input.trigger).into(),
-                compaction: input.compaction,
+                system_prompt_fingerprint: prompt_fingerprint(
+                    &self
+                        .runtime
+                        .session_manager
+                        .read_model(sid)
+                        .await
+                        .map_err(|e| HandlerError::Other(e.to_string()))?
+                        .system_prompt
+                        .clone()
+                        .unwrap_or_default(),
+                ),
+                trigger_name: compact_trigger_name(CompactTrigger::ManualCommand).into(),
+                compaction,
             },
         )
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        if is_manual_compact {
-            // Auto compact emits this from the agent loop at the real compact
-            // point. Manual compact has no agent loop, so emit it here after
-            // failure/skip paths are behind us and before the boundary event.
-            self.record_and_broadcast(&parent_session_id, None, EventPayload::CompactionStarted)
-                .await
-                .map_err(HandlerError::Other)?;
-        }
-        for event in events.appended_events {
+
+        for event in events {
             let _ = self.event_tx.send(ClientNotification::Event(event));
         }
-        if input.trigger == CompactTrigger::AutoThreshold {
-            self.runtime
-                .auto_compact_failures
-                .transfer_session(&parent_session_id, &child_session_id);
-        }
-        if input.switch_active {
-            self.active_session_id = Some(child_session_id.clone());
-        }
-        let child_state = self
+
+        let state = self
             .runtime
             .session_manager
-            .read_model(&child_session_id)
+            .read_model(sid)
             .await
-            .map_err(|e| HandlerError::Other(format!("read session {child_session_id}: {e}")))?;
+            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
         let _ = self.event_tx.send(ClientNotification::SessionResumed {
-            session_id: child_session_id.clone().into_string(),
-            snapshot: session_snapshot(&child_state),
+            session_id: sid.clone().into_string(),
+            snapshot: session_snapshot(&state),
         });
-        Ok(child_session_id)
+
+        Ok(ManualCompactOutcome::Compacted {
+            session_id: sid.clone(),
+        })
     }
 
     pub(super) async fn continue_active_turn_from_compaction(
         &mut self,
         session_id: SessionId,
         turn_id: TurnId,
-        trigger: CompactTrigger,
+        _trigger: CompactTrigger,
         compaction: CompactResult,
     ) -> Result<SessionId, HandlerError> {
-        let Some(mut active_turn) = self.active_turns.remove(&session_id) else {
+        // 校验 active turn 存在且 turn_id 匹配，但不 remove/reinsert。
+        let Some(active_turn) = self.active_turns.get(&session_id) else {
             return Err(HandlerError::Other("stale auto compact transition".into()));
         };
         if active_turn.turn_id != turn_id {
-            self.active_turns.insert(session_id, active_turn);
             return Err(HandlerError::Other("stale auto compact transition".into()));
         }
+        let system_prompt = active_turn.system_prompt.clone();
 
-        let input = PendingCompactContinuation {
-            parent_session_id: session_id.clone(),
-            working_dir: active_turn.working_dir.clone(),
-            model_id: active_turn.model_id.clone(),
-            system_prompt: active_turn.system_prompt.clone(),
-            tool_registry: Arc::clone(&active_turn.tool_registry),
-            trigger,
-            compaction,
-            switch_active: active_turn.switch_active_on_continuation,
-        };
+        // Auto compact 的 CompactionStarted 已由 agent loop 发出，不再重复。
+        let events = append_same_session_compaction(
+            &self.runtime.session_manager,
+            SameSessionCompactionInput {
+                session_id: session_id.clone(),
+                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
+                system_prompt,
+                trigger_name: compact_trigger_name(CompactTrigger::AutoThreshold).into(),
+                compaction,
+            },
+        )
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        match self.create_compact_continuation_child(input).await {
-            Ok(child_session_id) => {
-                active_turn.session_id = child_session_id.clone();
-                self.active_turns
-                    .insert(child_session_id.clone(), active_turn);
-                Ok(child_session_id)
-            },
-            Err(error) => {
-                self.active_turns.insert(session_id, active_turn);
-                Err(error)
-            },
+        for event in events {
+            let _ = self.event_tx.send(ClientNotification::Event(event));
         }
+
+        let state = self
+            .runtime
+            .session_manager
+            .read_model(&session_id)
+            .await
+            .map_err(|e| HandlerError::Other(format!("read session {session_id}: {e}")))?;
+        let _ = self.event_tx.send(ClientNotification::SessionResumed {
+            session_id: session_id.clone().into_string(),
+            snapshot: session_snapshot(&state),
+        });
+
+        Ok(session_id)
     }
 }

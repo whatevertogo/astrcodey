@@ -1,8 +1,7 @@
 use astrcode_core::llm::{LlmMessage, ModelLimits};
 
-use crate::ContextSettings;
-
 use crate::{
+    ContextSettings,
     compaction::{CompactResult, CompactSkipReason, compact_messages_with_render_options},
     token_usage::{build_prompt_snapshot, should_compact},
 };

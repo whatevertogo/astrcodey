@@ -3,9 +3,8 @@
 //! 模板文件定义九段 summary contract；本模块只负责把模式、修复反馈、
 //! hook/custom 指令和运行时 system prompt 填入模板。
 
-use crate::ContextSettings;
-
 use super::plan::CompactPromptMode;
+use crate::ContextSettings;
 
 const BASE_COMPACT_PROMPT_TEMPLATE: &str = include_str!("../templates/compact/base.md");
 const INCREMENTAL_COMPACT_PROMPT_TEMPLATE: &str =

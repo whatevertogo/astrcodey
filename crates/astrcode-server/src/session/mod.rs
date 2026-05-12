@@ -188,83 +188,52 @@ impl ToolResultArtifactReader for SessionManager {
     }
 }
 
-/// compact continuation child 的创建输入。
-pub(crate) struct CompactContinuationCreateInput {
-    pub(crate) parent_session_id: SessionId,
-    pub(crate) working_dir: String,
-    pub(crate) model_id: String,
-}
-
-/// 已创建但尚未追加 continuation 事件的 child session。
-pub(crate) struct CompactContinuationSession {
-    pub(crate) parent_session_id: SessionId,
-    pub(crate) parent_cursor: Cursor,
-    pub(crate) child_session_id: SessionId,
-    pub(crate) child_started: Event,
-}
-
-/// compact continuation durable events 的追加输入。
-pub(crate) struct CompactContinuationAppendInput {
-    pub(crate) session: CompactContinuationSession,
+/// 同会话 compact 追加输入。
+pub(crate) struct SameSessionCompactionInput {
+    pub(crate) session_id: SessionId,
     pub(crate) system_prompt: String,
     pub(crate) system_prompt_fingerprint: String,
     pub(crate) trigger_name: String,
     pub(crate) compaction: CompactResult,
 }
 
-/// compact continuation 写入后产生的事件。
-pub(crate) struct CompactContinuationEvents {
-    pub(crate) child_session_id: SessionId,
-    pub(crate) appended_events: Vec<Event>,
-}
-
-/// 只负责创建 compact continuation child。
+/// 向同一个 session 追加 compact boundary 和 continuation 事件。
 ///
-/// 这里不广播、不切换 active session、不发送 SessionResumed，也不追加
-/// continuation events；这些副作用由
-/// CommandHandler 或 ServerSessionSpawner 这样的 owner 自己决定。
-pub(crate) async fn create_compact_continuation_session(
+/// 不创建 child session。两个事件都使用 `session_id` 作为所属会话。
+/// Projection reducer 会在遇到 `SessionContinuedFromCompaction` 时
+/// 将 messages 替换为 compacted view，旧事件在投影层面被丢弃。
+pub(crate) async fn append_same_session_compaction(
     session_manager: &SessionManager,
-    input: CompactContinuationCreateInput,
-) -> Result<CompactContinuationSession, String> {
+    input: SameSessionCompactionInput,
+) -> Result<Vec<Event>, String> {
+    let session_id = input.session_id;
+
+    // 在追加任何 compact 事件前捕获 cursor，作为旧 transcript 的边界。
     let parent_cursor = session_manager
-        .latest_cursor(&input.parent_session_id)
+        .latest_cursor(&session_id)
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| "0".into());
-    let child_started = session_manager
-        .create(
-            &input.working_dir,
-            &input.model_id,
-            Some(&input.parent_session_id),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let child_session_id = child_started.session_id.clone();
 
-    Ok(CompactContinuationSession {
-        parent_session_id: input.parent_session_id,
-        parent_cursor,
-        child_session_id,
-        child_started,
-    })
-}
+    let mut appended = Vec::with_capacity(3);
 
-/// 只负责向已创建的 continuation child 追加 durable continuation events。
-///
-/// Parent 和 child 分属不同 event log，v1 不提供跨 session 事务。
-/// 调用方应把这里的失败视为可重试的半持久状态：child session 可能已经
-/// 存在，或者已经写入了部分 child-side setup events。
-pub(crate) async fn append_compact_continuation_events(
-    session_manager: &SessionManager,
-    input: CompactContinuationAppendInput,
-) -> Result<CompactContinuationEvents, String> {
-    let child_session_id = input.session.child_session_id.clone();
-    let mut appended_events = Vec::with_capacity(3);
-    appended_events.push(
+    // 1. CompactBoundaryCreated — boundary seq 标记旧 transcript 截止点
+    appended.push(
         session_manager
             .append_event(Event::new(
-                child_session_id.clone(),
+                session_id.clone(),
+                None,
+                compact_boundary_payload(input.trigger_name, &input.compaction, session_id.clone()),
+            ))
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+
+    // 2. SystemPromptConfigured — boundary 之后刷新 prompt
+    appended.push(
+        session_manager
+            .append_event(Event::new(
+                session_id.clone(),
                 None,
                 EventPayload::SystemPromptConfigured {
                     text: input.system_prompt,
@@ -274,28 +243,16 @@ pub(crate) async fn append_compact_continuation_events(
             .await
             .map_err(|e| e.to_string())?,
     );
-    appended_events.push(
+
+    // 3. SessionContinuedFromCompaction — 替换 messages 为 compacted view
+    appended.push(
         session_manager
             .append_event(Event::new(
-                input.session.parent_session_id.clone(),
-                None,
-                compact_boundary_payload(
-                    input.trigger_name,
-                    &input.compaction,
-                    child_session_id.clone(),
-                ),
-            ))
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-    appended_events.push(
-        session_manager
-            .append_event(Event::new(
-                child_session_id.clone(),
+                session_id.clone(),
                 None,
                 session_continued_from_compaction_payload(
-                    input.session.parent_session_id,
-                    input.session.parent_cursor,
+                    session_id.clone(),
+                    parent_cursor,
                     &input.compaction,
                 ),
             ))
@@ -304,20 +261,17 @@ pub(crate) async fn append_compact_continuation_events(
     );
 
     if let Some(cursor) = session_manager
-        .latest_cursor(&child_session_id)
+        .latest_cursor(&session_id)
         .await
         .map_err(|e| e.to_string())?
     {
         session_manager
-            .checkpoint(&child_session_id, &cursor)
+            .checkpoint(&session_id, &cursor)
             .await
             .map_err(|e| e.to_string())?;
     }
 
-    Ok(CompactContinuationEvents {
-        child_session_id,
-        appended_events,
-    })
+    Ok(appended)
 }
 
 /// 会话操作中可能出现的错误类型。
