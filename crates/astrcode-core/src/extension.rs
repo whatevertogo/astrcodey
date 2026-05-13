@@ -566,23 +566,23 @@ pub trait CommandDiscoveryHandler: Send + Sync {
 ///
 /// 在 `Extension::register()` 调用期间有效，扩展通过它声明自己提供的能力。
 pub struct Registrar {
-    pub tools: Vec<(ToolDefinition, std::sync::Arc<dyn ToolHandler>)>,
-    pub tool_discovery: Vec<std::sync::Arc<dyn ToolDiscoveryHandler>>,
-    pub tool_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
-    pub commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
-    pub command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
-    pub pre_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)>,
-    pub post_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)>,
-    pub provider: Vec<(
+    pub(crate) tools: Vec<(ToolDefinition, std::sync::Arc<dyn ToolHandler>)>,
+    pub(crate) tool_discovery: Vec<std::sync::Arc<dyn ToolDiscoveryHandler>>,
+    pub(crate) tool_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
+    pub(crate) commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
+    pub(crate) command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
+    pub(crate) pre_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)>,
+    pub(crate) post_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)>,
+    pub(crate) provider: Vec<(
         ProviderEvent,
         HookMode,
         i32,
         std::sync::Arc<dyn ProviderHandler>,
     )>,
-    pub prompt_build: Vec<(i32, std::sync::Arc<dyn PromptBuildHandler>)>,
-    pub compact: Vec<(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)>,
-    pub post_tool_use_failure: Vec<(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)>,
-    pub lifecycle: Vec<(
+    pub(crate) prompt_build: Vec<(i32, std::sync::Arc<dyn PromptBuildHandler>)>,
+    pub(crate) compact: Vec<(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)>,
+    pub(crate) post_tool_use_failure: Vec<(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)>,
+    pub(crate) lifecycle: Vec<(
         ExtensionEvent,
         HookMode,
         i32,
@@ -704,6 +704,76 @@ impl Registrar {
             && self.compact.is_empty()
             && self.post_tool_use_failure.is_empty()
             && self.lifecycle.is_empty()
+    }
+
+    pub fn tools(&self) -> &[(ToolDefinition, std::sync::Arc<dyn ToolHandler>)] {
+        &self.tools
+    }
+
+    pub fn tool_discoveries(&self) -> &[std::sync::Arc<dyn ToolDiscoveryHandler>] {
+        &self.tool_discovery
+    }
+
+    pub fn all_tool_metadata(&self) -> &std::collections::HashMap<String, ToolPromptMetadata> {
+        &self.tool_metadata
+    }
+
+    pub fn commands(&self) -> &[(SlashCommand, std::sync::Arc<dyn CommandHandler>)] {
+        &self.commands
+    }
+
+    pub fn command_discoveries(&self) -> &[std::sync::Arc<dyn CommandDiscoveryHandler>] {
+        &self.command_discovery
+    }
+
+    pub fn pre_tool_use(
+        &self,
+    ) -> &[(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)] {
+        &self.pre_tool_use
+    }
+
+    pub fn post_tool_use(
+        &self,
+    ) -> &[(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)] {
+        &self.post_tool_use
+    }
+
+    pub fn provider(
+        &self,
+    ) -> &[(
+        ProviderEvent,
+        HookMode,
+        i32,
+        std::sync::Arc<dyn ProviderHandler>,
+    )] {
+        &self.provider
+    }
+
+    pub fn prompt_build(&self) -> &[(i32, std::sync::Arc<dyn PromptBuildHandler>)] {
+        &self.prompt_build
+    }
+
+    pub fn compact(
+        &self,
+    ) -> &[(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)] {
+        &self.compact
+    }
+
+    pub fn post_tool_use_failure(
+        &self,
+    ) -> &[(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)] {
+        &self.post_tool_use_failure
+    }
+
+    pub fn lifecycle(
+        &self,
+    ) -> &[(
+        ExtensionEvent,
+        HookMode,
+        i32,
+        std::sync::Arc<dyn LifecycleHandler>,
+    )] {
+        &self.lifecycle
     }
 }
 

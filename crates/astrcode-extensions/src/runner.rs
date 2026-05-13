@@ -77,25 +77,25 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut lc: Vec<(ExtensionEvent, i32, HookMode, Arc<dyn LifecycleHandler>)> = Vec::new();
 
     for record in records {
-        for (mode, pri, h) in &record.reg.pre_tool_use {
+        for (mode, pri, h) in record.reg.pre_tool_use() {
             pre.push((*pri, *mode, Arc::clone(h)));
         }
-        for (mode, pri, h) in &record.reg.post_tool_use {
+        for (mode, pri, h) in record.reg.post_tool_use() {
             post.push((*pri, *mode, Arc::clone(h)));
         }
-        for (ev, mode, pri, h) in &record.reg.provider {
+        for (ev, mode, pri, h) in record.reg.provider() {
             prov.push((*ev, *pri, *mode, Arc::clone(h)));
         }
-        for (pri, h) in &record.reg.prompt_build {
+        for (pri, h) in record.reg.prompt_build() {
             pb.push((*pri, Arc::clone(h)));
         }
-        for (ev, pri, h) in &record.reg.compact {
+        for (ev, pri, h) in record.reg.compact() {
             cmp.push((*ev, *pri, Arc::clone(h)));
         }
-        for (pri, h) in &record.reg.post_tool_use_failure {
+        for (pri, h) in record.reg.post_tool_use_failure() {
             ptuf.push((*pri, Arc::clone(h)));
         }
-        for (ev, mode, pri, h) in &record.reg.lifecycle {
+        for (ev, mode, pri, h) in record.reg.lifecycle() {
             lc.push((ev.clone(), *pri, *mode, Arc::clone(h)));
         }
     }
@@ -485,7 +485,7 @@ impl ExtensionRunner {
         let records = self.records.read().await;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         for record in records.iter() {
-            for (def, handler) in record.reg.tools.iter() {
+            for (def, handler) in record.reg.tools().iter() {
                 tools.push(Arc::new(HandlerTool {
                     definition: def.clone(),
                     handler: Arc::clone(handler),
@@ -493,7 +493,7 @@ impl ExtensionRunner {
                     spawner: Arc::clone(&self.spawner),
                 }));
             }
-            for discovery in record.reg.tool_discovery.iter() {
+            for discovery in record.reg.tool_discoveries().iter() {
                 match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                     Ok(discovered) => {
                         for (def, handler) in discovered {
@@ -521,7 +521,7 @@ impl ExtensionRunner {
         let records = self.records.read().await;
         let mut map = std::collections::HashMap::new();
         for record in records.iter() {
-            map.extend(record.reg.tool_metadata.clone());
+            map.extend(record.reg.all_tool_metadata().clone());
         }
         map
     }
@@ -534,10 +534,10 @@ impl ExtensionRunner {
         let records = self.records.read().await;
         let mut cmds = Vec::new();
         for record in records.iter() {
-            for (cmd, handler) in record.reg.commands.iter() {
+            for (cmd, handler) in record.reg.commands().iter() {
                 cmds.push((record.id.clone(), cmd.clone(), Arc::clone(handler)));
             }
-            for discovery in record.reg.command_discovery.iter() {
+            for discovery in record.reg.command_discoveries().iter() {
                 match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                     Ok(discovered) => {
                         for (cmd, handler) in discovered {

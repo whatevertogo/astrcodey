@@ -650,9 +650,9 @@ mod tests {
         assert_eq!(manifest["subscriptions"].as_array().unwrap().len(), 2);
         let mut reg = Registrar::new();
         TodoToolExtension.register(&mut reg);
-        assert_eq!(reg.tools.len(), 1);
-        assert!(!reg.provider.is_empty());
-        assert!(!reg.post_tool_use.is_empty());
+        assert_eq!(reg.tools().len(), 1);
+        assert!(!reg.provider().is_empty());
+        assert!(!reg.post_tool_use().is_empty());
     }
 
     #[test]

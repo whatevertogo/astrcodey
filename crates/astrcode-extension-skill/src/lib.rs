@@ -838,8 +838,8 @@ mod tests {
         assert_eq!(manifest["tools"][0]["parameters"], definition.parameters);
         let mut reg = Registrar::new();
         SkillExtension.register(&mut reg);
-        assert_eq!(reg.tools.len(), 1);
-        assert!(!reg.prompt_build.is_empty());
+        assert_eq!(reg.tools().len(), 1);
+        assert!(!reg.prompt_build().is_empty());
     }
 
     fn tool_ctx(working_dir: &Path) -> ToolExecutionContext {
