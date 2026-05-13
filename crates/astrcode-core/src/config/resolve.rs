@@ -134,7 +134,7 @@ impl Config {
 ///
 /// 解析规则：
 /// - `env:VAR_NAME` 前缀：从环境变量 `VAR_NAME` 读取，不存在则报错
-/// - 全大写加下划线的字符串：视为环境变量名，读取失败则使用原始值作为回退
+/// - 全大写加下划线的字符串：尝试作为环境变量名，不存在时 emit warning 后使用原始值
 /// - 其他字符串：直接作为密钥使用
 ///
 /// 空字符串在此函数被调用前已由调用方（`into_effective`）拦截。
@@ -143,8 +143,18 @@ pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
         // "env:VAR_NAME" 格式：必须存在该环境变量
         std::env::var(var).map_err(|_| ResolveError::MissingEnvVar(var.into()))
     } else if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-        // 全大写加下划线：尝试作为环境变量名，失败则使用原始值
-        Ok(std::env::var(raw).unwrap_or_else(|_| raw.into()))
+        // 全大写加下划线：尝试作为环境变量名，失败则 emit warning 后使用原始值
+        match std::env::var(raw) {
+            Ok(val) => Ok(val),
+            Err(_) => {
+                tracing::warn!(
+                    key = raw,
+                    "Config value looks like an env var name but the variable is not set; \
+                     using the raw value as API key. Use 'env:{raw}' prefix for explicit env var reference."
+                );
+                Ok(raw.into())
+            }
+        }
     } else {
         // 其他情况：直接作为密钥
         Ok(raw.into())

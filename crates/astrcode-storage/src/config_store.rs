@@ -30,29 +30,33 @@ impl FileConfigStore {
 #[async_trait::async_trait]
 impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
-        if !self.path.exists() {
-            // Return defaults if no config file exists
-            let config = Config::default();
-            // Save defaults so user has a starting point
-            self.save(&config).await?;
-            return Ok(config);
-        }
-        let data = std::fs::read_to_string(&self.path)?;
-        let config: Config = serde_json::from_str(&data)?;
-        Ok(config)
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            if !path.exists() {
+                return Ok(Config::default());
+            }
+            let data = std::fs::read_to_string(&path)?;
+            let config: Config = serde_json::from_str(&data)?;
+            Ok(config)
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn save(&self, config: &Config) -> Result<(), ConfigStoreError> {
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // Atomic write: write to .tmp, then rename
-        let tmp_path = self.path.with_extension("json.tmp");
+        let path = self.path.clone();
         let json = serde_json::to_string_pretty(config)?;
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &self.path)?;
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp_path = path.with_extension("json.tmp");
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 
     fn path(&self) -> PathBuf {
@@ -66,12 +70,16 @@ impl ConfigStore for FileConfigStore {
         let overlay_path = PathBuf::from(working_dir)
             .join(".astrcode")
             .join("config.json");
-        if !overlay_path.exists() {
-            return Ok(None);
-        }
-        let data = std::fs::read_to_string(&overlay_path)?;
-        let overlay: ConfigOverlay = serde_json::from_str(&data)?;
-        Ok(Some(overlay))
+        tokio::task::spawn_blocking(move || {
+            if !overlay_path.exists() {
+                return Ok(None);
+            }
+            let data = std::fs::read_to_string(&overlay_path)?;
+            let overlay: ConfigOverlay = serde_json::from_str(&data)?;
+            Ok(Some(overlay))
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn save_overlay(
@@ -80,12 +88,16 @@ impl ConfigStore for FileConfigStore {
         overlay: &ConfigOverlay,
     ) -> Result<(), ConfigStoreError> {
         let overlay_dir = PathBuf::from(working_dir).join(".astrcode");
-        std::fs::create_dir_all(&overlay_dir)?;
-        let overlay_path = overlay_dir.join("config.json");
-        let tmp_path = overlay_path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(overlay)?;
-        std::fs::write(&tmp_path, &json)?;
-        std::fs::rename(&tmp_path, &overlay_path)?;
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&overlay_dir)?;
+            let overlay_path = overlay_dir.join("config.json");
+            let tmp_path = overlay_path.with_extension("json.tmp");
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &overlay_path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 }

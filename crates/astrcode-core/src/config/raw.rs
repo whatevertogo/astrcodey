@@ -90,7 +90,7 @@ pub struct OpenAiProfileCapabilities {
 
 /// 模型配置，定义一个具体模型的参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelConfig {
     /// 模型标识（如 "deepseek-chat"、"gpt-4.1"）。
     pub id: String,
@@ -145,7 +145,7 @@ pub struct RuntimeSection {
 /// 用于 `.astrcode/config.json` 中的项目特定配置，
 /// 可覆盖全局配置中的部分字段。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfigOverlay {
     /// 覆盖激活的配置文件名。
     pub active_profile: Option<String>,
