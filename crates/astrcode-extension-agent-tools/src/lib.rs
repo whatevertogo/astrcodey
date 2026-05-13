@@ -157,7 +157,9 @@ impl ToolHandler for SendToolHandler {
             .capabilities
             .agent_session_control
             .as_ref()
-            .ok_or_else(|| ExtensionError::Internal("agent session control not available".into()))?;
+            .ok_or_else(|| {
+                ExtensionError::Internal("agent session control not available".into())
+            })?;
 
         // 尝试把 agent_id 解析为 agent_name → session_id
         let child_session_id =
@@ -179,9 +181,7 @@ impl ToolHandler for SendToolHandler {
                 }
             },
             astrcode_core::tool::TurnResult::Failed { error } => (error, true),
-            astrcode_core::tool::TurnResult::Aborted => {
-                ("agent was aborted".into(), true)
-            },
+            astrcode_core::tool::TurnResult::Aborted => ("agent was aborted".into(), true),
         };
 
         let render = RenderSpec::Box {
@@ -279,13 +279,13 @@ fn agent_tool_metadata()
         "send".to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
             "Send a message to an already-running agent and wait for its response. Use this to \
-             continue a conversation with an agent that was started with waitForResult: false, \
-             or to give additional instructions to a running agent.",
+             continue a conversation with an agent that was started with waitForResult: false, or \
+             to give additional instructions to a running agent.",
         )
         .caveat(
-            "The agentId can be either the agent's name (e.g. 'Code Reviewer') or its session \
-             ID. Sending blocks until the agent responds — for long tasks, consider spawning a \
-             new background agent instead.",
+            "The agentId can be either the agent's name (e.g. 'Code Reviewer') or its session ID. \
+             Sending blocks until the agent responds — for long tasks, consider spawning a new \
+             background agent instead.",
         )
         .prompt_tag("collaboration"),
     );
@@ -427,10 +427,10 @@ fn agent_tool_definition() -> ToolDefinition {
     }
 }
 
-const SEND_TOOL_DESCRIPTION: &str =
-    "Send a message to a running agent and wait for its response. Use this to continue a \
-     conversation with an agent that was started with waitForResult: false, or to give \
-     additional instructions to a running agent.";
+const SEND_TOOL_DESCRIPTION: &str = "Send a message to a running agent and wait for its response. \
+                                     Use this to continue a conversation with an agent that was \
+                                     started with waitForResult: false, or to give additional \
+                                     instructions to a running agent.";
 
 const SEND_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"agentId":{"type":"string","description":"The agent's name or session ID to send the message to"},"message":{"type":"string","description":"The message to send to the agent"}},"required":["agentId","message"]}"#;
 
