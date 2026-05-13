@@ -209,7 +209,7 @@ pub trait FileObservationStore: Send + Sync {
 /// Agent 工具执行时需要的会话操控能力。
 ///
 /// 由 server 实现，通过 [`ToolCapabilities`] 注入。提供子会话的发送、中止、
-/// 查询等原子操作；高级逻辑（级联关闭）由 agent-tools 扩展组合。
+/// 查询等原子操作，供 agent-tools 扩展消费。
 #[async_trait::async_trait]
 pub trait AgentSessionControl: Send + Sync {
     /// 向子 session 提交 prompt 并阻塞等待完成，返回带实际输出的结果。
@@ -219,10 +219,10 @@ pub trait AgentSessionControl: Send + Sync {
         message: String,
     ) -> Result<TurnResult, String>;
 
-    /// 中止单个 session（不级联）。
+    /// 中止单个 session。
     async fn abort_session(&self, session_id: &str) -> Result<(), String>;
 
-    /// 查询子 agent 列表（用于级联 close 遍历）。
+    /// 查询子 agent 列表。
     async fn list_children(
         &self,
         session_id: &str,
@@ -269,7 +269,7 @@ pub struct ToolCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
-    /// Agent 会话操控能力（`send` / `close` 工具使用）。
+    /// Agent 会话操控能力（`send` 工具使用）。
     pub agent_session_control: Option<Arc<dyn AgentSessionControl>>,
 }
 

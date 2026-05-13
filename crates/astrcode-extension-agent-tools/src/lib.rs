@@ -227,9 +227,9 @@ impl ToolHandler for SendToolHandler {
 async fn resolve_child_session_id(
     port: &Arc<dyn AgentSessionControl>,
     agent_id: &str,
-    _parent_session_id: &str,
+    parent_session_id: &str,
 ) -> Option<String> {
-    let children = port.list_children(_parent_session_id).await.ok()?;
+    let children = port.list_children(parent_session_id).await.ok()?;
     children
         .iter()
         .find(|c| c.agent_name == agent_id)

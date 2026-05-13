@@ -69,7 +69,7 @@ async fn main() {
         runtime.session_manager.clone(),
         Arc::clone(&command_handle_slot),
     ));
-    *runtime.agent_session_control.write() = Some(session_control as Arc<dyn astrcode_core::tool::AgentSessionControl>);
+    *runtime.agent_session_control.write() = Some(session_control);
 
     let handler = CommandHandler::spawn_actor(runtime, event_tx.clone());
 

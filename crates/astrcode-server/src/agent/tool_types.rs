@@ -125,7 +125,7 @@ pub(crate) struct ToolCallRuntimeContext {
     pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
     pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
-    /// Agent 会话操控能力，用于 send / close 工具与子 session 交互。
+    /// Agent 会话操控能力，用于 send 等工具与子 session 交互。
     pub(super) agent_session_control: Option<Arc<dyn AgentSessionControl>>,
 }
 
