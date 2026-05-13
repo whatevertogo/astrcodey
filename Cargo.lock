@@ -272,6 +272,7 @@ dependencies = [
  "astrcode-protocol",
  "astrcode-support",
  "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",

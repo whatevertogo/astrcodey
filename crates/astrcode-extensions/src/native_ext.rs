@@ -327,6 +327,8 @@ impl PostToolUseHandler for FfiPostToolUseHandler {
 }
 
 /// FFI Provider 钩子处理器。
+/// TODO: 当前仅支持 Block / Allow，未支持 ReplaceMessages / AppendMessages。
+///       需要时需扩展 FfiCtxOwned 传入 messages JSON，并新增 effect code 映射。
 struct FfiProviderHandler {
     callback: EventCallback,
     event_disc: u8,

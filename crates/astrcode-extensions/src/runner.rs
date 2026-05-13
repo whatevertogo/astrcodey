@@ -580,7 +580,7 @@ impl ExtensionRunner {
             .into_iter()
             .filter(|(_, cmd, _)| cmd.name == command_name)
             .collect();
-        matched.sort_by_key(|a| command_dispatch_priority(&a.0));
+        matched.sort_by_key(|a| std::cmp::Reverse(command_dispatch_priority(&a.0)));
 
         if let Some((_, _, handler)) = matched.into_iter().next() {
             handler
@@ -597,11 +597,12 @@ impl ExtensionRunner {
     }
 }
 
+/// Lower value = higher dispatch priority.
 fn command_dispatch_priority(extension_id: &str) -> u8 {
     if extension_id == "astrcode-skill" {
-        1
-    } else {
         0
+    } else {
+        1
     }
 }
 

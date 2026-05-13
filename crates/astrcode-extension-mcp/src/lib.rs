@@ -217,6 +217,13 @@ impl McpToolHandler {
             (entry.candidates.clone(), entry.diagnostics.clone())
         } else {
             let discovered = discover_mcp_tools(working_dir).await;
+            if !discovered.tools.is_empty() {
+                self.shared.store(working_dir, McpCacheEntry {
+                    tool_lookup: HashMap::new(),
+                    candidates: discovered.tools.clone(),
+                    diagnostics: discovered.diagnostics.clone(),
+                });
+            }
             (discovered.tools, discovered.diagnostics)
         };
 
@@ -281,11 +288,18 @@ async fn discover_mcp_tools(working_dir: &str) -> DiscoveredMcpTools {
     let mut diagnostics = config.diagnostics;
     let servers = config.servers;
 
+    let results: Vec<(String, Result<Vec<McpTool>, _>)> =
+        futures::future::join_all(servers.iter().map(|server| async {
+            let name = server.name.clone();
+            let result = StdioMcpClient::new(server.clone()).list_tools().await;
+            (name, result)
+        }))
+        .await;
+
     let mut emitted = BTreeSet::new();
     let mut candidates = Vec::new();
-    for server in &servers {
-        let server_name = server.name.clone();
-        match StdioMcpClient::new(server.clone()).list_tools().await {
+    for (server_name, list_result) in results {
+        match list_result {
             Ok(tools) => {
                 for tool in tools {
                     let Some(definition) = tool_definition(&server_name, &tool) else {
