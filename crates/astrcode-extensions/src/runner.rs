@@ -260,6 +260,7 @@ impl ExtensionRunner {
         let index = self.load_index();
 
         let mut ctx = ctx;
+        let mut modified = false;
         for (mode, handler) in &index.post_tool_use {
             match mode {
                 HookMode::Blocking => {
@@ -271,13 +272,20 @@ impl ExtensionRunner {
                             return Ok(PostToolUseResult::Block { reason });
                         },
                         PostToolUseResult::ModifyResult { content } => {
+                            let is_error = ctx.tool_result.is_error;
                             ctx = PostToolUseContext {
                                 tool_result: ToolResult {
-                                    content,
+                                    content: content.clone(),
+                                    error: if is_error {
+                                        Some(content)
+                                    } else {
+                                        ctx.tool_result.error.clone()
+                                    },
                                     ..ctx.tool_result
                                 },
                                 ..ctx
                             };
+                            modified = true;
                         },
                         PostToolUseResult::Allow => {},
                     }
@@ -298,7 +306,13 @@ impl ExtensionRunner {
                 },
             }
         }
-        Ok(PostToolUseResult::Allow)
+        if modified {
+            Ok(PostToolUseResult::ModifyResult {
+                content: ctx.tool_result.content,
+            })
+        } else {
+            Ok(PostToolUseResult::Allow)
+        }
     }
 
     /// Provider 钩子分发。
