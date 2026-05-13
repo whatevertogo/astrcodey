@@ -199,6 +199,7 @@ impl CommandHandler for FfiCommandHandler {
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         );
 
         let args_bytes = arguments.as_bytes();
@@ -279,6 +280,7 @@ impl PreToolUseHandler for FfiPreToolUseHandler {
             tools_json,
             String::new(),
             String::new(),
+            String::new(),
         );
         let (effect, content) =
             call_ffi_event(self.callback, self.event_disc, &ffi_ctx, self.output_free);
@@ -315,6 +317,7 @@ impl PostToolUseHandler for FfiPostToolUseHandler {
             String::new(),
             tool_result_json,
             String::new(),
+            String::new(),
         );
         let (effect, content) =
             call_ffi_event(self.callback, self.event_disc, &ffi_ctx, self.output_free);
@@ -327,8 +330,6 @@ impl PostToolUseHandler for FfiPostToolUseHandler {
 }
 
 /// FFI Provider 钩子处理器。
-/// TODO: 当前仅支持 Block / Allow，未支持 ReplaceMessages / AppendMessages。
-///       需要时需扩展 FfiCtxOwned 传入 messages JSON，并新增 effect code 映射。
 struct FfiProviderHandler {
     callback: EventCallback,
     event_disc: u8,
@@ -338,6 +339,7 @@ struct FfiProviderHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for FfiProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+        let messages_json = serde_json::to_string(&ctx.messages).unwrap_or_default();
         let ffi_ctx = FfiCtxOwned::new(
             ctx.session_id,
             ctx.working_dir,
@@ -347,11 +349,33 @@ impl ProviderHandler for FfiProviderHandler {
             String::new(),
             String::new(),
             String::new(),
+            messages_json,
         );
         let (effect, content) =
             call_ffi_event(self.callback, self.event_disc, &ffi_ctx, self.output_free);
         match effect {
+            // 0 (Allow) falls through to default — 无需处理，允许请求继续
             1 => Ok(ProviderResult::Block { reason: content }),
+            // 2 (ModifiedResult) 和 3 (ModifiedInput) 不适用于 Provider 事件
+            // 4 (PromptContributions) 仅用于 PromptBuild 事件
+            // 5 (CompactContributions) 仅用于 Compact 事件
+            6 => {
+                let messages = serde_json::from_str(&content).map_err(|e| {
+                    ExtensionError::Internal(format!(
+                        "FFI Provider invalid ReplaceMessages: {e}"
+                    ))
+                })?;
+                Ok(ProviderResult::ReplaceMessages { messages })
+            },
+            7 => {
+                let messages = serde_json::from_str(&content).map_err(|e| {
+                    ExtensionError::Internal(format!(
+                        "FFI Provider invalid AppendMessages: {e}"
+                    ))
+                })?;
+                Ok(ProviderResult::AppendMessages { messages })
+            },
+            // 0 (Allow) 或其他未识别值 — 允许请求继续
             _ => Ok(ProviderResult::Allow),
         }
     }
@@ -373,6 +397,7 @@ impl PromptBuildHandler for FfiPromptBuildHandler {
             String::new(),
             String::new(),
             ctx.model.model,
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -416,6 +441,7 @@ impl CompactHandler for FfiCompactHandler {
             String::new(),
             String::new(),
             event_context_json,
+            String::new(),
         );
         let (effect, content) =
             call_ffi_event(self.callback, self.event_disc, &ffi_ctx, self.output_free);
@@ -447,6 +473,7 @@ impl LifecycleHandler for FfiLifecycleHandler {
             String::new(),
             String::new(),
             ctx.model.model,
+            String::new(),
             String::new(),
             String::new(),
             String::new(),

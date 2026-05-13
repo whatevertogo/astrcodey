@@ -148,6 +148,7 @@ fn ffi_ctx_passes_session_info() {
         String::new(),
         String::new(),
         String::new(),
+        String::new(),
     );
     let raw = unsafe { &*(ffi_ctx.as_ptr() as *const astrcode_extensions::ffi::FfiCtx) };
     unsafe {

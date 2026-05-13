@@ -19,6 +19,10 @@ use astrcode_core::extension::{ExtensionEvent, HookMode};
 /// - ModifiedInput (3): `output_ptr/len` 携带替换的工具输入 JSON。
 /// - PromptContributions (4): `output_ptr/len` 携带 PromptContributions JSON。
 /// - CompactContributions (5): `output_ptr/len` 携带 CompactContributions JSON。
+/// - ReplaceMessages (6): `output_ptr/len` 携带替换后的 Vec<LlmMessage> JSON（仅 Provider 事件）。
+/// - AppendMessages (7): `output_ptr/len` 携带追加的 Vec<LlmMessage> JSON（仅 Provider 事件）。
+///
+/// 注意：6/7 仅对 Provider 钩子有意义。其他钩子返回这些 code 会被当作 Allow 忽略。
 pub type EventCallback = unsafe extern "C" fn(
     event: u8,
     ctx: *const c_void,
@@ -280,6 +284,9 @@ pub struct FfiCtx {
     /// 事件上下文 JSON (ptr, len) — Compact 等事件的额外上下文，按事件类型设置
     pub event_context_json_ptr: *const u8,
     pub event_context_json_len: u32,
+    /// 消息列表 JSON (ptr, len) — 序列化的 Vec<LlmMessage>，仅在 Provider 事件时设置
+    pub messages_json_ptr: *const u8,
+    pub messages_json_len: u32,
 }
 
 impl FfiCtx {
@@ -294,6 +301,7 @@ impl FfiCtx {
         tools_json: &str,
         tool_result_json: &str,
         event_context_json: &str,
+        messages_json: &str,
     ) -> Self {
         let sid = session_id.as_bytes();
         let wd = working_dir.as_bytes();
@@ -303,6 +311,7 @@ impl FfiCtx {
         let tj = tools_json.as_bytes();
         let tr = tool_result_json.as_bytes();
         let ec = event_context_json.as_bytes();
+        let mj = messages_json.as_bytes();
         Self {
             session_id_ptr: sid.as_ptr(),
             session_id_len: sid.len() as u32,
@@ -320,6 +329,8 @@ impl FfiCtx {
             tool_result_json_len: tr.len() as u32,
             event_context_json_ptr: ec.as_ptr(),
             event_context_json_len: ec.len() as u32,
+            messages_json_ptr: mj.as_ptr(),
+            messages_json_len: mj.len() as u32,
         }
     }
 }
@@ -337,6 +348,7 @@ pub struct FfiCtxOwned {
     tools_json: String,
     tool_result_json: String,
     event_context_json: String,
+    messages_json: String,
     raw: FfiCtx,
 }
 
@@ -364,6 +376,7 @@ impl FfiCtxOwned {
             tools_json,
             String::new(),
             String::new(),
+            String::new(),
         )
     }
 
@@ -378,6 +391,7 @@ impl FfiCtxOwned {
         tools_json: String,
         tool_result_json: String,
         event_context_json: String,
+        messages_json: String,
     ) -> Self {
         let mut owned = Self {
             session_id,
@@ -388,6 +402,7 @@ impl FfiCtxOwned {
             tools_json,
             tool_result_json,
             event_context_json,
+            messages_json,
             raw: FfiCtx {
                 session_id_ptr: std::ptr::null(),
                 session_id_len: 0,
@@ -405,6 +420,8 @@ impl FfiCtxOwned {
                 tool_result_json_len: 0,
                 event_context_json_ptr: std::ptr::null(),
                 event_context_json_len: 0,
+                messages_json_ptr: std::ptr::null(),
+                messages_json_len: 0,
             },
         };
         // 让 raw 中的指针指向 owned 中的字符串数据
@@ -417,6 +434,7 @@ impl FfiCtxOwned {
             &owned.tools_json,
             &owned.tool_result_json,
             &owned.event_context_json,
+            &owned.messages_json,
         );
         owned
     }
