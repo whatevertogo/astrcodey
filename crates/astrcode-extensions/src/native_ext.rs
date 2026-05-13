@@ -160,7 +160,10 @@ impl ToolHandler for FfiToolHandler {
                     ))
                 })?;
                 let mut metadata = std::collections::BTreeMap::new();
-                metadata.insert("extension_tool_outcome".into(), outcome_json);
+                metadata.insert(
+                    astrcode_core::extension::EXTENSION_TOOL_OUTCOME_KEY.into(),
+                    outcome_json,
+                );
                 Ok(ToolResult {
                     call_id: ctx.tool_call_id.clone().unwrap_or_default(),
                     content: String::new(),

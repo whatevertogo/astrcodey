@@ -675,7 +675,10 @@ impl Tool for HandlerTool {
             },
         };
 
-        if let Some(outcome_value) = result.metadata.remove("extension_tool_outcome") {
+        if let Some(outcome_value) = result
+            .metadata
+            .remove(astrcode_core::extension::EXTENSION_TOOL_OUTCOME_KEY)
+        {
             if let Ok(ExtensionToolOutcome::RunSession {
                 name,
                 system_prompt,

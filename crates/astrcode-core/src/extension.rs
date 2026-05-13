@@ -280,6 +280,12 @@ pub enum ExtensionError {
 
 // ─── Extension Tool Outcome ───────────────────────────────────────────────
 
+/// ToolResult.metadata 中用于携带 [`ExtensionToolOutcome`] 的键名。
+///
+/// 扩展工具通过此键将声明式结果（如 `RunSession`）传递给运行器，
+/// 运行器再解释并执行对应的副作用。
+pub const EXTENSION_TOOL_OUTCOME_KEY: &str = "extension_tool_outcome";
+
 /// 扩展工具回调返回的声明式结果。
 ///
 /// 扩展返回这些变体而非直接调用宿主原语，由运行器解释每个变体：

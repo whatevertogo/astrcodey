@@ -45,6 +45,14 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub(crate) prompt_files: PromptFiles,
 }
 
+// ─── AgentSessionControl 延迟注入槽 ────────────────────────────────────
+
+/// `AgentSessionControl` 的延迟注入容器。
+///
+/// Bootstrap 时创建空槽位，spawn_actor 后注入 `CommandHandle` 实现。
+/// 消费者通过 `.read().clone()` 获取 `Option<Arc<...>>`。
+pub(crate) type AgentSessionControlSlot = Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>>;
+
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
 /// 启动时组装的所有服务集合，按领域分组。
@@ -72,8 +80,11 @@ pub struct ServerRuntime {
     pub raw_config: RwLock<astrcode_core::config::Config>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
-    /// AgentSessionControl 共享引用（延迟注入：spawn_actor 后绑定 CommandHandle）。
-    pub agent_session_control: Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>>,
+    /// AgentSessionControl 延迟注入槽。
+    ///
+    /// bootstrap 时为空；spawn_actor 后绑定 `CommandHandle` 实现。
+    /// 通过 `RwLock` 允许所有持有 `Arc` 的消费者读取当前值。
+    pub agent_session_control: AgentSessionControlSlot,
 }
 
 impl ServerRuntime {
@@ -263,8 +274,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     }
 
     // 共享的 agent_session_control slot，runtime 和 spawner 都读它。
-    let agent_session_control_slot: Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>> =
-        Arc::new(RwLock::new(None));
+    let agent_session_control_slot: AgentSessionControlSlot = Arc::new(RwLock::new(None));
 
     // 7. 给扩展运行时绑定”创建子会话”的宿主能力。
     //

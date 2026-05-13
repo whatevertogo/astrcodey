@@ -205,6 +205,8 @@ impl ActiveTurn {
 }
 
 impl CommandHandler {
+    // ─── 命令路由 ────────────────────────────────────────────────────────
+
     /// 处理一个客户端命令，将其路由到对应的处理方法。
     ///
     /// 支持的命令包括：创建会话、提交提示词、列出会话、中止回合、
@@ -342,6 +344,8 @@ impl CommandHandler {
         Ok(())
     }
 
+    // ─── 会话生命周期 ──────────────────────────────────────────────────
+
     /// 发送当前活跃会话快照，用于客户端初次同步或事件流 lag 后恢复。
     async fn send_current_state(&mut self) {
         let Some(session_id) = self.active_session_id.clone() else {
@@ -415,6 +419,8 @@ impl CommandHandler {
         }
     }
 
+    // ─── 提示词提交与回合管理 ──────────────────────────────────────────
+
     /// 提交用户提示词，创建回合并在后台启动 Agent 处理。
     ///
     /// 如果已有回合在运行则拒绝（返回 40900 错误）。
@@ -430,6 +436,8 @@ impl CommandHandler {
             },
         }
     }
+
+    // ─── 斜杠命令 ──────────────────────────────────────────────────────
 
     /// 向指定会话提交用户输入。斜杠命令在这里被后端统一拦截和派发。
     pub async fn submit_input_for_session(
@@ -685,6 +693,8 @@ impl CommandHandler {
         infos
     }
 
+    // ─── 辅助查询 ──────────────────────────────────────────────────────
+
     async fn active_session_working_dir(&self) -> Result<String, String> {
         let Some(sid) = self.active_session_id.clone() else {
             return Ok(std::env::current_dir()
@@ -785,6 +795,8 @@ impl CommandHandler {
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
     }
+
+    // ─── 工具表与提示词配置 ────────────────────────────────────────────
 
     /// 确保存在活跃会话，如果没有则自动创建一个。
     /// 使用当前工作目录作为新会话的工作目录。
@@ -932,136 +944,14 @@ impl CommandHandler {
         Ok(system_prompt)
     }
 
-    /// 在后台 tokio 任务中启动 Agent 回合处理。
-    ///
-    /// 使用 `tokio::select!` 同时等待 Agent 完成和事件流，
-    /// 确保事件实时广播给客户端。Agent 完成后发送回合完成事件。
+    // ─── Agent Turn 启动 ──────────────────────────────────────────────
+
     fn spawn_agent_turn(&self, input: AgentTurnInput) -> JoinHandle<()> {
         let runtime = self.runtime.clone();
-
-        tokio::spawn(async move {
-            let AgentTurnInput {
-                sid,
-                turn_id,
-                working_dir,
-                tool_registry,
-                system_prompt,
-                history,
-                text,
-                transient_instructions,
-                actor_tx,
-            } = input;
-            let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
-
-            let (background_result_tx, mut background_result_rx) =
-                mpsc::unbounded_channel::<BackgroundTaskCompletion>();
-
-            let bg_actor_tx = actor_tx.clone();
-            tokio::spawn(async move {
-                while let Some(completion) = background_result_rx.recv().await {
-                    let _ = bg_actor_tx.send(CommandMessage::BackgroundTaskCompleted(completion));
-                }
-            });
-
-            let model_id = runtime.read_effective().llm.model_id.clone();
-            let system_prompt = transient_instructions
-                .filter(|instructions| !instructions.trim().is_empty())
-                .map(|instructions| {
-                    format!(
-                        "{system_prompt}\n\n[Slash Command Instructions]\n{}",
-                        instructions.trim()
-                    )
-                })
-                .unwrap_or(system_prompt);
-
-            let agent = AgentLoop::new(
-                sid.clone(),
-                working_dir,
-                system_prompt,
-                model_id,
-                AgentServices {
-                    llm: runtime.read_llm_provider(),
-                    tool_registry,
-                    extension_runner: runtime.extension_runner.clone(),
-                    context_assembler: runtime.context_assembler.clone(),
-                    session_manager: runtime.session_manager.clone(),
-                    auto_compact_failures: runtime.auto_compact_failures.clone(),
-                    background_result_tx: Some(background_result_tx),
-                    background_tasks: runtime.background_tasks.clone(),
-                    agent_session_control: runtime.agent_session_control.read().clone(),
-                },
-            );
-
-            let (output, emitted_error) = drive_agent(&agent, &text, history, |signal| {
-                let actor_tx = actor_tx.clone();
-                let current_session_id = Arc::clone(&current_session_id);
-                let turn_id = turn_id.clone();
-                async move {
-                    match signal {
-                        AgentSignal::Event(payload) => {
-                            let session_id = current_session_id.lock().await.clone();
-                            let _ = actor_tx.send(CommandMessage::AgentEvent {
-                                session_id,
-                                turn_id,
-                                payload,
-                            });
-                        },
-                        AgentSignal::AutoCompact {
-                            trigger,
-                            compaction,
-                            reply,
-                        } => {
-                            let session_id = current_session_id.lock().await.clone();
-                            let (actor_reply, actor_rx) = oneshot::channel();
-                            let result: Result<SessionId, HandlerError> = if actor_tx
-                                .send(CommandMessage::AgentAutoCompact {
-                                    session_id,
-                                    turn_id,
-                                    trigger,
-                                    compaction,
-                                    reply: actor_reply,
-                                })
-                                .is_err()
-                            {
-                                Err(HandlerError::Other("command actor is unavailable".into()))
-                            } else {
-                                match actor_rx.await {
-                                    Ok(result) => result,
-                                    Err(_) => Err(HandlerError::Other(
-                                        "command actor dropped auto compact response".into(),
-                                    )),
-                                }
-                            };
-                            if let Ok(child_session_id) = &result {
-                                *current_session_id.lock().await = child_session_id.clone();
-                            }
-                            let _ = reply.send(result.map_err(|e| e.to_string()));
-                        },
-                    }
-                }
-            })
-            .await;
-            let final_session_id = current_session_id.lock().await.clone();
-
-            match output {
-                Ok(output) => {
-                    let _ = actor_tx.send(CommandMessage::AgentTurnFinished {
-                        session_id: final_session_id,
-                        turn_id,
-                        output,
-                    });
-                },
-                Err(error) => {
-                    let _ = actor_tx.send(CommandMessage::AgentTurnFailed {
-                        session_id: final_session_id,
-                        turn_id,
-                        error,
-                        emitted_error,
-                    });
-                },
-            }
-        })
+        tokio::spawn(run_agent_turn_task(runtime, input))
     }
+
+    // ─── 事件记录与内部辅助 ──────────────────────────────────────────
 
     /// 记录事件到存储并广播给客户端的便捷方法。
     async fn record_and_broadcast(
@@ -1192,6 +1082,142 @@ impl CommandHandler {
             code,
             message: message.into(),
         });
+    }
+}
+
+// ─── Agent Turn 后台任务 ──────────────────────────────────────────────
+
+/// Agent 回合的完整执行流程，作为独立的 tokio 任务运行。
+///
+/// 1. 建立后台任务完成转发通道。
+/// 2. 组装 `AgentLoop`（含 provider、工具表、扩展等）。
+/// 3. 调用 `drive_agent` 驱动 LLM ↔ 工具循环。
+/// 4. 通过 actor channel 将完成/失败结果发回 `CommandHandler`。
+async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput) {
+    let AgentTurnInput {
+        sid,
+        turn_id,
+        working_dir,
+        tool_registry,
+        system_prompt,
+        history,
+        text,
+        transient_instructions,
+        actor_tx,
+    } = input;
+
+    // 后台子任务完成时，转发到 actor 以便记录到会话。
+    let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
+    let (background_result_tx, mut background_result_rx) =
+        mpsc::unbounded_channel::<BackgroundTaskCompletion>();
+    {
+        let bg_actor_tx = actor_tx.clone();
+        tokio::spawn(async move {
+            while let Some(completion) = background_result_rx.recv().await {
+                let _ = bg_actor_tx.send(CommandMessage::BackgroundTaskCompleted(completion));
+            }
+        });
+    }
+
+    // 合并 transient instructions（斜杠命令注入的一次性指令）。
+    let model_id = runtime.read_effective().llm.model_id.clone();
+    let system_prompt = transient_instructions
+        .filter(|instructions| !instructions.trim().is_empty())
+        .map(|instructions| {
+            format!(
+                "{system_prompt}\n\n[Slash Command Instructions]\n{}",
+                instructions.trim()
+            )
+        })
+        .unwrap_or(system_prompt);
+
+    let agent = AgentLoop::new(
+        sid.clone(),
+        working_dir,
+        system_prompt,
+        model_id,
+        AgentServices {
+            llm: runtime.read_llm_provider(),
+            tool_registry,
+            extension_runner: runtime.extension_runner.clone(),
+            context_assembler: runtime.context_assembler.clone(),
+            session_manager: runtime.session_manager.clone(),
+            auto_compact_failures: runtime.auto_compact_failures.clone(),
+            background_result_tx: Some(background_result_tx),
+            background_tasks: runtime.background_tasks.clone(),
+            agent_session_control: runtime.agent_session_control.read().clone(),
+        },
+    );
+
+    // 驱动 LLM ↔ 工具循环，信号回调将事件转发给 CommandHandler。
+    let (output, emitted_error) = drive_agent(&agent, &text, history, |signal| {
+        let actor_tx = actor_tx.clone();
+        let current_session_id = Arc::clone(&current_session_id);
+        let turn_id = turn_id.clone();
+        async move {
+            match signal {
+                AgentSignal::Event(payload) => {
+                    let session_id = current_session_id.lock().await.clone();
+                    let _ = actor_tx.send(CommandMessage::AgentEvent {
+                        session_id,
+                        turn_id,
+                        payload,
+                    });
+                },
+                AgentSignal::AutoCompact {
+                    trigger,
+                    compaction,
+                    reply,
+                } => {
+                    let session_id = current_session_id.lock().await.clone();
+                    let (actor_reply, actor_rx) = oneshot::channel();
+                    let result: Result<SessionId, HandlerError> = if actor_tx
+                        .send(CommandMessage::AgentAutoCompact {
+                            session_id,
+                            turn_id,
+                            trigger,
+                            compaction,
+                            reply: actor_reply,
+                        })
+                        .is_err()
+                    {
+                        Err(HandlerError::Other("command actor is unavailable".into()))
+                    } else {
+                        match actor_rx.await {
+                            Ok(result) => result,
+                            Err(_) => Err(HandlerError::Other(
+                                "command actor dropped auto compact response".into(),
+                            )),
+                        }
+                    };
+                    if let Ok(child_session_id) = &result {
+                        *current_session_id.lock().await = child_session_id.clone();
+                    }
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                },
+            }
+        }
+    })
+    .await;
+    let final_session_id = current_session_id.lock().await.clone();
+
+    // 将完成/失败结果发回 CommandHandler actor。
+    match output {
+        Ok(output) => {
+            let _ = actor_tx.send(CommandMessage::AgentTurnFinished {
+                session_id: final_session_id,
+                turn_id,
+                output,
+            });
+        },
+        Err(error) => {
+            let _ = actor_tx.send(CommandMessage::AgentTurnFailed {
+                session_id: final_session_id,
+                turn_id,
+                error,
+                emitted_error,
+            });
+        },
     }
 }
 

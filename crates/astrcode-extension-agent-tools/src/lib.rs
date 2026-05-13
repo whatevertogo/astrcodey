@@ -13,8 +13,8 @@ use std::{
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionError, ExtensionToolOutcome, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolHandler,
+        EXTENSION_TOOL_OUTCOME_KEY, Extension, ExtensionError, ExtensionToolOutcome,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{
@@ -252,7 +252,7 @@ impl ToolHandler for AgentToolHandler {
             String::new(),
             false,
             tool_metadata([
-                ("extension_tool_outcome", outcome_json),
+                (EXTENSION_TOOL_OUTCOME_KEY, outcome_json),
                 (UI_RENDER_METADATA_KEY, render_json),
             ]),
         ))
