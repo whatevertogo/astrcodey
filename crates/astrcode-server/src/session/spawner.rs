@@ -35,7 +35,6 @@ use crate::{
     },
 };
 
-
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
 ///
 /// 当扩展返回 `ExtensionToolOutcome::RunSession` 时，
@@ -50,6 +49,24 @@ pub(crate) struct ServerSessionSpawner {
     // bind 时从 effective.llm 快照，不会随配置热更新变化。
     // TODO: 如需配置热更新生效，改为持有 RwLock<EffectiveConfig> 引用，在 spawn 时动态读取。
     pub(crate) read_timeout_secs: u64,
+    pub(crate) agent_session_control: crate::bootstrap::AgentSessionControlSlot,
+}
+
+// ─── spawn() 入口与准备阶段 ────────────────────────────────────────────
+
+/// `prepare_child_session()` 的产出，传给 `spawn_sync` / `spawn_async`。
+struct PreparedChild {
+    parent_session_id: SessionId,
+    child_sid: SessionId,
+    child_turn_id: TurnId,
+    child_name: String,
+    user_prompt: String,
+    tool_call_id: Option<String>,
+    system_prompt: String,
+    model_id: String,
+    agent: AgentLoop,
+    progress: ProgressTx,
+    current_child_sid: Arc<Mutex<SessionId>>,
 }
 
 #[async_trait::async_trait]
@@ -59,8 +76,33 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         parent_session_id: &str,
         request: SpawnRequest,
     ) -> Result<SpawnResult, String> {
+        let wait_for_result = request.wait_for_result;
+        let prepared = self
+            .prepare_child_session(parent_session_id, request)
+            .await?;
+        if wait_for_result {
+            self.spawn_sync(prepared).await
+        } else {
+            self.spawn_async(prepared).await
+        }
+    }
+}
+
+impl ServerSessionSpawner {
+    fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
+        self.llm_provider.read().clone()
+    }
+
+    /// 共享准备阶段：创建子会话、构建 prompt、初始化 AgentLoop。
+    ///
+    /// 无论同步还是异步路径，都需要完成这些步骤。
+    async fn prepare_child_session(
+        &self,
+        parent_session_id: &str,
+        request: SpawnRequest,
+    ) -> Result<PreparedChild, String> {
         let parent_session_id = SessionId::from(parent_session_id);
-        let tool_call_id_clone = request.tool_call_id.clone();
+        let tool_call_id = request.tool_call_id.clone();
         let progress = ProgressTx::new(request.tool_call_id, request.event_tx);
         let child_name = request.name.clone();
         let user_prompt = request.user_prompt.clone();
@@ -83,7 +125,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
 
         let child_sid = create_event.session_id.clone();
 
-        // 向父 session 记录派生关系
         self.session_manager
             .append_event(Event::new(
                 parent_session_id.clone(),
@@ -157,11 +198,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         let current_child_sid = Arc::new(Mutex::new(child_sid.clone()));
         let child_bg_final_sid = Arc::clone(&current_child_sid);
 
-        // 子会话的后台任务完成通道。
-        // watcher 通过此通道发送 BackgroundTaskCompletion，
-        // 下面的 spawned task 将其转为事件持久化到子会话存储。
-        // 注意：需要共享 current_child_sid 以便 compact continuation 后
-        // 也能正确定位最终的 leaf session。
         let (child_bg_result_tx, mut child_bg_result_rx) =
             mpsc::unbounded_channel::<BackgroundTaskCompletion>();
 
@@ -171,7 +207,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
         tokio::spawn(async move {
             while let Some(completion) = child_bg_result_rx.recv().await {
                 let sid = child_bg_final_sid.lock().await.clone();
-                // 持久化 ToolCallCompleted 到子会话
                 if let Err(e) = append_child_payload(
                     child_bg_sm.as_ref(),
                     &sid,
@@ -182,7 +217,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 {
                     tracing::warn!(session_id = %sid, error = %e, "failed to persist ToolCallCompleted for background task");
                 }
-                // BackgroundTaskCompleted 是 live UI 状态；append_child_payload 会跳过持久化。
                 let bg_event = completion.to_background_task_completed();
                 if let Err(e) = append_child_payload(
                     child_bg_sm.as_ref(),
@@ -212,157 +246,41 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                 auto_compact_failures: Arc::clone(&self.auto_compact_failures),
                 background_result_tx: Some(child_bg_result_tx),
                 background_tasks: Arc::clone(&self.background_tasks),
+                agent_session_control: self.agent_session_control.read().clone(),
             },
         );
 
-        // ── 异步路径：tokio::spawn 后立即返回占位结果 ────────────────
-        if !request.wait_for_result {
-            let task_id = new_background_task_id();
-            let task_id_str = task_id.to_string();
+        Ok(PreparedChild {
+            parent_session_id,
+            child_sid,
+            child_turn_id,
+            child_name,
+            user_prompt,
+            tool_call_id,
+            system_prompt,
+            model_id,
+            agent,
+            progress,
+            current_child_sid,
+        })
+    }
 
-            let parent_sid = parent_session_id.clone();
-            let parent_sm = Arc::clone(&self.session_manager);
-            let watcher_bg_tasks = Arc::clone(&self.background_tasks);
-            let watcher_task_id = task_id.clone();
-            let watcher_progress = progress.clone();
-            let tool_call_id_for_result = tool_call_id_clone.clone();
-            let cti_for_completion = child_turn_id.clone();
-            let drive_session_manager = Arc::clone(&self.session_manager);
-            let drive_current_child_sid = Arc::clone(&current_child_sid);
-            let drive_child_turn_id = child_turn_id.clone();
-            let drive_progress = progress.clone();
-            let drive_system_prompt = system_prompt.clone();
-            let async_child_sid = child_sid.clone();
-            let return_child_sid = child_sid.clone();
+    // ─── 同步路径 ────────────────────────────────────────────────────
 
-            let agent_handle = tokio::spawn(async move {
-                let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
-                    &agent,
-                    &user_prompt,
-                    drive_session_manager,
-                    drive_current_child_sid,
-                    drive_child_turn_id,
-                    drive_progress,
-                    drive_system_prompt,
-                )
-                .await;
+    /// 阻塞等待子 Agent 完成并返回结果。
+    async fn spawn_sync(&self, p: PreparedChild) -> Result<SpawnResult, String> {
+        let PreparedChild {
+            parent_session_id,
+            child_sid,
+            child_turn_id,
+            user_prompt,
+            system_prompt,
+            agent,
+            progress,
+            current_child_sid,
+            ..
+        } = p;
 
-                let result_content = match &output {
-                    Ok(o) => {
-                        let _ = append_child_progress_payloads(
-                            parent_sm.as_ref(),
-                            &watcher_progress,
-                            &final_child_sid,
-                            Some(&cti_for_completion),
-                            agent_turn_completed_payloads(o.finish_reason.clone()),
-                        )
-                        .await;
-                        let _ = parent_sm
-                            .append_event(Event::new(
-                                parent_sid.clone(),
-                                None,
-                                EventPayload::AgentSessionCompleted {
-                                    child_session_id: async_child_sid.clone(),
-                                    final_session_id: final_child_sid.clone(),
-                                    summary: one_line_summary(&o.text),
-                                },
-                            ))
-                            .await;
-                        o.text.clone()
-                    },
-                    Err(e) => {
-                        let _ = append_child_progress_payloads(
-                            parent_sm.as_ref(),
-                            &watcher_progress,
-                            &final_child_sid,
-                            Some(&cti_for_completion),
-                            agent_turn_failed_payloads(
-                                (!emitted_error).then(|| e.to_string()),
-                                "error".into(),
-                            ),
-                        )
-                        .await;
-                        watcher_progress.emit(
-                            ToolOutputStream::Stderr,
-                            format!("child agent error: {e}\n"),
-                        );
-                        let _ = parent_sm
-                            .append_event(Event::new(
-                                parent_sid.clone(),
-                                None,
-                                EventPayload::AgentSessionFailed {
-                                    child_session_id: async_child_sid.clone(),
-                                    final_session_id: final_child_sid.clone(),
-                                    error: e.to_string(),
-                                },
-                            ))
-                            .await;
-                        format!("child agent error: {e}")
-                    },
-                };
-
-                // 向父 session 追加 ToolCallCompleted，让下一轮 projection 可见
-                if let Some(call_id) = &tool_call_id_for_result {
-                    let mut meta = std::collections::BTreeMap::new();
-                    meta.insert(
-                        "task_id".into(),
-                        serde_json::json!(watcher_task_id.to_string()),
-                    );
-
-                    let result = astrcode_core::tool::ToolResult {
-                        call_id: call_id.clone(),
-                        content: result_content,
-                        is_error: output.is_err(),
-                        error: output.as_ref().err().map(|e| e.to_string()),
-                        metadata: meta,
-                        duration_ms: None,
-                    };
-                    let _ = parent_sm
-                        .append_event(Event::new(
-                            parent_sid.clone(),
-                            None,
-                            EventPayload::ToolCallCompleted {
-                                call_id: ToolCallId::from(call_id.as_str()),
-                                tool_name: "agent".into(),
-                                result,
-                            },
-                        ))
-                        .await;
-                }
-
-                complete_background_task(&watcher_bg_tasks, &watcher_task_id);
-            });
-
-            // 异步 agent 只有一个 handle；注册一个空 watcher 以复用现有取消接口。
-            // TODO: 前端 UI 入口设计中——用户如何取消异步 agent（ESC / 任务面板）
-            let dummy_watcher = tokio::spawn(async {});
-            self.background_tasks.lock().register(
-                task_id.clone(),
-                parent_session_id.clone(),
-                agent_handle,
-                dummy_watcher,
-            );
-
-            // 向父 session 记录异步派生关系
-            progress.emit(
-                ToolOutputStream::Stdout,
-                format!(
-                    "async child agent '{child_name}' launched: {return_child_sid} using \
-                     {model_id}\n"
-                ),
-            );
-
-            return Ok(SpawnResult {
-                content: format!(
-                    "异步 agent 已启动。完成后结果将在下一轮对话中可用。\nagent: {child_name} | \
-                     session: {return_child_sid}"
-                ),
-                child_session_id: return_child_sid.into_string(),
-                background_task_id: Some(task_id_str),
-            });
-        }
-
-        // ── 同步路径：阻塞等待子 agent 完成 ───────────────────────
         let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
             &agent,
             &user_prompt,
@@ -370,7 +288,7 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             current_child_sid,
             child_turn_id.clone(),
             progress.clone(),
-            system_prompt.clone(),
+            system_prompt,
         )
         .await;
 
@@ -384,10 +302,9 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     agent_turn_completed_payloads(output.finish_reason.clone()),
                 )
                 .await?;
-                // 向父会话记录子 Agent 完成状态
                 self.session_manager
                     .append_event(Event::new(
-                        parent_session_id.clone(),
+                        parent_session_id,
                         None,
                         EventPayload::AgentSessionCompleted {
                             child_session_id: child_sid.clone(),
@@ -419,10 +336,9 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
                     ToolOutputStream::Stderr,
                     format!("child agent error: {e}\n"),
                 );
-                // 向父会话记录子 Agent 失败状态
                 self.session_manager
                     .append_event(Event::new(
-                        parent_session_id.clone(),
+                        parent_session_id,
                         None,
                         EventPayload::AgentSessionFailed {
                             child_session_id: child_sid.clone(),
@@ -440,13 +356,169 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
             },
         }
     }
-}
 
-impl ServerSessionSpawner {
-    fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.llm_provider.read().clone()
+    // ─── 异步路径 ────────────────────────────────────────────────────
+
+    /// 启动子 Agent 后立即返回占位结果，Agent 在后台完成。
+    async fn spawn_async(&self, p: PreparedChild) -> Result<SpawnResult, String> {
+        let PreparedChild {
+            parent_session_id,
+            child_sid,
+            child_turn_id,
+            child_name,
+            user_prompt,
+            tool_call_id,
+            system_prompt,
+            model_id,
+            agent,
+            progress,
+            current_child_sid,
+        } = p;
+
+        let task_id = new_background_task_id();
+        let task_id_str = task_id.to_string();
+
+        let parent_sid = parent_session_id.clone();
+        let parent_sm = Arc::clone(&self.session_manager);
+        let watcher_bg_tasks = Arc::clone(&self.background_tasks);
+        let watcher_task_id = task_id.clone();
+        let watcher_progress = progress.clone();
+        let tool_call_id_for_result = tool_call_id.clone();
+        let cti_for_completion = child_turn_id.clone();
+        let drive_session_manager = Arc::clone(&self.session_manager);
+        let drive_current_child_sid = Arc::clone(&current_child_sid);
+        let drive_child_turn_id = child_turn_id.clone();
+        let drive_progress = progress.clone();
+        let drive_system_prompt = system_prompt.clone();
+        let async_child_sid = child_sid.clone();
+        let return_child_sid = child_sid.clone();
+
+        let agent_handle = tokio::spawn(async move {
+            let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
+                &agent,
+                &user_prompt,
+                drive_session_manager,
+                drive_current_child_sid,
+                drive_child_turn_id,
+                drive_progress,
+                drive_system_prompt,
+            )
+            .await;
+
+            let result_content = match &output {
+                Ok(o) => {
+                    let _ = append_child_progress_payloads(
+                        parent_sm.as_ref(),
+                        &watcher_progress,
+                        &final_child_sid,
+                        Some(&cti_for_completion),
+                        agent_turn_completed_payloads(o.finish_reason.clone()),
+                    )
+                    .await;
+                    let _ = parent_sm
+                        .append_event(Event::new(
+                            parent_sid.clone(),
+                            None,
+                            EventPayload::AgentSessionCompleted {
+                                child_session_id: async_child_sid.clone(),
+                                final_session_id: final_child_sid.clone(),
+                                summary: one_line_summary(&o.text),
+                            },
+                        ))
+                        .await;
+                    o.text.clone()
+                },
+                Err(e) => {
+                    let _ = append_child_progress_payloads(
+                        parent_sm.as_ref(),
+                        &watcher_progress,
+                        &final_child_sid,
+                        Some(&cti_for_completion),
+                        agent_turn_failed_payloads(
+                            (!emitted_error).then(|| e.to_string()),
+                            "error".into(),
+                        ),
+                    )
+                    .await;
+                    watcher_progress.emit(
+                        ToolOutputStream::Stderr,
+                        format!("child agent error: {e}\n"),
+                    );
+                    let _ = parent_sm
+                        .append_event(Event::new(
+                            parent_sid.clone(),
+                            None,
+                            EventPayload::AgentSessionFailed {
+                                child_session_id: async_child_sid.clone(),
+                                final_session_id: final_child_sid.clone(),
+                                error: e.to_string(),
+                            },
+                        ))
+                        .await;
+                    format!("child agent error: {e}")
+                },
+            };
+
+            if let Some(call_id) = &tool_call_id_for_result {
+                let mut meta = std::collections::BTreeMap::new();
+                meta.insert(
+                    "task_id".into(),
+                    serde_json::json!(watcher_task_id.to_string()),
+                );
+
+                let result = astrcode_core::tool::ToolResult {
+                    call_id: call_id.clone(),
+                    content: result_content,
+                    is_error: output.is_err(),
+                    error: output.as_ref().err().map(|e| e.to_string()),
+                    metadata: meta,
+                    duration_ms: None,
+                };
+                let _ = parent_sm
+                    .append_event(Event::new(
+                        parent_sid.clone(),
+                        None,
+                        EventPayload::ToolCallCompleted {
+                            call_id: ToolCallId::from(call_id.as_str()),
+                            tool_name: "agent".into(),
+                            result,
+                        },
+                    ))
+                    .await;
+            }
+
+            complete_background_task(&watcher_bg_tasks, &watcher_task_id);
+        });
+
+        // 异步 agent 只有一个 handle；注册一个空 watcher 以复用现有取消接口。
+        // TODO: 前端 UI 入口设计中——用户如何取消异步 agent（ESC / 任务面板）
+        let dummy_watcher = tokio::spawn(async {});
+        self.background_tasks.lock().register(
+            task_id.clone(),
+            parent_session_id,
+            agent_handle,
+            dummy_watcher,
+        );
+
+        progress.emit(
+            ToolOutputStream::Stdout,
+            format!(
+                "async child agent '{child_name}' launched: {return_child_sid} using {model_id}\n"
+            ),
+        );
+
+        Ok(SpawnResult {
+            content: format!(
+                "异步 agent 已启动。完成后结果将在下一轮对话中可用。\nagent: {child_name} | \
+                 session: {return_child_sid}"
+            ),
+            child_session_id: return_child_sid.into_string(),
+            background_task_id: Some(task_id_str),
+        })
     }
 }
+
+// ─── 子 Agent 驱动 ────────────────────────────────────────────────────
 
 async fn drive_child_agent_turn(
     agent: &AgentLoop,
@@ -511,13 +583,9 @@ async fn drive_child_agent_turn(
     (output, emitted_error, final_child_sid)
 }
 
-/// 沿 `parent_session_id` 链路向上遍历，计算从根会话到指定会话的嵌套深度。
-///
-/// 根会话（无 `parent_session_id`）深度为 0，其子会话深度为 1，以此类推。
+// ─── 进度转发 ─────────────────────────────────────────────────────────
+
 /// 将子 agent 事件转发为父级工具调用的 [`ToolOutputDelta`] 进度事件。
-///
-/// 持有父级工具调用 ID 和事件发送通道。`emit` 发送字符串消息，
-/// `forward` 将子 agent 事件自动转译为对应的进度描述。
 #[derive(Clone)]
 struct ProgressTx {
     call_id: Option<String>,
@@ -549,6 +617,8 @@ impl ProgressTx {
         }
     }
 }
+
+// ─── 子会话事件持久化 ──────────────────────────────────────────────────
 
 async fn append_child_payload(
     session_manager: &SessionManager,
@@ -665,6 +735,8 @@ fn one_line_summary(text: &str) -> String {
     crate::http::compact_inline(text, 159)
 }
 
+// ─── 测试 ──────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -780,6 +852,7 @@ mod tests {
             background_tasks: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
+            agent_session_control: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -849,6 +922,7 @@ mod tests {
             background_tasks: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
+            agent_session_control: Arc::new(RwLock::new(None)),
         };
         *llm_provider.write() = Arc::new(StaticTextLlm { text: "new" });
 
@@ -889,6 +963,7 @@ mod tests {
             background_tasks: Arc::clone(&background_tasks),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
+            agent_session_control: Arc::new(RwLock::new(None)),
         };
 
         let result = spawner

@@ -161,8 +161,9 @@ async fn execute_tool_call_blocking(
             model_id: Some(runtime.model_id),
             available_tools: Some(runtime.tools),
             tool_result_reader: runtime.tool_result_reader,
-            background_task_reader: runtime.background_task_reader,
-            file_observation_store: runtime.file_observation_store,
+            background_task_reader: runtime.capabilities.background_task_reader,
+            file_observation_store: runtime.capabilities.file_observation_store,
+            agent_session_control: runtime.capabilities.agent_session_control,
         },
     };
 
@@ -235,8 +236,9 @@ async fn execute_tool_call_with_background(
             model_id: Some(runtime.model_id.clone()),
             available_tools: Some(runtime.tools.clone()),
             tool_result_reader: runtime.tool_result_reader.clone(),
-            background_task_reader: runtime.background_task_reader.clone(),
-            file_observation_store: runtime.file_observation_store.clone(),
+            background_task_reader: runtime.capabilities.background_task_reader.clone(),
+            file_observation_store: runtime.capabilities.file_observation_store.clone(),
+            agent_session_control: runtime.capabilities.agent_session_control.clone(),
         },
     };
 
@@ -355,8 +357,8 @@ async fn background_tool_call(
     let bg_tool_name = tool_name.clone();
     let bg_task_id = task_id.clone();
     let bg_session_id = runtime.session_id.clone();
-    let bg_result_tx = runtime.background_result_tx.clone();
-    let bg_manager = runtime.background_tasks.clone();
+    let bg_result_tx = runtime.capabilities.background_result_tx.clone();
+    let bg_manager = runtime.capabilities.background_tasks.clone();
     let register_task_id = task_id.clone();
 
     let watcher_handle = tokio::spawn(async move {
@@ -409,7 +411,7 @@ async fn background_tool_call(
     });
 
     // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）
-    let mut mgr = runtime.background_tasks.lock();
+    let mut mgr = runtime.capabilities.background_tasks.lock();
     mgr.register(
         register_task_id,
         runtime.session_id.clone(),

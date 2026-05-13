@@ -836,6 +836,7 @@ where
         auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
         background_result_tx: None,
         background_tasks: Default::default(),
+        agent_session_control: None,
     }
 }
 
@@ -1307,6 +1308,7 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
             background_tasks: Default::default(),
+            agent_session_control: None,
         },
     );
 
@@ -1368,6 +1370,7 @@ async fn read_file_tool_result_is_persisted_when_exceeds_limit() {
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
             background_tasks: Default::default(),
+            agent_session_control: None,
         },
     );
 
@@ -1457,6 +1460,7 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
             background_tasks: Default::default(),
+            agent_session_control: None,
         },
     );
 
@@ -1775,6 +1779,7 @@ async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
             auto_compact_failures,
             background_result_tx: None,
             background_tasks: Default::default(),
+            agent_session_control: None,
         },
     );
     let mut history = Vec::new();

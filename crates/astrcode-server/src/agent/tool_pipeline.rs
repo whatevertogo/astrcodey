@@ -9,7 +9,7 @@ use astrcode_core::{
     extension::{PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult},
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
-    tool::{BackgroundTaskReader, ExecutionMode, ToolDefinition, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_support::tool_results::{
@@ -20,15 +20,14 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
 use super::{
-    background::BackgroundTaskManager,
     shared_context::{
         AgentError, AgentSignal, SharedTurnContext, TOOL_SEARCH_TOOL_NAME, send_event,
     },
     tool_exec::execute_tool_call,
     tool_types::{
-        BackgroundTaskCompletion, CommitToolResults, ExecutableToolCall, ExecuteToolCalls,
-        PendingCommittedToolResult, PendingToolCall, PreparedToolCall, PreparedToolOutcome,
-        ToolCallRuntimeContext, ToolExecutionStep, committed_tool_result_content_len,
+        CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
+        PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolCallRuntimeContext,
+        ToolExecutionStep, ToolRuntimeCapabilities, committed_tool_result_content_len,
         missing_tool_result, send_tool_requested,
     },
     util::{discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible},
@@ -42,33 +41,23 @@ pub(in crate::agent) struct ToolPipeline {
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<ExtensionRunner>,
     session_manager: Arc<SessionManager>,
-    background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-    background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
-    background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
-    file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
+    capabilities: ToolRuntimeCapabilities,
 }
 
 impl ToolPipeline {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         shared: SharedTurnContext,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
         session_manager: Arc<SessionManager>,
-        background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-        background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
-        background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
-        file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
+        capabilities: ToolRuntimeCapabilities,
     ) -> Self {
         Self {
             shared,
             tool_registry,
             extension_runner,
             session_manager,
-            background_result_tx,
-            background_tasks,
-            background_task_reader,
-            file_observation_store,
+            capabilities,
         }
     }
 
@@ -91,10 +80,7 @@ impl ToolPipeline {
                 Arc::clone(&self.session_manager) as Arc<dyn ToolResultArtifactReader>
             ),
             event_tx,
-            background_result_tx: self.background_result_tx.clone(),
-            background_tasks: self.background_tasks.clone(),
-            background_task_reader: self.background_task_reader.clone(),
-            file_observation_store: self.file_observation_store.clone(),
+            capabilities: self.capabilities.clone(),
         }
     }
 

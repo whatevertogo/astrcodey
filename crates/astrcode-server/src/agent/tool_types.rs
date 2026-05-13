@@ -9,8 +9,8 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
     tool::{
-        BackgroundTaskReader, ExecutionMode, FileObservation, FileObservationStore, ToolDefinition,
-        ToolResult,
+        AgentSessionControl, BackgroundTaskReader, ExecutionMode, FileObservation,
+        FileObservationStore, ToolDefinition, ToolResult,
     },
     types::*,
 };
@@ -117,14 +117,7 @@ pub(crate) struct ToolCallRuntimeContext {
     pub(super) tools: Vec<ToolDefinition>,
     pub(super) tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     pub(super) event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-    /// 后台任务完成后的通知通道。
-    pub(super) background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-    /// 后台任务管理器，用于注册 watcher handle 以支持取消。
-    pub(super) background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
-    /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
-    pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
-    /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
-    pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
+    pub(super) capabilities: ToolRuntimeCapabilities,
 }
 
 impl PreparedToolCall {
@@ -207,6 +200,25 @@ pub(crate) fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
 }
 
 use std::sync::Arc;
+
+// ─── Tool runtime capabilities ──────────────────────────────────────────
+
+/// 会话级工具运行时能力，从 ToolPipeline 透传到 ToolExecutionContext。
+///
+/// 整合了后台任务、文件观察、agent 会话控制等按 session 生命周期存在的能力。
+#[derive(Clone)]
+pub(crate) struct ToolRuntimeCapabilities {
+    /// 后台任务完成后的通知通道。
+    pub(super) background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    /// 后台任务管理器，用于注册 watcher handle 以支持取消。
+    pub(super) background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
+    /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
+    pub(super) background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
+    /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
+    pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
+    /// Agent 会话操控能力，用于 send 等工具与子 session 交互。
+    pub(super) agent_session_control: Option<Arc<dyn AgentSessionControl>>,
+}
 
 // ─── File observation store ──────────────────────────────────────────────────
 

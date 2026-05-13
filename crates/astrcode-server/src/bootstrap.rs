@@ -12,7 +12,7 @@ use astrcode_core::{
     extension::{ExtensionError, PromptBuildContext},
     llm::{LlmClientConfig, LlmProvider},
     prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
-    tool::ToolDefinition,
+    tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
 use astrcode_prompt::{composer::PromptComposer, pipeline};
@@ -45,6 +45,14 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub(crate) prompt_files: PromptFiles,
 }
 
+// ─── AgentSessionControl 延迟注入槽 ────────────────────────────────────
+
+/// `AgentSessionControl` 的延迟注入容器。
+///
+/// Bootstrap 时创建空槽位，spawn_actor 后注入 `CommandHandle` 实现。
+/// 消费者通过 `.read().clone()` 获取 `Option<Arc<...>>`。
+pub(crate) type AgentSessionControlSlot = Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>>;
+
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
 /// 启动时组装的所有服务集合，按领域分组。
@@ -72,6 +80,11 @@ pub struct ServerRuntime {
     pub raw_config: RwLock<astrcode_core::config::Config>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
+    /// AgentSessionControl 延迟注入槽。
+    ///
+    /// bootstrap 时为空；spawn_actor 后绑定 `CommandHandle` 实现。
+    /// 通过 `RwLock` 允许所有持有 `Arc` 的消费者读取当前值。
+    pub agent_session_control: AgentSessionControlSlot,
 }
 
 impl ServerRuntime {
@@ -260,7 +273,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!("Extension load error: {err}");
     }
 
-    // 7. 给扩展运行时绑定“创建子会话”的宿主能力。
+    // 共享的 agent_session_control slot，runtime 和 spawner 都读它。
+    let agent_session_control_slot: AgentSessionControlSlot = Arc::new(RwLock::new(None));
+
+    // 7. 给扩展运行时绑定”创建子会话”的宿主能力。
     //
     // 扩展本身不能直接拿到 SessionManager；当扩展工具返回 RunSession 声明式结果时，
     // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
@@ -273,11 +289,12 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         background_tasks: Arc::clone(&background_tasks),
         extension_runner: Arc::clone(&extension_runner),
         read_timeout_secs: effective.llm.read_timeout_secs,
+        agent_session_control: Arc::clone(&agent_session_control_slot),
     }));
 
     // 8. 返回运行时容器。
     //
-    // ServerRuntime 保存的是“共享基础设施”：session、LLM、prompt、扩展、
+    // ServerRuntime 保存的是”共享基础设施”：session、LLM、prompt、扩展、
     // 配置和上下文预算。注意这里故意没有 tool_registry：
     // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
     Ok(ServerRuntime {
@@ -291,6 +308,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         config_store: Arc::new(config_store),
         raw_config: RwLock::new(config),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
+        agent_session_control: agent_session_control_slot,
     })
 }
 

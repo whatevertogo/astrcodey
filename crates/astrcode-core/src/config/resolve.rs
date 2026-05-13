@@ -149,11 +149,12 @@ pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
             Err(_) => {
                 tracing::warn!(
                     key = raw,
-                    "Config value looks like an env var name but the variable is not set; \
-                     using the raw value as API key. Use 'env:{raw}' prefix for explicit env var reference."
+                    "Config value looks like an env var name but the variable is not set; using \
+                     the raw value as API key. Use 'env:{raw}' prefix for explicit env var \
+                     reference."
                 );
                 Ok(raw.into())
-            }
+            },
         }
     } else {
         // 其他情况：直接作为密钥

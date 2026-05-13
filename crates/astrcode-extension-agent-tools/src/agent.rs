@@ -1,12 +1,7 @@
 //! Agent 发现与解析 — 兼容 Claude Code 的 Markdown / YAML frontmatter 格式。
 //!
-//! 支持两种工具列表格式：
-//! - CSV 工具格式 (`tools: read, grep`)
-//! - YAML 列表格式 (`tools: ["read", "grep"]`)
-//!
-//! 扫描目录顺序：
-//! - `~/.astrcode/agents/`、`.astrcode/agents/`
-//! - `~/.claude/agents/`、`.claude/agents/`
+//! 扫描优先级（从低到高）：内置 → 用户级 → 项目级。
+//! 项目级从根到当前目录依次扫描，最近的目录覆盖最远的。
 
 use std::path::PathBuf;
 
@@ -15,15 +10,14 @@ use astrcode_support::{frontmatter, hostpaths};
 /// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Agent 唯一标识（由名称标准化生成）
+    /// 由名称标准化生成的唯一标识。
     pub id: String,
-    /// Agent 显示名称
     pub name: String,
-    /// 描述何时应选择此 Agent
+    /// 描述何时应选择此 Agent（给 LLM 的选择依据）。
     pub description: String,
-    /// 可选的模型偏好，从兼容 Claude 的 frontmatter 中解析
+    /// `None` 或 `"inherit"` 表示继承父会话模型。
     pub model: Option<String>,
-    /// 系统提示词正文（markdown 正文或 systemPrompt/prompt frontmatter 字段）
+    /// 系统提示词正文。
     pub body: String,
 }
 
@@ -119,6 +113,7 @@ fn merge_dir(agents: &mut Vec<AgentConfig>, dir: &std::path::Path, override_exis
             continue;
         };
         let Ok(agent) = parse(&path.to_string_lossy(), &content) else {
+            tracing::warn!(path = %path.display(), "skipping agent file: parse failed");
             continue;
         };
         if override_existing {

@@ -60,10 +60,9 @@ const COMMUNICATION: &str =
      answer, not headers and sections. When closing implementation work, briefly cover what \
      changed, why it is correct, what you verified, and any remaining risk.\n\nWhen you see \
      risks, better alternatives, or have substantive concerns about the user's direction, voice \
-     your doubts and suggestions — constructive disagreement helps more than silent compliance.\
-\n\nBetween tool \
-     calls, keep text brief — focus on decisions needing user input, high-level status, and \
-     errors that change the plan.";
+     your doubts and suggestions — constructive disagreement helps more than silent \
+     compliance.\n\nBetween tool calls, keep text brief — focus on decisions needing user input, \
+     high-level status, and errors that change the plan.";
 
 // ─── Identity 加载 ─────────────────────────────────────────────────────
 

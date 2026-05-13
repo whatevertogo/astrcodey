@@ -118,7 +118,7 @@ function CodeBlockRenderer({
     )
   }
 
-  const codeText = String(children).replace(/\n$/, '')
+  const codeText = String(children).replace(/^\n/, '').replace(/\n$/, '')
   return (
     <div className={codeBlockShell}>
       <div className={codeBlockHeader}>
@@ -126,7 +126,7 @@ function CodeBlockRenderer({
         <CopyButton code={codeText} />
       </div>
       <pre className={codeBlockContent} {...props}>
-        <code className={className}>{children}</code>
+        <code className={className}>{codeText}</code>
       </pre>
     </div>
   )

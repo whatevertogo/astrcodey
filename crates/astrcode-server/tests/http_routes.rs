@@ -760,5 +760,6 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
                 post_compact_max_tokens_per_file: 5_000,
             },
         }),
+        agent_session_control: Arc::new(parking_lot::RwLock::new(None)),
     })
 }

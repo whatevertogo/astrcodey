@@ -1,6 +1,7 @@
 //! Agent 模块 — 回合处理器与相关工具。
 
 pub mod background;
+pub mod collaboration;
 pub(crate) mod compact;
 mod r#loop;
 pub(crate) mod post_compact;

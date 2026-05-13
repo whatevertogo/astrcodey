@@ -150,6 +150,7 @@ pub struct AgentServices {
     pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     pub background_tasks: Arc<parking_lot::Mutex<super::background::BackgroundTaskManager>>,
+    pub agent_session_control: Option<Arc<dyn astrcode_core::tool::AgentSessionControl>>,
 }
 
 /// 消费 LLM 事件流直到完成或积累工具调用。
@@ -339,15 +340,19 @@ impl AgentLoop {
         ));
         let file_observation_store: Option<Arc<dyn FileObservationStore>> =
             Some(Arc::new(InMemoryFileObservationStore::default()));
+        let capabilities = super::tool_types::ToolRuntimeCapabilities {
+            background_result_tx: services.background_result_tx,
+            background_tasks: services.background_tasks,
+            background_task_reader,
+            file_observation_store,
+            agent_session_control: services.agent_session_control,
+        };
         let tools = ToolPipeline::new(
             shared.clone(),
             services.tool_registry,
             services.extension_runner.clone(),
             services.session_manager.clone(),
-            services.background_result_tx,
-            services.background_tasks,
-            background_task_reader,
-            file_observation_store,
+            capabilities,
         );
         Self {
             system_prompt,

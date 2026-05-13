@@ -15,6 +15,7 @@ use astrcode_protocol::{
     version::negotiate_version,
 };
 use astrcode_server::{
+    agent::collaboration::ServerAgentSessionControl,
     handler::CommandHandler,
     transport::{ServerTransport, StdioTransport, write_error_response, write_initialize_response},
 };
@@ -61,7 +62,19 @@ async fn main() {
     write_initialize_response(request_id, accepted_version);
 
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let command_handle_slot = Arc::new(parking_lot::RwLock::new(None));
+
+    // 创建 AgentSessionControl 并注入到 runtime（handler 和 spawner 共享同一个 slot）。
+    let session_control = Arc::new(ServerAgentSessionControl::new(
+        runtime.session_manager.clone(),
+        Arc::clone(&command_handle_slot),
+    ));
+    *runtime.agent_session_control.write() = Some(session_control);
+
     let handler = CommandHandler::spawn_actor(runtime, event_tx.clone());
+
+    // spawn_actor 后绑定 CommandHandle 到 agent_session_control 的共享槽。
+    *command_handle_slot.write() = Some(handler.clone());
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();
