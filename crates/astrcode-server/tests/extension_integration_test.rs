@@ -1,6 +1,6 @@
 //! Integration test: extensions can block tool execution via PreToolUse hooks.
 
-use std::{collections::BTreeMap, collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
     extension::{
