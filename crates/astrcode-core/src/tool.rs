@@ -223,10 +223,7 @@ pub trait AgentSessionControl: Send + Sync {
     async fn abort_session(&self, session_id: &str) -> Result<(), String>;
 
     /// 查询子 agent 列表。
-    async fn list_children(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<AgentSessionInfo>, String>;
+    async fn list_children(&self, session_id: &str) -> Result<Vec<AgentSessionInfo>, String>;
 }
 
 /// Turn 完成结果。

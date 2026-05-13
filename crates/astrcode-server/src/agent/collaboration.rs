@@ -12,8 +12,10 @@ use astrcode_core::{
 };
 use parking_lot::RwLock;
 
-use crate::handler::{CommandHandle, TurnCompletion};
-use crate::session::SessionManager;
+use crate::{
+    handler::{CommandHandle, TurnCompletion},
+    session::SessionManager,
+};
 
 /// Server-side AgentSessionControl 实现。
 ///
@@ -105,10 +107,7 @@ impl AgentSessionControl for ServerAgentSessionControl {
             .map_err(|e| format!("abort session: {e}"))
     }
 
-    async fn list_children(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<AgentSessionInfo>, String> {
+    async fn list_children(&self, session_id: &str) -> Result<Vec<AgentSessionInfo>, String> {
         let model = self
             .session_manager
             .read_model(&SessionId::from(session_id))

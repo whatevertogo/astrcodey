@@ -50,7 +50,8 @@ pub(crate) struct ServerSessionSpawner {
     // bind 时从 effective.llm 快照，不会随配置热更新变化。
     // TODO: 如需配置热更新生效，改为持有 RwLock<EffectiveConfig> 引用，在 spawn 时动态读取。
     pub(crate) read_timeout_secs: u64,
-    pub(crate) agent_session_control: Arc<parking_lot::RwLock<Option<Arc<dyn astrcode_core::tool::AgentSessionControl>>>>,
+    pub(crate) agent_session_control:
+        Arc<parking_lot::RwLock<Option<Arc<dyn astrcode_core::tool::AgentSessionControl>>>>,
 }
 
 #[async_trait::async_trait]

@@ -12,7 +12,7 @@ use astrcode_core::{
     extension::{ExtensionError, PromptBuildContext},
     llm::{LlmClientConfig, LlmProvider},
     prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
-    tool::ToolDefinition,
+    tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
 use astrcode_prompt::{composer::PromptComposer, pipeline};
@@ -25,7 +25,6 @@ use crate::{
     agent::{AutoCompactFailureTracker, BackgroundTaskManager},
     session::{SessionManager, spawner::ServerSessionSpawner},
 };
-use astrcode_core::tool::AgentSessionControl;
 
 #[derive(Clone, Default)]
 pub(crate) struct PromptFiles {
