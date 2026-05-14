@@ -78,7 +78,7 @@ async fn main() {
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();
-    tokio::spawn(async move {
+    let broadcast_handle = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
             let line = notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
@@ -88,6 +88,11 @@ async fn main() {
             let mut handle = stdout.lock();
             let _ = handle.write_all(line.as_bytes());
             let _ = handle.flush();
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = broadcast_handle.await {
+            tracing::error!("event broadcast task panicked: {e}");
         }
     });
 
