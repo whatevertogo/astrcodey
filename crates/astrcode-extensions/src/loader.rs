@@ -12,8 +12,6 @@ use std::{
 use astrcode_core::extension::Extension;
 use astrcode_support::hostpaths;
 
-use crate::native_ext::NativeExtension;
-
 /// 从磁盘加载所有扩展的结果。
 pub struct LoadExtensionsResult {
     /// 成功加载的扩展列表
@@ -98,7 +96,7 @@ impl ExtensionLoader {
         Ok(paths)
     }
 
-    /// 加载单个扩展：读取并验证清单，然后加载原生库。
+    /// 加载单个扩展：读取并验证清单，加载 WASM 模块。
     async fn load_extension(ext_dir: &Path) -> Result<Arc<dyn Extension>, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes =
@@ -106,21 +104,11 @@ impl ExtensionLoader {
         let manifest: astrcode_core::extension::ExtensionManifest =
             serde_json::from_slice(&manifest_bytes).map_err(|e| format!("parse manifest: {e}"))?;
         Self::validate_manifest(&manifest)?;
-        // 检查原生扩展功能是否启用
-        if !native_extensions_enabled() {
-            return Err(
-                "native extensions are disabled; set ASTRCODE_ENABLE_NATIVE_EXTENSIONS=1 to load"
-                    .into(),
-            );
-        }
 
         let lib_path = ext_dir.join(&manifest.library);
-        // SAFETY: 库文件必须导出符合 FFI 契约的 extension_factory 符号
-        let ext = unsafe {
-            NativeExtension::load(&lib_path, manifest.id.clone())
-                .map_err(|e| format!("load {}: {e}", lib_path.display()))?
-        };
-        Ok(Arc::new(ext))
+        crate::wasm_ext::WasmExtension::load(&lib_path, manifest.id.clone())
+            .map(|ext| ext as Arc<dyn Extension>)
+            .map_err(|e| format!("load wasm {}: {e}", lib_path.display()))
     }
 
     /// 验证扩展清单的必填字段。
@@ -138,16 +126,6 @@ impl ExtensionLoader {
         }
         Ok(())
     }
-}
-
-/// 检查原生扩展功能是否启用。
-///
-/// 通过环境变量 `ASTRCODE_ENABLE_NATIVE_EXTENSIONS` 控制，
-/// 默认启用（未设置时返回 true）。
-fn native_extensions_enabled() -> bool {
-    std::env::var("ASTRCODE_ENABLE_NATIVE_EXTENSIONS")
-        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-        .unwrap_or(true) // 默认: 启用
 }
 
 #[cfg(test)]

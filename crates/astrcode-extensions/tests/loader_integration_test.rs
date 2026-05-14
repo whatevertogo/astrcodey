@@ -1,7 +1,7 @@
 //! 集成测试：扩展加载器发现和解析清单文件。
 //!
 //! 测试扩展加载器在不存在的目录、空目录等边界条件下的行为，
-//! 以及扩展运行时的工具注册和取出功能，FFI 判别值的往返转换。
+//! 以及扩展运行时的工具注册和取出功能，判别值的往返转换。
 
 use astrcode_core::extension::ExtensionManifest;
 use astrcode_extensions::loader::ExtensionLoader;
@@ -24,11 +24,11 @@ async fn loader_returns_empty_result_for_none_working_dir() {
     assert!(result.errors.is_empty());
 }
 
-/// 测试 FFI 事件和模式的判别值能够正确往返转换
+/// 测试事件和模式的判别值能够正确往返转换
 #[test]
-fn ffi_discriminants_roundtrip() {
+fn discriminants_roundtrip() {
     use astrcode_core::extension::{ExtensionEvent, HookMode};
-    use astrcode_extensions::ffi;
+    use astrcode_extensions::wasm_api;
 
     // 事件判别值往返测试
     for event in [
@@ -42,8 +42,8 @@ fn ffi_discriminants_roundtrip() {
         ExtensionEvent::AfterProviderResponse,
         ExtensionEvent::UserPromptSubmit,
     ] {
-        let d = ffi::event_discriminant(event.clone());
-        let back = ffi::event_from_discriminant(d);
+        let d = wasm_api::event_discriminant(event.clone());
+        let back = wasm_api::event_from_discriminant(d);
         assert_eq!(back, Some(event));
     }
 
@@ -53,8 +53,8 @@ fn ffi_discriminants_roundtrip() {
         HookMode::NonBlocking,
         HookMode::Advisory,
     ] {
-        let d = ffi::mode_discriminant(mode);
-        let back = ffi::mode_from_discriminant(d);
+        let d = wasm_api::mode_discriminant(mode);
+        let back = wasm_api::mode_from_discriminant(d);
         assert_eq!(back, Some(mode));
     }
 }
