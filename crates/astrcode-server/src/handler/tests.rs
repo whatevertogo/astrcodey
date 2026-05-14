@@ -22,6 +22,7 @@ use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
 use super::*;
+use crate::agent::AgentTurnOutput;
 use crate::session::{
     SessionManager, compact_boundary_payload, session_continued_from_compaction_payload,
 };
@@ -521,13 +522,13 @@ async fn submit_prompt_reuses_session_system_prompt() {
     };
 
     handler
-        .submit_prompt_for_session(sid.clone(), "one".into())
+        .submit_input_for_session(sid.clone(), "one".into())
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
     handler
-        .submit_prompt_for_session(sid.clone(), "two".into())
+        .submit_input_for_session(sid.clone(), "two".into())
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -549,7 +550,7 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
 
     handler
-        .submit_prompt_for_session(sid.clone(), "hello".into())
+        .submit_input_for_session(sid.clone(), "hello".into())
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -570,7 +571,7 @@ async fn submit_prompt_uses_one_turn_id_for_turn_events() {
 
     let sid = handler.create_session(".".into()).await.unwrap();
     handler
-        .submit_prompt_for_session(sid, "hi".into())
+        .submit_input_for_session(sid, "hi".into())
         .await
         .unwrap();
     let (finish_reason, turn_ids) = collect_turn_ids_until_completed(&mut event_rx).await;
@@ -651,11 +652,11 @@ async fn submit_prompt_rejects_second_running_turn() {
 
     let sid = handler.create_session(".".into()).await.unwrap();
     handler
-        .submit_prompt_for_session(sid.clone(), "first".into())
+        .submit_input_for_session(sid.clone(), "first".into())
         .await
         .unwrap();
     let error = handler
-        .submit_prompt_for_session(sid.clone(), "second".into())
+        .submit_input_for_session(sid.clone(), "second".into())
         .await
         .unwrap_err();
     assert!(
@@ -683,7 +684,7 @@ async fn abort_stops_active_turn_and_records_completion() {
 
     let sid = handler.create_session(".".into()).await.unwrap();
     handler
-        .submit_prompt_for_session(sid.clone(), "keep running".into())
+        .submit_input_for_session(sid.clone(), "keep running".into())
         .await
         .unwrap();
 
@@ -700,7 +701,7 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
 
     let sid = handler.create_session(".".into()).await.unwrap();
     handler
-        .submit_prompt_for_session(sid.clone(), "keep running".into())
+        .submit_input_for_session(sid.clone(), "keep running".into())
         .await
         .unwrap();
     while event_rx.try_recv().is_ok() {}
@@ -738,10 +739,13 @@ async fn stale_agent_finish_after_abort_is_ignored() {
         CommandHandler::spawn_actor(test_runtime_with_llm(Arc::new(PendingLlm)), event_tx);
 
     let sid = handler.create_session(".".into()).await.unwrap();
-    let turn_id = handler
-        .submit_prompt_for_session(sid.clone(), "keep running".into())
+    let PromptSubmission::Accepted { turn_id } = handler
+        .submit_input_for_session(sid.clone(), "keep running".into())
         .await
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected Accepted");
+    };
     handler.abort_session(sid.clone()).await.unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
 
@@ -779,7 +783,7 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
         handler
-            .submit_prompt_for_session(session_id.clone(), text.into())
+            .submit_input_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -827,7 +831,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
         handler
-            .submit_prompt_for_session(session_id.clone(), text.into())
+            .submit_input_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -988,7 +992,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three", "four"] {
         handler
-            .submit_prompt_for_session(session_id.clone(), text.into())
+            .submit_input_for_session(session_id.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -1014,7 +1018,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     };
 
     handler
-        .submit_prompt_for_session(session_id.clone(), "five".into())
+        .submit_input_for_session(session_id.clone(), "five".into())
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
@@ -1085,7 +1089,7 @@ async fn auto_compact_applies_same_session_boundary() {
     }
 
     handler
-        .submit_prompt_for_session(session_id.clone(), "current".into())
+        .submit_input_for_session(session_id.clone(), "current".into())
         .await
         .unwrap();
     let mut compaction_started_count = 0;
@@ -1155,7 +1159,7 @@ async fn compact_command_does_not_fallback_when_summary_is_invalid() {
     let sid = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
         handler
-            .submit_prompt_for_session(sid.clone(), text.into())
+            .submit_input_for_session(sid.clone(), text.into())
             .await
             .unwrap();
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");

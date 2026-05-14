@@ -1,3 +1,5 @@
+//! 会话快照 — 内部模型转传输层 DTO。
+
 use astrcode_core::{
     llm::{LlmContent, LlmMessage},
     storage::AgentSessionStatus,
@@ -6,6 +8,7 @@ use astrcode_protocol::events::{
     AgentSessionLinkDto, AgentSessionStatusDto, MessageDto, SessionSnapshot,
 };
 
+/// Agent 会话状态转换。
 pub(crate) fn agent_status_to_dto(status: AgentSessionStatus) -> AgentSessionStatusDto {
     match status {
         AgentSessionStatus::Running => AgentSessionStatusDto::Running,
@@ -14,6 +17,7 @@ pub(crate) fn agent_status_to_dto(status: AgentSessionStatus) -> AgentSessionSta
     }
 }
 
+/// 构建会话快照 DTO，用于客户端同步。
 pub(super) fn session_snapshot(
     state: &astrcode_core::storage::SessionReadModel,
 ) -> SessionSnapshot {
@@ -36,7 +40,7 @@ pub(super) fn session_snapshot(
     }
 }
 
-/// 将 LLM 消息转换为传输层 DTO，用于会话快照。
+/// 将 LLM 消息转换为传输层 DTO。
 pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
     MessageDto {
         role: message.role.as_str().to_string(),
@@ -49,7 +53,7 @@ pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
     }
 }
 
-/// 将 LLM 内容块转换为纯文本表示，用于客户端展示。
+/// 将 LLM 内容块转换为纯文本表示。
 pub(crate) fn content_to_text(content: &LlmContent) -> String {
     match content {
         LlmContent::Text { text } => text.clone(),

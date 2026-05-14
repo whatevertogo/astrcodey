@@ -1,3 +1,5 @@
+//! 事件处理 — 持久化与广播。
+
 use astrcode_core::{
     event::{Event, EventPayload},
     types::{SessionId, TurnId},
@@ -19,6 +21,7 @@ pub(super) async fn record_and_broadcast(
     payload: EventPayload,
 ) -> Result<Event, String> {
     let event = Event::new(session_id.clone(), turn_id.cloned(), payload);
+    // 判断是否需要持久化
     let event = if event.payload.is_durable() {
         runtime
             .session_manager
@@ -29,6 +32,7 @@ pub(super) async fn record_and_broadcast(
         event
     };
 
+    // 广播给所有订阅者（不关心结果）
     let _ = event_tx.send(ClientNotification::Event(event.clone()));
     Ok(event)
 }
