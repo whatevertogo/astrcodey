@@ -32,7 +32,7 @@ Rust 实现的 AI coding agent，~45k 行（Rust ~41k + TypeScript ~4k），18 c
 
 ### 结构化输出 contract
 
-Compact 不是"请总结一下"，而是一个**严格的 XML contract**：
+Compact是一个**严格的 XML contract**：
 
 - 模型必须返回 `<analysis>` scratchpad + `<summary>` 块，顺序固定
 - Summary 必须包含 9 个固定段标题（Primary Request、Files、Errors 等），缺一则拒绝
