@@ -1112,9 +1112,14 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         mpsc::unbounded_channel::<BackgroundTaskCompletion>();
     {
         let bg_actor_tx = actor_tx.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while let Some(completion) = background_result_rx.recv().await {
                 let _ = bg_actor_tx.send(CommandMessage::BackgroundTaskCompleted(completion));
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                tracing::error!("background result forwarder panicked: {e}");
             }
         });
     }

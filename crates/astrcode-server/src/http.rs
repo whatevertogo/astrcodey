@@ -1262,9 +1262,14 @@ fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {
 async fn shutdown(State(state): State<HttpState>) -> Response {
     tracing::info!("shutdown requested via HTTP");
     let runtime = Arc::clone(&state.runtime);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         runtime.shutdown_token.cancel();
+    });
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::error!("shutdown task panicked: {e}");
+        }
     });
     StatusCode::NO_CONTENT.into_response()
 }

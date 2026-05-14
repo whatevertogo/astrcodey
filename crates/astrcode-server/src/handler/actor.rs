@@ -224,8 +224,13 @@ impl CommandHandler {
     ) -> CommandHandle {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut handler = Self::new(runtime, event_tx, tx.clone());
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             handler.run(rx).await;
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                tracing::error!("command handler actor panicked: {e}");
+            }
         });
         CommandHandle { tx }
     }

@@ -204,7 +204,7 @@ impl ServerSessionSpawner {
         let child_bg_sm = Arc::clone(&self.session_manager);
         let child_bg_progress = progress.clone();
         let child_bg_turn_id = child_turn_id.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while let Some(completion) = child_bg_result_rx.recv().await {
                 let sid = child_bg_final_sid.lock().await.clone();
                 if let Err(e) = append_child_payload(
@@ -229,6 +229,11 @@ impl ServerSessionSpawner {
                     tracing::warn!(session_id = %sid, error = %e, "failed to persist BackgroundTaskCompleted");
                 }
                 child_bg_progress.forward(&bg_event);
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                tracing::error!("child background result forwarder panicked: {e}");
             }
         });
 
