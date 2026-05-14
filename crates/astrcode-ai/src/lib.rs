@@ -1,11 +1,10 @@
 //! astrcode-ai：LLM 提供商抽象层。
 //!
-//! 支持 OpenAI 兼容、Kimi、Anthropic、Google Gemini 的 API 客户端。
+//! 支持 OpenAI 兼容、Anthropic、Google Gemini 的 API 客户端。
 //! 提供 SSE 流式响应、指数退避重试、多字节安全 UTF-8 解码，
 //! 以及可替换的内容累积器 trait（[`ChatAccumulator`]）。
 
 pub mod common;
-pub mod compat;
 pub mod providers;
 pub mod retry;
 pub mod serialization;
@@ -17,15 +16,13 @@ use astrcode_core::{
     config::OpenAiApiMode,
     llm::{LlmClientConfig, LlmProvider},
 };
-use compat::ProviderCompat;
 use providers::{
-    anthropic::AnthropicProvider, google_genai::GeminiProvider, kimi::KimiProvider,
+    anthropic::AnthropicProvider, google_genai::GeminiProvider,
     openai::StandardProvider,
 };
 
 /// 根据 `provider_kind`、`base_url` 和 `model_id` 创建 LLM provider。
 ///
-/// 通过 [`ProviderCompat::detect`] 自动探测 Kimi 等异构模型。
 /// 未知 `provider_kind` 默认走 OpenAI 兼容路径。
 pub fn create_provider(
     provider_kind: &str,
@@ -35,8 +32,6 @@ pub fn create_provider(
     max_tokens: Option<u32>,
     context_limit: Option<usize>,
 ) -> Arc<dyn LlmProvider> {
-    let compat = ProviderCompat::detect(&config.base_url, &model_id);
-
     match provider_kind {
         "anthropic" => Arc::new(AnthropicProvider::new(
             config,
@@ -50,24 +45,12 @@ pub fn create_provider(
             max_tokens,
             context_limit,
         )),
-        _ => {
-            if compat.is_kimi {
-                Arc::new(KimiProvider::new(
-                    config,
-                    api_mode,
-                    model_id,
-                    max_tokens,
-                    context_limit,
-                ))
-            } else {
-                Arc::new(StandardProvider::new(
-                    config,
-                    api_mode,
-                    model_id,
-                    max_tokens,
-                    context_limit,
-                ))
-            }
-        },
+        _ => Arc::new(StandardProvider::new(
+            config,
+            api_mode,
+            model_id,
+            max_tokens,
+            context_limit,
+        )),
     }
 }
