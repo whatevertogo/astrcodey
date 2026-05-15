@@ -722,9 +722,6 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         event_store: Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>,
         llm_provider: Arc::new(parking_lot::RwLock::new(llm_provider)),
         context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
-        auto_compact_failures: Arc::new(
-            astrcode_server::agent::AutoCompactFailureTracker::default(),
-        ),
         background_tasks: Default::default(),
         extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
         shutdown_token: tokio_util::sync::CancellationToken::new(),

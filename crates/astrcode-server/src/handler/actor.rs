@@ -5,12 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_context::compaction::CompactResult;
-use astrcode_core::{
-    event::EventPayload,
-    extension::CompactTrigger,
-    types::{SessionId, TurnId},
-};
+use astrcode_core::types::{SessionId, TurnId};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_session::{TurnError, TurnOutput, background::BackgroundTaskCompletion};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -161,12 +156,6 @@ pub(in crate::handler) enum CommandMessage {
             Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError>,
         >,
     },
-    /// Agent 事件（来自后台任务）
-    AgentEvent {
-        session_id: SessionId,
-        turn_id: TurnId,
-        payload: EventPayload,
-    },
     /// Agent Turn 完成
     AgentTurnFinished {
         session_id: SessionId,
@@ -179,14 +168,6 @@ pub(in crate::handler) enum CommandMessage {
         turn_id: TurnId,
         error: TurnError,
         emitted_error: bool,
-    },
-    /// 自动压缩完成，需要继续 Turn
-    AgentAutoCompact {
-        session_id: SessionId,
-        turn_id: TurnId,
-        trigger: CompactTrigger,
-        compaction: CompactResult,
-        reply: oneshot::Sender<Result<SessionId, HandlerError>>,
     },
     /// 后台任务完成
     BackgroundTaskCompleted(BackgroundTaskCompletion),
@@ -266,26 +247,6 @@ impl CommandHandler {
             CommandMessage::ListCommandsForSession { session_id, reply } => {
                 let _ = reply.send(self.command_infos_for_session(&session_id).await);
             },
-            // Agent 事件：校验 Turn 有效性后记录并广播
-            CommandMessage::AgentEvent {
-                session_id,
-                turn_id,
-                payload,
-            } => {
-                if self.active_turn_matches(&session_id, &turn_id) {
-                    if let Err(e) = self
-                        .record_and_broadcast(&session_id, Some(&turn_id), payload)
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            turn_id = %turn_id,
-                            error = %e,
-                            "failed to persist/broadcast agent event"
-                        );
-                    }
-                }
-            },
             // Agent Turn 完成
             CommandMessage::AgentTurnFinished {
                 session_id,
@@ -303,19 +264,6 @@ impl CommandHandler {
             } => {
                 self.fail_agent_turn(session_id, turn_id, error, emitted_error)
                     .await;
-            },
-            // 自动压缩后继续 Turn
-            CommandMessage::AgentAutoCompact {
-                session_id,
-                turn_id,
-                trigger,
-                compaction,
-                reply,
-            } => {
-                let result = self
-                    .continue_active_turn_from_compaction(session_id, turn_id, trigger, compaction)
-                    .await;
-                let _ = reply.send(result);
             },
             // 后台任务完成：持久化 ToolCallCompleted 和 BackgroundTaskCompleted 事件
             CommandMessage::BackgroundTaskCompleted(completion) => {

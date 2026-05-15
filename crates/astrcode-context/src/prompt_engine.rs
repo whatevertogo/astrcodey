@@ -183,12 +183,7 @@ fn compute_fingerprint(input: &SystemPromptInput) -> String {
         key.push_str(extra);
     }
 
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in key.as_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:016x}", hash)
+    astrcode_support::hash::hex_fingerprint(key.as_bytes())
 }
 
 // ─── Identity 加载 ─────────────────────────────────────────────────────
@@ -729,6 +724,36 @@ fn non_empty_string(text: String) -> Option<String> {
         None
     } else {
         Some(text)
+    }
+}
+
+// ─── Prompt file loading ───────────────────────────────────────────────
+
+/// 从磁盘加载的三个系统提示词文件内容。
+#[derive(Clone, Default)]
+pub struct PromptFiles {
+    pub identity: Option<String>,
+    pub user_rules: Option<String>,
+    pub project_rules: Option<String>,
+}
+
+/// 异步加载系统提示词文件（identity、user rules、project rules）。
+pub async fn load_system_prompt_files(working_dir: &str) -> PromptFiles {
+    let working_dir = PathBuf::from(working_dir);
+    let fallback_dir = working_dir.clone();
+    tokio::task::spawn_blocking(move || read_system_prompt_files(&working_dir))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "prompt file preload task failed; reading inline");
+            read_system_prompt_files(&fallback_dir)
+        })
+}
+
+fn read_system_prompt_files(working_dir: &Path) -> PromptFiles {
+    PromptFiles {
+        identity: load_identity_md(&user_identity_md_path()),
+        user_rules: load_user_rules(&user_agents_md_path()),
+        project_rules: load_project_rules(working_dir),
     }
 }
 

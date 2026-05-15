@@ -4,7 +4,6 @@
 
 pub mod background;
 pub mod compact;
-pub mod event_bus;
 pub mod llm_stream;
 pub mod payload;
 pub mod post_compact;
@@ -17,13 +16,11 @@ pub mod turn_context;
 pub mod turn_runner;
 pub mod util;
 
-pub use compact::AutoCompactFailureTracker;
-pub use event_bus::{EventBus, NoopEventBus};
 pub use payload::{
     agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
     compact_boundary_payload, session_continued_from_compaction_payload,
 };
 pub use session::{Session, SessionError};
 pub use session_services::SessionServices;
-pub use turn_context::{TurnError, AgentSignal};
-pub use turn_runner::{CompactContinuation, TurnOutput, TurnRunner, drive_agent};
+pub use turn_context::{EventBus, NoopEventBus, TurnError, AgentSignal};
+pub use turn_runner::{RunTurnResult, TurnOutput, TurnRunner, drive_agent, run_turn};

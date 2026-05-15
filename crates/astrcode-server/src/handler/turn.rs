@@ -10,14 +10,15 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
+use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
     AgentSignal, Session, SessionServices, TurnOutput, TurnRunner, agent_turn_completed_payloads,
     agent_turn_failed_payloads, agent_turn_started_payloads, background::BackgroundTaskCompletion,
-    drive_agent,
+    run_turn,
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
 
@@ -28,6 +29,7 @@ use crate::bootstrap::ServerRuntime;
 pub(in crate::handler) struct AgentTurnInput {
     pub sid: SessionId,
     pub turn_id: TurnId,
+    pub session: Arc<Session>,
     pub working_dir: String,
     pub tool_registry: Arc<ToolRegistry>,
     pub system_prompt: String,
@@ -36,6 +38,7 @@ pub(in crate::handler) struct AgentTurnInput {
     /// 斜杠命令注入的一次性指令
     pub transient_instructions: Option<String>,
     pub actor_tx: mpsc::UnboundedSender<CommandMessage>,
+    pub event_tx: broadcast::Sender<ClientNotification>,
 }
 
 /// 待处理的工具调用请求。
@@ -59,7 +62,6 @@ pub(in crate::handler) struct ActiveTurn {
     pub handle: JoinHandle<()>,
     pub working_dir: String,
     pub model_id: String,
-    pub system_prompt: String,
     /// Turn 完成时通知等待者的通道
     pub completion_tx: Option<oneshot::Sender<TurnCompletion>>,
 }
@@ -104,20 +106,15 @@ impl CommandHandler {
         }
 
         // 恢复会话并修复可能的遗留状态
-        {
-            let store = self.runtime.event_store.clone();
-            Session::open(store, sid.clone()).await.map_err(|e| {
-                HandlerError::SessionNotFound(format!("Session {sid} not found: {e}"))
-            })?;
-        }
+        let session = Session::open(self.runtime.event_store.clone(), sid.clone())
+            .await
+            .map_err(|e| HandlerError::SessionNotFound(format!("Session {sid} not found: {e}")))?;
         self.repair_stale_pending_tool_calls(&sid)
             .await
             .map_err(HandlerError::Other)?;
         // 读取会话状态
-        let state = self
-            .runtime
-            .event_store
-            .session_read_model(&sid)
+        let state = session
+            .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
         let history = state.provider_messages();
@@ -148,6 +145,7 @@ impl CommandHandler {
         let handle = self.spawn_agent_turn(AgentTurnInput {
             sid: sid.clone(),
             turn_id: turn_id.clone(),
+            session: Arc::new(session),
             working_dir: working_dir.clone(),
             tool_registry: Arc::clone(&tool_registry),
             system_prompt: system_prompt.clone(),
@@ -155,6 +153,7 @@ impl CommandHandler {
             text: user_text,
             transient_instructions,
             actor_tx: self.actor_tx.clone(),
+            event_tx: self.event_tx.clone(),
         });
         self.active_turns.insert(
             sid.clone(),
@@ -164,7 +163,6 @@ impl CommandHandler {
                 handle,
                 working_dir,
                 model_id,
-                system_prompt,
                 completion_tx,
             },
         );
@@ -394,6 +392,7 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     let AgentTurnInput {
         sid,
         turn_id,
+        session,
         working_dir,
         tool_registry,
         system_prompt,
@@ -401,10 +400,10 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         text,
         transient_instructions,
         actor_tx,
+        event_tx,
     } = input;
 
     // 后台子任务结果转发到 Actor
-    let current_session_id = Arc::new(tokio::sync::Mutex::new(sid.clone()));
     let (background_result_tx, mut background_result_rx) =
         mpsc::unbounded_channel::<BackgroundTaskCompletion>();
     {
@@ -434,9 +433,6 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         .unwrap_or(system_prompt);
 
     // 组装 TurnRunner
-    let session = Session::open(runtime.event_store.clone(), sid.clone())
-        .await
-        .expect("session should be openable at agent turn start");
     let agent = TurnRunner::new(
         sid.clone(),
         working_dir,
@@ -447,84 +443,43 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
             tool_registry,
             runtime.extension_runner.clone(),
             runtime.context_assembler.clone(),
-            Arc::new(session),
-            runtime.auto_compact_failures.clone(),
+            session,
             runtime.background_tasks.clone(),
         )
         .with_background_result_tx(background_result_tx)
         .with_agent_session_control(runtime.agent_session_control.read().clone()),
     );
 
-    // 驱动 Agent 循环，通过回调转发事件到 Actor
-    let noop_bus = astrcode_session::NoopEventBus;
-    let (output, emitted_error) = drive_agent(&agent, &text, history, &noop_bus, |signal| {
-        let actor_tx = actor_tx.clone();
-        let current_session_id = Arc::clone(&current_session_id);
-        let turn_id = turn_id.clone();
+    // 驱动 Agent 循环，事件通过 ServerEventBus 直接持久化+广播
+    let event_bus = crate::server_event_bus::ServerEventBus::new(
+        runtime.event_store.clone(),
+        event_tx,
+    )
+    .with_turn_id(turn_id.clone());
+    let result = run_turn(&agent, &text, history, &event_bus, sid.clone(), |signal| {
+        let _actor_tx = actor_tx.clone();
         async move {
-            match signal {
-                AgentSignal::Event(payload) => {
-                    let session_id = current_session_id.lock().await.clone();
-                    let _ = actor_tx.send(CommandMessage::AgentEvent {
-                        session_id,
-                        turn_id,
-                        payload,
-                    });
-                },
-                // 自动压缩触发：请求 Actor 执行压缩并返回新会话 ID
-                AgentSignal::AutoCompact {
-                    trigger,
-                    compaction,
-                    reply,
-                } => {
-                    let session_id = current_session_id.lock().await.clone();
-                    let (actor_reply, actor_rx) = oneshot::channel();
-                    let result: Result<SessionId, HandlerError> = if actor_tx
-                        .send(CommandMessage::AgentAutoCompact {
-                            session_id,
-                            turn_id,
-                            trigger,
-                            compaction,
-                            reply: actor_reply,
-                        })
-                        .is_err()
-                    {
-                        Err(HandlerError::Other("command actor is unavailable".into()))
-                    } else {
-                        match actor_rx.await {
-                            Ok(result) => result,
-                            Err(_) => Err(HandlerError::Other(
-                                "command actor dropped auto compact response".into(),
-                            )),
-                        }
-                    };
-                    // 更新当前会话 ID（压缩后可能切换到子会话）
-                    if let Ok(child_session_id) = &result {
-                        *current_session_id.lock().await = child_session_id.clone();
-                    }
-                    let _ = reply.send(result.map_err(|e| e.to_string()));
-                },
-            }
+            let AgentSignal::Event(_) = signal;
+            // 事件已由 ServerEventBus 处理，无需转发
         }
     })
     .await;
-    let final_session_id = current_session_id.lock().await.clone();
 
     // 发送完成或失败结果到 Actor
-    match output {
+    match result.output {
         Ok(output) => {
             let _ = actor_tx.send(CommandMessage::AgentTurnFinished {
-                session_id: final_session_id,
+                session_id: sid,
                 turn_id,
                 output,
             });
         },
         Err(error) => {
             let _ = actor_tx.send(CommandMessage::AgentTurnFailed {
-                session_id: final_session_id,
+                session_id: sid,
                 turn_id,
                 error,
-                emitted_error,
+                emitted_error: result.emitted_error,
             });
         },
     }

@@ -244,6 +244,7 @@ dependencies = [
  "async-trait",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

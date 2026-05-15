@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 
 use crate::{
     background::{BackgroundTaskCompletion, BackgroundTaskManager},
-    compact::AutoCompactFailureTracker,
     session::Session,
 };
 
@@ -23,7 +22,6 @@ pub struct SessionServices {
     pub extension_runner: Arc<ExtensionRunner>,
     pub context_assembler: Arc<LlmContextAssembler>,
     pub session: Arc<Session>,
-    pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
     pub background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
     pub agent_session_control: Option<Arc<dyn AgentSessionControl>>,
@@ -36,7 +34,6 @@ impl SessionServices {
         extension_runner: Arc<ExtensionRunner>,
         context_assembler: Arc<LlmContextAssembler>,
         session: Arc<Session>,
-        auto_compact_failures: Arc<AutoCompactFailureTracker>,
         background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
     ) -> Self {
         Self {
@@ -45,7 +42,6 @@ impl SessionServices {
             extension_runner,
             context_assembler,
             session,
-            auto_compact_failures,
             background_result_tx: None,
             background_tasks,
             agent_session_control: None,

@@ -80,12 +80,6 @@ impl Session {
         Ok(self.store.latest_cursor(&self.id).await?)
     }
 
-    /// 从指定 cursor 之后重放 durable 事件。
-    #[allow(dead_code)]
-    pub async fn replay_after(&self, cursor: &Cursor) -> Result<Vec<Event>, SessionError> {
-        Ok(self.store.replay_from(&self.id, cursor).await?)
-    }
-
     /// 为当前 projection cursor 写入恢复 checkpoint。
     pub async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
         Ok(self.store.checkpoint(&self.id, cursor).await?)

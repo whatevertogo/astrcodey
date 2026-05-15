@@ -1,5 +1,4 @@
-//! Shared turn context — session-level identifiers, signal types, and error
-//! types shared across agent sub-objects.
+//! Turn 基础设施 — 事件总线、信号类型、共享上下文、错误类型。
 
 use astrcode_core::{
     config::ModelSelection,
@@ -8,17 +7,32 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+
+// ─── EventBus ───────────────────────────────────────────────────────────
+
+/// 事件发射目标。
+///
+/// TurnRunner 每产生一个事件就调 `emit()`。
+/// 实现方负责持久化和/或广播。
+#[async_trait::async_trait]
+pub trait EventBus: Send + Sync {
+    /// 发射一个事件。实现应同时处理持久化和客户端广播。
+    async fn emit(&self, session_id: &SessionId, payload: EventPayload);
+}
+
+/// 丢弃所有事件的空实现，用于测试。
+pub struct NoopEventBus;
+
+#[async_trait::async_trait]
+impl EventBus for NoopEventBus {
+    async fn emit(&self, _session_id: &SessionId, _payload: EventPayload) {}
+}
 
 // ─── Signal ──────────────────────────────────────────────────────────────
 
 pub enum AgentSignal {
     Event(EventPayload),
-    AutoCompact {
-        trigger: astrcode_core::extension::CompactTrigger,
-        compaction: astrcode_context::compaction::CompactResult,
-        reply: oneshot::Sender<Result<SessionId, String>>,
-    },
 }
 
 pub(crate) fn send_event(
@@ -59,19 +73,6 @@ pub struct SharedTurnContext {
     pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
-    // TODO: 恢复 event_bus、session_history、system_prompt 等能力，
-    // 旧 ExtensionContext trait 已在类型化注册迁移中移除，
-    // 后续需要通过独立的机制（如 SharedState struct）重新暴露给 handler。
-}
-
-impl SharedTurnContext {
-    pub fn new(session_id: SessionId, working_dir: String, model_id: String) -> Self {
-        Self {
-            session_id,
-            working_dir,
-            model_id,
-        }
-    }
 }
 
 // ─── TurnError ───────────────────────────────────────────────────────────

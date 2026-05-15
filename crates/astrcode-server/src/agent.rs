@@ -1,7 +1,11 @@
-//! Server-side AgentSessionControl 实现。
-//!
-//! 使用 `CommandHandle` 提供的 submit/abort 能力，
-//! 和 `EventStore` 提供的读模型查询能力。
+//! Agent 模块 — ServerAgentSessionControl + re-exports。
+
+pub use astrcode_session::{
+    SessionServices,
+    background::BackgroundTaskManager,
+    turn_context::{TurnError, AgentSignal},
+    turn_runner::{TurnOutput, TurnRunner, drive_agent},
+};
 
 use std::sync::Arc;
 

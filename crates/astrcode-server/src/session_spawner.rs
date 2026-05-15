@@ -18,19 +18,18 @@ use astrcode_extensions::{
     runtime::{SpawnRequest, SpawnResult},
 };
 use astrcode_session::{
-    TurnError, AgentSignal, AutoCompactFailureTracker, Session, SessionServices, TurnOutput,
+    TurnError, AgentSignal, Session, SessionServices, TurnOutput,
     TurnRunner, agent_turn_completed_payloads, agent_turn_failed_payloads,
     agent_turn_started_payloads,
     background::{BackgroundTaskCompletion, BackgroundTaskManager, complete_background_task},
-    compact::compact_trigger_name,
-    drive_agent,
+    run_turn,
 };
 use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::bootstrap::{
     SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-    build_tool_registry_snapshot, load_system_prompt_files, prompt_fingerprint,
+    build_tool_registry_snapshot, load_system_prompt_files,
 };
 
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
@@ -41,7 +40,6 @@ pub(crate) struct ServerSessionSpawner {
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) llm_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
-    pub(crate) auto_compact_failures: Arc<AutoCompactFailureTracker>,
     pub(crate) background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     // bind 时从 effective.llm 快照，不会随配置热更新变化。
@@ -247,7 +245,6 @@ impl ServerSessionSpawner {
                 Arc::clone(&self.extension_runner),
                 Arc::clone(&self.context_assembler),
                 Arc::clone(&child_arc),
-                Arc::clone(&self.auto_compact_failures),
                 Arc::clone(&self.background_tasks),
             )
             .with_background_result_tx(child_bg_result_tx)
@@ -528,65 +525,34 @@ async fn drive_child_agent_turn(
     current_child_sid: Arc<Mutex<SessionId>>,
     child_turn_id: TurnId,
     progress: ProgressTx,
-    system_prompt: String,
+    _system_prompt: String,
 ) -> (Result<TurnOutput, TurnError>, bool, SessionId) {
-    let signal_child_sid = Arc::clone(&current_child_sid);
-    let noop_bus_spawn = astrcode_session::NoopEventBus;
-    let (output, emitted_error) = drive_agent(
+    let initial_sid = current_child_sid.lock().await.clone();
+    let noop_bus = astrcode_session::NoopEventBus;
+    let result = run_turn(
         agent,
         user_prompt,
         Vec::new(),
-        &noop_bus_spawn,
+        &noop_bus,
+        initial_sid.clone(),
         move |signal| {
             let child_session = Arc::clone(&child_session);
-            let current_child_sid = Arc::clone(&signal_child_sid);
             let child_turn_id = child_turn_id.clone();
             let progress = progress.clone();
-            let system_prompt = system_prompt.clone();
             async move {
-                match signal {
-                    AgentSignal::Event(payload) => {
-                        let _sid = current_child_sid.lock().await.clone();
-                        let _ = append_child_progress_payload(
-                            &child_session,
-                            &progress,
-                            Some(&child_turn_id),
-                            payload.clone(),
-                        )
-                        .await;
-                    },
-                    AgentSignal::AutoCompact {
-                        trigger,
-                        compaction,
-                        reply,
-                    } => {
-                        let parent_sid = current_child_sid.lock().await.clone();
-                        let fp = prompt_fingerprint(&system_prompt);
-                        let result = child_session
-                            .append_compact_boundary(
-                                system_prompt,
-                                fp,
-                                compact_trigger_name(trigger).into(),
-                                compaction,
-                            )
-                            .await
-                            .map(|_| parent_sid.clone())
-                            .map_err(|e| e.to_string());
-                        if result.is_ok() {
-                            progress.emit(
-                                ToolOutputStream::Stdout,
-                                format!("child agent compacted: {parent_sid}\n"),
-                            );
-                        }
-                        let _ = reply.send(result);
-                    },
-                }
+                let AgentSignal::Event(payload) = signal;
+                let _ = append_child_progress_payload(
+                    &child_session,
+                    &progress,
+                    Some(&child_turn_id),
+                    payload.clone(),
+                )
+                .await;
             }
         },
     )
     .await;
-    let final_child_sid = current_child_sid.lock().await.clone();
-    (output, emitted_error, final_child_sid)
+    (result.output, result.emitted_error, initial_sid)
 }
 
 // ─── 进度转发 ─────────────────────────────────────────────────────────
@@ -846,7 +812,6 @@ mod tests {
             store,
             llm_provider: Arc::new(RwLock::new(llm_provider)),
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
-            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
@@ -920,7 +885,6 @@ mod tests {
             store,
             llm_provider: Arc::clone(&llm_provider),
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
-            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,
@@ -963,7 +927,6 @@ mod tests {
             store: Arc::clone(&store),
             llm_provider: Arc::new(RwLock::new(llm_provider)),
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
-            auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_tasks: Arc::clone(&background_tasks),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
             read_timeout_secs: 1,

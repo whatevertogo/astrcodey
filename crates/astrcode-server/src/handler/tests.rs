@@ -84,8 +84,6 @@ impl LlmProvider for MockLlm {
 
 struct PendingLlm;
 
-struct InvalidSummaryLlm;
-
 struct FailSessionStartExtension;
 
 #[derive(Clone, Default)]
@@ -183,31 +181,6 @@ impl LlmProvider for PendingLlm {
 }
 
 #[async_trait::async_trait]
-impl LlmProvider for InvalidSummaryLlm {
-    async fn generate(
-        &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta {
-            delta: "not a compact summary".into(),
-        });
-        let _ = tx.send(LlmEvent::Done {
-            finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200000,
-            max_output_tokens: 1024,
-        }
-    }
-}
-
-#[async_trait::async_trait]
 impl LlmProvider for CapturingLlm {
     async fn generate(
         &self,
@@ -241,7 +214,6 @@ fn test_runtime_with_settings(
         event_store: Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>,
         llm_provider: Arc::new(parking_lot::RwLock::new(llm_provider)),
         context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
-        auto_compact_failures: Arc::new(astrcode_session::AutoCompactFailureTracker::default()),
         background_tasks: Default::default(),
         extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
             Duration::from_secs(1),
@@ -427,18 +399,16 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     let sid = session.id().clone();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
 
-    record_and_broadcast(
-        &runtime.event_store,
-        &event_tx,
-        &sid,
+    let event = Event::new(
+        sid.clone(),
         None,
         EventPayload::SystemPromptConfigured {
             text: "ordered prompt".into(),
             fingerprint: "fingerprint".into(),
         },
-    )
-    .await
-    .unwrap();
+    );
+    let event = runtime.event_store.append_event(event).await.unwrap();
+    let _ = event_tx.send(ClientNotification::Event(event));
 
     let ClientNotification::Event(event) = recv_event(&mut event_rx).await else {
         panic!("expected event notification");
@@ -752,7 +722,6 @@ async fn stale_agent_finish_after_abort_is_ignored() {
                 text: "late".into(),
                 finish_reason: "stop".into(),
                 tool_results: vec![],
-                auto_compaction: None,
             },
         })
         .unwrap();
@@ -1044,7 +1013,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
 }
 
 #[tokio::test]
-async fn auto_compact_applies_same_session_boundary() {
+async fn auto_compact_applies_in_memory_during_turn() {
     let settings = astrcode_context::ContextSettings {
         compact_threshold_percent: 0.0,
         ..Default::default()
@@ -1087,10 +1056,8 @@ async fn auto_compact_applies_same_session_boundary() {
         .await
         .unwrap();
     let mut compaction_started_count = 0;
-    let mut compact_boundary_seen = false;
-    let mut turn_completed = false;
     loop {
-        let notification = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+        let notification = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
             .await
             .expect("event should arrive")
             .expect("event channel should remain open");
@@ -1102,76 +1069,16 @@ async fn auto_compact_applies_same_session_boundary() {
                 compaction_started_count += 1;
                 assert_eq!(event.session_id, session_id);
             },
-            EventPayload::CompactBoundaryCreated {
-                continued_session_id,
-                ..
-            } => {
-                assert!(
-                    !turn_completed,
-                    "compact boundary should be created before turn completion"
-                );
-                assert_eq!(event.session_id, session_id);
-                assert_eq!(continued_session_id, session_id, "same-session compact");
-                compact_boundary_seen = true;
-            },
             EventPayload::TurnCompleted { finish_reason } => {
                 assert_eq!(finish_reason, "stop");
                 assert_eq!(
                     event.session_id, session_id,
                     "turn completes on same session"
                 );
-                turn_completed = true;
-                if compact_boundary_seen {
-                    break;
-                }
+                break;
             },
             _ => {},
         }
     }
     assert_eq!(compaction_started_count, 1);
-    assert!(compact_boundary_seen);
-
-    let state = runtime
-        .event_store
-        .session_read_model(&session_id)
-        .await
-        .unwrap();
-    assert!(!state.context_messages.is_empty());
-    assert!(state.messages.iter().any(|message| {
-        message_to_dto(message)
-            .content
-            .contains("Compacted conversation summary")
-    }));
-}
-
-#[tokio::test]
-async fn compact_command_does_not_fallback_when_summary_is_invalid() {
-    let runtime = test_runtime_with_llm(Arc::new(InvalidSummaryLlm));
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), event_tx);
-
-    let sid = handler.create_session(".".into()).await.unwrap();
-    for text in ["one", "two", "three"] {
-        handler
-            .submit_input_for_session(sid.clone(), text.into())
-            .await
-            .unwrap();
-        assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
-    }
-    while event_rx.try_recv().is_ok() {}
-
-    let error = handler.compact_session(sid.clone()).await.unwrap_err();
-    assert!(error.to_string().contains("Compaction failed"));
-
-    let state = runtime.event_store.session_read_model(&sid).await.unwrap();
-    assert!(state.context_messages.is_empty());
-
-    while let Ok(notification) = event_rx.try_recv() {
-        if let ClientNotification::Event(event) = notification {
-            assert!(
-                !matches!(event.payload, EventPayload::CompactionStarted),
-                "failed compact must not leave clients in compacting state"
-            );
-        }
-    }
 }

@@ -20,13 +20,13 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::bootstrap::{
-    ServerRuntime, SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-    build_tool_registry_snapshot, load_system_prompt_files,
+    ServerRuntime, SystemPromptSnapshotInput,
+    build_system_prompt_snapshot_with_files, build_tool_registry_snapshot,
+    load_system_prompt_files, PromptFiles,
 };
 
 mod actor;
 mod compact;
-mod events;
 pub(crate) mod slash;
 pub(crate) mod snapshot;
 pub(in crate::handler) mod turn;
@@ -34,7 +34,6 @@ pub(in crate::handler) mod turn;
 pub use actor::CommandHandle;
 use actor::CommandMessage;
 pub use compact::ManualCompactOutcome;
-use events::record_and_broadcast;
 #[cfg(test)]
 use snapshot::message_to_dto;
 use snapshot::session_snapshot;
@@ -542,7 +541,7 @@ impl CommandHandler {
         working_dir: &str,
         tool_registry: &ToolRegistry,
         extra_system_prompt: Option<&str>,
-        prompt_files: crate::bootstrap::PromptFiles,
+        prompt_files: PromptFiles,
     ) -> Result<String, String> {
         let tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
         let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
@@ -586,14 +585,18 @@ impl CommandHandler {
         turn_id: Option<&TurnId>,
         payload: EventPayload,
     ) -> Result<Event, String> {
-        record_and_broadcast(
-            &self.runtime.event_store,
-            &self.event_tx,
-            session_id,
-            turn_id,
-            payload,
-        )
-        .await
+        let event = Event::new(session_id.clone(), turn_id.cloned(), payload);
+        let event = if event.payload.is_durable() {
+            self.runtime
+                .event_store
+                .append_event(event)
+                .await
+                .map_err(|e| e.to_string())?
+        } else {
+            event
+        };
+        let _ = self.event_tx.send(ClientNotification::Event(event.clone()));
+        Ok(event)
     }
 
     /// 批量记录多个事件。

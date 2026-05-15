@@ -15,7 +15,7 @@ use astrcode_protocol::{
     version::negotiate_version,
 };
 use astrcode_server::{
-    agent::collaboration::ServerAgentSessionControl,
+    agent::ServerAgentSessionControl,
     handler::CommandHandler,
     transport::{ServerTransport, StdioTransport, write_error_response, write_initialize_response},
 };

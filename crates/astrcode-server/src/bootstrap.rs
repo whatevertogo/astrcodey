@@ -3,12 +3,12 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use astrcode_ai::create_provider;
 use astrcode_context::{
     context_engine::LlmContextAssembler,
-    prompt_engine::{self as prompt, PromptEngine},
+    prompt_engine::PromptEngine,
 };
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
@@ -19,20 +19,16 @@ use astrcode_core::{
     tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
-use astrcode_session::{AutoCompactFailureTracker, background::BackgroundTaskManager};
+use astrcode_session::background::BackgroundTaskManager;
 use astrcode_storage::config_store::FileConfigStore;
+use astrcode_support::hash::hex_fingerprint;
 use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 use parking_lot::{Mutex, RwLock};
 
 use crate::session_spawner::ServerSessionSpawner;
 
-#[derive(Clone, Default)]
-pub(crate) struct PromptFiles {
-    pub(crate) identity: Option<String>,
-    pub(crate) user_rules: Option<String>,
-    pub(crate) project_rules: Option<String>,
-}
+pub(crate) use astrcode_context::prompt_engine::{PromptFiles, load_system_prompt_files};
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub(crate) extension_runner: &'a ExtensionRunner,
@@ -67,8 +63,6 @@ pub struct ServerRuntime {
     pub llm_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
     /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
-    /// Auto compact provider 连续失败熔断状态。
-    pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
     /// 跨回合共享的后台任务管理器。
     pub background_tasks: Arc<Mutex<BackgroundTaskManager>>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
@@ -207,7 +201,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 3. 初始化上下文组装器。
     let context_settings = effective.context.clone();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
-    let auto_compact_failures = Arc::new(AutoCompactFailureTracker::default());
     let background_tasks = Arc::new(Mutex::new(BackgroundTaskManager::default()));
 
     // 4. 确定当前项目工作目录。
@@ -272,7 +265,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         store: Arc::clone(&event_store),
         llm_provider: Arc::clone(&llm_provider),
         context_assembler: Arc::clone(&context_assembler),
-        auto_compact_failures: Arc::clone(&auto_compact_failures),
         background_tasks: Arc::clone(&background_tasks),
         extension_runner: Arc::clone(&extension_runner),
         read_timeout_secs: effective.llm.read_timeout_secs,
@@ -288,7 +280,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         event_store,
         llm_provider,
         context_assembler,
-        auto_compact_failures,
         background_tasks,
         extension_runner,
         effective: RwLock::new(effective),
@@ -434,36 +425,8 @@ pub(crate) async fn build_system_prompt_snapshot_with_files(
     Ok((system_prompt, fingerprint))
 }
 
-pub(crate) async fn load_system_prompt_files(working_dir: &str) -> PromptFiles {
-    let working_dir = std::path::PathBuf::from(working_dir);
-    let fallback_dir = working_dir.clone();
-    tokio::task::spawn_blocking(move || read_system_prompt_files(&working_dir))
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "prompt file preload task failed; reading inline");
-            read_system_prompt_files(&fallback_dir)
-        })
-}
-
-fn read_system_prompt_files(working_dir: &Path) -> PromptFiles {
-    PromptFiles {
-        identity: prompt::load_identity_md(&prompt::user_identity_md_path()),
-        user_rules: prompt::load_user_rules(&prompt::user_agents_md_path()),
-        project_rules: prompt::load_project_rules(working_dir),
-    }
-}
-
-pub(crate) fn fnv1a_hash_bytes(data: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &byte in data {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 pub(crate) fn prompt_fingerprint(text: &str) -> String {
-    format!("{:016x}", fnv1a_hash_bytes(text.as_bytes()))
+    hex_fingerprint(text.as_bytes())
 }
 
 #[cfg(test)]
