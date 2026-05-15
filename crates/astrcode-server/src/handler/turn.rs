@@ -11,7 +11,9 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_session::{
-    Session, agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
+    AgentSignal, Session, SessionContext, TurnOutput, TurnRunner, agent_turn_completed_payloads,
+    agent_turn_failed_payloads, agent_turn_started_payloads, drive_agent,
+    tool_types::BackgroundTaskCompletion,
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{
@@ -20,13 +22,7 @@ use tokio::{
 };
 
 use super::{CommandHandler, CommandMessage, HandlerError};
-use crate::{
-    agent::{
-        AgentLoop, AgentServices, AgentSignal, AgentTurnOutput, drive_agent,
-        tool_types::BackgroundTaskCompletion,
-    },
-    bootstrap::ServerRuntime,
-};
+use crate::bootstrap::ServerRuntime;
 
 /// Agent Turn 的输入参数，用于启动后台任务。
 pub(in crate::handler) struct AgentTurnInput {
@@ -186,7 +182,7 @@ impl CommandHandler {
         &mut self,
         session_id: SessionId,
         turn_id: TurnId,
-        output: AgentTurnOutput,
+        output: TurnOutput,
     ) {
         // 忽略：Turn 已被中止或替换
         if !self.active_turn_matches(&session_id, &turn_id) {
@@ -211,7 +207,7 @@ impl CommandHandler {
         &mut self,
         session_id: SessionId,
         turn_id: TurnId,
-        error: crate::agent::AgentError,
+        error: astrcode_session::AgentError,
         emitted_error: bool,
     ) {
         // 忽略：Turn 已被中止或替换
@@ -393,7 +389,7 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
     }
 }
 
-/// Agent Turn 后台任务：组装 AgentLoop 并驱动 LLM ↔ 工具循环。
+/// Agent Turn 后台任务：组装 TurnRunner 并驱动 LLM ↔ 工具循环。
 async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput) {
     let AgentTurnInput {
         sid,
@@ -437,16 +433,16 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         })
         .unwrap_or(system_prompt);
 
-    // 组装 AgentLoop
+    // 组装 TurnRunner
     let session = Session::open(runtime.event_store.clone(), sid.clone())
         .await
         .expect("session should be openable at agent turn start");
-    let agent = AgentLoop::new(
+    let agent = TurnRunner::new(
         sid.clone(),
         working_dir,
         system_prompt,
         model_id,
-        AgentServices {
+        SessionContext {
             llm: runtime.read_llm_provider(),
             tool_registry,
             extension_runner: runtime.extension_runner.clone(),
@@ -460,7 +456,8 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     );
 
     // 驱动 Agent 循环，通过回调转发事件到 Actor
-    let (output, emitted_error) = drive_agent(&agent, &text, history, |signal| {
+    let noop_bus = astrcode_session::NoopEventBus;
+    let (output, emitted_error) = drive_agent(&agent, &text, history, &noop_bus, &sid, |signal| {
         let actor_tx = actor_tx.clone();
         let current_session_id = Arc::clone(&current_session_id);
         let turn_id = turn_id.clone();

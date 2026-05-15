@@ -9,7 +9,7 @@ use astrcode_core::{
     tool::{ToolDefinition, ToolResult},
 };
 
-use super::shared_context::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
+use crate::turn_context::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 
 /// 解析并尝试修复 JSON 参数。
 ///
@@ -19,7 +19,7 @@ use super::shared_context::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEAR
 /// - 末尾缺少闭合括号
 /// - 末尾有多余的逗号
 /// - 引号不匹配
-pub(super) fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Value {
+pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Value {
     // 首先尝试直接解析
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
         return value;
@@ -93,7 +93,7 @@ pub(super) fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_j
     serde_json::json!({})
 }
 
-pub(super) fn provider_visible_tool_indexes(
+pub fn provider_visible_tool_indexes(
     tools: &[ToolDefinition],
     active_mcp_tools: &HashSet<String>,
 ) -> Vec<usize> {
@@ -110,10 +110,7 @@ pub(super) fn provider_visible_tool_indexes(
         .collect()
 }
 
-pub(super) fn clone_tools_by_index(
-    tools: &[ToolDefinition],
-    indexes: &[usize],
-) -> Vec<ToolDefinition> {
+pub fn clone_tools_by_index(tools: &[ToolDefinition], indexes: &[usize]) -> Vec<ToolDefinition> {
     indexes
         .iter()
         .filter_map(|index| tools.get(*index))
@@ -121,7 +118,7 @@ pub(super) fn clone_tools_by_index(
         .collect()
 }
 
-pub(super) fn append_deferred_mcp_tools_reminder(
+pub fn append_deferred_mcp_tools_reminder(
     messages: &mut Vec<LlmMessage>,
     tools: &[ToolDefinition],
     active_mcp_tools: &HashSet<String>,
@@ -148,7 +145,7 @@ pub(super) fn append_deferred_mcp_tools_reminder(
     messages.push(LlmMessage::system(text));
 }
 
-pub(super) fn activate_discovered_mcp_tools(
+pub fn activate_discovered_mcp_tools(
     active_mcp_tools: &mut HashSet<String>,
     tools: &[ToolDefinition],
     discovered: Vec<String>,
@@ -167,7 +164,7 @@ pub(super) fn activate_discovered_mcp_tools(
     changed
 }
 
-pub(super) fn discovered_mcp_tool_names(result: &ToolResult) -> Vec<String> {
+pub fn discovered_mcp_tool_names(result: &ToolResult) -> Vec<String> {
     result
         .metadata
         .get(TOOL_SEARCH_METADATA_KEY)
@@ -181,11 +178,11 @@ pub(super) fn discovered_mcp_tool_names(result: &ToolResult) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
+pub fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
     tools.iter().any(|tool| tool.name == name)
 }
 
-pub(super) fn is_concrete_mcp_tool(name: &str) -> bool {
+pub fn is_concrete_mcp_tool(name: &str) -> bool {
     name.starts_with(MCP_TOOL_PREFIX) && name != TOOL_SEARCH_TOOL_NAME
 }
 

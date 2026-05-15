@@ -435,7 +435,11 @@ version = "0.1.0"
 dependencies = [
  "astrcode-context",
  "astrcode-core",
+ "astrcode-extensions",
+ "astrcode-support",
+ "astrcode-tools",
  "async-trait",
+ "parking_lot",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

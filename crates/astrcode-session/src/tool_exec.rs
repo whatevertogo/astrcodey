@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 
 use super::{
     background::backgrounded_placeholder_result,
-    shared_context::{AgentSignal, send_event},
     tool_types::{BackgroundTaskCompletion, ExecutableToolCall, ToolCallRuntimeContext},
+    turn_context::{AgentSignal, send_event},
 };
 
 fn error_tool_result(
@@ -84,7 +84,7 @@ fn error_tool_result(
 /// - `true` → 立即后台化（阈值降为 0）
 /// - `false` → 禁止自动后台化（视为 `Never`）
 /// - 未设置 → 使用工具声明的默认策略
-pub(crate) async fn execute_tool_call(
+pub async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
     call: ExecutableToolCall,
@@ -407,7 +407,7 @@ async fn background_tool_call(
         }
 
         // 完成后从管理器移除
-        super::background::complete_background_task(&bg_manager, &bg_task_id);
+        crate::background::complete_background_task(&bg_manager, &bg_task_id);
     });
 
     // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）

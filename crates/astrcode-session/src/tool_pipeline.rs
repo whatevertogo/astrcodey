@@ -12,7 +12,6 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_session::Session;
 use astrcode_support::tool_results::{
     MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary,
     should_persist_tool_result, tool_result_inline_limit, tool_result_preview,
@@ -21,9 +20,6 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
 use super::{
-    shared_context::{
-        AgentError, AgentSignal, SharedTurnContext, TOOL_SEARCH_TOOL_NAME, send_event,
-    },
     tool_exec::execute_tool_call,
     tool_types::{
         CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
@@ -31,13 +27,15 @@ use super::{
         ToolExecutionStep, ToolRuntimeCapabilities, committed_tool_result_content_len,
         missing_tool_result, send_tool_requested,
     },
+    turn_context::{AgentError, AgentSignal, SharedTurnContext, TOOL_SEARCH_TOOL_NAME, send_event},
     util::{discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible},
 };
+use crate::session::Session;
 
 // TODO:Config可配置
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
 
-pub(in crate::agent) struct ToolPipeline {
+pub struct ToolPipeline {
     shared: SharedTurnContext,
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<ExtensionRunner>,
@@ -46,7 +44,7 @@ pub(in crate::agent) struct ToolPipeline {
 }
 
 impl ToolPipeline {
-    pub(super) fn new(
+    pub fn new(
         shared: SharedTurnContext,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
@@ -62,7 +60,7 @@ impl ToolPipeline {
         }
     }
 
-    pub(super) fn list_definitions(&self) -> Vec<ToolDefinition> {
+    pub fn list_definitions(&self) -> Vec<ToolDefinition> {
         self.tool_registry.list_definitions()
     }
 
@@ -92,7 +90,7 @@ impl ToolPipeline {
     /// 2. 检查工具白名单，不在白名单中的工具直接标记为 `Blocked`。
     /// 3. 分发 `PreToolUse` 扩展钩子，允许扩展修改输入或阻止执行。
     /// 4. 根据工具注册表确定执行模式（并行 / 串行）。
-    pub(super) async fn prepare_tool_calls(
+    pub async fn prepare_tool_calls(
         &self,
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
@@ -179,7 +177,7 @@ impl ToolPipeline {
     /// - **Blocked**：先提交已完成的并行批次，再提交预处理阶段的阻止结果。
     /// - **Parallel**：加入当前并行批次，由 `flush_parallel_batch` 统一调度。
     /// - **Sequential**：先提交当前并行批次，再单独执行并提交当前调用。
-    pub(super) async fn execute_and_commit(
+    pub async fn execute_and_commit(
         &self,
         mut input: ExecuteToolCalls<'_>,
     ) -> Result<Vec<String>, AgentError> {
@@ -385,7 +383,7 @@ impl ToolPipeline {
     /// 1. 分发 `PostToolUse` 扩展钩子，允许扩展修改结果内容或阻止。
     /// 2. 通过 `event_tx` 发送 `ToolCallCompleted` 事件通知客户端。
     /// 3. 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
-    pub(super) async fn commit_tool_results(
+    pub async fn commit_tool_results(
         &self,
         mut input: CommitToolResults<'_>,
     ) -> Result<Vec<String>, AgentError> {

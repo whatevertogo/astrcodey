@@ -8,19 +8,17 @@ use astrcode_core::{
     types::{SessionId, TurnId},
 };
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::{SameSessionCompactionInput, Session, append_same_session_compaction};
+use astrcode_session::{
+    Session,
+    compact::{
+        CompactHookContext, collect_compact_instructions, compact_trigger_name,
+        compact_with_forked_provider, dispatch_post_compact,
+    },
+    post_compact::enrich_post_compact_context,
+};
 
 use super::{CommandHandler, HandlerError, session_snapshot};
-use crate::{
-    agent::{
-        compact::{
-            CompactHookContext, collect_compact_instructions, compact_trigger_name,
-            compact_with_forked_provider, dispatch_post_compact,
-        },
-        post_compact::enrich_post_compact_context,
-    },
-    bootstrap::prompt_fingerprint,
-};
+use crate::bootstrap::prompt_fingerprint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactOutcome {
@@ -151,18 +149,12 @@ impl CommandHandler {
             .await
             .map_err(HandlerError::Other)?;
 
-        let events = append_same_session_compaction(
-            &session,
-            SameSessionCompactionInput {
-                session_id: sid.clone(),
-                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
-                system_prompt,
-                trigger_name: compact_trigger_name(CompactTrigger::ManualCommand).into(),
-                compaction,
-            },
-        )
-        .await
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        let fp = prompt_fingerprint(&system_prompt);
+        let trigger = compact_trigger_name(CompactTrigger::ManualCommand).into();
+        let events = session
+            .append_compact_boundary(system_prompt, fp, trigger, compaction)
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
 
         for event in events {
             let _ = self.event_tx.send(ClientNotification::Event(event));
@@ -203,18 +195,12 @@ impl CommandHandler {
             .map_err(|e| HandlerError::Other(format!("open session: {e}")))?;
 
         // Auto compact 的 CompactionStarted 已由 agent loop 发出，不再重复。
-        let events = append_same_session_compaction(
-            &session,
-            SameSessionCompactionInput {
-                session_id: session_id.clone(),
-                system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
-                system_prompt,
-                trigger_name: compact_trigger_name(CompactTrigger::AutoThreshold).into(),
-                compaction,
-            },
-        )
-        .await
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        let fp = prompt_fingerprint(&system_prompt);
+        let trigger = compact_trigger_name(CompactTrigger::AutoThreshold).into();
+        let events = session
+            .append_compact_boundary(system_prompt, fp, trigger, compaction)
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
 
         for event in events {
             let _ = self.event_tx.send(ClientNotification::Event(event));

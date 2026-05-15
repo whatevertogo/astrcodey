@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 
-use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
@@ -132,87 +131,51 @@ impl ToolResultArtifactReader for Session {
     }
 }
 
-// ─── Same-session compaction ────────────────────────────────────────────
+// ─── Compact ────────────────────────────────────────────────────────
 
-/// 同会话 compact 追加输入。
-pub struct SameSessionCompactionInput {
-    pub session_id: SessionId,
-    pub system_prompt: String,
-    pub system_prompt_fingerprint: String,
-    pub trigger_name: String,
-    pub compaction: CompactResult,
-}
-
-/// 向同一个 session 追加 compact boundary 和 continuation 事件。
-///
-/// 不创建 child session。两个事件都使用 `session.id()` 作为所属会话。
-/// Projection reducer 会在遇到 `SessionContinuedFromCompaction` 时
-/// 将 messages 替换为 compacted view，旧事件在投影层面被丢弃。
-pub async fn append_same_session_compaction(
-    session: &Session,
-    input: SameSessionCompactionInput,
-) -> Result<Vec<Event>, String> {
-    let session_id = input.session_id;
-
-    let parent_cursor = session
-        .latest_cursor()
-        .await
-        .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| "0".into());
-
-    let mut appended = Vec::with_capacity(3);
-
-    appended.push(
-        session
-            .append_event(Event::new(
-                session_id.clone(),
+impl Session {
+    pub async fn append_compact_boundary(
+        &self,
+        system_prompt: String,
+        fingerprint: String,
+        trigger_name: String,
+        compaction: astrcode_context::compaction::CompactResult,
+    ) -> Result<Vec<Event>, SessionError> {
+        let cursor = self.latest_cursor().await?.unwrap_or_else(|| "0".into());
+        let mut events = Vec::with_capacity(3);
+        events.push(
+            self.append_event(Event::new(
+                self.id.clone(),
                 None,
-                compact_boundary_payload(input.trigger_name, &input.compaction, session_id.clone()),
+                compact_boundary_payload(trigger_name, &compaction, self.id.clone()),
             ))
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-
-    appended.push(
-        session
-            .append_event(Event::new(
-                session_id.clone(),
+            .await?,
+        );
+        events.push(
+            self.append_event(Event::new(
+                self.id.clone(),
                 None,
                 EventPayload::SystemPromptConfigured {
-                    text: input.system_prompt,
-                    fingerprint: input.system_prompt_fingerprint,
+                    text: system_prompt,
+                    fingerprint,
                 },
             ))
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-
-    appended.push(
-        session
-            .append_event(Event::new(
-                session_id.clone(),
+            .await?,
+        );
+        events.push(
+            self.append_event(Event::new(
+                self.id.clone(),
                 None,
-                session_continued_from_compaction_payload(
-                    session_id.clone(),
-                    parent_cursor,
-                    &input.compaction,
-                ),
+                session_continued_from_compaction_payload(self.id.clone(), cursor, &compaction),
             ))
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-
-    if let Some(cursor) = session.latest_cursor().await.map_err(|e| e.to_string())? {
-        session
-            .checkpoint(&cursor)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?,
+        );
+        if let Some(cursor) = self.latest_cursor().await? {
+            self.checkpoint(&cursor).await?;
+        }
+        Ok(events)
     }
-
-    Ok(appended)
-}
-
-// ─── SessionError ───────────────────────────────────────────────────────
+} // ─── SessionError ───────────────────────────────────────────────────────
 
 /// 会话操作中可能出现的错误类型。
 #[derive(Debug, thiserror::Error)]
@@ -221,4 +184,6 @@ pub enum SessionError {
     NotFound(SessionId),
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("{0}")]
+    Other(String),
 }

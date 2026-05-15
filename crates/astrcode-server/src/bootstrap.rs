@@ -19,15 +19,13 @@ use astrcode_core::{
     tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
+use astrcode_session::{AutoCompactFailureTracker, background::BackgroundTaskManager};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 use parking_lot::{Mutex, RwLock};
 
-use crate::{
-    agent::{AutoCompactFailureTracker, BackgroundTaskManager},
-    session_spawner::ServerSessionSpawner,
-};
+use crate::session_spawner::ServerSessionSpawner;
 
 #[derive(Clone, Default)]
 pub(crate) struct PromptFiles {

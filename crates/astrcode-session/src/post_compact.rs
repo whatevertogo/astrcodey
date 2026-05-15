@@ -28,7 +28,7 @@ const AGENT_NOTE_MAX_CHARS: usize = 20_000;
 const TOOL_NOTE_MAX_CHARS: usize = 16_000;
 const TOKEN_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
 
-pub(crate) async fn enrich_post_compact_context(
+pub async fn enrich_post_compact_context(
     compaction: &mut CompactResult,
     session_id: &str,
     source_messages: &[LlmMessage],

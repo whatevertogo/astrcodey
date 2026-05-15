@@ -12,13 +12,11 @@ use astrcode_core::{
     types::{SessionId, TurnId},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_session::{AgentError, TurnOutput, tool_types::BackgroundTaskCompletion};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
-use crate::{
-    agent::{AgentError, AgentTurnOutput, tool_types::BackgroundTaskCompletion},
-    bootstrap::ServerRuntime,
-};
+use crate::bootstrap::ServerRuntime;
 
 /// 外部访问 CommandHandler 的句柄，通过消息通道发送命令。
 #[derive(Clone)]
@@ -173,7 +171,7 @@ pub(in crate::handler) enum CommandMessage {
     AgentTurnFinished {
         session_id: SessionId,
         turn_id: TurnId,
-        output: AgentTurnOutput,
+        output: TurnOutput,
     },
     /// Agent Turn 失败
     AgentTurnFailed {

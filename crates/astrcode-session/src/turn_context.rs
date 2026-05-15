@@ -19,7 +19,7 @@ pub(crate) const TOOL_SEARCH_METADATA_KEY: &str = "toolSearch";
 
 // ─── Signal ──────────────────────────────────────────────────────────────
 
-pub(crate) enum AgentSignal {
+pub enum AgentSignal {
     Event(EventPayload),
     AutoCompact {
         trigger: astrcode_core::extension::CompactTrigger,
@@ -39,7 +39,7 @@ pub(crate) fn send_event(
 
 /// Emit `TurnEnd` before returning an error, preventing extensions from
 /// seeing an unfinished turn.
-pub(super) async fn end_turn_with_error_typed<T, E>(
+pub async fn end_turn_with_error_typed<T, E>(
     extension_runner: &ExtensionRunner,
     shared: &SharedTurnContext,
     error: E,
@@ -62,17 +62,17 @@ where
 
 /// Session-level identifiers shared across all agent sub-objects.
 #[derive(Clone)]
-pub(super) struct SharedTurnContext {
-    pub(super) session_id: SessionId,
-    pub(super) working_dir: String,
-    pub(super) model_id: String,
+pub struct SharedTurnContext {
+    pub session_id: SessionId,
+    pub working_dir: String,
+    pub model_id: String,
     // TODO: 恢复 event_bus、session_history、system_prompt 等能力，
     // 旧 ExtensionContext trait 已在类型化注册迁移中移除，
     // 后续需要通过独立的机制（如 SharedState struct）重新暴露给 handler。
 }
 
 impl SharedTurnContext {
-    pub(super) fn new(session_id: SessionId, working_dir: String, model_id: String) -> Self {
+    pub fn new(session_id: SessionId, working_dir: String, model_id: String) -> Self {
         Self {
             session_id,
             working_dir,
@@ -83,7 +83,7 @@ impl SharedTurnContext {
 
 /// Computes the retained messages by stripping the compact context prefix
 /// and filtering out system messages.
-pub(super) fn retained_messages_after_compaction(
+pub fn retained_messages_after_compaction(
     messages: &[astrcode_core::llm::LlmMessage],
     context_messages: &[astrcode_core::llm::LlmMessage],
 ) -> Vec<astrcode_core::llm::LlmMessage> {

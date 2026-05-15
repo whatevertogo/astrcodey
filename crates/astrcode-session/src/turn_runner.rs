@@ -39,14 +39,14 @@ use super::{
         prepared_context_from_compaction,
     },
     post_compact::enrich_post_compact_context,
-    shared_context::{
-        AgentError, AgentSignal, SharedTurnContext, end_turn_with_error_typed,
-        retained_messages_after_compaction, send_event,
-    },
     tool_pipeline::ToolPipeline,
     tool_types::{
         BackgroundTaskCompletion, ExecuteToolCalls, InMemoryFileObservationStore, PendingToolCall,
         assistant_tool_call_message,
+    },
+    turn_context::{
+        AgentError, AgentSignal, SharedTurnContext, end_turn_with_error_typed,
+        retained_messages_after_compaction, send_event,
     },
     util::{
         activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
@@ -72,20 +72,20 @@ enum StreamOutcome {
         message_started: bool,
     },
 }
-use astrcode_session::Session;
-
-use crate::agent::AutoCompactFailureTracker;
+use crate::{compact::AutoCompactFailureTracker, event_bus::EventBus, session::Session};
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
 /// `on_signal` 在每个事件或控制信号到达时被调用（包含 select 阶段和 drain 阶段）。
 /// 返回 `(output, emitted_error)`。
-pub(crate) async fn drive_agent<F, Fut>(
-    agent: &AgentLoop,
+pub async fn drive_agent<F, Fut>(
+    agent: &TurnRunner,
     user_text: &str,
     history: Vec<LlmMessage>,
+    event_bus: &dyn EventBus,
+    session_id: &SessionId,
     mut on_signal: F,
-) -> (Result<AgentTurnOutput, AgentError>, bool)
+) -> (Result<TurnOutput, AgentError>, bool)
 where
     F: FnMut(AgentSignal) -> Fut,
     Fut: Future<Output = ()>,
@@ -102,8 +102,11 @@ where
             payload = event_rx.recv(), if !events_closed => {
                 match payload {
                     Some(signal) => {
-                        if matches!(signal, AgentSignal::Event(EventPayload::ErrorOccurred { .. })) {
-                            emitted_error = true;
+                        if let AgentSignal::Event(ref payload) = signal {
+                            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                                emitted_error = true;
+                            }
+                            event_bus.emit(session_id, payload.clone()).await;
                         }
                         on_signal(signal).await;
                     },
@@ -114,11 +117,11 @@ where
     };
 
     while let Some(signal) = event_rx.recv().await {
-        if matches!(
-            signal,
-            AgentSignal::Event(EventPayload::ErrorOccurred { .. })
-        ) {
-            emitted_error = true;
+        if let AgentSignal::Event(ref payload) = signal {
+            if matches!(payload, EventPayload::ErrorOccurred { .. }) {
+                emitted_error = true;
+            }
+            event_bus.emit(session_id, payload.clone()).await;
         }
         on_signal(signal).await;
     }
@@ -131,7 +134,7 @@ where
 /// Created from a session projection, processes one turn, emits event payloads,
 /// and is discarded. Durable event persistence stays in the handler; compact
 /// transcript snapshots are written through the injected session manager.
-pub struct AgentLoop {
+pub struct TurnRunner {
     system_prompt: String,
     shared: SharedTurnContext,
     llm: Arc<dyn LlmProvider>,
@@ -140,19 +143,6 @@ pub struct AgentLoop {
     context_assembler: Arc<LlmContextAssembler>,
     session_manager: Arc<Session>,
     auto_compact_failures: Arc<AutoCompactFailureTracker>,
-}
-
-#[derive(Clone)]
-pub struct AgentServices {
-    pub llm: Arc<dyn LlmProvider>,
-    pub tool_registry: Arc<ToolRegistry>,
-    pub extension_runner: Arc<ExtensionRunner>,
-    pub context_assembler: Arc<LlmContextAssembler>,
-    pub session: Arc<Session>,
-    pub auto_compact_failures: Arc<AutoCompactFailureTracker>,
-    pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-    pub background_tasks: Arc<parking_lot::Mutex<super::background::BackgroundTaskManager>>,
-    pub agent_session_control: Option<Arc<dyn astrcode_core::tool::AgentSessionControl>>,
 }
 
 /// 消费 LLM 事件流直到完成或积累工具调用。
@@ -324,25 +314,25 @@ fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
         .collect()
 }
 
-impl AgentLoop {
-    /// 创建一个新的 AgentLoop 实例。
+impl TurnRunner {
+    /// 创建一个新的 TurnRunner 实例。
     ///
-    /// `AgentServices` 中的依赖被分配给相应的子对象；
-    /// `AgentLoop` 本身只保留编排职责。
+    /// `SessionContext` 中的依赖被分配给相应的子对象；
+    /// `TurnRunner` 本身只保留编排职责。
     pub fn new(
         session_id: SessionId,
         working_dir: String,
         system_prompt: String,
         model_id: String,
-        services: AgentServices,
+        services: crate::session_context::SessionContext,
     ) -> Self {
         let shared = SharedTurnContext::new(session_id, working_dir, model_id);
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
-            super::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
+            crate::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
         ));
         let file_observation_store: Option<Arc<dyn FileObservationStore>> =
             Some(Arc::new(InMemoryFileObservationStore::default()));
-        let capabilities = super::tool_types::ToolRuntimeCapabilities {
+        let capabilities = crate::tool_types::ToolRuntimeCapabilities {
             background_result_tx: services.background_result_tx,
             background_tasks: services.background_tasks,
             background_task_reader,
@@ -374,7 +364,7 @@ impl AgentLoop {
         user_text: &str,
         history: Vec<LlmMessage>,
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<AgentTurnOutput, AgentError> {
+    ) -> Result<TurnOutput, AgentError> {
         let _session_history = history.clone();
         let all_tools = self.tools.list_definitions();
         let mut active_mcp_tools = std::collections::HashSet::new();
@@ -412,7 +402,7 @@ impl AgentLoop {
         let mut final_text = String::new();
         let mut all_tool_results: Vec<astrcode_core::tool::ToolResult> = Vec::new();
         let return_auto_compaction = event_tx.is_none();
-        let mut auto_compaction: Option<AgentCompactContinuation> = None;
+        let mut auto_compaction: Option<CompactContinuation> = None;
 
         loop {
             let (system_messages, prepared_context, compacted) = self
@@ -420,7 +410,7 @@ impl AgentLoop {
                 .await?;
             if return_auto_compaction {
                 if let Some(compaction) = compacted {
-                    auto_compaction = Some(AgentCompactContinuation {
+                    auto_compaction = Some(CompactContinuation {
                         trigger: CompactTrigger::AutoThreshold,
                         compaction,
                     });
@@ -474,7 +464,7 @@ impl AgentLoop {
                     self.extension_runner
                         .emit_lifecycle(ExtensionEvent::TurnEnd, lifecycle_ctx.clone())
                         .await?;
-                    return Ok(AgentTurnOutput {
+                    return Ok(TurnOutput {
                         text: final_text,
                         finish_reason,
                         tool_results: all_tool_results,
@@ -849,21 +839,21 @@ impl AgentLoop {
 
 /// Agent 回合的输出结果。
 #[derive(Debug)]
-pub struct AgentTurnOutput {
+pub struct TurnOutput {
     pub text: String,
     pub finish_reason: String,
     pub tool_results: Vec<astrcode_core::tool::ToolResult>,
-    pub auto_compaction: Option<AgentCompactContinuation>,
+    pub auto_compaction: Option<CompactContinuation>,
 }
 
 /// Agent loop 发现 auto compact 后交给 command owner 执行的 continuation 计划。
 #[derive(Debug)]
-pub struct AgentCompactContinuation {
+pub struct CompactContinuation {
     pub trigger: CompactTrigger,
     pub compaction: CompactResult,
 }
 
-impl AgentCompactContinuation {
+impl CompactContinuation {
     fn with_retained_messages(mut self, messages: &[LlmMessage]) -> Self {
         self.compaction.retained_messages =
             retained_messages_after_compaction(messages, &self.compaction.context_messages);
@@ -872,11 +862,5 @@ impl AgentCompactContinuation {
 }
 
 // Re-export constants for the test module.
-#[cfg(test)]
-use super::shared_context::{TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
 
 // ─── Tests ────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-#[path = "loop_tests.rs"]
-mod tests;

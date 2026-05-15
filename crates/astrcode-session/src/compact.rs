@@ -42,19 +42,19 @@ pub struct AutoCompactFailureTracker {
 }
 
 impl AutoCompactFailureTracker {
-    pub(crate) fn should_skip_provider(&self, session_id: &SessionId) -> bool {
+    pub fn should_skip_provider(&self, session_id: &SessionId) -> bool {
         self.consecutive_failures(session_id) >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
     }
 
-    pub(crate) fn consecutive_failures(&self, session_id: &SessionId) -> usize {
+    pub fn consecutive_failures(&self, session_id: &SessionId) -> usize {
         *self.counts().get(session_id).unwrap_or(&0)
     }
 
-    pub(crate) fn record_provider_success(&self, session_id: &SessionId) {
+    pub fn record_provider_success(&self, session_id: &SessionId) {
         self.counts().remove(session_id);
     }
 
-    pub(crate) fn record_provider_failure(&self, session_id: &SessionId) -> usize {
+    pub fn record_provider_failure(&self, session_id: &SessionId) -> usize {
         let mut counts = self.counts();
         let count = counts.entry(session_id.clone()).or_insert(0);
         *count = count.saturating_add(1);
@@ -71,15 +71,15 @@ impl AutoCompactFailureTracker {
 // ─── Hook 上下文 ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-pub(crate) struct CompactHookContext<'a> {
-    pub(crate) session_id: &'a str,
-    pub(crate) working_dir: &'a str,
-    pub(crate) model_id: &'a str,
-    pub(crate) trigger: CompactTrigger,
-    pub(crate) message_count: usize,
+pub struct CompactHookContext<'a> {
+    pub session_id: &'a str,
+    pub working_dir: &'a str,
+    pub model_id: &'a str,
+    pub trigger: CompactTrigger,
+    pub message_count: usize,
 }
 
-pub(crate) async fn collect_compact_instructions(
+pub async fn collect_compact_instructions(
     extension_runner: &ExtensionRunner,
     input: CompactHookContext<'_>,
 ) -> Result<Vec<String>, ExtensionError> {
@@ -103,7 +103,7 @@ pub(crate) async fn collect_compact_instructions(
     }
 }
 
-pub(crate) async fn dispatch_post_compact(
+pub async fn dispatch_post_compact(
     extension_runner: &ExtensionRunner,
     input: CompactHookContext<'_>,
     compaction: &CompactResult,
@@ -124,7 +124,7 @@ pub(crate) async fn dispatch_post_compact(
     Ok(())
 }
 
-pub(crate) fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
+pub fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
     match trigger {
         CompactTrigger::AutoThreshold => "auto_threshold",
         CompactTrigger::ManualCommand => "manual_command",
@@ -141,21 +141,21 @@ fn clean_compact_instructions(instructions: Vec<String>) -> Vec<String> {
 
 // ─── Forked provider ─────────────────────────────────────────────────────
 
-pub(crate) struct ForkedProviderRequest {
-    pub(crate) base_messages: Vec<LlmMessage>,
-    pub(crate) prompt_messages: Vec<LlmMessage>,
-    pub(crate) tools: Vec<ToolDefinition>,
-    pub(crate) max_turns: usize,
+pub struct ForkedProviderRequest {
+    pub base_messages: Vec<LlmMessage>,
+    pub prompt_messages: Vec<LlmMessage>,
+    pub tools: Vec<ToolDefinition>,
+    pub max_turns: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct ForkedProviderOutput {
-    pub(crate) text: String,
-    pub(crate) finish_reason: String,
+pub struct ForkedProviderOutput {
+    pub text: String,
+    pub finish_reason: String,
 }
 
 #[derive(Debug)]
-pub(crate) enum ForkedRunError {
+pub enum ForkedRunError {
     Llm(LlmError),
     UnexpectedToolCall { name: String },
     UnsupportedMaxTurns { max_turns: usize },
@@ -182,16 +182,16 @@ impl From<LlmError> for ForkedRunError {
 }
 
 #[derive(Clone)]
-pub(crate) struct ForkedProviderRunner {
+pub struct ForkedProviderRunner {
     llm: Arc<dyn LlmProvider>,
 }
 
 impl ForkedProviderRunner {
-    pub(crate) fn new(llm: Arc<dyn LlmProvider>) -> Self {
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self { llm }
     }
 
-    pub(crate) async fn run_one_turn(
+    pub async fn run_one_turn(
         &self,
         request: ForkedProviderRequest,
     ) -> Result<ForkedProviderOutput, ForkedRunError> {
@@ -269,7 +269,7 @@ impl CompactForkRunner {
     }
 }
 
-pub(crate) async fn compact_with_forked_provider(
+pub async fn compact_with_forked_provider(
     llm: Arc<dyn LlmProvider>,
     tools: Vec<ToolDefinition>,
     messages: &[LlmMessage],
@@ -294,7 +294,7 @@ pub(crate) async fn compact_with_forked_provider(
 }
 
 /// 把 compact 结果转换成主循环继续发送给 provider 的 prepared context。
-pub(crate) fn prepared_context_from_compaction(
+pub fn prepared_context_from_compaction(
     compaction: CompactResult,
 ) -> astrcode_context::context_engine::PreparedContext {
     let messages = [
@@ -308,7 +308,7 @@ pub(crate) fn prepared_context_from_compaction(
     }
 }
 
-pub(crate) fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
+pub fn counts_as_auto_compact_provider_failure(error: &CompactError) -> bool {
     !matches!(
         error,
         CompactError::Skip(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact)

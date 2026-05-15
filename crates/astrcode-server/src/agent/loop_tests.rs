@@ -823,11 +823,11 @@ async fn test_services<L>(
     llm: Arc<L>,
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<ExtensionRunner>,
-) -> AgentServices
+) -> SessionContext
 where
     L: LlmProvider + 'static,
 {
-    AgentServices {
+    SessionContext {
         llm,
         tool_registry,
         extension_runner,
@@ -945,7 +945,7 @@ async fn parallel_tools_in_same_batch_overlap() {
         }),
     ]);
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1014,7 +1014,7 @@ async fn tool_search_result_activates_mcp_tool_for_next_provider_request() {
         }),
     ]);
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1050,7 +1050,7 @@ async fn thinking_only_tool_call_turn_completes_scoped_assistant_block() {
         result: success_tool_result("ok"),
     })]);
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1144,7 +1144,7 @@ async fn sequential_tool_splits_parallel_batches() {
         }),
     ]);
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1189,7 +1189,7 @@ async fn completed_parallel_batch_is_committed_before_later_sequential_tool_fini
         }),
     ]);
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1262,7 +1262,7 @@ async fn parallel_results_are_committed_in_model_order() {
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1305,12 +1305,12 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
         .unwrap();
     let session_id = session.id().clone();
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         session_id.clone(),
         ".".into(),
         String::new(),
         "mock".into(),
-        AgentServices {
+        SessionContext {
             llm: Arc::new(ToolCallsThenFinalLlm {
                 call_count: AtomicUsize::new(0),
                 calls: vec![("call-1", "large")],
@@ -1369,12 +1369,12 @@ async fn read_file_tool_result_is_persisted_when_exceeds_limit() {
         .await
         .unwrap();
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         session.id().clone(),
         ".".into(),
         String::new(),
         "mock".into(),
-        AgentServices {
+        SessionContext {
             llm: Arc::new(ToolCallsThenFinalLlm {
                 call_count: AtomicUsize::new(0),
                 calls: vec![("call-1", "read")],
@@ -1456,12 +1456,12 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
         ("call-6", "small"),
     ];
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         session.id().clone(),
         ".".into(),
         String::new(),
         "mock".into(),
-        AgentServices {
+        SessionContext {
             llm: Arc::new(ToolCallsThenFinalLlm {
                 call_count: AtomicUsize::new(0),
                 calls,
@@ -1513,7 +1513,7 @@ async fn parallel_failure_does_not_drop_sibling_result() {
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1554,7 +1554,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
         .register(Arc::new(BlockingPreToolExtension))
         .await;
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         String::new(),
@@ -1604,7 +1604,7 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
 #[tokio::test]
 async fn session_system_prompt_is_sent_to_llm() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "session-1".into(),
         ".".into(),
         "test system prompt".to_string(),
@@ -1657,7 +1657,7 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
         }))
         .await;
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "provider-hook-session".into(),
         std::env::temp_dir()
             .join("astrcode-provider-hook-chain")
@@ -1708,7 +1708,7 @@ async fn auto_compact_uses_forked_runner_with_tools() {
             post_seen: Arc::clone(&compact_post_seen),
         }))
         .await;
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "auto-compact-tools-session".into(),
         ".".into(),
         "main system prompt".into(),
@@ -1791,12 +1791,12 @@ async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
             ..Default::default()
         },
     ));
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         session_id,
         ".".into(),
         "main system prompt".into(),
         "mock".into(),
-        AgentServices {
+        SessionContext {
             llm: llm.clone(),
             tool_registry: Arc::new(ToolRegistry::new()),
             extension_runner: default_extension_runner(),
@@ -1844,7 +1844,7 @@ async fn compact_tool_call_is_not_executed() {
     let llm = Arc::new(CompactToolCallThenOkLlm {
         call_count: AtomicUsize::new(0),
     });
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "compact-tool-call-session".into(),
         ".".into(),
         String::new(),
@@ -1887,7 +1887,7 @@ async fn prompt_too_long_returns_recoverable_error_without_same_session_compact(
         call_count: AtomicUsize::new(0),
         captured_messages: Arc::clone(&captured_messages),
     });
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "overflow-session".into(),
         ".".into(),
         String::new(),
@@ -1960,7 +1960,7 @@ impl LlmProvider for DanglingStreamLlm {
 
 #[tokio::test]
 async fn stream_ended_unexpectedly_returns_internal_error() {
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "dangling-session".into(),
         ".".into(),
         String::new(),
@@ -2020,7 +2020,7 @@ async fn before_provider_request_blocked_returns_internal_error() {
     let runner = default_extension_runner();
     runner.register(Arc::new(BlockingProviderExtension)).await;
 
-    let agent_loop = AgentLoop::new(
+    let agent_loop = TurnRunner::new(
         "blocked-provider-session".into(),
         ".".into(),
         String::new(),

@@ -18,22 +18,20 @@ use astrcode_extensions::{
     runtime::{SpawnRequest, SpawnResult},
 };
 use astrcode_session::{
-    SameSessionCompactionInput, Session, agent_turn_completed_payloads, agent_turn_failed_payloads,
-    agent_turn_started_payloads, append_same_session_compaction,
+    AgentError, AgentSignal, AutoCompactFailureTracker, Session, SessionContext, TurnOutput,
+    TurnRunner, agent_turn_completed_payloads, agent_turn_failed_payloads,
+    agent_turn_started_payloads,
+    background::{BackgroundTaskManager, complete_background_task},
+    compact::compact_trigger_name,
+    drive_agent,
+    tool_types::BackgroundTaskCompletion,
 };
 use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::{
-    agent::{
-        AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput,
-        AutoCompactFailureTracker, BackgroundTaskManager, background::complete_background_task,
-        compact::compact_trigger_name, drive_agent, tool_types::BackgroundTaskCompletion,
-    },
-    bootstrap::{
-        SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-        build_tool_registry_snapshot, load_system_prompt_files, prompt_fingerprint,
-    },
+use crate::bootstrap::{
+    SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
+    build_tool_registry_snapshot, load_system_prompt_files, prompt_fingerprint,
 };
 
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
@@ -65,7 +63,7 @@ struct PreparedChild {
     tool_call_id: Option<String>,
     system_prompt: String,
     model_id: String,
-    agent: AgentLoop,
+    agent: TurnRunner,
     progress: ProgressTx,
     current_child_sid: Arc<Mutex<SessionId>>,
 }
@@ -94,7 +92,7 @@ impl ServerSessionSpawner {
         self.llm_provider.read().clone()
     }
 
-    /// 共享准备阶段：创建子会话、构建 prompt、初始化 AgentLoop。
+    /// 共享准备阶段：创建子会话、构建 prompt、初始化 TurnRunner。
     async fn prepare_child_session(
         &self,
         parent_session_id: &str,
@@ -239,12 +237,12 @@ impl ServerSessionSpawner {
             }
         });
 
-        let agent = AgentLoop::new(
+        let agent = TurnRunner::new(
             child_sid.clone(),
             request.working_dir.clone(),
             system_prompt.clone(),
             model_id.clone(),
-            AgentServices {
+            SessionContext {
                 llm: self.read_llm_provider(),
                 tool_registry: Arc::clone(&tool_registry),
                 extension_runner: Arc::clone(&self.extension_runner),
@@ -525,62 +523,70 @@ impl ServerSessionSpawner {
 // ─── 子 Agent 驱动 ────────────────────────────────────────────────────
 
 async fn drive_child_agent_turn(
-    agent: &AgentLoop,
+    agent: &TurnRunner,
     user_prompt: &str,
     child_session: Arc<Session>,
     current_child_sid: Arc<Mutex<SessionId>>,
     child_turn_id: TurnId,
     progress: ProgressTx,
     system_prompt: String,
-) -> (Result<AgentTurnOutput, AgentError>, bool, SessionId) {
+) -> (Result<TurnOutput, AgentError>, bool, SessionId) {
     let signal_child_sid = Arc::clone(&current_child_sid);
-    let (output, emitted_error) = drive_agent(agent, user_prompt, Vec::new(), move |signal| {
-        let child_session = Arc::clone(&child_session);
-        let current_child_sid = Arc::clone(&signal_child_sid);
-        let child_turn_id = child_turn_id.clone();
-        let progress = progress.clone();
-        let system_prompt = system_prompt.clone();
-        async move {
-            match signal {
-                AgentSignal::Event(payload) => {
-                    let _sid = current_child_sid.lock().await.clone();
-                    let _ = append_child_progress_payload(
-                        &child_session,
-                        &progress,
-                        Some(&child_turn_id),
-                        payload.clone(),
-                    )
-                    .await;
-                },
-                AgentSignal::AutoCompact {
-                    trigger,
-                    compaction,
-                    reply,
-                } => {
-                    let parent_sid = current_child_sid.lock().await.clone();
-                    let result = append_same_session_compaction(
-                        &child_session,
-                        SameSessionCompactionInput {
-                            session_id: parent_sid.clone(),
-                            system_prompt_fingerprint: prompt_fingerprint(&system_prompt),
-                            system_prompt,
-                            trigger_name: compact_trigger_name(trigger).into(),
-                            compaction,
-                        },
-                    )
-                    .await
-                    .map(|_| parent_sid.clone());
-                    if result.is_ok() {
-                        progress.emit(
-                            ToolOutputStream::Stdout,
-                            format!("child agent compacted: {parent_sid}\n"),
-                        );
-                    }
-                    let _ = reply.send(result);
-                },
+    let noop_bus_spawn = astrcode_session::NoopEventBus;
+    let cid = child_session.id().clone();
+    let (output, emitted_error) = drive_agent(
+        agent,
+        user_prompt,
+        Vec::new(),
+        &noop_bus_spawn,
+        &cid,
+        move |signal| {
+            let child_session = Arc::clone(&child_session);
+            let current_child_sid = Arc::clone(&signal_child_sid);
+            let child_turn_id = child_turn_id.clone();
+            let progress = progress.clone();
+            let system_prompt = system_prompt.clone();
+            async move {
+                match signal {
+                    AgentSignal::Event(payload) => {
+                        let _sid = current_child_sid.lock().await.clone();
+                        let _ = append_child_progress_payload(
+                            &child_session,
+                            &progress,
+                            Some(&child_turn_id),
+                            payload.clone(),
+                        )
+                        .await;
+                    },
+                    AgentSignal::AutoCompact {
+                        trigger,
+                        compaction,
+                        reply,
+                    } => {
+                        let parent_sid = current_child_sid.lock().await.clone();
+                        let fp = prompt_fingerprint(&system_prompt);
+                        let result = child_session
+                            .append_compact_boundary(
+                                system_prompt,
+                                fp,
+                                compact_trigger_name(trigger).into(),
+                                compaction,
+                            )
+                            .await
+                            .map(|_| parent_sid.clone())
+                            .map_err(|e| e.to_string());
+                        if result.is_ok() {
+                            progress.emit(
+                                ToolOutputStream::Stdout,
+                                format!("child agent compacted: {parent_sid}\n"),
+                            );
+                        }
+                        let _ = reply.send(result);
+                    },
+                }
             }
-        }
-    })
+        },
+    )
     .await;
     let final_child_sid = current_child_sid.lock().await.clone();
     (output, emitted_error, final_child_sid)

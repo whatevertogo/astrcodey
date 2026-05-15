@@ -19,13 +19,13 @@ use astrcode_core::{
     types::{SessionId, ToolCallId},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_session::{
+    Session, TurnOutput, compact_boundary_payload, session_continued_from_compaction_payload,
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
-use astrcode_session::{Session, compact_boundary_payload, session_continued_from_compaction_payload};
-
 use super::*;
-use crate::agent::AgentTurnOutput;
 
 struct MockLlm;
 
@@ -241,7 +241,7 @@ fn test_runtime_with_settings(
         event_store: Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>,
         llm_provider: Arc::new(parking_lot::RwLock::new(llm_provider)),
         context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
-        auto_compact_failures: Arc::new(crate::agent::AutoCompactFailureTracker::default()),
+        auto_compact_failures: Arc::new(astrcode_session::AutoCompactFailureTracker::default()),
         background_tasks: Default::default(),
         extension_runner: Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
             Duration::from_secs(1),
@@ -748,7 +748,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
         .send(CommandMessage::AgentTurnFinished {
             session_id: sid,
             turn_id,
-            output: AgentTurnOutput {
+            output: TurnOutput {
                 text: "late".into(),
                 finish_reason: "stop".into(),
                 tool_results: vec![],
