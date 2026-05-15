@@ -1,11 +1,10 @@
-//! 会话模块 — Session 作为带存储能力的会话句柄。
+//! Session 句柄 — 带存储能力的会话操作入口。
 //!
-//! 持久事实和投影读模型由 storage 层拥有；Session 是操作入口，
-//! 内部 runtime 通过它追加事件、查询读模型、写入 artifact。
-//! 插件侧通过 `AgentSessionControl` trait 的受限接口操作会话。
-
-mod payload;
-pub(crate) mod spawner;
+//! Session 是系统唯一的持久事实来源。所有关键状态变化以不可变事件
+//! 写入持久层，任何时刻都可通过事件日志和快照重建 session 状态。
+//!
+//! 内部 runtime 通过此类型操作会话；插件侧通过 `AgentSessionControl` trait
+//! 的受限接口操作会话。
 
 use std::sync::Arc;
 
@@ -18,10 +17,8 @@ use astrcode_core::{
     },
     types::*,
 };
-pub(crate) use payload::{
-    agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
-    compact_boundary_payload, session_continued_from_compaction_payload,
-};
+
+use crate::payload::{compact_boundary_payload, session_continued_from_compaction_payload};
 
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
@@ -67,10 +64,10 @@ impl Session {
         &self.store
     }
 
-    // ─── 事件操作（crate 内部） ─────────────────────────────────────────
+    // ─── 事件操作 ──────────────────────────────────────────────────────
 
     /// 追加持久事件到事件日志，分配递增序号。
-    pub(crate) async fn append_event(&self, event: Event) -> Result<Event, SessionError> {
+    pub async fn append_event(&self, event: Event) -> Result<Event, SessionError> {
         Ok(self.store.append_event(event).await?)
     }
 
@@ -80,25 +77,25 @@ impl Session {
     }
 
     /// 返回最新 durable cursor。
-    pub(crate) async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
+    pub async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
         Ok(self.store.latest_cursor(&self.id).await?)
     }
 
     /// 从指定 cursor 之后重放 durable 事件。
-    #[expect(dead_code, reason = "将由 collaboration/http 模块在后续迭代中使用")]
-    pub(crate) async fn replay_after(&self, cursor: &Cursor) -> Result<Vec<Event>, SessionError> {
+    #[allow(dead_code)]
+    pub async fn replay_after(&self, cursor: &Cursor) -> Result<Vec<Event>, SessionError> {
         Ok(self.store.replay_from(&self.id, cursor).await?)
     }
 
     /// 为当前 projection cursor 写入恢复 checkpoint。
-    pub(crate) async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
+    pub async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
         Ok(self.store.checkpoint(&self.id, cursor).await?)
     }
 
-    // ─── Artifact 操作（crate 内部） ────────────────────────────────────
+    // ─── Artifact 操作 ─────────────────────────────────────────────────
 
     /// 写入 compact 前 transcript snapshot。
-    pub(crate) async fn write_compact_snapshot(
+    pub async fn write_compact_snapshot(
         &self,
         snapshot: CompactSnapshotInput,
     ) -> Result<Option<String>, SessionError> {
@@ -109,7 +106,7 @@ impl Session {
     }
 
     /// 写入大工具结果 artifact。
-    pub(crate) async fn write_tool_artifact(
+    pub async fn write_tool_artifact(
         &self,
         artifact: ToolResultArtifactInput,
     ) -> Result<ToolResultArtifactRef, SessionError> {
@@ -135,13 +132,15 @@ impl ToolResultArtifactReader for Session {
     }
 }
 
+// ─── Same-session compaction ────────────────────────────────────────────
+
 /// 同会话 compact 追加输入。
-pub(crate) struct SameSessionCompactionInput {
-    pub(crate) session_id: SessionId,
-    pub(crate) system_prompt: String,
-    pub(crate) system_prompt_fingerprint: String,
-    pub(crate) trigger_name: String,
-    pub(crate) compaction: CompactResult,
+pub struct SameSessionCompactionInput {
+    pub session_id: SessionId,
+    pub system_prompt: String,
+    pub system_prompt_fingerprint: String,
+    pub trigger_name: String,
+    pub compaction: CompactResult,
 }
 
 /// 向同一个 session 追加 compact boundary 和 continuation 事件。
@@ -149,7 +148,7 @@ pub(crate) struct SameSessionCompactionInput {
 /// 不创建 child session。两个事件都使用 `session.id()` 作为所属会话。
 /// Projection reducer 会在遇到 `SessionContinuedFromCompaction` 时
 /// 将 messages 替换为 compacted view，旧事件在投影层面被丢弃。
-pub(crate) async fn append_same_session_compaction(
+pub async fn append_same_session_compaction(
     session: &Session,
     input: SameSessionCompactionInput,
 ) -> Result<Vec<Event>, String> {
@@ -163,7 +162,6 @@ pub(crate) async fn append_same_session_compaction(
 
     let mut appended = Vec::with_capacity(3);
 
-    // 1. CompactBoundaryCreated
     appended.push(
         session
             .append_event(Event::new(
@@ -175,7 +173,6 @@ pub(crate) async fn append_same_session_compaction(
             .map_err(|e| e.to_string())?,
     );
 
-    // 2. SystemPromptConfigured
     appended.push(
         session
             .append_event(Event::new(
@@ -190,7 +187,6 @@ pub(crate) async fn append_same_session_compaction(
             .map_err(|e| e.to_string())?,
     );
 
-    // 3. SessionContinuedFromCompaction
     appended.push(
         session
             .append_event(Event::new(
@@ -215,6 +211,8 @@ pub(crate) async fn append_same_session_compaction(
 
     Ok(appended)
 }
+
+// ─── SessionError ───────────────────────────────────────────────────────
 
 /// 会话操作中可能出现的错误类型。
 #[derive(Debug, thiserror::Error)]

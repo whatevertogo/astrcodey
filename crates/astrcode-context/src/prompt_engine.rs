@@ -1,7 +1,25 @@
-//! Pipeline：纯函数式 system prompt 组装。
+//! System prompt 组装。
 //!
-//! `build_system_prompt()` 接收结构化输入，组装固定顺序的 section 后直接
-//! 返回完整字符串。扩展通过 `PromptBuild` 事件追加内容到固定 section。
+//! section 顺序固定：静态内容（Identity、System、TaskGuidelines、Communication）
+//! 在前，动态内容（Environment、Rules、ToolSummary、Extension blocks、ExtraInstructions）
+//! 在后。这样 KV cache 在 extension 贡献变化时只需失效后半部分。
+//!
+//! ## 扩展动态贡献流程
+//!
+//! 扩展不直接依赖此模块。它们实现 `PromptBuildHandler` 返回
+//! `PromptContributions`（定义在 `astrcode-core`）。TurnRunner 每轮
+//! 调用 `ExtensionRunner::collect_prompt_contributions_typed()` 收集
+//! 最新贡献，然后传给 `PromptEngine::ensure()` 组装。
+//!
+//! ```text
+//! TurnRunner (每轮)
+//!   → ExtensionRunner::collect_prompt_contributions_typed()
+//!   → PromptEngine::ensure(contribs, base, tools)
+//!     → 指纹没变 → 返回缓存
+//!     → 指纹变了 → 重建 prompt → 返回新值
+//! ```
+//!
+//! MCP 断连/重连、skill 文件变化等都会在下一轮自动反映到 prompt。
 
 use std::{
     fs,
@@ -9,7 +27,9 @@ use std::{
 };
 
 use astrcode_core::{
-    prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
+    prompt::{
+        ExtensionPromptBlock, ExtensionSection, PromptPlan, PromptProvider, SystemPromptInput,
+    },
     tool::{ToolDefinition, ToolOrigin, ToolPromptMetadata},
 };
 use astrcode_support::hostpaths::astrcode_dir;
@@ -63,6 +83,113 @@ const COMMUNICATION: &str =
      your doubts and suggestions — constructive disagreement helps more than silent \
      compliance.\n\nBetween tool calls, keep text brief — focus on decisions needing user input, \
      high-level status, and errors that change the plan.";
+
+// ─── PromptEngine ───────────────────────────────────────────────────────
+
+/// System prompt 组装器，带指纹缓存。
+///
+/// 每个 turn 调 `ensure()`，内部按指纹判断是否需要重建。
+/// 外部调用方负责每轮收集最新扩展贡献。
+pub struct PromptEngine {
+    /// 上次组装的 prompt 指纹（用于 KV cache 稳定性判断）
+    fingerprint: String,
+    /// 缓存的完整 prompt 文本
+    cached_prompt: String,
+}
+
+impl PromptEngine {
+    pub fn new() -> Self {
+        Self {
+            fingerprint: String::new(),
+            cached_prompt: String::new(),
+        }
+    }
+
+    /// 确保 prompt 是最新的。指纹不变则返回缓存，变了则重建。
+    ///
+    /// 返回 `(prompt, fingerprint, rebuilt)`，`rebuilt` 为 true 表示本次重建了。
+    pub fn ensure(&mut self, input: SystemPromptInput) -> (String, String, bool) {
+        let new_fp = compute_fingerprint(&input);
+        if new_fp == self.fingerprint && !self.fingerprint.is_empty() {
+            return (self.cached_prompt.clone(), new_fp, false);
+        }
+        let prompt = build_system_prompt(&input);
+        self.fingerprint = new_fp.clone();
+        self.cached_prompt = prompt.clone();
+        (prompt, new_fp, true)
+    }
+
+    /// 强制重建（用于 configuration 变更等场景）。
+    pub fn invalidate(&mut self) {
+        self.fingerprint.clear();
+    }
+}
+
+impl Default for PromptEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 兼容旧的 `PromptProvider` trait（bootstrap 中仍在使用）。
+#[async_trait::async_trait]
+impl PromptProvider for PromptEngine {
+    async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
+        let system_prompt = build_system_prompt(&input);
+        PromptPlan::from_system_prompt(system_prompt)
+    }
+}
+
+fn compute_fingerprint(input: &SystemPromptInput) -> String {
+    // 对 prompt 的动态部分计算指纹：工具列表、扩展块、额外指令。
+    // 静态部分（identity、rules）已包含在 input 中，一并参与。
+    let mut key = String::new();
+    key.push_str(&input.working_dir);
+    key.push('\0');
+    key.push_str(&input.os);
+    key.push('\0');
+    key.push_str(&input.shell);
+    key.push('\0');
+    key.push_str(&input.date);
+    key.push('\0');
+    if let Some(ref id) = input.identity {
+        key.push_str(id);
+    }
+    key.push('\0');
+    if let Some(ref rules) = input.user_rules {
+        key.push_str(rules);
+    }
+    key.push('\0');
+    if let Some(ref rules) = input.project_rules {
+        key.push_str(rules);
+    }
+    key.push('\0');
+    for tool in &input.tools {
+        key.push_str(&tool.name);
+        key.push('\0');
+    }
+    for block in &input.extension_blocks {
+        key.push_str(match block.section {
+            ExtensionSection::PlatformInstructions => "pi",
+            ExtensionSection::AdditionalInstructions => "ai",
+            ExtensionSection::Skills => "sk",
+            ExtensionSection::Agents => "ag",
+        });
+        key.push('\0');
+        key.push_str(&block.content);
+        key.push('\0');
+    }
+    if let Some(ref extra) = input.extra_instructions {
+        key.push_str(extra);
+    }
+
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in key.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
 
 // ─── Identity 加载 ─────────────────────────────────────────────────────
 
@@ -489,11 +616,6 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
     Some(lines.join("\n").trim().to_string())
 }
 
-/// Tool prompt display ordering: lower → shown earlier.
-///
-/// Keep in sync when adding/removing/renaming tools.
-/// 0–9 = high-frequency, 50 = default, 90+ = last-resort.
-/// Fixme: 这里可能有问题
 fn tool_summary_rank(name: &str) -> u8 {
     match name {
         "read" => 0,
@@ -559,13 +681,9 @@ fn is_plugin_tool(tool: &ToolDefinition) -> bool {
         || (tool.origin == ToolOrigin::Bundled && !tool.name.starts_with("mcp__"))
 }
 
-
-// ─── AGENTS.md 加载（供 bootstrap 使用） ────────────────────────────────
+// ─── AGENTS.md 加载 ────────────────────────────────────────────────────
 
 /// 从 working_dir 向上遍历查找所有 AGENTS.md，由浅到深排序。
-///
-/// 目录越深的 AGENTS.md 规则越具体，因此加载时先返回浅层，再返回深层，
-/// 让最终 prompt 里的冲突规则顺序和覆盖语义一致。
 pub fn find_agents_files(working_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut current = Some(working_dir);
@@ -614,6 +732,8 @@ fn non_empty_string(text: String) -> Option<String> {
     }
 }
 
+// ─── Tests ─────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use astrcode_core::tool::ExecutionMode;
@@ -628,6 +748,56 @@ mod tests {
             origin,
             execution_mode: ExecutionMode::Sequential,
         }
+    }
+
+    fn input() -> SystemPromptInput {
+        SystemPromptInput {
+            working_dir: env!("CARGO_MANIFEST_DIR").to_string(),
+            os: "windows".into(),
+            shell: "powershell".into(),
+            date: "2026-04-28".into(),
+            identity: None,
+            user_rules: None,
+            project_rules: None,
+            tools: vec![],
+            extension_blocks: vec![],
+            extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn assemble_returns_usable_prompt_plan() {
+        let plan = PromptEngine::new().assemble(input()).await;
+        assert!(plan.system_prompt.is_some());
+    }
+
+    #[test]
+    fn ensure_caches_when_fingerprint_unchanged() {
+        let mut engine = PromptEngine::new();
+        let input = input();
+
+        let (prompt1, fp1, rebuilt1) = engine.ensure(input.clone());
+        assert!(rebuilt1);
+        assert!(!prompt1.is_empty());
+
+        let (prompt2, fp2, rebuilt2) = engine.ensure(input);
+        assert!(!rebuilt2);
+        assert_eq!(fp1, fp2);
+        assert_eq!(prompt1, prompt2);
+    }
+
+    #[test]
+    fn ensure_rebuilds_when_input_changes() {
+        let mut engine = PromptEngine::new();
+        let (_, fp1, _) = engine.ensure(input());
+
+        let mut changed = input();
+        changed.working_dir = "/different".into();
+        let (_, fp2, rebuilt) = engine.ensure(changed);
+
+        assert!(rebuilt);
+        assert_ne!(fp1, fp2);
     }
 
     #[test]
@@ -682,7 +852,6 @@ mod tests {
 
         let prompt = build_system_prompt(&input);
 
-        // All sections present
         assert!(prompt.contains("[Identity]\n  custom identity"));
         assert!(prompt.contains("[System]\n"));
         assert!(prompt.contains("[Task Guidelines]\n"));
@@ -701,7 +870,6 @@ mod tests {
         assert!(prompt.contains("[Agents]\n  agent x"));
         assert!(prompt.contains("[Additional Instructions]\n  mcp workflow\n\n  extra body"));
 
-        // Ordering keeps stable policy text before volatile environment data.
         let identity = prompt.find("[Identity]").unwrap();
         let system = prompt.find("[System]").unwrap();
         let task = prompt.find("[Task Guidelines]").unwrap();
@@ -746,14 +914,11 @@ mod tests {
 
         let prompt = build_system_prompt(&input);
 
-        // Should have Identity (fallback to default), System, Task Guidelines, Communication,
-        // Environment
         assert!(prompt.contains("[Identity]\n"));
         assert!(prompt.contains("[System]"));
         assert!(prompt.contains("[Task Guidelines]"));
         assert!(prompt.contains("[Communication]"));
         assert!(prompt.contains("[Environment]"));
-        // Should NOT have empty sections
         assert!(!prompt.contains("[User Rules]"));
         assert!(!prompt.contains("[Project Rules]"));
         assert!(!prompt.contains("[Tool Summary]"));

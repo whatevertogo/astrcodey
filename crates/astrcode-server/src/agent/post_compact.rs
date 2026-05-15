@@ -12,7 +12,7 @@ use std::{
 use astrcode_context::{
     ContextSettings,
     compaction::{CompactResult, PostCompactFile, PostCompactNote, recent_read_paths},
-    token_usage::truncate_text_to_tokens,
+    token_budget::truncate_text_to_tokens,
 };
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
@@ -327,7 +327,7 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::token_usage::estimate_text_tokens;
+    use astrcode_context::token_budget::estimate_text_tokens;
     use astrcode_core::tool::ToolOrigin;
     use astrcode_support::hostpaths;
     use serde_json::json;

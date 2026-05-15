@@ -8,6 +8,7 @@ use astrcode_core::{
     types::{SessionId, TurnId},
 };
 use astrcode_protocol::events::ClientNotification;
+use astrcode_session::{SameSessionCompactionInput, Session, append_same_session_compaction};
 
 use super::{CommandHandler, HandlerError, session_snapshot};
 use crate::{
@@ -19,7 +20,6 @@ use crate::{
         post_compact::enrich_post_compact_context,
     },
     bootstrap::prompt_fingerprint,
-    session::{SameSessionCompactionInput, Session, append_same_session_compaction},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

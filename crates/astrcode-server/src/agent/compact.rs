@@ -296,13 +296,13 @@ pub(crate) async fn compact_with_forked_provider(
 /// 把 compact 结果转换成主循环继续发送给 provider 的 prepared context。
 pub(crate) fn prepared_context_from_compaction(
     compaction: CompactResult,
-) -> astrcode_context::manager::PreparedContext {
+) -> astrcode_context::context_engine::PreparedContext {
     let messages = [
         compaction.context_messages.clone(),
         compaction.retained_messages.clone(),
     ]
     .concat();
-    astrcode_context::manager::PreparedContext {
+    astrcode_context::context_engine::PreparedContext {
         messages,
         compaction: Some(compaction),
     }

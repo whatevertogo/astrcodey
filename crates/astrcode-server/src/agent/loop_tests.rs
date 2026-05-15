@@ -809,8 +809,8 @@ fn test_registry(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
     Arc::new(registry)
 }
 
-fn test_context_assembler() -> Arc<astrcode_context::manager::LlmContextAssembler> {
-    Arc::new(astrcode_context::manager::LlmContextAssembler::new(
+fn test_context_assembler() -> Arc<astrcode_context::context_engine::LlmContextAssembler> {
+    Arc::new(astrcode_context::context_engine::LlmContextAssembler::new(
         astrcode_context::ContextSettings::default(),
     ))
 }
@@ -1469,12 +1469,14 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
             }),
             tool_registry,
             extension_runner: default_extension_runner(),
-            context_assembler: Arc::new(astrcode_context::manager::LlmContextAssembler::new(
-                astrcode_context::ContextSettings {
-                    auto_compact_enabled: false,
-                    ..Default::default()
-                },
-            )),
+            context_assembler: Arc::new(
+                astrcode_context::context_engine::LlmContextAssembler::new(
+                    astrcode_context::ContextSettings {
+                        auto_compact_enabled: false,
+                        ..Default::default()
+                    },
+                ),
+            ),
             session: Arc::new(session.clone()),
             auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
             background_result_tx: None,
@@ -1783,7 +1785,7 @@ async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
     for _ in 0..MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES {
         auto_compact_failures.record_provider_failure(&session_id);
     }
-    let context_assembler = Arc::new(astrcode_context::manager::LlmContextAssembler::new(
+    let context_assembler = Arc::new(astrcode_context::context_engine::LlmContextAssembler::new(
         astrcode_context::ContextSettings {
             compact_threshold_percent: 0.0,
             ..Default::default()

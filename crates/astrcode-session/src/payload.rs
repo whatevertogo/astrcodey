@@ -1,7 +1,4 @@
-//! Compact continuation 事件载荷构造 helper。
-//!
-//! 这些 payload 构造函数将 compaction 结果转换为用于父会话边界
-//! 事件和子会话继续事件的协议事件负载。
+//! Compact continuation 事件载荷构造。
 
 use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
@@ -10,10 +7,7 @@ use astrcode_core::{
 };
 
 /// 构造一轮 agent 对话开始时的标准事件序列。
-pub(crate) fn agent_turn_started_payloads(
-    message_id: MessageId,
-    user_text: String,
-) -> [EventPayload; 3] {
+pub fn agent_turn_started_payloads(message_id: MessageId, user_text: String) -> [EventPayload; 3] {
     [
         EventPayload::TurnStarted,
         EventPayload::UserMessage {
@@ -25,7 +19,7 @@ pub(crate) fn agent_turn_started_payloads(
 }
 
 /// 构造一轮 agent 对话正常结束时的标准事件序列。
-pub(crate) fn agent_turn_completed_payloads(reason: String) -> [EventPayload; 2] {
+pub fn agent_turn_completed_payloads(reason: String) -> [EventPayload; 2] {
     [
         EventPayload::TurnCompleted {
             finish_reason: reason.clone(),
@@ -35,7 +29,7 @@ pub(crate) fn agent_turn_completed_payloads(reason: String) -> [EventPayload; 2]
 }
 
 /// 构造一轮 agent 对话失败结束时的标准事件序列。
-pub(crate) fn agent_turn_failed_payloads(
+pub fn agent_turn_failed_payloads(
     error_message: Option<String>,
     reason: String,
 ) -> Vec<EventPayload> {
@@ -52,7 +46,7 @@ pub(crate) fn agent_turn_failed_payloads(
 }
 
 /// 构造父会话 compact continuation 边界事件载荷。
-pub(crate) fn compact_boundary_payload(
+pub fn compact_boundary_payload(
     trigger: impl Into<String>,
     compaction: &CompactResult,
     continued_session_id: SessionId,
@@ -68,7 +62,7 @@ pub(crate) fn compact_boundary_payload(
 }
 
 /// 构造子会话 compact continuation 投影事件载荷。
-pub(crate) fn session_continued_from_compaction_payload(
+pub fn session_continued_from_compaction_payload(
     parent_session_id: SessionId,
     parent_cursor: Cursor,
     compaction: &CompactResult,

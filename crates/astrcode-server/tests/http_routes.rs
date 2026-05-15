@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
 
-use astrcode_context::{ContextSettings, manager::LlmContextAssembler};
+use astrcode_context::{ContextSettings, context_engine::LlmContextAssembler};
 use astrcode_core::{
     config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
@@ -17,7 +17,8 @@ use astrcode_protocol::{
         PromptSubmitResponse, SlashCommandListResponseDto,
     },
 };
-use astrcode_server::{bootstrap::ServerRuntime, http::router, session::Session};
+use astrcode_server::{bootstrap::ServerRuntime, http::router};
+use astrcode_session::Session;
 use astrcode_storage::in_memory::InMemoryEventStore;
 use axum::{
     Router,

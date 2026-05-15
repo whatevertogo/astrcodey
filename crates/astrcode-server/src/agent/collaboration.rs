@@ -11,12 +11,10 @@ use astrcode_core::{
     tool::{AgentSessionControl, AgentSessionInfo, TurnResult},
     types::SessionId,
 };
+use astrcode_session::Session;
 use parking_lot::RwLock;
 
-use crate::{
-    handler::{CommandHandle, TurnCompletion},
-    session::Session,
-};
+use crate::handler::{CommandHandle, TurnCompletion};
 
 /// Server-side AgentSessionControl 实现。
 ///

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use astrcode_context::manager::LlmContextAssembler;
+use astrcode_context::context_engine::LlmContextAssembler;
 use astrcode_core::{
     event::{Event, EventPayload, ToolOutputStream},
     llm::LlmProvider,
@@ -17,13 +17,13 @@ use astrcode_extensions::{
     runner::ExtensionRunner,
     runtime::{SpawnRequest, SpawnResult},
 };
-use parking_lot::{Mutex as StdMutex, RwLock};
-use tokio::sync::{Mutex, mpsc};
-
-use super::{
+use astrcode_session::{
     SameSessionCompactionInput, Session, agent_turn_completed_payloads, agent_turn_failed_payloads,
     agent_turn_started_payloads, append_same_session_compaction,
 };
+use parking_lot::{Mutex as StdMutex, RwLock};
+use tokio::sync::{Mutex, mpsc};
+
 use crate::{
     agent::{
         AgentError, AgentLoop, AgentServices, AgentSignal, AgentTurnOutput,
@@ -746,7 +746,7 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::manager::LlmContextAssembler;
+    use astrcode_context::context_engine::LlmContextAssembler;
     use astrcode_core::{
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::EventStore,

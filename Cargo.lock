@@ -407,6 +407,7 @@ dependencies = [
  "astrcode-extensions",
  "astrcode-log",
  "astrcode-protocol",
+ "astrcode-session",
  "astrcode-storage",
  "astrcode-support",
  "astrcode-tools",
@@ -425,6 +426,19 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "astrcode-session"
+version = "0.1.0"
+dependencies = [
+ "astrcode-context",
+ "astrcode-core",
+ "async-trait",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

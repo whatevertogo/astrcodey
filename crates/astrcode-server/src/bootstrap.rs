@@ -7,8 +7,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use astrcode_ai::create_provider;
 use astrcode_context::{
-    manager::LlmContextAssembler,
-    prompt::{composer::PromptComposer, pipeline},
+    context_engine::LlmContextAssembler,
+    prompt_engine::{self as prompt, PromptEngine},
 };
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
@@ -26,7 +26,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{
     agent::{AutoCompactFailureTracker, BackgroundTaskManager},
-    session::spawner::ServerSessionSpawner,
+    session_spawner::ServerSessionSpawner,
 };
 
 #[derive(Clone, Default)]
@@ -427,7 +427,7 @@ pub(crate) async fn build_system_prompt_snapshot_with_files(
         extra_instructions,
     };
 
-    let system_prompt = PromptComposer::new()
+    let system_prompt = PromptEngine::new()
         .assemble(input)
         .await
         .system_prompt
@@ -449,9 +449,9 @@ pub(crate) async fn load_system_prompt_files(working_dir: &str) -> PromptFiles {
 
 fn read_system_prompt_files(working_dir: &Path) -> PromptFiles {
     PromptFiles {
-        identity: pipeline::load_identity_md(&pipeline::user_identity_md_path()),
-        user_rules: pipeline::load_user_rules(&pipeline::user_agents_md_path()),
-        project_rules: pipeline::load_project_rules(working_dir),
+        identity: prompt::load_identity_md(&prompt::user_identity_md_path()),
+        user_rules: prompt::load_user_rules(&prompt::user_agents_md_path()),
+        project_rules: prompt::load_project_rules(working_dir),
     }
 }
 

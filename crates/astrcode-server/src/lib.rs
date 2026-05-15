@@ -8,5 +8,6 @@ pub mod agent;
 pub mod bootstrap;
 pub mod handler;
 pub mod http;
-pub mod session;
 pub mod transport;
+
+pub(crate) mod session_spawner;

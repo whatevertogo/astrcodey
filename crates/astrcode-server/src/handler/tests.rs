@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_context::{compaction::CompactResult, manager::LlmContextAssembler};
+use astrcode_context::{compaction::CompactResult, context_engine::LlmContextAssembler};
 use astrcode_core::{
     config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},
@@ -22,11 +22,10 @@ use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
+use astrcode_session::{Session, compact_boundary_payload, session_continued_from_compaction_payload};
+
 use super::*;
-use crate::{
-    agent::AgentTurnOutput,
-    session::{Session, compact_boundary_payload, session_continued_from_compaction_payload},
-};
+use crate::agent::AgentTurnOutput;
 
 struct MockLlm;
 

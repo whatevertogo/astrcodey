@@ -3,7 +3,7 @@ use astrcode_core::llm::{LlmMessage, ModelLimits};
 use crate::{
     ContextSettings,
     compaction::{CompactResult, CompactSkipReason, compact_messages_with_render_options},
-    token_usage::{build_prompt_snapshot, should_compact},
+    token_budget::{build_prompt_snapshot, should_compact},
 };
 
 /// 一次 provider request 的上下文准备输入。
@@ -84,7 +84,7 @@ impl LlmContextAssembler {
     pub fn prompt_snapshot(
         &self,
         input: &ContextPrepareInput<'_>,
-    ) -> crate::token_usage::PromptTokenSnapshot {
+    ) -> crate::token_budget::PromptTokenSnapshot {
         self.snapshot(
             &input.messages,
             input.system_prompt,
@@ -97,7 +97,7 @@ impl LlmContextAssembler {
         messages: &[LlmMessage],
         system_prompt: Option<&str>,
         model_limits: ModelLimits,
-    ) -> crate::token_usage::PromptTokenSnapshot {
+    ) -> crate::token_budget::PromptTokenSnapshot {
         build_prompt_snapshot(
             messages,
             system_prompt,

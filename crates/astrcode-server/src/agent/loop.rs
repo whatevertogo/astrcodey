@@ -12,8 +12,8 @@ use astrcode_context::{
         CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
         compact_messages_with_render_options, is_prompt_too_long_message,
     },
-    manager::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
-    token_usage::should_compact as token_should_compact,
+    context_engine::{ContextPrepareInput, LlmContextAssembler, PreparedContext},
+    token_budget::should_compact as token_should_compact,
 };
 use astrcode_core::{
     config::ModelSelection,
@@ -72,7 +72,9 @@ enum StreamOutcome {
         message_started: bool,
     },
 }
-use crate::{agent::AutoCompactFailureTracker, session::Session};
+use astrcode_session::Session;
+
+use crate::agent::AutoCompactFailureTracker;
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///

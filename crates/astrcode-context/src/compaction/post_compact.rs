@@ -7,7 +7,7 @@ use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 use super::assemble::collapse_compaction_whitespace;
 use crate::{
     ContextSettings,
-    token_usage::{estimate_text_tokens, truncate_text_to_tokens},
+    token_budget::{estimate_text_tokens, truncate_text_to_tokens},
 };
 
 const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";

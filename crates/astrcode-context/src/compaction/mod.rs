@@ -14,7 +14,7 @@ use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
 
 use crate::{
     ContextSettings,
-    token_usage::{estimate_request_tokens, estimate_text_tokens},
+    token_budget::{estimate_request_tokens, estimate_text_tokens},
 };
 
 const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";

@@ -12,6 +12,7 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_session::Session;
 use astrcode_support::tool_results::{
     MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary,
     should_persist_tool_result, tool_result_inline_limit, tool_result_preview,
@@ -32,7 +33,6 @@ use super::{
     },
     util::{discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible},
 };
-use crate::session::Session;
 
 // TODO:Config可配置
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;
