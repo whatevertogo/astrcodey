@@ -64,6 +64,7 @@ impl CommandHandler {
         let tool_registry = self.ensure_tool_registry(sid, &state.working_dir).await;
         let provider_messages = state.provider_messages();
         let tools = tool_registry.list_definitions();
+
         let hook_ctx = CompactHookContext {
             session_id: sid.as_str(),
             working_dir: &state.working_dir,
@@ -71,13 +72,12 @@ impl CommandHandler {
             trigger: CompactTrigger::ManualCommand,
             message_count: provider_messages.len(),
         };
-        let _compact_instructions =
-            match collect_compact_instructions(&self.runtime.extension_runner, hook_ctx).await {
-                Ok(instructions) => instructions,
-                Err(error) => {
-                    return Err(HandlerError::Other(format!("Compaction failed: {error}")));
-                },
-            };
+        if let Err(error) =
+            collect_compact_instructions(&self.runtime.extension_runner, hook_ctx).await
+        {
+            return Err(HandlerError::Other(format!("Compaction failed: {error}")));
+        }
+
         let snapshot_path = match session
             .write_compact_snapshot(CompactSnapshotInput {
                 trigger: compact_trigger_name(CompactTrigger::ManualCommand).into(),

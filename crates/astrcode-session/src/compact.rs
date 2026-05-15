@@ -1,10 +1,4 @@
 //! Compact pipeline — hook 桥接。
-//!
-//! 包含：
-//! - [`CompactHookContext`]：在 compact 前后触发扩展钩子所需的上下文
-//! - [`collect_compact_instructions`] / [`dispatch_post_compact`]：扩展钩子桥接
-//!
-//! 设计约束：这个模块不持有任何会话状态，所有参数通过调用方传入。
 
 use astrcode_core::{
     config::ModelSelection,
@@ -14,8 +8,6 @@ use astrcode_core::{
     },
 };
 use astrcode_extensions::runner::ExtensionRunner;
-
-// ─── Hook 上下文 ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
 pub struct CompactHookContext<'a> {
@@ -82,4 +74,3 @@ pub fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
         CompactTrigger::ManualCommand => "manual_command",
     }
 }
-
