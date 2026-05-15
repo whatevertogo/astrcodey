@@ -25,6 +25,13 @@ astrcode v2 的目标是一套 session-first、extension-first、核心极简的
 - context compaction
 - built-in tools
 
+Session owns facts.
+TurnRunner executes.
+Extensions contribute.
+Context derives.
+Handler adapts protocol.
+
+
 skills、agent profiles、自定义工具、prompt context providers 都不作为核心内建能力看待，而是统一通过扩展系统加载。
 
 ## 核心原则
