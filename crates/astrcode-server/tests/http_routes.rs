@@ -5,6 +5,7 @@ use astrcode_core::{
     config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    storage::EventStore,
     tool::{ToolDefinition, ToolResult},
     types::{SessionId, new_message_id},
 };
@@ -17,7 +18,6 @@ use astrcode_protocol::{
     },
 };
 use astrcode_server::{bootstrap::ServerRuntime, http::router, session::Session};
-use astrcode_core::storage::EventStore;
 use astrcode_storage::in_memory::InMemoryEventStore;
 use axum::{
     Router,

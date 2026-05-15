@@ -6,6 +6,8 @@ description = "LLM context window management: token estimation and summary compa
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-support = { path = "../astrcode-support" }
+async-trait = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

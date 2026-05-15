@@ -21,8 +21,7 @@ use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, mpsc};
 
 use super::{
-    SameSessionCompactionInput, Session,
-    agent_turn_completed_payloads, agent_turn_failed_payloads,
+    SameSessionCompactionInput, Session, agent_turn_completed_payloads, agent_turn_failed_payloads,
     agent_turn_started_payloads, append_same_session_compaction,
 };
 use crate::{
@@ -834,10 +833,7 @@ mod tests {
         }
     }
 
-    fn test_spawner(
-        store: Arc<dyn EventStore>,
-        llm: Arc<ToolThenTextLlm>,
-    ) -> ServerSessionSpawner {
+    fn test_spawner(store: Arc<dyn EventStore>, llm: Arc<ToolThenTextLlm>) -> ServerSessionSpawner {
         let settings = astrcode_context::ContextSettings {
             compact_threshold_percent: 0.0,
             ..Default::default()

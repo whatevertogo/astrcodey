@@ -7,6 +7,11 @@ description = "Extension/hook system: lifecycle events, hook modes, extension lo
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
+astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", default-features = false }
+astrcode-extension-mcp = { path = "../astrcode-extension-mcp", default-features = false }
+astrcode-extension-skill = { path = "../astrcode-extension-skill", default-features = false }
+astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", default-features = false }
+astrcode-extension-mode = { path = "../astrcode-extension-mode", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -790,11 +790,7 @@ impl AgentLoop {
             system_prompt: system_prompt.map(str::to_string),
             provider_messages,
         };
-        match self
-            .session_manager
-            .write_compact_snapshot(snapshot)
-            .await
-        {
+        match self.session_manager.write_compact_snapshot(snapshot).await {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(

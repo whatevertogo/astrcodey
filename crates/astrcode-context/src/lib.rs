@@ -1,13 +1,14 @@
-//! astrcode-context：LLM 上下文窗口管理 crate。
+//! astrcode-context：LLM 上下文窗口管理。
 //!
-//! 提供 token 估算和 LLM 驱动的摘要压缩，生成 provider-ready 的可见对话上下文。
-//!
-//! 本 crate 只描述”对话窗口应该长什么样”：可见对话、compact 触发条件、
-//! 摘要 contract 与压缩后的消息形态。system prompt 组装属于 `astrcode-prompt`；
-//! 真正的 provider 调用、工具快照、session/eventlog 编排仍由 server/runtime 层负责。
+//! 负责 system prompt 组装和 provider-ready 上下文构建：
+//! - `prompt`：system prompt 组装（静态内容在前，动态内容在后）
+//! - `manager`：上下文窗口裁剪
+//! - `compaction`：LLM 驱动的摘要压缩
+//! - `token_usage`：token 估算
 
 pub use astrcode_core::config::ContextSettings;
 
 pub mod compaction;
 pub mod manager;
+pub mod prompt;
 pub mod token_usage;

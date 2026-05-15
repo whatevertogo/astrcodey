@@ -9,12 +9,12 @@ use std::sync::Arc;
 use astrcode_core::{
     extension::{
         CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler,
-        CompactResult, Extension, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-        ExtensionToolOutcome, HookMode, HookResult, LifecycleContext, LifecycleHandler,
-        PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-        PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, SlashCommand, ToolHandler, EXTENSION_TOOL_OUTCOME_KEY,
+        CompactResult, EXTENSION_TOOL_OUTCOME_KEY, Extension, ExtensionCommandResult,
+        ExtensionError, ExtensionEvent, ExtensionToolOutcome, HookMode, HookResult,
+        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
+        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
+        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
     },
     tool::{ToolDefinition, ToolResult, tool_metadata},
 };
@@ -48,13 +48,8 @@ fn call_guest(
     let memory = guard.memory;
     let alloc_fn = guard.alloc_fn.clone();
 
-    let (ptr, len) = wasm_api::write_to_guest(
-        &mut guard.store,
-        &memory,
-        &alloc_fn,
-        request_bytes,
-    )
-    .map_err(ExtensionError::Internal)?;
+    let (ptr, len) = wasm_api::write_to_guest(&mut guard.store, &memory, &alloc_fn, request_bytes)
+        .map_err(ExtensionError::Internal)?;
 
     let status = func
         .call(&mut guard.store, (ptr as i32, len as i32))
@@ -100,9 +95,15 @@ impl WasmExtension {
             .get_typed_func::<i32, i32>(&mut store, "alloc")
             .map_err(|e| format!("wasm module must export 'alloc': {e}"))?;
 
-        let handle_tool_fn = instance.get_typed_func::<(i32, i32), i32>(&mut store, "handle_tool").ok();
-        let handle_command_fn = instance.get_typed_func::<(i32, i32), i32>(&mut store, "handle_command").ok();
-        let handle_event_fn = instance.get_typed_func::<(i32, i32), i32>(&mut store, "handle_event").ok();
+        let handle_tool_fn = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "handle_tool")
+            .ok();
+        let handle_command_fn = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "handle_command")
+            .ok();
+        let handle_event_fn = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "handle_event")
+            .ok();
 
         if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&mut store, "extension_init") {
             init_fn
@@ -185,20 +186,22 @@ impl Extension for WasmExtension {
             match event {
                 ExtensionEvent::PreToolUse => {
                     reg.on_pre_tool_use(
-                        *mode, 0,
+                        *mode,
+                        0,
                         Arc::new(WasmPreToolUseHandler {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
                 ExtensionEvent::PostToolUse => {
                     reg.on_post_tool_use(
-                        *mode, 0,
+                        *mode,
+                        0,
                         Arc::new(WasmPostToolUseHandler {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
                 ExtensionEvent::BeforeProviderRequest | ExtensionEvent::AfterProviderResponse => {
                     reg.on_provider(
                         if event == &ExtensionEvent::BeforeProviderRequest {
@@ -206,12 +209,13 @@ impl Extension for WasmExtension {
                         } else {
                             ProviderEvent::AfterResponse
                         },
-                        *mode, 0,
+                        *mode,
+                        0,
                         Arc::new(WasmProviderHandler {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
                 ExtensionEvent::PromptBuild => {
                     reg.on_prompt_build(
                         0,
@@ -219,7 +223,7 @@ impl Extension for WasmExtension {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
                 ExtensionEvent::PreCompact | ExtensionEvent::PostCompact => {
                     reg.on_compact(
                         if event == &ExtensionEvent::PreCompact {
@@ -232,16 +236,17 @@ impl Extension for WasmExtension {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
                 _ => {
                     reg.on_event(
                         event.clone(),
-                        *mode, 0,
+                        *mode,
+                        0,
                         Arc::new(WasmLifecycleHandler {
                             inner: Arc::clone(&inner),
                         }),
                     );
-                }
+                },
             }
         }
     }
@@ -290,14 +295,11 @@ impl ToolHandler for WasmToolHandler {
                         .unwrap_or(response)
                 };
                 Ok(ToolResult::text(content, false, Default::default()))
-            }
-            1 => {
-                Ok(ToolResult::text(response.clone(), true, Default::default()))
-            }
+            },
+            1 => Ok(ToolResult::text(response.clone(), true, Default::default())),
             2 => {
-                let outcome: ExtensionToolOutcome =
-                    serde_json::from_str(&response)
-                        .map_err(|e| ExtensionError::Internal(format!("parse outcome: {e}")))?;
+                let outcome: ExtensionToolOutcome = serde_json::from_str(&response)
+                    .map_err(|e| ExtensionError::Internal(format!("parse outcome: {e}")))?;
                 let outcome_json = serde_json::to_value(&outcome)
                     .map_err(|e| ExtensionError::Internal(format!("serialize outcome: {e}")))?;
                 Ok(ToolResult::text(
@@ -305,7 +307,7 @@ impl ToolHandler for WasmToolHandler {
                     false,
                     tool_metadata([(EXTENSION_TOOL_OUTCOME_KEY, outcome_json)]),
                 ))
-            }
+            },
             other => Err(ExtensionError::Internal(format!(
                 "extension {} tool handler unknown status: {other}",
                 self.extension_id
@@ -393,7 +395,7 @@ impl PreToolUseHandler for WasmPreToolUseHandler {
                 let tool_input = serde_json::from_str(&content)
                     .map_err(|e| ExtensionError::Internal(format!("invalid ModifiedInput: {e}")))?;
                 Ok(PreToolUseResult::ModifyInput { tool_input })
-            }
+            },
             _ => Ok(PreToolUseResult::Allow),
         }
     }
@@ -465,15 +467,17 @@ impl ProviderHandler for WasmProviderHandler {
         match effect {
             1 => Ok(ProviderResult::Block { reason: content }),
             6 => {
-                let messages = serde_json::from_str(&content)
-                    .map_err(|e| ExtensionError::Internal(format!("invalid ReplaceMessages: {e}")))?;
+                let messages = serde_json::from_str(&content).map_err(|e| {
+                    ExtensionError::Internal(format!("invalid ReplaceMessages: {e}"))
+                })?;
                 Ok(ProviderResult::ReplaceMessages { messages })
-            }
+            },
             7 => {
-                let messages = serde_json::from_str(&content)
-                    .map_err(|e| ExtensionError::Internal(format!("invalid AppendMessages: {e}")))?;
+                let messages = serde_json::from_str(&content).map_err(|e| {
+                    ExtensionError::Internal(format!("invalid AppendMessages: {e}"))
+                })?;
                 Ok(ProviderResult::AppendMessages { messages })
-            }
+            },
             _ => Ok(ProviderResult::Allow),
         }
     }
@@ -544,8 +548,9 @@ impl CompactHandler for WasmCompactHandler {
         let (effect, content) = call_guest(&self.inner, &func, &request.to_string())?;
 
         if effect == 5 {
-            let contributions = serde_json::from_str(&content)
-                .map_err(|e| ExtensionError::Internal(format!("invalid CompactContributions: {e}")))?;
+            let contributions = serde_json::from_str(&content).map_err(|e| {
+                ExtensionError::Internal(format!("invalid CompactContributions: {e}"))
+            })?;
             Ok(CompactResult::Contributions(contributions))
         } else {
             Ok(CompactResult::Allow)

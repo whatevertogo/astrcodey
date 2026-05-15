@@ -23,7 +23,10 @@ use crate::{
         tool_types::BackgroundTaskCompletion,
     },
     bootstrap::ServerRuntime,
-    session::{Session, agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads},
+    session::{
+        Session, agent_turn_completed_payloads, agent_turn_failed_payloads,
+        agent_turn_started_payloads,
+    },
 };
 
 /// Agent Turn 的输入参数，用于启动后台任务。
@@ -108,9 +111,9 @@ impl CommandHandler {
         // 恢复会话并修复可能的遗留状态
         {
             let store = self.runtime.event_store.clone();
-            Session::open(store, sid.clone())
-                .await
-                .map_err(|e| HandlerError::SessionNotFound(format!("Session {sid} not found: {e}")))?;
+            Session::open(store, sid.clone()).await.map_err(|e| {
+                HandlerError::SessionNotFound(format!("Session {sid} not found: {e}"))
+            })?;
         }
         self.repair_stale_pending_tool_calls(&sid)
             .await

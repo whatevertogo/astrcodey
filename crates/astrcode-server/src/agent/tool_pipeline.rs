@@ -526,13 +526,11 @@ impl ToolPipeline {
         let original_content = result.content.clone();
         let reference = self
             .session_manager
-            .write_tool_artifact(
-                astrcode_core::storage::ToolResultArtifactInput {
-                    call_id: call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    content: original_content.clone(),
-                },
-            )
+            .write_tool_artifact(astrcode_core::storage::ToolResultArtifactInput {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                content: original_content.clone(),
+            })
             .await
             .map_err(|error| AgentError::Internal(format!("persist tool result: {error}")))?;
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);

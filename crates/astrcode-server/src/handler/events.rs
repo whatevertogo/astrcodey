@@ -24,10 +24,7 @@ pub(super) async fn record_and_broadcast(
     let event = Event::new(session_id.clone(), turn_id.cloned(), payload);
     // 判断是否需要持久化
     let event = if event.payload.is_durable() {
-        store
-            .append_event(event)
-            .await
-            .map_err(|e| e.to_string())?
+        store.append_event(event).await.map_err(|e| e.to_string())?
     } else {
         event
     };

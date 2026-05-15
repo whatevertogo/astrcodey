@@ -240,6 +240,8 @@ name = "astrcode-context"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
+ "astrcode-support",
+ "async-trait",
  "serde_json",
  "tokio",
 ]
@@ -352,6 +354,11 @@ name = "astrcode-extensions"
 version = "0.1.0"
 dependencies = [
  "astrcode-core",
+ "astrcode-extension-agent-tools",
+ "astrcode-extension-mcp",
+ "astrcode-extension-mode",
+ "astrcode-extension-skill",
+ "astrcode-extension-todo-tool",
  "astrcode-support",
  "async-trait",
  "dirs",
@@ -372,16 +379,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "astrcode-prompt"
-version = "0.1.0"
-dependencies = [
- "astrcode-core",
- "astrcode-support",
- "async-trait",
- "tokio",
 ]
 
 [[package]]
@@ -409,7 +406,6 @@ dependencies = [
  "astrcode-extension-todo-tool",
  "astrcode-extensions",
  "astrcode-log",
- "astrcode-prompt",
  "astrcode-protocol",
  "astrcode-storage",
  "astrcode-support",

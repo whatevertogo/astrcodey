@@ -19,7 +19,7 @@ use crate::{
         post_compact::enrich_post_compact_context,
     },
     bootstrap::prompt_fingerprint,
-    session::{Session, SameSessionCompactionInput, append_same_session_compaction},
+    session::{SameSessionCompactionInput, Session, append_same_session_compaction},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

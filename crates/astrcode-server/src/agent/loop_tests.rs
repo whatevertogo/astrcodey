@@ -10,13 +10,13 @@ use std::{
 };
 
 use astrcode_core::{
-    storage::EventStore,
     extension::{
         CompactContext, CompactContributions, CompactEvent, CompactResult, CompactTrigger,
         Extension, ExtensionError, HookMode, PreToolUseContext, PreToolUseResult, ProviderContext,
         ProviderEvent, ProviderResult, Registrar,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, ModelLimits},
+    storage::EventStore,
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,
@@ -833,9 +833,13 @@ where
         extension_runner,
         context_assembler: test_context_assembler(),
         session: {
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-        Arc::new(Session::create(store, ".", "mock-model", None).await.unwrap())
-    },
+            let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+            Arc::new(
+                Session::create(store, ".", "mock-model", None)
+                    .await
+                    .unwrap(),
+            )
+        },
         auto_compact_failures: Arc::new(AutoCompactFailureTracker::default()),
         background_result_tx: None,
         background_tasks: Default::default(),
@@ -954,7 +958,8 @@ async fn parallel_tools_in_same_batch_overlap() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     timeout(
@@ -1021,7 +1026,8 @@ async fn tool_search_result_activates_mcp_tool_for_next_provider_request() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     agent_loop
@@ -1056,7 +1062,8 @@ async fn thinking_only_tool_call_turn_completes_scoped_assistant_block() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
@@ -1150,7 +1157,8 @@ async fn sequential_tool_splits_parallel_batches() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     agent_loop
@@ -1194,7 +1202,8 @@ async fn completed_parallel_batch_is_committed_before_later_sequential_tool_fini
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
@@ -1266,7 +1275,8 @@ async fn parallel_results_are_committed_in_model_order() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     agent_loop
@@ -1290,7 +1300,9 @@ async fn large_tool_result_is_persisted_before_next_llm_call() {
     })]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-    let session = Session::create(store.clone(), ".", "mock", None).await.unwrap();
+    let session = Session::create(store.clone(), ".", "mock", None)
+        .await
+        .unwrap();
     let session_id = session.id().clone();
 
     let agent_loop = AgentLoop::new(
@@ -1353,7 +1365,9 @@ async fn read_file_tool_result_is_persisted_when_exceeds_limit() {
     })]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-    let session = Session::create(store.clone(), ".", "mock", None).await.unwrap();
+    let session = Session::create(store.clone(), ".", "mock", None)
+        .await
+        .unwrap();
 
     let agent_loop = AgentLoop::new(
         session.id().clone(),
@@ -1430,7 +1444,9 @@ async fn aggregate_tool_result_budget_persists_largest_inline_result() {
     ]);
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-    let session = Session::create(store.clone(), ".", "mock", None).await.unwrap();
+    let session = Session::create(store.clone(), ".", "mock", None)
+        .await
+        .unwrap();
     let calls = vec![
         ("call-1", "big1"),
         ("call-2", "big2"),
@@ -1508,7 +1524,8 @@ async fn parallel_failure_does_not_drop_sibling_result() {
             }),
             tool_registry,
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     agent_loop
@@ -1546,7 +1563,8 @@ async fn blocked_pre_tool_use_emits_completed_event_and_preserves_message_order(
             }),
             tool_registry,
             extension_runner,
-        ).await,
+        )
+        .await,
     );
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -1595,7 +1613,8 @@ async fn session_system_prompt_is_sent_to_llm() {
             }),
             Arc::new(ToolRegistry::new()),
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     let output = agent_loop
@@ -1654,7 +1673,8 @@ async fn provider_hooks_receive_tools_and_chain_message_updates() {
                 delay_ms: 0,
             })]),
             extension_runner,
-        ).await,
+        )
+        .await,
     );
 
     let output = agent_loop
@@ -1699,7 +1719,8 @@ async fn auto_compact_uses_forked_runner_with_tools() {
                 delay_ms: 0,
             })]),
             extension_runner,
-        ).await,
+        )
+        .await,
     );
     let mut history = Vec::new();
     for index in 0..10 {
@@ -1779,9 +1800,13 @@ async fn auto_compact_circuit_skips_forked_provider_after_repeated_failures() {
             extension_runner: default_extension_runner(),
             context_assembler,
             session: {
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
-        Arc::new(Session::create(store, ".", "mock-model", None).await.unwrap())
-    },
+                let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+                Arc::new(
+                    Session::create(store, ".", "mock-model", None)
+                        .await
+                        .unwrap(),
+                )
+            },
             auto_compact_failures,
             background_result_tx: None,
             background_tasks: Default::default(),
@@ -1828,7 +1853,8 @@ async fn compact_tool_call_is_not_executed() {
                 executed: Arc::clone(&executed),
             })]),
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
     let mut history = Vec::new();
     for index in 0..10 {
@@ -1868,7 +1894,8 @@ async fn prompt_too_long_returns_recoverable_error_without_same_session_compact(
             llm.clone(),
             Arc::new(ToolRegistry::new()),
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
     let mut history = Vec::new();
     for index in 0..6 {
@@ -1940,7 +1967,8 @@ async fn stream_ended_unexpectedly_returns_internal_error() {
             Arc::new(DanglingStreamLlm),
             Arc::new(ToolRegistry::new()),
             default_extension_runner(),
-        ).await,
+        )
+        .await,
     );
 
     let error = agent_loop
@@ -2001,7 +2029,8 @@ async fn before_provider_request_blocked_returns_internal_error() {
             }),
             Arc::new(ToolRegistry::new()),
             runner,
-        ).await,
+        )
+        .await,
     );
 
     let error = agent_loop

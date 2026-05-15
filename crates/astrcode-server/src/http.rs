@@ -191,7 +191,12 @@ async fn conversation_snapshot(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.runtime.event_store.session_read_model(&session_id).await {
+    match state
+        .runtime
+        .event_store
+        .session_read_model(&session_id)
+        .await
+    {
         Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }

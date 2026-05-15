@@ -6,7 +6,10 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use astrcode_ai::create_provider;
-use astrcode_context::manager::LlmContextAssembler;
+use astrcode_context::{
+    manager::LlmContextAssembler,
+    prompt::{composer::PromptComposer, pipeline},
+};
 use astrcode_core::{
     config::{ConfigStore, EffectiveConfig, ModelSelection},
     extension::{ExtensionError, PromptBuildContext},
@@ -16,7 +19,6 @@ use astrcode_core::{
     tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
-use astrcode_prompt::{composer::PromptComposer, pipeline};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::shell::resolve_shell;
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
@@ -252,21 +254,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let cwd_str = cwd.to_string_lossy().to_string();
     let load_result = ExtensionLoader::load_all(Some(&cwd_str)).await;
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
-    extension_runner
-        .register(astrcode_extension_agent_tools::extension())
-        .await;
-    extension_runner
-        .register(astrcode_extension_mcp::extension())
-        .await;
-    extension_runner
-        .register(astrcode_extension_skill::extension())
-        .await;
-    extension_runner
-        .register(astrcode_extension_todo_tool::extension())
-        .await;
-    extension_runner
-        .register(astrcode_extension_mode::extension())
-        .await;
+    extension_runner.register_builtins().await;
     for ext in load_result.extensions {
         extension_runner.register(ext).await;
     }

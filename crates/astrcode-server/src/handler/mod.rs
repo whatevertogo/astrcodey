@@ -18,11 +18,13 @@ use astrcode_protocol::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::bootstrap::{
-    ServerRuntime, SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-    build_tool_registry_snapshot, load_system_prompt_files,
+use crate::{
+    bootstrap::{
+        ServerRuntime, SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
+        build_tool_registry_snapshot, load_system_prompt_files,
+    },
+    session::Session,
 };
-use crate::session::Session;
 
 mod actor;
 mod compact;
@@ -250,10 +252,7 @@ impl CommandHandler {
     }
 
     /// 创建新会话，分发 SessionStart 事件，初始化工具表和 system prompt。
-    pub async fn create_session(
-        &mut self,
-        working_dir: String,
-    ) -> Result<SessionId, HandlerError> {
+    pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
         let model_id = self.runtime.read_effective().llm.model_id.clone();
         tracing::info!(working_dir = %working_dir, model_id = %model_id, "creating session");
         let session = Session::create(
@@ -283,16 +282,12 @@ impl CommandHandler {
             .ok_or_else(|| HandlerError::Other("session created but no events found".into()))?;
 
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
-        let _ = self
-            .event_tx
-            .send(ClientNotification::Event(start_event));
+        let _ = self.event_tx.send(ClientNotification::Event(start_event));
 
         let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
             session_id: sid.to_string(),
             working_dir: working_dir.clone(),
-            model: ModelSelection::simple(
-                self.runtime.read_effective().llm.model_id.clone(),
-            ),
+            model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
         };
         if let Err(e) = self
             .runtime
@@ -403,16 +398,10 @@ impl CommandHandler {
                 let needs_prompt = state.system_prompt.is_none();
                 let snapshot = session_snapshot(&state);
 
-                let tool_registry =
-                    self.ensure_tool_registry(&session_id, &working_dir).await;
+                let tool_registry = self.ensure_tool_registry(&session_id, &working_dir).await;
                 if needs_prompt {
                     if let Err(e) = self
-                        .configure_session_prompt(
-                            &session_id,
-                            &working_dir,
-                            &tool_registry,
-                            None,
-                        )
+                        .configure_session_prompt(&session_id, &working_dir, &tool_registry, None)
                         .await
                     {
                         self.send_error(-32603, &e);
@@ -441,14 +430,9 @@ impl CommandHandler {
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
-        let session = Session::create(
-            self.runtime.event_store.clone(),
-            &wd,
-            &model_id,
-            None,
-        )
-        .await
-        .map_err(|e| HandlerError::Other(format!("create session: {e}")))?;
+        let session = Session::create(self.runtime.event_store.clone(), &wd, &model_id, None)
+            .await
+            .map_err(|e| HandlerError::Other(format!("create session: {e}")))?;
 
         let sid = session.id().clone();
         self.active_session_id = Some(sid.clone());

@@ -3,8 +3,8 @@
 //! 定义了 WASM 插件和宿主之间的通信协议：
 //! - 宿主通过 Linker 提供 host_xxx import 函数
 //! - 插件在 `extension_init()` 中调用这些 import 注册工具/命令/事件订阅
-//! - 宿主调用插件的 `handle_tool` / `handle_command` / `handle_event` 时，
-//!   通过线性内存传递 JSON 请求，插件通过 `host_set_response` 返回结果
+//! - 宿主调用插件的 `handle_tool` / `handle_command` / `handle_event` 时， 通过线性内存传递 JSON
+//!   请求，插件通过 `host_set_response` 返回结果
 
 use astrcode_core::{
     extension::{ExtensionEvent, HookMode, SlashCommand},
@@ -134,8 +134,7 @@ fn host_register_tool(
     let name = read_memory_string(&mut caller, name_ptr as u32, name_len as u32);
     let desc = read_memory_string(&mut caller, desc_ptr as u32, desc_len as u32);
     let schema = read_memory_string(&mut caller, schema_ptr as u32, schema_len as u32);
-    let params: serde_json::Value =
-        serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
+    let params: serde_json::Value = serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
     caller.data_mut().tools.push(ToolDefinition {
         name,
         description: desc,

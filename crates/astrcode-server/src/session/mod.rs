@@ -13,9 +13,8 @@ use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, EventStore, SessionReadModel, StorageError,
-        ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
-        ToolResultArtifactSlice,
+        CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
+        ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::*,
 };
@@ -54,10 +53,7 @@ impl Session {
     /// 从磁盘恢复已有会话。
     ///
     /// 幂等操作：存储层已缓存会话时不产生额外 I/O。
-    pub async fn open(
-        store: Arc<dyn EventStore>,
-        id: SessionId,
-    ) -> Result<Self, SessionError> {
+    pub async fn open(store: Arc<dyn EventStore>, id: SessionId) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
         Ok(Self { id, store })
     }
@@ -106,7 +102,10 @@ impl Session {
         &self,
         snapshot: CompactSnapshotInput,
     ) -> Result<Option<String>, SessionError> {
-        Ok(self.store.write_compact_snapshot(&self.id, snapshot).await?)
+        Ok(self
+            .store
+            .write_compact_snapshot(&self.id, snapshot)
+            .await?)
     }
 
     /// 写入大工具结果 artifact。

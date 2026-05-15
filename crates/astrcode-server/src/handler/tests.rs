@@ -1006,7 +1006,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     let first_summary = {
         let state = runtime
             .event_store
-        .session_read_model(&session_id)
+            .session_read_model(&session_id)
             .await
             .unwrap();
         message_to_dto(&state.context_messages[0]).content
