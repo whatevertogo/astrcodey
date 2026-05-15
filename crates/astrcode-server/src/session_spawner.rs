@@ -18,13 +18,12 @@ use astrcode_extensions::{
     runtime::{SpawnRequest, SpawnResult},
 };
 use astrcode_session::{
-    AgentError, AgentSignal, AutoCompactFailureTracker, Session, SessionContext, TurnOutput,
+    TurnError, AgentSignal, AutoCompactFailureTracker, Session, SessionServices, TurnOutput,
     TurnRunner, agent_turn_completed_payloads, agent_turn_failed_payloads,
     agent_turn_started_payloads,
-    background::{BackgroundTaskManager, complete_background_task},
+    background::{BackgroundTaskCompletion, BackgroundTaskManager, complete_background_task},
     compact::compact_trigger_name,
     drive_agent,
-    tool_types::BackgroundTaskCompletion,
 };
 use parking_lot::{Mutex as StdMutex, RwLock};
 use tokio::sync::{Mutex, mpsc};
@@ -242,17 +241,17 @@ impl ServerSessionSpawner {
             request.working_dir.clone(),
             system_prompt.clone(),
             model_id.clone(),
-            SessionContext {
-                llm: self.read_llm_provider(),
-                tool_registry: Arc::clone(&tool_registry),
-                extension_runner: Arc::clone(&self.extension_runner),
-                context_assembler: Arc::clone(&self.context_assembler),
-                session: Arc::clone(&child_arc),
-                auto_compact_failures: Arc::clone(&self.auto_compact_failures),
-                background_result_tx: Some(child_bg_result_tx),
-                background_tasks: Arc::clone(&self.background_tasks),
-                agent_session_control: self.agent_session_control.read().clone(),
-            },
+            SessionServices::new(
+                self.read_llm_provider(),
+                Arc::clone(&tool_registry),
+                Arc::clone(&self.extension_runner),
+                Arc::clone(&self.context_assembler),
+                Arc::clone(&child_arc),
+                Arc::clone(&self.auto_compact_failures),
+                Arc::clone(&self.background_tasks),
+            )
+            .with_background_result_tx(child_bg_result_tx)
+            .with_agent_session_control(self.agent_session_control.read().clone()),
         );
 
         Ok(PreparedChild {
@@ -530,16 +529,14 @@ async fn drive_child_agent_turn(
     child_turn_id: TurnId,
     progress: ProgressTx,
     system_prompt: String,
-) -> (Result<TurnOutput, AgentError>, bool, SessionId) {
+) -> (Result<TurnOutput, TurnError>, bool, SessionId) {
     let signal_child_sid = Arc::clone(&current_child_sid);
     let noop_bus_spawn = astrcode_session::NoopEventBus;
-    let cid = child_session.id().clone();
     let (output, emitted_error) = drive_agent(
         agent,
         user_prompt,
         Vec::new(),
         &noop_bus_spawn,
-        &cid,
         move |signal| {
             let child_session = Arc::clone(&child_session);
             let current_child_sid = Arc::clone(&signal_child_sid);

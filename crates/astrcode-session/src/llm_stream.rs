@@ -3,14 +3,14 @@
 use astrcode_context::compaction::is_prompt_too_long_message;
 use astrcode_core::{
     event::EventPayload,
-    llm::{LlmError, LlmEvent, LlmMessage, LlmRole},
+    llm::{LlmError, LlmEvent, LlmMessage},
     types::*,
 };
 use tokio::sync::mpsc;
 
 use crate::{
     tool_types::PendingToolCall,
-    turn_context::{AgentError, AgentSignal, send_event},
+    turn_context::{TurnError, AgentSignal, send_event},
 };
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ pub async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
     event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
     message_id: MessageId,
-) -> Result<StreamOutcome, AgentError> {
+) -> Result<StreamOutcome, TurnError> {
     let mut current_text = String::new();
     let mut reasoning_content = String::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
@@ -154,12 +154,12 @@ pub async fn consume_llm_stream(
                         recoverable,
                     },
                 );
-                return Err(AgentError::Llm(LlmError::StreamParse(message)));
+                return Err(TurnError::Llm(LlmError::StreamParse(message)));
             },
         }
     }
 
-    Err(AgentError::Internal("LLM stream ended unexpectedly".into()))
+    Err(TurnError::Internal("LLM stream ended unexpectedly".into()))
 }
 
 pub fn ensure_assistant_message_started(

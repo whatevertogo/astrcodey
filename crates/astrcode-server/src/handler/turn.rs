@@ -11,9 +11,9 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_session::{
-    AgentSignal, Session, SessionContext, TurnOutput, TurnRunner, agent_turn_completed_payloads,
-    agent_turn_failed_payloads, agent_turn_started_payloads, drive_agent,
-    tool_types::BackgroundTaskCompletion,
+    AgentSignal, Session, SessionServices, TurnOutput, TurnRunner, agent_turn_completed_payloads,
+    agent_turn_failed_payloads, agent_turn_started_payloads, background::BackgroundTaskCompletion,
+    drive_agent,
 };
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{
@@ -207,7 +207,7 @@ impl CommandHandler {
         &mut self,
         session_id: SessionId,
         turn_id: TurnId,
-        error: astrcode_session::AgentError,
+        error: astrcode_session::TurnError,
         emitted_error: bool,
     ) {
         // 忽略：Turn 已被中止或替换
@@ -442,22 +442,22 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         working_dir,
         system_prompt,
         model_id,
-        SessionContext {
-            llm: runtime.read_llm_provider(),
+        SessionServices::new(
+            runtime.read_llm_provider(),
             tool_registry,
-            extension_runner: runtime.extension_runner.clone(),
-            context_assembler: runtime.context_assembler.clone(),
-            session: Arc::new(session),
-            auto_compact_failures: runtime.auto_compact_failures.clone(),
-            background_result_tx: Some(background_result_tx),
-            background_tasks: runtime.background_tasks.clone(),
-            agent_session_control: runtime.agent_session_control.read().clone(),
-        },
+            runtime.extension_runner.clone(),
+            runtime.context_assembler.clone(),
+            Arc::new(session),
+            runtime.auto_compact_failures.clone(),
+            runtime.background_tasks.clone(),
+        )
+        .with_background_result_tx(background_result_tx)
+        .with_agent_session_control(runtime.agent_session_control.read().clone()),
     );
 
     // 驱动 Agent 循环，通过回调转发事件到 Actor
     let noop_bus = astrcode_session::NoopEventBus;
-    let (output, emitted_error) = drive_agent(&agent, &text, history, &noop_bus, &sid, |signal| {
+    let (output, emitted_error) = drive_agent(&agent, &text, history, &noop_bus, |signal| {
         let actor_tx = actor_tx.clone();
         let current_session_id = Arc::clone(&current_session_id);
         let turn_id = turn_id.clone();

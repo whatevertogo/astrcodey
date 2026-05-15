@@ -180,8 +180,6 @@ impl Session {
 /// 会话操作中可能出现的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("Session not found: {0}")]
-    NotFound(SessionId),
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("{0}")]

@@ -12,7 +12,7 @@ use astrcode_core::{
     types::{SessionId, TurnId},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
-use astrcode_session::{AgentError, TurnOutput, tool_types::BackgroundTaskCompletion};
+use astrcode_session::{TurnError, TurnOutput, background::BackgroundTaskCompletion};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
@@ -177,7 +177,7 @@ pub(in crate::handler) enum CommandMessage {
     AgentTurnFailed {
         session_id: SessionId,
         turn_id: TurnId,
-        error: AgentError,
+        error: TurnError,
         emitted_error: bool,
     },
     /// 自动压缩完成，需要继续 Turn

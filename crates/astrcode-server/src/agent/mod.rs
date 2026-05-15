@@ -3,9 +3,9 @@
 pub mod collaboration;
 
 pub use astrcode_session::{
-    SessionContext,
+    SessionServices,
     background::BackgroundTaskManager,
     compact::AutoCompactFailureTracker,
-    turn_context::{AgentError, AgentSignal},
+    turn_context::{TurnError, AgentSignal},
     turn_runner::{CompactContinuation, TurnOutput, TurnRunner, drive_agent},
 };

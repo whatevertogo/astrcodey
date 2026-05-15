@@ -6,7 +6,10 @@ use std::{sync::Arc, time::Instant};
 
 use astrcode_core::{
     event::EventPayload,
-    tool::{BackgroundPolicy, ToolCapabilities, ToolError, ToolExecutionContext, ToolResult},
+    tool::{
+        BackgroundPolicy, FileObservation, FileObservationStore, ToolCapabilities, ToolError,
+        ToolExecutionContext, ToolResult,
+    },
     types::*,
 };
 use astrcode_tools::registry::ToolRegistry;
@@ -14,8 +17,8 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use super::{
-    background::backgrounded_placeholder_result,
-    tool_types::{BackgroundTaskCompletion, ExecutableToolCall, ToolCallRuntimeContext},
+    background::{BackgroundTaskCompletion, backgrounded_placeholder_result},
+    tool_types::{ExecutableToolCall, ToolCallRuntimeContext},
     turn_context::{AgentSignal, send_event},
 };
 
@@ -427,4 +430,27 @@ async fn background_tool_call(
         .map(String::from);
     let placeholder = backgrounded_placeholder_result(&call_id, &task_id, command.as_deref());
     (call_index, placeholder)
+}
+
+// ─── File observation store ──────────────────────────────────────────────────
+
+/// 进程内文件观察存储，用于 read/edit 工具的 read-before-edit 守卫。
+///
+/// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
+/// 生命周期与 session 一致（由 `TurnRunner::new` 创建，随 `TurnRunner` 销毁）。
+#[derive(Default)]
+pub struct InMemoryFileObservationStore {
+    observations: Mutex<std::collections::HashMap<String, FileObservation>>,
+}
+
+impl FileObservationStore for InMemoryFileObservationStore {
+    fn remember(&self, observation: FileObservation) {
+        let mut map = self.observations.lock();
+        map.insert(observation.path.clone(), observation);
+    }
+
+    fn load(&self, path: &str) -> Option<FileObservation> {
+        let map = self.observations.lock();
+        map.get(path).cloned()
+    }
 }

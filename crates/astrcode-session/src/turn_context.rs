@@ -5,17 +5,10 @@ use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
     extension::{ExtensionEvent, LifecycleContext},
-    llm::LlmRole,
     types::*,
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::sync::{mpsc, oneshot};
-
-// ─── Constants ───────────────────────────────────────────────────────────
-
-pub(crate) const MCP_TOOL_PREFIX: &str = "mcp__";
-pub(crate) const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
-pub(crate) const TOOL_SEARCH_METADATA_KEY: &str = "toolSearch";
 
 // ─── Signal ──────────────────────────────────────────────────────────────
 
@@ -43,9 +36,9 @@ pub async fn end_turn_with_error_typed<T, E>(
     extension_runner: &ExtensionRunner,
     shared: &SharedTurnContext,
     error: E,
-) -> Result<T, AgentError>
+) -> Result<T, TurnError>
 where
-    E: Into<AgentError>,
+    E: Into<TurnError>,
 {
     let ctx = LifecycleContext {
         session_id: shared.session_id.to_string(),
@@ -81,33 +74,10 @@ impl SharedTurnContext {
     }
 }
 
-/// Computes the retained messages by stripping the compact context prefix
-/// and filtering out system messages.
-pub fn retained_messages_after_compaction(
-    messages: &[astrcode_core::llm::LlmMessage],
-    context_messages: &[astrcode_core::llm::LlmMessage],
-) -> Vec<astrcode_core::llm::LlmMessage> {
-    let without_session_prompt = if matches!(
-        messages.first(),
-        Some(message) if message.role == LlmRole::System
-    ) {
-        &messages[1..]
-    } else {
-        messages
-    };
-    without_session_prompt
-        .strip_prefix(context_messages)
-        .unwrap_or(without_session_prompt)
-        .iter()
-        .filter(|message| message.role != LlmRole::System)
-        .cloned()
-        .collect()
-}
-
-// ─── AgentError ──────────────────────────────────────────────────────────
+// ─── TurnError ───────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
-pub enum AgentError {
+pub enum TurnError {
     #[error("{0}")]
     Llm(#[from] astrcode_core::llm::LlmError),
     #[error("Tool error: {0}")]

@@ -6,10 +6,40 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
+    event::EventPayload,
     tool::{BackgroundTaskReader, ToolResult},
-    types::{BackgroundTaskId, SessionId},
+    types::{BackgroundTaskId, SessionId, ToolCallId},
 };
 use parking_lot::Mutex;
+
+/// 后台任务完成通知的载荷。
+pub struct BackgroundTaskCompletion {
+    pub session_id: SessionId,
+    pub task_id: BackgroundTaskId,
+    pub tool_name: String,
+    pub result: ToolResult,
+}
+
+impl BackgroundTaskCompletion {
+    /// 从完成通知派生 `ToolCallCompleted` 事件载荷。
+    pub fn to_tool_call_completed(&self) -> EventPayload {
+        EventPayload::ToolCallCompleted {
+            call_id: ToolCallId::from(self.result.call_id.clone()),
+            tool_name: self.tool_name.clone(),
+            result: self.result.clone(),
+        }
+    }
+
+    /// 从完成通知派生 `BackgroundTaskCompleted` 事件载荷。
+    pub fn to_background_task_completed(&self) -> EventPayload {
+        EventPayload::BackgroundTaskCompleted {
+            task_id: self.task_id.clone(),
+            call_id: ToolCallId::from(self.result.call_id.clone()),
+            tool_name: self.tool_name.clone(),
+            result: self.result.clone(),
+        }
+    }
+}
 
 struct RunningTask {
     session_id: SessionId,

@@ -22,13 +22,12 @@ use astrcode_core::{
         CompactTrigger, ExtensionEvent, LifecycleContext, ProviderContext, ProviderEvent,
         ProviderResult,
     },
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole},
+    llm::{LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::CompactSnapshotInput,
     tool::{BackgroundTaskReader, FileObservationStore, ToolDefinition},
     types::*,
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
@@ -39,14 +38,11 @@ use super::{
         prepared_context_from_compaction,
     },
     post_compact::enrich_post_compact_context,
+    tool_exec::InMemoryFileObservationStore,
     tool_pipeline::ToolPipeline,
-    tool_types::{
-        BackgroundTaskCompletion, ExecuteToolCalls, InMemoryFileObservationStore, PendingToolCall,
-        assistant_tool_call_message,
-    },
+    tool_types::{ExecuteToolCalls, assistant_tool_call_message},
     turn_context::{
-        AgentError, AgentSignal, SharedTurnContext, end_turn_with_error_typed,
-        retained_messages_after_compaction, send_event,
+        TurnError, AgentSignal, SharedTurnContext, end_turn_with_error_typed, send_event,
     },
     util::{
         activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
@@ -57,8 +53,7 @@ use crate::{
     compact::AutoCompactFailureTracker,
     event_bus::EventBus,
     llm_stream::{
-        StreamOutcome, assistant_message_with_thinking, consume_llm_stream,
-        ensure_assistant_message_started, non_empty_reasoning_content, provider_visible_messages,
+        StreamOutcome, assistant_message_with_thinking, consume_llm_stream, non_empty_reasoning_content, provider_visible_messages,
     },
     session::Session,
 };
@@ -72,9 +67,8 @@ pub async fn drive_agent<F, Fut>(
     user_text: &str,
     history: Vec<LlmMessage>,
     event_bus: &dyn EventBus,
-    session_id: &SessionId,
     mut on_signal: F,
-) -> (Result<TurnOutput, AgentError>, bool)
+) -> (Result<TurnOutput, TurnError>, bool)
 where
     F: FnMut(AgentSignal) -> Fut,
     Fut: Future<Output = ()>,
@@ -95,7 +89,7 @@ where
                             if matches!(payload, EventPayload::ErrorOccurred { .. }) {
                                 emitted_error = true;
                             }
-                            event_bus.emit(session_id, payload.clone()).await;
+                            event_bus.emit(&agent.shared.session_id, payload.clone()).await;
                         }
                         on_signal(signal).await;
                     },
@@ -110,7 +104,7 @@ where
             if matches!(payload, EventPayload::ErrorOccurred { .. }) {
                 emitted_error = true;
             }
-            event_bus.emit(session_id, payload.clone()).await;
+            event_bus.emit(&agent.shared.session_id, payload.clone()).await;
         }
         on_signal(signal).await;
     }
@@ -137,14 +131,14 @@ pub struct TurnRunner {
 impl TurnRunner {
     /// 创建一个新的 TurnRunner 实例。
     ///
-    /// `SessionContext` 中的依赖被分配给相应的子对象；
+    /// `SessionServices` 中的依赖被分配给相应的子对象；
     /// `TurnRunner` 本身只保留编排职责。
     pub fn new(
         session_id: SessionId,
         working_dir: String,
         system_prompt: String,
         model_id: String,
-        services: crate::session_context::SessionContext,
+        services: crate::session_services::SessionServices,
     ) -> Self {
         let shared = SharedTurnContext::new(session_id, working_dir, model_id);
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
@@ -184,7 +178,7 @@ impl TurnRunner {
         user_text: &str,
         history: Vec<LlmMessage>,
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<TurnOutput, AgentError> {
+    ) -> Result<TurnOutput, TurnError> {
         let _session_history = history.clone();
         let all_tools = self.tools.list_definitions();
         let mut active_mcp_tools = std::collections::HashSet::new();
@@ -356,7 +350,7 @@ impl TurnRunner {
         messages: &mut Vec<LlmMessage>,
         tools: &[ToolDefinition],
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<(Vec<LlmMessage>, PreparedContext, Option<CompactResult>), AgentError> {
+    ) -> Result<(Vec<LlmMessage>, PreparedContext, Option<CompactResult>), TurnError> {
         let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
             .iter()
             .cloned()
@@ -498,7 +492,7 @@ impl TurnRunner {
         &self,
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
         compaction: CompactResult,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         let Some(tx) = event_tx else {
             return Ok(());
         };
@@ -508,18 +502,18 @@ impl TurnRunner {
             compaction,
             reply,
         })
-        .map_err(|_| AgentError::Internal("auto compact transition channel closed".into()))?;
+        .map_err(|_| TurnError::Internal("auto compact transition channel closed".into()))?;
         rx.await
-            .map_err(|_| AgentError::Internal("auto compact transition was dropped".into()))?
+            .map_err(|_| TurnError::Internal("auto compact transition was dropped".into()))?
             .map(|_| ())
-            .map_err(AgentError::Internal)
+            .map_err(TurnError::Internal)
     }
 
     async fn apply_before_provider_request_hook(
         &self,
         system_messages: Vec<LlmMessage>,
         context_messages: Vec<LlmMessage>,
-    ) -> Result<Vec<LlmMessage>, AgentError> {
+    ) -> Result<Vec<LlmMessage>, TurnError> {
         let send_messages = provider_visible_messages([system_messages, context_messages].concat());
         let provider_ctx = ProviderContext {
             session_id: self.shared.session_id.to_string(),
@@ -541,7 +535,7 @@ impl TurnRunner {
                 self.extension_runner
                     .emit_lifecycle(ExtensionEvent::TurnEnd, lifecycle_ctx)
                     .await?;
-                Err(AgentError::Internal(reason))
+                Err(TurnError::Internal(reason))
             },
             ProviderResult::ReplaceMessages { messages } => Ok(provider_visible_messages(messages)),
             ProviderResult::AppendMessages { messages } => {
@@ -558,7 +552,7 @@ impl TurnRunner {
         send_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, AgentError> {
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, TurnError> {
         match self.llm.generate(send_messages, tools.to_vec()).await {
             Ok(rx) => Ok(rx),
             Err(e) => {
@@ -578,7 +572,7 @@ impl TurnRunner {
     async fn dispatch_after_provider_response(
         &self,
         lifecycle_ctx: &LifecycleContext,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         if let Err(e) = self
             .extension_runner
             .emit_lifecycle(ExtensionEvent::AfterProviderResponse, lifecycle_ctx.clone())
@@ -620,7 +614,7 @@ impl TurnRunner {
         &self,
         trigger: CompactTrigger,
         message_count: usize,
-    ) -> Result<Vec<String>, AgentError> {
+    ) -> Result<Vec<String>, TurnError> {
         collect_compact_instructions(
             &self.extension_runner,
             CompactHookContext {
@@ -632,7 +626,7 @@ impl TurnRunner {
             },
         )
         .await
-        .map_err(AgentError::Extension)
+        .map_err(TurnError::Extension)
     }
 
     async fn notify_post_compact(
@@ -640,7 +634,7 @@ impl TurnRunner {
         trigger: CompactTrigger,
         message_count: usize,
         compaction: &CompactResult,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         dispatch_post_compact(
             &self.extension_runner,
             CompactHookContext {
@@ -653,7 +647,7 @@ impl TurnRunner {
             compaction,
         )
         .await
-        .map_err(AgentError::Extension)
+        .map_err(TurnError::Extension)
     }
 }
 
@@ -679,6 +673,29 @@ impl CompactContinuation {
             retained_messages_after_compaction(messages, &self.compaction.context_messages);
         self
     }
+}
+
+/// Computes the retained messages by stripping the compact context prefix
+/// and filtering out system messages.
+fn retained_messages_after_compaction(
+    messages: &[LlmMessage],
+    context_messages: &[LlmMessage],
+) -> Vec<LlmMessage> {
+    let without_session_prompt = if matches!(
+        messages.first(),
+        Some(message) if message.role == LlmRole::System
+    ) {
+        &messages[1..]
+    } else {
+        messages
+    };
+    without_session_prompt
+        .strip_prefix(context_messages)
+        .unwrap_or(without_session_prompt)
+        .iter()
+        .filter(|message| message.role != LlmRole::System)
+        .cloned()
+        .collect()
 }
 
 // Re-export constants for the test module.

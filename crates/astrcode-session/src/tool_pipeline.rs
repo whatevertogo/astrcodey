@@ -27,8 +27,10 @@ use super::{
         ToolExecutionStep, ToolRuntimeCapabilities, committed_tool_result_content_len,
         missing_tool_result, send_tool_requested,
     },
-    turn_context::{AgentError, AgentSignal, SharedTurnContext, TOOL_SEARCH_TOOL_NAME, send_event},
-    util::{discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible},
+    turn_context::{TurnError, AgentSignal, SharedTurnContext, send_event},
+    util::{
+        TOOL_SEARCH_TOOL_NAME, discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible,
+    },
 };
 use crate::session::Session;
 
@@ -95,7 +97,7 @@ impl ToolPipeline {
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
-    ) -> Result<Vec<PreparedToolCall>, AgentError> {
+    ) -> Result<Vec<PreparedToolCall>, TurnError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
         for (index, tc) in tool_calls.iter().enumerate() {
@@ -180,7 +182,7 @@ impl ToolPipeline {
     pub async fn execute_and_commit(
         &self,
         mut input: ExecuteToolCalls<'_>,
-    ) -> Result<Vec<String>, AgentError> {
+    ) -> Result<Vec<String>, TurnError> {
         let mut discovered_tools = Vec::new();
         let mut parallel_batch = Vec::new();
         let mut parallel_batch_start = None;
@@ -270,7 +272,7 @@ impl ToolPipeline {
         parallel_batch: &mut Vec<ExecutableToolCall>,
         parallel_batch_start: &mut Option<usize>,
         input: &mut ExecuteToolCalls<'_>,
-    ) -> Result<Vec<String>, AgentError> {
+    ) -> Result<Vec<String>, TurnError> {
         let Some(batch_start) = parallel_batch_start.take() else {
             return Ok(Vec::new());
         };
@@ -301,7 +303,7 @@ impl ToolPipeline {
         input: &mut ExecuteToolCalls<'_>,
         position: usize,
         result: ToolResult,
-    ) -> Result<Vec<String>, AgentError> {
+    ) -> Result<Vec<String>, TurnError> {
         let mut results = BTreeMap::new();
         results.insert(input.prepared[position].index, result);
         self.commit_tool_results(CommitToolResults {
@@ -324,7 +326,7 @@ impl ToolPipeline {
         tools: &[ToolDefinition],
         event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
         results: &mut BTreeMap<usize, ToolResult>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -347,7 +349,7 @@ impl ToolPipeline {
 
         while let Some(joined) = join_set.join_next().await {
             let (index, result) =
-                joined.map_err(|err| AgentError::Internal(format!("tool task failed: {err}")))?;
+                joined.map_err(|err| TurnError::Internal(format!("tool task failed: {err}")))?;
             results.insert(index, result);
 
             if let Some(call) = pending.next() {
@@ -386,7 +388,7 @@ impl ToolPipeline {
     pub async fn commit_tool_results(
         &self,
         mut input: CommitToolResults<'_>,
-    ) -> Result<Vec<String>, AgentError> {
+    ) -> Result<Vec<String>, TurnError> {
         let mut pending_results = Vec::with_capacity(input.prepared.len());
         for call in input.prepared {
             let mut result = input
@@ -499,7 +501,7 @@ impl ToolPipeline {
         tool_name: &str,
         call_id: &str,
         result: &mut ToolResult,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
             return Ok(());
         };
@@ -514,7 +516,7 @@ impl ToolPipeline {
         tool_name: &str,
         call_id: &str,
         result: &mut ToolResult,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         if result.metadata.contains_key("persistedToolResult") {
             return Ok(());
         }
@@ -530,7 +532,7 @@ impl ToolPipeline {
                 content: original_content.clone(),
             })
             .await
-            .map_err(|error| AgentError::Internal(format!("persist tool result: {error}")))?;
+            .map_err(|error| TurnError::Internal(format!("persist tool result: {error}")))?;
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         result.metadata.insert(
             "persistedToolResult".into(),
@@ -550,7 +552,7 @@ impl ToolPipeline {
         &self,
         committed_tool_result_chars: usize,
         pending_results: &mut [PendingCommittedToolResult],
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), TurnError> {
         let mut total: usize = committed_tool_result_chars
             + pending_results
                 .iter()

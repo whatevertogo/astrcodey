@@ -9,7 +9,9 @@ use astrcode_core::{
     tool::{ToolDefinition, ToolResult},
 };
 
-use crate::turn_context::{MCP_TOOL_PREFIX, TOOL_SEARCH_METADATA_KEY, TOOL_SEARCH_TOOL_NAME};
+pub(crate) const MCP_TOOL_PREFIX: &str = "mcp__";
+pub(crate) const TOOL_SEARCH_TOOL_NAME: &str = "tool_search_tool";
+pub(crate) const TOOL_SEARCH_METADATA_KEY: &str = "toolSearch";
 
 /// 解析并尝试修复 JSON 参数。
 ///

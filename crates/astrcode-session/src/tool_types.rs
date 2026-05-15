@@ -9,8 +9,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
     tool::{
-        AgentSessionControl, BackgroundTaskReader, ExecutionMode, FileObservation,
-        FileObservationStore, ToolDefinition, ToolResult,
+        AgentSessionControl, BackgroundTaskReader, ExecutionMode, ToolDefinition, ToolResult,
     },
     types::*,
 };
@@ -79,35 +78,6 @@ pub struct ExecutableToolCall {
     pub call_id: String,
     pub name: String,
     pub tool_input: serde_json::Value,
-}
-
-/// 后台任务完成通知的载荷。
-pub struct BackgroundTaskCompletion {
-    pub session_id: SessionId,
-    pub task_id: BackgroundTaskId,
-    pub tool_name: String,
-    pub result: ToolResult,
-}
-
-impl BackgroundTaskCompletion {
-    /// 从完成通知派生 `ToolCallCompleted` 事件载荷。
-    pub fn to_tool_call_completed(&self) -> EventPayload {
-        EventPayload::ToolCallCompleted {
-            call_id: ToolCallId::from(self.result.call_id.clone()),
-            tool_name: self.tool_name.clone(),
-            result: self.result.clone(),
-        }
-    }
-
-    /// 从完成通知派生 `BackgroundTaskCompleted` 事件载荷。
-    pub fn to_background_task_completed(&self) -> EventPayload {
-        EventPayload::BackgroundTaskCompleted {
-            task_id: self.task_id.clone(),
-            call_id: ToolCallId::from(self.result.call_id.clone()),
-            tool_name: self.tool_name.clone(),
-            result: self.result.clone(),
-        }
-    }
 }
 
 pub struct ToolCallRuntimeContext {
@@ -209,7 +179,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ToolRuntimeCapabilities {
     /// 后台任务完成后的通知通道。
-    pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    pub background_result_tx: Option<mpsc::UnboundedSender<crate::background::BackgroundTaskCompletion>>,
     /// 后台任务管理器，用于注册 watcher handle 以支持取消。
     pub background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
     /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
@@ -218,27 +188,4 @@ pub struct ToolRuntimeCapabilities {
     pub file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
     /// Agent 会话操控能力，用于 send 等工具与子 session 交互。
     pub agent_session_control: Option<Arc<dyn AgentSessionControl>>,
-}
-
-// ─── File observation store ──────────────────────────────────────────────────
-
-/// 进程内文件观察存储，用于 read/edit 工具的 read-before-edit 守卫。
-///
-/// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
-/// 生命周期与 session 一致（由 `TurnRunner::new` 创建，随 `TurnRunner` 销毁）。
-#[derive(Default)]
-pub struct InMemoryFileObservationStore {
-    observations: parking_lot::Mutex<std::collections::HashMap<String, FileObservation>>,
-}
-
-impl FileObservationStore for InMemoryFileObservationStore {
-    fn remember(&self, observation: FileObservation) {
-        let mut map = self.observations.lock();
-        map.insert(observation.path.clone(), observation);
-    }
-
-    fn load(&self, path: &str) -> Option<FileObservation> {
-        let map = self.observations.lock();
-        map.get(path).cloned()
-    }
 }

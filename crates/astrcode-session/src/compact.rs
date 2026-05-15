@@ -6,10 +6,7 @@
 //!
 //! 设计约束：这个模块不持有任何会话状态，所有参数通过调用方传入。
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_context::{
     ContextSettings,
@@ -29,6 +26,7 @@ use astrcode_core::{
     types::SessionId,
 };
 use astrcode_extensions::runner::ExtensionRunner;
+use parking_lot::Mutex;
 
 pub const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES: usize = 3;
 
@@ -61,10 +59,8 @@ impl AutoCompactFailureTracker {
         *count
     }
 
-    fn counts(&self) -> MutexGuard<'_, HashMap<SessionId, usize>> {
-        self.counts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn counts(&self) -> parking_lot::MutexGuard<'_, HashMap<SessionId, usize>> {
+        self.counts.lock()
     }
 }
 

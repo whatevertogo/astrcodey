@@ -9,7 +9,7 @@ pub mod llm_stream;
 pub mod payload;
 pub mod post_compact;
 pub mod session;
-pub mod session_context;
+pub mod session_services;
 pub mod tool_exec;
 pub mod tool_pipeline;
 pub mod tool_types;
@@ -24,6 +24,6 @@ pub use payload::{
     compact_boundary_payload, session_continued_from_compaction_payload,
 };
 pub use session::{Session, SessionError};
-pub use session_context::SessionContext;
-pub use turn_context::{AgentError, AgentSignal};
+pub use session_services::SessionServices;
+pub use turn_context::{TurnError, AgentSignal};
 pub use turn_runner::{CompactContinuation, TurnOutput, TurnRunner, drive_agent};
