@@ -19,6 +19,8 @@ pub fn build_client(config: &LlmClientConfig) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
         .read_timeout(std::time::Duration::from_secs(config.read_timeout_secs))
+        // TODO: 改为可配置代理，支持需要代理的网络环境
+        .no_proxy()
         .build()
         .unwrap_or_else(|e| {
             tracing::error!("Failed to create HTTP client: {e}");
