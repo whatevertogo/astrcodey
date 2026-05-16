@@ -1,6 +1,6 @@
 //! File-system config store with atomic writes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use astrcode_core::config::{Config, ConfigOverlay, ConfigStore, ConfigStoreError};
 use astrcode_support::hostpaths;
@@ -36,7 +36,8 @@ impl ConfigStore for FileConfigStore {
                 return Ok(Config::default());
             }
             let data = std::fs::read_to_string(&path)?;
-            let config: Config = serde_json::from_str(&data)?;
+            let config: Config = serde_json::from_str(&data)
+                .map_err(|e| friendly_deser_error(&e, &path))?;
             Ok(config)
         })
         .await
@@ -75,7 +76,8 @@ impl ConfigStore for FileConfigStore {
                 return Ok(None);
             }
             let data = std::fs::read_to_string(&overlay_path)?;
-            let overlay: ConfigOverlay = serde_json::from_str(&data)?;
+            let overlay: ConfigOverlay = serde_json::from_str(&data)
+                .map_err(|e| friendly_deser_error(&e, &overlay_path))?;
             Ok(Some(overlay))
         })
         .await
@@ -100,4 +102,53 @@ impl ConfigStore for FileConfigStore {
         .await
         .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
+}
+
+/// 将 serde 反序列化错误转换为更友好的提示。
+///
+/// 针对 "unknown field" 错误，提示 camelCase 命名约定并建议可能的正确字段名。
+fn friendly_deser_error(e: &serde_json::Error, path: &Path) -> ConfigStoreError {
+    let msg = e.to_string();
+    if msg.contains("unknown field") {
+        let hint = msg
+            .split('`')
+            .nth(1)
+            .and_then(|field| {
+                let camel = to_camel_case(field);
+                if camel != field {
+                    Some(format!("，是否应为 `{camel}`？"))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        ConfigStoreError::Invalid(format!(
+            "配置文件 {} 解析失败: {msg}\n\
+             提示: 字段名使用 camelCase 命名约定（如 maxTokens 而非 max_tokens）{hint}",
+            path.display(),
+        ))
+    } else {
+        ConfigStoreError::Invalid(format!(
+            "配置文件 {} 解析失败: {msg}",
+            path.display(),
+        ))
+    }
+}
+
+/// snake_case → camelCase 转换，用于猜测用户意图。
+fn to_camel_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut upper = false;
+    for c in s.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            result.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
