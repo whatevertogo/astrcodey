@@ -350,23 +350,11 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         let bg_event_bus = Arc::clone(&event_bus);
         let handle = tokio::spawn(async move {
             while let Some(completion) = background_result_rx.recv().await {
-                bg_event_bus
-                    .emit(
-                        &completion.session_id,
-                        None,
-                        completion.to_tool_call_completed(),
-                    )
-                    .await;
-                bg_event_bus
-                    .emit(
-                        &completion.session_id,
-                        None,
-                        completion.to_background_task_completed(),
-                    )
-                    .await;
-                bg_event_bus
-                    .sync_durable_events(&completion.session_id)
-                    .await;
+                let session_id = completion.session_id.clone();
+                let (tool_call_event, bg_event) = completion.into_events();
+                bg_event_bus.emit(&session_id, None, tool_call_event).await;
+                bg_event_bus.emit(&session_id, None, bg_event).await;
+                bg_event_bus.sync_durable_events(&session_id).await;
             }
         });
         tokio::spawn(async move {

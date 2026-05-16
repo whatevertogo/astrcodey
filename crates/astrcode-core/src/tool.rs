@@ -68,7 +68,6 @@ pub struct ToolDefinition {
 /// 补充 `ToolDefinition.description`（单行摘要）之外的结构化指导信息：
 /// guide、caveats、examples 和分类标签。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
 pub struct ToolPromptMetadata {
     /// 详细使用说明，仅 discovery/collaboration 工具展示。
     #[serde(default)]

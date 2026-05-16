@@ -3,7 +3,7 @@
 //! 快照是恢复加速器，事件日志仍然是追加式的唯一数据源。
 //! 快照不参与正常的追加 seq 分配。
 
-use std::{cmp::Reverse, fs, path::PathBuf};
+use std::{cmp::Reverse, path::PathBuf};
 
 use astrcode_core::storage::{SessionReadModel, StorageError};
 use chrono::Utc;
@@ -48,7 +48,7 @@ impl SnapshotManager {
 
     /// 为当前会话读模型创建 projection 快照。
     pub async fn create_snapshot(&self, model: &SessionReadModel) -> Result<(), StorageError> {
-        fs::create_dir_all(&self.dir)?;
+        tokio::fs::create_dir_all(&self.dir).await?;
         let cursor = model.cursor();
         let snapshot = SessionProjectionSnapshot {
             version: SNAPSHOT_VERSION,
@@ -62,12 +62,14 @@ impl SnapshotManager {
             .dir
             .join(format!(".snapshot-{}-{}.tmp", cursor, Uuid::new_v4()));
         let content = serde_json::to_vec_pretty(&snapshot)?;
-        fs::write(&temp_path, content)?;
-        if path.exists() {
-            fs::remove_file(&path)?;
+        tokio::fs::write(&temp_path, content).await?;
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
         }
-        fs::rename(&temp_path, &path)?;
-        self.prune_old_snapshots()?;
+        tokio::fs::rename(&temp_path, &path).await?;
+        self.prune_old_snapshots().await?;
         Ok(())
     }
 
@@ -78,11 +80,11 @@ impl SnapshotManager {
     pub(crate) async fn latest_snapshot(
         &self,
     ) -> Result<Option<SessionProjectionSnapshot>, StorageError> {
-        let mut candidates = self.snapshot_candidates()?;
+        let mut candidates = self.snapshot_candidates().await?;
         candidates.sort_by_key(|candidate| Reverse(candidate.cursor));
 
         for candidate in candidates {
-            match self.read_snapshot(&candidate) {
+            match self.read_snapshot(&candidate).await {
                 Ok(snapshot) => return Ok(Some(snapshot)),
                 Err(message) => {
                     tracing::warn!(
@@ -102,9 +104,9 @@ impl SnapshotManager {
             return Ok(vec![]);
         }
         let mut snapshots = Vec::new();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
+        let mut entries = tokio::fs::read_dir(&self.dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_file() {
                 if let Some(name) = entry.file_name().to_str() {
                     snapshots.push(name.to_string());
                 }
@@ -115,15 +117,15 @@ impl SnapshotManager {
     }
 
     /// 清理旧快照，只保留最新的 [`MAX_SNAPSHOTS`] 个。
-    fn prune_old_snapshots(&self) -> Result<(), StorageError> {
-        let mut candidates = self.snapshot_candidates()?;
+    async fn prune_old_snapshots(&self) -> Result<(), StorageError> {
+        let mut candidates = self.snapshot_candidates().await?;
         if candidates.len() <= MAX_SNAPSHOTS {
             return Ok(());
         }
         // 按 cursor 降序排列，删除超出保留数量的旧快照
         candidates.sort_by_key(|c| Reverse(c.cursor));
         for old in candidates.into_iter().skip(MAX_SNAPSHOTS) {
-            if let Err(e) = fs::remove_file(&old.path) {
+            if let Err(e) = tokio::fs::remove_file(&old.path).await {
                 tracing::warn!(
                     path = %old.path.display(),
                     "Failed to remove old snapshot: {e}"
@@ -133,15 +135,15 @@ impl SnapshotManager {
         Ok(())
     }
 
-    fn snapshot_candidates(&self) -> Result<Vec<SnapshotCandidate>, StorageError> {
+    async fn snapshot_candidates(&self) -> Result<Vec<SnapshotCandidate>, StorageError> {
         if !self.dir.exists() {
             return Ok(vec![]);
         }
 
         let mut candidates = Vec::new();
-        for entry in fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
+        let mut entries = tokio::fs::read_dir(&self.dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_file() {
                 continue;
             }
             let file_name = entry.file_name();
@@ -160,11 +162,13 @@ impl SnapshotManager {
         Ok(candidates)
     }
 
-    fn read_snapshot(
+    async fn read_snapshot(
         &self,
         candidate: &SnapshotCandidate,
     ) -> Result<SessionProjectionSnapshot, String> {
-        let content = fs::read_to_string(&candidate.path).map_err(|error| error.to_string())?;
+        let content = tokio::fs::read_to_string(&candidate.path)
+            .await
+            .map_err(|error| error.to_string())?;
         let snapshot: SessionProjectionSnapshot =
             serde_json::from_str(&content).map_err(|error| error.to_string())?;
         validate_snapshot(&snapshot, candidate)?;

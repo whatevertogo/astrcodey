@@ -14,7 +14,7 @@ use astrcode_support::hostpaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
+pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 
 const TODO_WRITE_DESCRIPTION: &str = "\
 Persist the current progress snapshot for this session. Always send the full current snapshot, not \
@@ -25,7 +25,7 @@ const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
 /// Compute session-local progress todo storage root.
-pub fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
+pub(crate) fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
     hostpaths::session_dir_for_project_path(&PathBuf::from(working_dir), session_id).join("todos")
 }
 
@@ -154,7 +154,7 @@ struct TodoInputItem {
 /// Progress item status for the single-agent todo list.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ProgressStatus {
+pub(crate) enum ProgressStatus {
     Pending,
     InProgress,
     Completed,
@@ -163,7 +163,7 @@ pub enum ProgressStatus {
 /// A single progress todo item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProgressItem {
+pub(crate) struct ProgressItem {
     pub content: String,
     pub active_form: String,
     pub status: ProgressStatus,
@@ -174,7 +174,7 @@ pub struct ProgressItem {
 /// Persisted session-local progress list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ProgressList {
+pub(crate) struct ProgressList {
     pub schema_version: u32,
     pub items: Vec<ProgressItem>,
     pub updated_at: String,
@@ -182,27 +182,27 @@ pub struct ProgressList {
 
 /// Result of replacing the todo list.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TodoWriteOutcome {
+pub(crate) struct TodoWriteOutcome {
     pub old_todos: Vec<ProgressItem>,
     pub new_todos: Vec<ProgressItem>,
     pub verification_nudge_needed: bool,
 }
 
 /// Session-local progress todo store.
-pub struct ProgressListStore {
+pub(crate) struct ProgressListStore {
     root: PathBuf,
 }
 
 impl ProgressListStore {
-    pub fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    pub fn load_items(&self) -> Result<Vec<ProgressItem>, String> {
+    pub(crate) fn load_items(&self) -> Result<Vec<ProgressItem>, String> {
         self.load_progress().map(|progress| progress.items)
     }
 
-    pub fn replace(&self, submitted: Vec<ProgressItem>) -> Result<TodoWriteOutcome, String> {
+    pub(crate) fn replace(&self, submitted: Vec<ProgressItem>) -> Result<TodoWriteOutcome, String> {
         validate_items(&submitted)?;
 
         let old_todos = self.load_items()?;

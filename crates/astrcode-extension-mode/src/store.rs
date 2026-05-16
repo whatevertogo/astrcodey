@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Per-session mode state persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ModeState {
+pub(crate) struct ModeState {
     pub current_mode: String,
     #[serde(default)]
     pub previous_mode: Option<String>,

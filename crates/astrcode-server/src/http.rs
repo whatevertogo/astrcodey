@@ -53,6 +53,23 @@ use crate::{
 
 pub const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
 
+/// HTTP server startup and runtime errors.
+#[derive(Debug, thiserror::Error)]
+pub enum HttpServerError {
+    /// Failed to generate or read auth token.
+    #[error("auth token error")]
+    Auth(getrandom::Error),
+    /// I/O error during server operation.
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl From<getrandom::Error> for HttpServerError {
+    fn from(e: getrandom::Error) -> Self {
+        HttpServerError::Auth(e)
+    }
+}
+
 /// HTTP router shared state.
 #[derive(Clone)]
 pub struct HttpState {
@@ -79,10 +96,8 @@ struct DeleteProjectParams {
 pub fn router(
     runtime: Arc<ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
-) -> Result<(Router, String), Box<dyn std::error::Error + Send + Sync>> {
-    let auth_token = configured_auth_token().map_err(|e| {
-        Box::new(std::io::Error::other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>
-    })?;
+) -> Result<(Router, String), HttpServerError> {
+    let auth_token = configured_auth_token()?;
     let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
         runtime.event_store.clone(),
         event_tx.clone(),
@@ -142,7 +157,7 @@ pub fn router(
 pub async fn run_http_server(
     runtime: Arc<ServerRuntime>,
     addr: std::net::SocketAddr,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), HttpServerError> {
     let (event_tx, _) = broadcast::channel(256);
     let shutdown_token = runtime.shutdown_token.clone();
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
@@ -1260,13 +1275,18 @@ async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
 }
 
 async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
-    runtime
-        .session_manager
-        .latest_cursor(session_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "0".into())
+    match runtime.session_manager.latest_cursor(session_id).await {
+        Ok(Some(cursor)) => cursor,
+        Ok(None) => "0".to_string(),
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                %error,
+                "failed to read latest cursor from storage, falling back to 0"
+            );
+            "0".to_string()
+        },
+    }
 }
 
 fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {

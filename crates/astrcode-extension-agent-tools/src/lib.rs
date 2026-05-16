@@ -423,7 +423,8 @@ fn agent_tool_metadata()
              background by default — launch them and continue working; results arrive in the next \
              turn. Prefer launching multiple agents in a single response to parallelize \
              independent tasks (e.g. investigate bug A while agent B searches for related code). \
-             Only set waitForResult to true when your very next step depends on the agent's output.",
+             Only set waitForResult to true when your very next step depends on the agent's \
+             output.",
         )
         .caveat(
             "For simple file reads or targeted searches, use Read/Grep directly instead of \

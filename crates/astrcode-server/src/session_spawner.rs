@@ -217,13 +217,13 @@ impl ServerSessionSpawner {
         let handle = tokio::spawn(async move {
             while let Some(completion) = child_bg_result_rx.recv().await {
                 let _sid = child_bg_final_sid.lock().await.clone();
+                let (tool_call_event, bg_event) = completion.into_events();
                 let _ = append_child_payload(
                     child_bg_session.as_ref(),
                     Some(&child_bg_turn_id),
-                    completion.to_tool_call_completed(),
+                    tool_call_event,
                 )
                 .await;
-                let bg_event = completion.to_background_task_completed();
                 let _ = append_child_payload(
                     child_bg_session.as_ref(),
                     Some(&child_bg_turn_id),

@@ -323,6 +323,7 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
 }
 
 #[cfg(not(windows))]
+#[allow(clippy::unused_async)]
 async fn terminate_child_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }

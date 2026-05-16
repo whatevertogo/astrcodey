@@ -299,12 +299,8 @@ async fn execute_tool_call_with_background(
     match tokio::time::timeout(std::time::Duration::from_secs(threshold_secs), done_rx).await {
         Ok(Ok(())) => {
             // 在阈值内完成
-            let result = result_slot
-                .lock()
-                .take()
-                .expect("done_tx sent but no result");
-            match result {
-                Ok(mut r) => {
+            match result_slot.lock().take() {
+                Some(Ok(mut r)) => {
                     r.call_id = call_id.clone();
                     r.duration_ms = Some(started_at.elapsed().as_millis() as u64);
                     tracing::debug!(
@@ -315,10 +311,29 @@ async fn execute_tool_call_with_background(
                     );
                     (call_index, r)
                 },
-                Err(e) => (
+                Some(Err(e)) => (
                     call_index,
                     error_tool_result(call_id.clone(), &tool_name, e, started_at.elapsed()),
                 ),
+                None => {
+                    // done_tx 发送成功但 result_slot 为空 — 任务在写入结果前异常终止
+                    tracing::error!(
+                        tool_name,
+                        call_id,
+                        "done_tx sent but no result available in slot"
+                    );
+                    (
+                        call_index,
+                        error_tool_result(
+                            call_id.clone(),
+                            &tool_name,
+                            ToolError::Execution(
+                                "tool task completed but no result available".into(),
+                            ),
+                            started_at.elapsed(),
+                        ),
+                    )
+                },
             }
         },
         Ok(Err(_)) => {

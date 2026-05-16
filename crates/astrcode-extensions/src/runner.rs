@@ -182,16 +182,17 @@ impl ExtensionRunner {
             return;
         }
 
+        // 在释放 extensions 锁之前先插入 ext，确保去重结果一致
+        exts.push(ext);
+        drop(exts);
+
+        // records + index 的更新与 extensions 写锁解耦，减少阻塞读并发的时间
         if !reg.is_empty() {
             let mut records = self.records.write().await;
-            records.push(ExtensionRecord {
-                id: id.clone(),
-                reg,
-            });
+            records.push(ExtensionRecord { id, reg });
             let index = Arc::new(build_handler_index(&records));
             *self.index.write() = index;
         }
-        exts.push(ext);
     }
 
     /// 绑定会话创建能力。

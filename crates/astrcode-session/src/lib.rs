@@ -4,7 +4,9 @@
 
 pub mod background;
 pub mod compact;
+pub(crate) mod json_repair;
 pub(crate) mod llm_stream;
+pub(crate) mod mcp_visibility;
 pub mod payload;
 pub mod post_compact;
 pub mod session;
@@ -15,7 +17,7 @@ pub(crate) mod tool_pipeline;
 pub(crate) mod tool_types;
 pub mod turn_context;
 pub mod turn_runner;
-pub(crate) mod util;
+
 
 pub use payload::{
     agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,

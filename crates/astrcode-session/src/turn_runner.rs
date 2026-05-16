@@ -28,14 +28,14 @@ use crate::{
         StreamOutcome, assistant_message_with_thinking, consume_llm_stream,
         non_empty_reasoning_content, provider_visible_messages,
     },
+    mcp_visibility::{
+        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
+        provider_visible_tool_indexes,
+    },
     tool_pipeline::ToolPipeline,
     tool_types::ExecuteToolCalls,
     turn_context::{
         AgentSignal, EventBus, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
-    },
-    util::{
-        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
-        provider_visible_tool_indexes,
     },
 };
 

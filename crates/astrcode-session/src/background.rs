@@ -21,23 +21,23 @@ pub struct BackgroundTaskCompletion {
 }
 
 impl BackgroundTaskCompletion {
-    /// 从完成通知派生 `ToolCallCompleted` 事件载荷。
-    pub fn to_tool_call_completed(&self) -> EventPayload {
-        EventPayload::ToolCallCompleted {
-            call_id: ToolCallId::from(self.result.call_id.clone()),
+    /// 从完成通知派生 `ToolCallCompleted` 和 `BackgroundTaskCompleted` 事件载荷。
+    ///
+    /// 消费 `self`，避免两个方法重复 clone `result`、`tool_name` 等字段。
+    pub fn into_events(self) -> (EventPayload, EventPayload) {
+        let call_id = ToolCallId::from(self.result.call_id.clone());
+        let tool_call_completed = EventPayload::ToolCallCompleted {
+            call_id: call_id.clone(),
             tool_name: self.tool_name.clone(),
             result: self.result.clone(),
-        }
-    }
-
-    /// 从完成通知派生 `BackgroundTaskCompleted` 事件载荷。
-    pub fn to_background_task_completed(&self) -> EventPayload {
-        EventPayload::BackgroundTaskCompleted {
-            task_id: self.task_id.clone(),
-            call_id: ToolCallId::from(self.result.call_id.clone()),
-            tool_name: self.tool_name.clone(),
-            result: self.result.clone(),
-        }
+        };
+        let background_task_completed = EventPayload::BackgroundTaskCompleted {
+            task_id: self.task_id,
+            call_id,
+            tool_name: self.tool_name,
+            result: self.result,
+        };
+        (tool_call_completed, background_task_completed)
     }
 }
 

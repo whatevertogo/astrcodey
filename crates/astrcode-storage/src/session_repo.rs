@@ -94,14 +94,17 @@ impl FileSystemSessionRepository {
     }
 
     /// 扫描 projects_base 下所有项目目录，返回其 sessions 子目录列表。
-    fn all_session_roots(&self) -> Vec<PathBuf> {
+    async fn all_session_roots(&self) -> Vec<PathBuf> {
         let mut roots = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.projects_base) else {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.projects_base).await else {
             return roots;
         };
-        for entry in entries.flatten() {
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let sessions_dir = entry.path().join("sessions");
-            if sessions_dir.is_dir() {
+            if tokio::fs::metadata(&sessions_dir)
+                .await
+                .is_ok_and(|m| m.is_dir())
+            {
                 roots.push(sessions_dir);
             }
         }
@@ -109,10 +112,10 @@ impl FileSystemSessionRepository {
     }
 
     /// 在所有项目目录中查找指定会话的目录。
-    fn find_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
-        for root in self.all_session_roots() {
+    async fn find_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
+        for root in self.all_session_roots().await {
             let dir = root.join(id.as_str());
-            if dir.is_dir() {
+            if tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
                 return Some(dir);
             }
         }
@@ -120,12 +123,13 @@ impl FileSystemSessionRepository {
     }
 
     /// 获取指定会话的目录路径。
-    fn session_dir(&self, id: &SessionId) -> Option<PathBuf> {
-        self.find_session_dir(id)
+    async fn session_dir(&self, id: &SessionId) -> Option<PathBuf> {
+        self.find_session_dir(id).await
     }
 
-    fn existing_session_dir(&self, id: &SessionId) -> Result<PathBuf, StorageError> {
+    async fn existing_session_dir(&self, id: &SessionId) -> Result<PathBuf, StorageError> {
         self.find_session_dir(id)
+            .await
             .ok_or_else(|| StorageError::NotFound(id.clone()))
     }
 
@@ -152,7 +156,7 @@ impl FileSystemSessionRepository {
 
         // Opening a log restores its in-memory next_seq from disk. That should
         // happen once per active process/session, not once per append.
-        let dir = self.existing_session_dir(session_id)?;
+        let dir = self.existing_session_dir(session_id).await?;
         let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
         let projection = self
@@ -237,7 +241,7 @@ impl EventStore for FileSystemSessionRepository {
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
         let dir = self.session_dir_from_working_dir(working_dir, session_id);
-        std::fs::create_dir_all(&dir)?;
+        tokio::fs::create_dir_all(&dir).await?;
 
         let start_event = Event::new(
             session_id.clone(),
@@ -359,13 +363,12 @@ impl EventStore for FileSystemSessionRepository {
 
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         let mut ids: Vec<SessionId> = self.sessions.read().await.keys().cloned().collect();
-        for base_path in self.session_roots() {
-            if !base_path.exists() {
+        for base_path in self.session_roots().await {
+            let Ok(mut entries) = tokio::fs::read_dir(&base_path).await else {
                 continue;
-            }
-            for entry in std::fs::read_dir(base_path)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_type().await?.is_dir() {
                     let id = SessionId::from(entry.file_name().to_string_lossy().to_string());
                     if !ids.contains(&id) {
                         ids.push(id);
@@ -382,10 +385,10 @@ impl EventStore for FileSystemSessionRepository {
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
         self.sessions.write().await.remove(session_id);
-        for base_path in self.session_roots() {
+        for base_path in self.session_roots().await {
             let dir = base_path.join(session_id.as_str());
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)?;
+            if tokio::fs::metadata(&dir).await.is_ok() {
+                tokio::fs::remove_dir_all(&dir).await?;
             }
         }
         Ok(())
@@ -490,20 +493,19 @@ impl EventStore for FileSystemSessionRepository {
 }
 
 impl FileSystemSessionRepository {
-    fn session_roots(&self) -> Vec<PathBuf> {
-        self.all_session_roots()
+    async fn session_roots(&self) -> Vec<PathBuf> {
+        self.all_session_roots().await
     }
 
     /// 仅扫描磁盘上的会话目录名，不打开任何文件。
     async fn list_session_dirs(&self) -> Result<Vec<SessionId>, StorageError> {
         let mut ids: Vec<SessionId> = self.sessions.read().await.keys().cloned().collect();
-        for base_path in self.session_roots() {
-            if !base_path.exists() {
+        for base_path in self.session_roots().await {
+            let Ok(mut entries) = tokio::fs::read_dir(&base_path).await else {
                 continue;
-            }
-            for entry in std::fs::read_dir(base_path)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_type().await?.is_dir() {
                     let id = SessionId::from(entry.file_name().to_string_lossy().to_string());
                     if !ids.contains(&id) {
                         ids.push(id);
@@ -524,7 +526,7 @@ impl FileSystemSessionRepository {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
-        let Some(dir) = self.session_dir(session_id) else {
+        let Some(dir) = self.session_dir(session_id).await else {
             return Ok(None);
         };
         let log_path = Self::event_log_path(&dir, session_id);

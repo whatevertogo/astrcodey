@@ -20,15 +20,14 @@ use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
 use super::{
+    json_repair::parse_and_repair_json,
+    mcp_visibility::{TOOL_SEARCH_TOOL_NAME, discovered_mcp_tool_names, tool_is_visible},
     tool_exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, execute_tool_call},
     tool_types::{
         CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
         PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
     },
     turn_context::{AgentSignal, SharedTurnContext, TurnError, send_event},
-    util::{
-        TOOL_SEARCH_TOOL_NAME, discovered_mcp_tool_names, parse_and_repair_json, tool_is_visible,
-    },
 };
 use crate::session::Session;
 

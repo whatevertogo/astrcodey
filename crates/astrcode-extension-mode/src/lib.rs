@@ -33,10 +33,7 @@ use astrcode_core::{
 };
 use serde_json::json;
 
-pub use crate::{
-    catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec},
-    store::ModeState,
-};
+pub use crate::catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec};
 use crate::{
     catalog::{ModeId, builtin_catalog},
     tools::{
