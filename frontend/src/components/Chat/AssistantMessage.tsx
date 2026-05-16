@@ -163,7 +163,9 @@ function StreamingMarkdown({ text }: { text: string }) {
     return (
       <>
         <span className="whitespace-pre-wrap break-words">{text}</span>
-        <span className="ml-px inline-block animate-blink text-text-secondary motion-reduce:animate-none">▋</span>
+        <span className="ml-px inline-block animate-blink text-text-secondary motion-reduce:animate-none">
+          ▋
+        </span>
       </>
     )
   }
@@ -173,7 +175,9 @@ function StreamingMarkdown({ text }: { text: string }) {
     <>
       <MarkdownContent text={committed} />
       <span className="whitespace-pre-wrap break-words">{tail}</span>
-      <span className="ml-px inline-block animate-blink text-text-secondary motion-reduce:animate-none">▋</span>
+      <span className="ml-px inline-block animate-blink text-text-secondary motion-reduce:animate-none">
+        ▋
+      </span>
     </>
   )
 }
@@ -282,7 +286,9 @@ function AssistantMessage({ block, reasoningText }: AssistantMessageProps) {
             </details>
           ))}
           {streaming ? (
-            visibleText ? <StreamingMarkdown text={visibleText} /> : null
+            visibleText ? (
+              <StreamingMarkdown text={visibleText} />
+            ) : null
           ) : visibleText ? (
             <MarkdownContent text={visibleText} />
           ) : null}

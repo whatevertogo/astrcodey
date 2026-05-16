@@ -115,7 +115,7 @@ v2 首期刻意选择保守、明确、容易落地的基础设施组合：
 ┌──────────────────────────────┐  ┌──────────────────────────────────┐
 │ Runtime Services             │  │ Extension Runtime                │
 │                              │  │                                  │
-│ astrcode-prompt              │  │ astrcode-extensions              │
+│ astrcode-session             │  │ astrcode-extensions              │
 │ astrcode-tools               │  │ ├─ astrcode-extension-mode       │
 │ astrcode-ai                  │  │ ├─ astrcode-extension-skill      │
 │ astrcode-context             │  │ ├─ astrcode-extension-todo-tool  │
@@ -141,21 +141,21 @@ v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 
 ### Layer 0：Foundation
 
-- `astrcode-core`：共享领域类型与核心 trait，例如 tool、LLM provider、config 抽象、extension contract
+- `astrcode-core`：共享领域类型与核心 trait，例如 tool、LLM provider、config 抽象、extension contract、prompt 组装 trait
 - `astrcode-support`：宿主环境集成辅助能力，例如路径解析、shell 检测、tool result 持久化工具
 - `astrcode-log`：结构化日志初始化与格式化工具，无内部依赖，被上层 crate 直接引用
 
 ### Layer 1：Services
 
 - `astrcode-ai`：OpenAI 兼容 provider、SSE 流解析、重试、缓存追踪
-- `astrcode-prompt`：基于 contributor 的 prompt 组装、分层缓存、诊断
 - `astrcode-tools`：内置工具、工具注册表、执行包装、agent 协作工具
 - `astrcode-storage`：JSONL event log、snapshot、config 持久化、锁
-- `astrcode-context`：token 估算、tool result 预算、裁剪、压缩、文件恢复
+- `astrcode-context`：token 估算、tool result 预算、裁剪、压缩、文件恢复、prompt engine
+- `astrcode-session`：会话运行时，包含 session handle、turn 执行、事件总线、工具管线
 
 ### Layer 2：Extensions
 
-- `astrcode-extensions`：扩展加载、生命周期分发、hook 执行策略、超时处理、能力注册
+- `astrcode-extensions`：扩展加载、生命周期分发、hook 执行策略、超时处理、能力注册、WASM 扩展运行时
 - `astrcode-extension-mode`：Agent 运行模式切换（Code / Plan），包含 Exit Gate、计划 Artifact 持久化、heading 校验
 - `astrcode-extension-skill`：斜杠命令技能发现与分发
 - `astrcode-extension-todo-tool`：进度追踪 Todo 工具
@@ -315,6 +315,7 @@ Prompt cache 被拆成四层：
 
 - **`ExtensionRunner`**：管理扩展注册、按优先级分派 hook、超时执行、工具/命令收集
 - **`ExtensionLoader`**：从磁盘发现并加载 native 扩展（`.dll`/`.so`），通过 `libloading` + FFI 适配
+- **WASM 扩展运行时**：基于 wasmtime 的沙箱化扩展执行，提供 host-guest 协议用于工具注册和事件处理
 - **`ExtensionRuntime`**：提供晚期绑定的 session 派生能力（`SessionSpawner`）、工具注册队列、派生深度限制（最大 3 层）
 - **`ServerExtensionContext`**：实现 `ExtensionContext`，提供只读 session 视图，支持 snapshot
 
@@ -322,6 +323,7 @@ Prompt cache 被拆成四层：
 
 - 全局扩展：`~/.astrcode/extensions/`
 - 项目扩展：`.astrcode/extensions/`
+- WASM 扩展：`.wasm` 文件通过 wasmtime 运行时加载，提供沙箱化的扩展执行环境
 
 项目级行为在当前 session 中优先。
 

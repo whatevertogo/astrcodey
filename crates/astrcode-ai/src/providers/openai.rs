@@ -249,8 +249,7 @@ impl ChatAccumulator for StandardAccumulator {
                             .collect::<Vec<_>>()
                             .join("");
                         if latest.len() > self.reasoning_accumulated.len() {
-                            let incremental =
-                                &latest[self.reasoning_accumulated.len()..];
+                            let incremental = &latest[self.reasoning_accumulated.len()..];
                             if !incremental.is_empty() {
                                 let _ = tx.send(LlmEvent::ThinkingDelta {
                                     delta: incremental.to_string(),
