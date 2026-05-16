@@ -9,7 +9,6 @@ use std::sync::Arc;
 use astrcode_context::context_engine::LlmContextAssembler;
 use astrcode_core::{
     event::{Event, EventPayload, ToolOutputStream},
-    storage::EventStore,
     types::{SessionId, ToolCallId, TurnId, new_background_task_id, new_message_id, new_turn_id},
 };
 use astrcode_extensions::{
@@ -25,21 +24,15 @@ use astrcode_session::{
 use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::bootstrap::{
-    SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-    build_tool_registry_snapshot, load_system_prompt_files,
-};
-
 /// 服务器端的会话派生器，实现 `SessionSpawner` trait。
 ///
 /// 当扩展返回 `ExtensionToolOutcome::RunSession` 时，
 /// 扩展运行器通过此派生器创建子会话并运行 Agent 回合。
 pub(crate) struct ServerSessionSpawner {
-    pub(crate) store: Arc<dyn EventStore>,
     pub(crate) config: Arc<crate::config_manager::ConfigManager>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
-    pub(crate) file_observation_stores: crate::bootstrap::FileObservationStoreMap,
+    pub(crate) session_manager: Arc<crate::session_manager::SessionManager>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     pub(crate) agent_session_control: crate::bootstrap::AgentSessionControlSlot,
 }
@@ -80,19 +73,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
 }
 
 impl ServerSessionSpawner {
-    fn file_observation_store(
-        &self,
-        session_id: &SessionId,
-    ) -> Arc<dyn astrcode_core::tool::FileObservationStore> {
-        let mut stores = self.file_observation_stores.lock();
-        stores
-            .entry(session_id.clone())
-            .or_insert_with(|| {
-                Arc::new(astrcode_session::tool_exec::InMemoryFileObservationStore::default())
-            })
-            .clone()
-    }
-
     /// 共享准备阶段：创建子会话、构建 prompt、初始化 TurnRunner。
     async fn prepare_child_session(
         &self,
@@ -107,7 +87,9 @@ impl ServerSessionSpawner {
         let model_id = match request.model_preference.clone() {
             Some(model) => model,
             None => {
-                let parent = Session::open(self.store.clone(), parent_session_id.clone())
+                let parent = self
+                    .session_manager
+                    .open(parent_session_id.clone())
                     .await
                     .map_err(|e| format!("open parent session: {e}"))?;
                 parent
@@ -118,17 +100,15 @@ impl ServerSessionSpawner {
             },
         };
 
-        let child_session = Session::create(
-            self.store.clone(),
-            &request.working_dir,
-            &model_id,
-            Some(&parent_session_id),
-        )
-        .await
-        .map_err(|e| format!("create child session: {e}"))?;
+        let child_session = self
+            .session_manager
+            .create_child(&request.working_dir, &model_id, &parent_session_id)
+            .await
+            .map_err(|e| format!("create child session: {e}"))?;
 
         let parent_session = Arc::new(
-            Session::open(self.store.clone(), parent_session_id.clone())
+            self.session_manager
+                .open(parent_session_id.clone())
                 .await
                 .map_err(|e| format!("open parent: {e}"))?,
         );
@@ -151,34 +131,19 @@ impl ServerSessionSpawner {
 
         let child_turn_id = new_turn_id();
 
-        let registry_fut = build_tool_registry_snapshot(
-            &self.extension_runner,
-            &request.working_dir,
-            self.config.read_effective().llm.read_timeout_secs,
-        );
-        let prompt_files_fut = load_system_prompt_files(&request.working_dir);
-        let (tool_registry, prompt_files) = tokio::join!(registry_fut, prompt_files_fut);
-
-        let prompt_tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
-        let prompt_tools: Vec<_> = prompt_tools_with_meta
-            .iter()
-            .map(|(def, _)| def.clone())
-            .collect();
-        let tool_prompt_metadata = prompt_tools_with_meta
-            .into_iter()
-            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
-            .collect();
-        let (system_prompt, fingerprint) =
-            build_system_prompt_snapshot_with_files(SystemPromptSnapshotInput {
-                extension_runner: &self.extension_runner,
-                session_id: child_sid.as_str(),
-                working_dir: &request.working_dir,
-                model_id: &model_id,
-                tools: &prompt_tools,
-                extra_system_prompt: Some(&request.system_prompt),
-                tool_prompt_metadata,
-                prompt_files,
-            })
+        let tool_registry = self
+            .session_manager
+            .refresh_tool_registry(&child_sid, &request.working_dir)
+            .await;
+        let (system_prompt, fingerprint) = self
+            .session_manager
+            .build_system_prompt_snapshot(
+                &child_sid,
+                &request.working_dir,
+                &model_id,
+                &tool_registry,
+                Some(&request.system_prompt),
+            )
             .await
             .map_err(|e| format!("build child system prompt: {e}"))?;
 
@@ -247,7 +212,7 @@ impl ServerSessionSpawner {
                 Arc::clone(&self.context_assembler),
                 Arc::clone(&child_arc),
                 Arc::clone(&self.background_tasks),
-                self.file_observation_store(&child_sid),
+                self.session_manager.file_observation_store(&child_sid),
             )
             .with_background_result_tx(child_bg_result_tx)
             .with_agent_session_control(agent_session_control),
@@ -833,13 +798,21 @@ mod tests {
             ..Default::default()
         };
         let llm_provider: Arc<dyn LlmProvider> = llm;
+        let config = test_config_manager(llm_provider);
+        let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Default::default(),
+        ));
         ServerSessionSpawner {
-            store,
-            config: test_config_manager(llm_provider),
+            config,
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
             background_tasks: Default::default(),
-            file_observation_stores: Default::default(),
-            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
+            session_manager,
+            extension_runner,
             agent_session_control: Arc::new(RwLock::new(None)),
         }
     }
@@ -906,13 +879,20 @@ mod tests {
             .unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
         let config = test_config_manager(initial_provider);
+        let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Default::default(),
+        ));
         let spawner = ServerSessionSpawner {
-            store,
             config: Arc::clone(&config),
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             background_tasks: Default::default(),
-            file_observation_stores: Default::default(),
-            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
+            session_manager,
+            extension_runner,
             agent_session_control: Arc::new(RwLock::new(None)),
         };
         config.set_llm_provider(Arc::new(StaticTextLlm { text: "new" }));
@@ -948,13 +928,21 @@ mod tests {
         });
         let llm_provider: Arc<dyn LlmProvider> = llm;
         let background_tasks: Arc<StdMutex<BackgroundTaskManager>> = Default::default();
+        let config = test_config_manager(llm_provider);
+        let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Arc::clone(&background_tasks),
+        ));
         let spawner = ServerSessionSpawner {
-            store: Arc::clone(&store),
-            config: test_config_manager(llm_provider),
+            config,
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             background_tasks: Arc::clone(&background_tasks),
-            file_observation_stores: Default::default(),
-            extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
+            session_manager,
+            extension_runner,
             agent_session_control: Arc::new(RwLock::new(None)),
         };
 

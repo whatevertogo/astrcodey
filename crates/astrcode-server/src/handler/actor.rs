@@ -190,7 +190,6 @@ impl CommandHandler {
             runtime,
             event_tx,
             active_session_id: None,
-            session_tool_registries: HashMap::new(),
             active_turns: HashMap::new(),
             actor_tx,
         }

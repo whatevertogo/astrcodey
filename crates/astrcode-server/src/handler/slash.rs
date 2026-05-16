@@ -97,12 +97,7 @@ impl CommandHandler {
         }
 
         // 扩展命令分发
-        let state = self
-            .runtime
-            .event_store
-            .session_read_model(&sid)
-            .await
-            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
+        let state = self.runtime.session_manager.read_model(&sid).await?;
         let cmd_ctx = astrcode_core::extension::CommandContext {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),

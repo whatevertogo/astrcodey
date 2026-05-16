@@ -746,20 +746,30 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             post_compact_max_tokens_per_file: 5_000,
         },
     };
-    Arc::new(ServerRuntime {
-        event_store: Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>,
-        config: Arc::new(astrcode_server::bootstrap::ConfigManager::new(
-            Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-                std::path::PathBuf::from("target/test-config.json"),
-            )),
-            astrcode_core::config::Config::default(),
-            effective,
-            llm_provider,
+    let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
+    let config = Arc::new(astrcode_server::bootstrap::ConfigManager::new(
+        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+            std::path::PathBuf::from("target/test-config.json"),
         )),
+        astrcode_core::config::Config::default(),
+        effective,
+        llm_provider,
+    ));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let session_manager = Arc::new(astrcode_server::session_manager::SessionManager::new(
+        Arc::clone(&event_store),
+        Arc::clone(&config),
+        Arc::clone(&extension_runner),
+        Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+        Default::default(),
+    ));
+    Arc::new(ServerRuntime {
+        event_store,
+        config,
         context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
         background_tasks: Default::default(),
-        file_observation_stores: Default::default(),
-        extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
+        session_manager,
+        extension_runner,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         agent_session_control: Arc::new(parking_lot::RwLock::new(None)),
     })

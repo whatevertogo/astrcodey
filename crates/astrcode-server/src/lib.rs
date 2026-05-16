@@ -12,4 +12,5 @@ pub mod transport;
 
 pub(crate) mod config_manager;
 pub(crate) mod server_event_bus;
+pub mod session_manager;
 pub(crate) mod session_spawner;

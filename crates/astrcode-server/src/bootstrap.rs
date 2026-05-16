@@ -3,7 +3,7 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use astrcode_ai::create_provider;
 pub(crate) use astrcode_context::prompt_engine::{PromptFiles, load_system_prompt_files};
@@ -14,20 +14,17 @@ use astrcode_core::{
     llm::{LlmClientConfig, LlmProvider},
     prompt::{ExtensionPromptBlock, ExtensionSection, PromptProvider, SystemPromptInput},
     storage::EventStore,
-    tool::{AgentSessionControl, FileObservationStore, ToolDefinition},
-    types::SessionId,
+    tool::{AgentSessionControl, ToolDefinition},
 };
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
-use astrcode_session::{
-    background::BackgroundTaskManager, tool_exec::InMemoryFileObservationStore,
-};
+use astrcode_session::{SessionRuntimeRegistry, background::BackgroundTaskManager};
 use astrcode_storage::config_store::FileConfigStore;
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 use parking_lot::{Mutex, RwLock};
 
 pub use crate::config_manager::ConfigManager;
-use crate::session_spawner::ServerSessionSpawner;
+use crate::{session_manager::SessionManager, session_spawner::ServerSessionSpawner};
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub(crate) extension_runner: &'a ExtensionRunner,
@@ -48,8 +45,6 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 /// Bootstrap 时创建空槽位，spawn_actor 后注入 `CommandHandle` 实现。
 /// 消费者通过 `.read().clone()` 获取 `Option<Arc<...>>`。
 pub(crate) type AgentSessionControlSlot = Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>>;
-pub(crate) type FileObservationStoreMap =
-    Arc<Mutex<HashMap<SessionId, Arc<dyn FileObservationStore>>>>;
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -66,8 +61,8 @@ pub struct ServerRuntime {
     pub context_assembler: Arc<LlmContextAssembler>,
     /// 跨回合共享的后台任务管理器。
     pub background_tasks: Arc<Mutex<BackgroundTaskManager>>,
-    /// 按 session 复用的文件观察快照，用于跨 turn 的 read-before-edit 保护。
-    pub file_observation_stores: FileObservationStoreMap,
+    /// server 侧的 session 生命周期门面。
+    pub session_manager: Arc<SessionManager>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
@@ -77,20 +72,6 @@ pub struct ServerRuntime {
     /// bootstrap 时为空；spawn_actor 后绑定 `CommandHandle` 实现。
     /// 通过 `RwLock` 允许所有持有 `Arc` 的消费者读取当前值。
     pub agent_session_control: AgentSessionControlSlot,
-}
-
-impl ServerRuntime {
-    pub fn file_observation_store(&self, session_id: &SessionId) -> Arc<dyn FileObservationStore> {
-        let mut stores = self.file_observation_stores.lock();
-        stores
-            .entry(session_id.clone())
-            .or_insert_with(|| Arc::new(InMemoryFileObservationStore::default()))
-            .clone()
-    }
-
-    pub fn remove_file_observation_store(&self, session_id: &SessionId) {
-        self.file_observation_stores.lock().remove(session_id);
-    }
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -154,7 +135,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let context_settings = effective.context.clone();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
     let background_tasks = Arc::new(Mutex::new(BackgroundTaskManager::default()));
-    let file_observation_stores = Arc::new(Mutex::new(HashMap::new()));
+    let session_runtime_registry = Arc::new(SessionRuntimeRegistry::default());
 
     // 4. 确定当前项目工作目录。
     //
@@ -208,6 +189,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 
     // 共享的 agent_session_control slot，runtime 和 spawner 都读它。
     let agent_session_control_slot: AgentSessionControlSlot = Arc::new(RwLock::new(None));
+    let session_manager = Arc::new(SessionManager::new(
+        Arc::clone(&event_store),
+        Arc::clone(&config_manager),
+        Arc::clone(&extension_runner),
+        session_runtime_registry,
+        Arc::clone(&background_tasks),
+    ));
 
     // 7. 给扩展运行时绑定”创建子会话”的宿主能力。
     //
@@ -215,11 +203,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
     extension_runner.bind(Arc::new(ServerSessionSpawner {
-        store: Arc::clone(&event_store),
         config: Arc::clone(&config_manager),
         context_assembler: Arc::clone(&context_assembler),
         background_tasks: Arc::clone(&background_tasks),
-        file_observation_stores: Arc::clone(&file_observation_stores),
+        session_manager: Arc::clone(&session_manager),
         extension_runner: Arc::clone(&extension_runner),
         agent_session_control: Arc::clone(&agent_session_control_slot),
     }));
@@ -234,7 +221,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         config: config_manager,
         context_assembler,
         background_tasks,
-        file_observation_stores,
+        session_manager,
         extension_runner,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         agent_session_control: agent_session_control_slot,

@@ -6,23 +6,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    config::ModelSelection,
     event::{Event, EventPayload},
-    extension::ExtensionEvent,
     types::*,
 };
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, SessionListItem},
 };
-use astrcode_session::Session;
 use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::bootstrap::{
-    PromptFiles, ServerRuntime, SystemPromptSnapshotInput, build_system_prompt_snapshot_with_files,
-    build_tool_registry_snapshot, load_system_prompt_files,
-};
+use crate::{bootstrap::ServerRuntime, session_manager::SessionManagerError};
 
 mod actor;
 mod compact;
@@ -62,6 +56,8 @@ pub enum HandlerError {
     CompactBlocked,
     #[error("Compaction skipped: {0}")]
     CompactionSkipped(String),
+    #[error(transparent)]
+    SessionManager(#[from] SessionManagerError),
     #[error("{0}")]
     Other(String),
 }
@@ -77,8 +73,6 @@ pub struct CommandHandler {
     event_tx: broadcast::Sender<ClientNotification>,
     /// 当前活跃的会话 ID
     active_session_id: Option<SessionId>,
-    /// 每个会话创建时固定的工具表快照，避免运行时工具变化影响会话
-    session_tool_registries: HashMap<SessionId, Arc<ToolRegistry>>,
     /// 当前正在执行的回合，按 session 隔离
     active_turns: HashMap<SessionId, ActiveTurn>,
     /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
@@ -102,8 +96,8 @@ impl CommandHandler {
             ClientCommand::ListSessions => {
                 let items: Vec<_> = self
                     .runtime
-                    .event_store
-                    .list_session_summaries()
+                    .session_manager
+                    .list_summaries()
                     .await
                     .unwrap_or_default()
                     .into_iter()
@@ -139,25 +133,7 @@ impl CommandHandler {
 
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
-                {
-                    let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
-                        session_id: session_id.to_string(),
-                        working_dir: String::new(),
-                        model: ModelSelection::simple(
-                            self.runtime.config.read_effective().llm.model_id.clone(),
-                        ),
-                    };
-                    if let Err(e) = self
-                        .runtime
-                        .extension_runner
-                        .emit_lifecycle(ExtensionEvent::SessionShutdown, lifecycle_ctx)
-                        .await
-                    {
-                        self.send_error(-32603, &e.to_string());
-                        return Ok(());
-                    }
-                }
-                match self.runtime.event_store.delete_session(&session_id).await {
+                match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
                         // 中止该会话的活跃回合并清理资源
                         if let Some(mut turn) = self.active_turns.remove(&session_id) {
@@ -166,9 +142,6 @@ impl CommandHandler {
                             }
                             turn.resolve_completion(turn::TurnCompletion::Aborted);
                         }
-                        self.cleanup_background_tasks_for_session(&session_id);
-                        self.runtime.remove_file_observation_store(&session_id);
-                        self.session_tool_registries.remove(&session_id);
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
                         }
@@ -250,57 +223,25 @@ impl CommandHandler {
 
     /// 创建新会话，分发 SessionStart 事件，初始化工具表和 system prompt。
     pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
-        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
-        tracing::info!(working_dir = %working_dir, model_id = %model_id, "creating session");
-        let session = Session::create(
-            self.runtime.event_store.clone(),
-            &working_dir,
-            &model_id,
-            None,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(working_dir = %working_dir, error = %e, "Session::create failed");
-            HandlerError::Other(e.to_string())
-        })?;
-
-        let sid = session.id().clone();
+        tracing::info!(working_dir = %working_dir, "creating session");
+        let created = match self.runtime.session_manager.create(&working_dir).await {
+            Ok(created) => created,
+            Err(error) => {
+                tracing::error!(working_dir = %working_dir, error = %error, "create session failed");
+                self.send_error(-32603, &error.to_string());
+                return Err(error.into());
+            },
+        };
+        let sid = created.session.id().clone();
         self.active_session_id = Some(sid.clone());
 
-        // 读回 SessionStarted 事件用于广播
-        let start_event = self
-            .runtime
-            .event_store
-            .replay_events(&sid)
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| HandlerError::Other("session created but no events found".into()))?;
-
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
-        let _ = self.event_tx.send(ClientNotification::Event(start_event));
-
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: working_dir.clone(),
-            model: ModelSelection::simple(
-                self.runtime.config.read_effective().llm.model_id.clone(),
-            ),
-        };
-        if let Err(e) = self
-            .runtime
-            .extension_runner
-            .emit_lifecycle(ExtensionEvent::SessionStart, lifecycle_ctx)
-            .await
-        {
-            tracing::error!(error = %e, "SessionStart extension dispatch failed");
-            self.send_error(-32603, &e.to_string());
-            return Err(HandlerError::Other(e.to_string()));
-        }
+        let _ = self
+            .event_tx
+            .send(ClientNotification::Event(created.start_event));
 
         match self.initialize_session_prompt(&sid, &working_dir).await {
-            Ok(_) => {
+            Ok(()) => {
                 tracing::info!(session_id = %sid, "session fully initialized");
                 Ok(sid)
             },
@@ -347,12 +288,7 @@ impl CommandHandler {
         &self,
         sid: &SessionId,
     ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
-        let state = self
-            .runtime
-            .event_store
-            .session_read_model(sid)
-            .await
-            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
+        let state = self.runtime.session_manager.read_model(sid).await?;
         Ok(self.command_infos_for_working_dir(&state.working_dir).await)
     }
 
@@ -365,8 +301,8 @@ impl CommandHandler {
                 .into_owned());
         };
         self.runtime
-            .event_store
-            .session_read_model(&sid)
+            .session_manager
+            .read_model(&sid)
             .await
             .map(|state| state.working_dir)
             .map_err(|e| format!("read session {sid}: {e}"))
@@ -374,19 +310,13 @@ impl CommandHandler {
 
     /// 恢复或切换到指定会话，修复可能的遗留状态后发送快照。
     async fn resume_session(&mut self, session_id: SessionId) {
-        let store = self.runtime.event_store.clone();
-        match Session::open(store, session_id.clone()).await {
+        match self.runtime.session_manager.open(session_id.clone()).await {
             Ok(_session) => {
                 if let Err(e) = self.repair_stale_pending_tool_calls(&session_id).await {
                     self.send_error(-32603, &e);
                     return;
                 }
-                let state = match self
-                    .runtime
-                    .event_store
-                    .session_read_model(&session_id)
-                    .await
-                {
+                let state = match self.runtime.session_manager.read_model(&session_id).await {
                     Ok(state) => state,
                     Err(e) => {
                         self.send_error(40401, &format!("Session not found: {e}"));
@@ -425,40 +355,15 @@ impl CommandHandler {
             return Ok(sid.clone());
         }
 
-        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
-        let session = Session::create(self.runtime.event_store.clone(), &wd, &model_id, None)
-            .await
-            .map_err(|e| HandlerError::Other(format!("create session: {e}")))?;
-
-        let sid = session.id().clone();
+        let created = self.runtime.session_manager.create(&wd).await?;
+        let sid = created.session.id().clone();
         self.active_session_id = Some(sid.clone());
-
-        let start_event = self
-            .runtime
-            .event_store
-            .replay_events(&sid)
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| HandlerError::Other("session created but no events found".into()))?;
-        let _ = self.event_tx.send(ClientNotification::Event(start_event));
-
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: wd.clone(),
-            model: ModelSelection::simple(
-                self.runtime.config.read_effective().llm.model_id.clone(),
-            ),
-        };
-        self.runtime
-            .extension_runner
-            .emit_lifecycle(ExtensionEvent::SessionStart, lifecycle_ctx)
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        let _ = self
+            .event_tx
+            .send(ClientNotification::Event(created.start_event));
         self.initialize_session_prompt(&sid, &wd)
             .await
             .map_err(HandlerError::Other)?;
@@ -470,22 +375,15 @@ impl CommandHandler {
         &mut self,
         session_id: &SessionId,
         working_dir: &str,
-    ) -> Result<String, String> {
-        let timeout = self.runtime.config.read_effective().llm.read_timeout_secs;
-        let registry_fut =
-            build_tool_registry_snapshot(&self.runtime.extension_runner, working_dir, timeout);
-        let prompt_files_fut = load_system_prompt_files(working_dir);
-        let (tool_registry, prompt_files) = tokio::join!(registry_fut, prompt_files_fut);
-        self.session_tool_registries
-            .insert(session_id.clone(), Arc::clone(&tool_registry));
-        self.configure_session_prompt_with_files(
-            session_id,
-            working_dir,
-            &tool_registry,
-            None,
-            prompt_files,
-        )
-        .await
+    ) -> Result<(), String> {
+        let (_, event) = self
+            .runtime
+            .session_manager
+            .initialize_system_prompt(session_id, working_dir, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.broadcast_event(event);
+        Ok(())
     }
 
     /// 获取会话的工具表，不存在则刷新。
@@ -494,29 +392,10 @@ impl CommandHandler {
         session_id: &SessionId,
         working_dir: &str,
     ) -> Arc<ToolRegistry> {
-        if let Some(tool_registry) = self.session_tool_registries.get(session_id) {
-            return Arc::clone(tool_registry);
-        }
-
-        self.refresh_tool_registry(session_id, working_dir).await
-    }
-
-    /// 刷新并缓存会话的工具表。
-    async fn refresh_tool_registry(
-        &mut self,
-        session_id: &SessionId,
-        working_dir: &str,
-    ) -> Arc<ToolRegistry> {
-        let tool_registry = self.build_tool_registry_for(working_dir).await;
-        self.session_tool_registries
-            .insert(session_id.clone(), Arc::clone(&tool_registry));
-        tool_registry
-    }
-
-    /// 为指定工作目录构建工具表快照。
-    async fn build_tool_registry_for(&self, working_dir: &str) -> Arc<ToolRegistry> {
-        let timeout = self.runtime.config.read_effective().llm.read_timeout_secs;
-        build_tool_registry_snapshot(&self.runtime.extension_runner, working_dir, timeout).await
+        self.runtime
+            .session_manager
+            .ensure_tool_registry(session_id, working_dir)
+            .await
     }
 
     /// 配置会话的 system prompt，包含工具描述和额外提示。
@@ -527,57 +406,17 @@ impl CommandHandler {
         tool_registry: &ToolRegistry,
         extra_system_prompt: Option<&str>,
     ) -> Result<String, String> {
-        let prompt_files = load_system_prompt_files(working_dir).await;
-        self.configure_session_prompt_with_files(
-            session_id,
-            working_dir,
-            tool_registry,
-            extra_system_prompt,
-            prompt_files,
-        )
-        .await
-    }
-
-    /// 使用已加载的提示词文件配置 system prompt。
-    async fn configure_session_prompt_with_files(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        tool_registry: &ToolRegistry,
-        extra_system_prompt: Option<&str>,
-        prompt_files: PromptFiles,
-    ) -> Result<String, String> {
-        let tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
-        let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
-        let tool_prompt_metadata = tools_with_meta
-            .into_iter()
-            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
-            .collect();
-        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
-        let (system_prompt, fingerprint) =
-            build_system_prompt_snapshot_with_files(SystemPromptSnapshotInput {
-                extension_runner: &self.runtime.extension_runner,
-                session_id: session_id.as_str(),
-                working_dir,
-                model_id: &model_id,
-                tools: &tools,
-                extra_system_prompt,
-                tool_prompt_metadata,
-                prompt_files,
-            })
+        let event = self
+            .runtime
+            .session_manager
+            .configure_system_prompt(session_id, working_dir, tool_registry, extra_system_prompt)
             .await
-            .map_err(|e| e.to_string())?;
-
-        self.record_and_broadcast(
-            session_id,
-            None,
-            EventPayload::SystemPromptConfigured {
-                text: system_prompt.clone(),
-                fingerprint,
-            },
-        )
-        .await?;
-        Ok(system_prompt)
+            .map_err(|error| error.to_string())?;
+        self.broadcast_event(event.clone());
+        let EventPayload::SystemPromptConfigured { text, .. } = event.payload else {
+            return Err("expected system prompt event".into());
+        };
+        Ok(text)
     }
 
     // ─── 事件记录与内部辅助 ──────────────────────────────────────────
@@ -601,6 +440,10 @@ impl CommandHandler {
         };
         let _ = self.event_tx.send(ClientNotification::Event(event.clone()));
         Ok(event)
+    }
+
+    fn broadcast_event(&self, event: Event) {
+        let _ = self.event_tx.send(ClientNotification::Event(event));
     }
 
     /// 批量记录多个事件。

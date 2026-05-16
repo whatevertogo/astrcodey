@@ -101,7 +101,10 @@ impl CommandHandler {
         }
 
         // 恢复会话并修复可能的遗留状态
-        let session = Session::open(self.runtime.event_store.clone(), sid.clone())
+        let session = self
+            .runtime
+            .session_manager
+            .open(sid.clone())
             .await
             .map_err(|e| HandlerError::SessionNotFound(format!("Session {sid} not found: {e}")))?;
         self.repair_stale_pending_tool_calls(&sid)
@@ -252,7 +255,9 @@ impl CommandHandler {
         if !active_turn.handle.is_finished() {
             active_turn.handle.abort();
         }
-        self.cleanup_background_tasks_for_session(&active_turn.session_id);
+        self.runtime
+            .session_manager
+            .cleanup_background_tasks(&active_turn.session_id);
 
         // 记录中止完成事件
         self.record_turn_payloads(
@@ -287,14 +292,6 @@ impl CommandHandler {
             .is_some_and(|active_turn| &active_turn.turn_id == turn_id)
     }
 
-    /// 清理会话的所有后台任务。
-    pub(in crate::handler) fn cleanup_background_tasks_for_session(&self, session_id: &SessionId) {
-        self.runtime
-            .background_tasks
-            .lock()
-            .cleanup_session(session_id);
-    }
-
     /// 修复遗留的待处理工具调用状态（如服务重启后）。
     pub(in crate::handler) async fn repair_stale_pending_tool_calls(
         &self,
@@ -307,8 +304,8 @@ impl CommandHandler {
 
         let state = self
             .runtime
-            .event_store
-            .session_read_model(session_id)
+            .session_manager
+            .read_model(session_id)
             .await
             .map_err(|e| format!("read session {session_id}: {e}"))?;
         // 仅处理 CallingTool 阶段且有待处理调用的会话
@@ -425,7 +422,7 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
             runtime.context_assembler.clone(),
             session,
             runtime.background_tasks.clone(),
-            runtime.file_observation_store(&sid),
+            runtime.session_manager.file_observation_store(&sid),
         )
         .with_background_result_tx(background_result_tx)
         .with_agent_session_control(agent_session_control),

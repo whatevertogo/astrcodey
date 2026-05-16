@@ -4,11 +4,9 @@ use std::sync::Arc;
 
 use astrcode_core::{
     llm::{LlmContent, LlmRole},
-    storage::EventStore,
     tool::{AgentSessionControl, AgentSessionInfo, TurnResult},
     types::SessionId,
 };
-use astrcode_session::Session;
 pub use astrcode_session::{
     SessionServices,
     background::BackgroundTaskManager,
@@ -17,31 +15,36 @@ pub use astrcode_session::{
 };
 use parking_lot::RwLock;
 
-use crate::handler::{CommandHandle, TurnCompletion};
+use crate::{
+    handler::{CommandHandle, TurnCompletion},
+    session_manager::SessionManager,
+};
 
 /// Server-side AgentSessionControl 实现。
 ///
 /// 持有 `CommandHandle`（通过共享槽延迟注入）和 `EventStore`。
 /// 不存储中间状态，`send_and_wait` 内部直接 await completion receiver。
 pub struct ServerAgentSessionControl {
-    store: Arc<dyn EventStore>,
+    session_manager: Arc<SessionManager>,
     command_handle: Arc<RwLock<Option<CommandHandle>>>,
 }
 
 impl ServerAgentSessionControl {
     pub fn new(
-        store: Arc<dyn EventStore>,
+        session_manager: Arc<SessionManager>,
         command_handle: Arc<RwLock<Option<CommandHandle>>>,
     ) -> Self {
         Self {
-            store,
+            session_manager,
             command_handle,
         }
     }
 
     /// 读取 session 最后一条 assistant 消息的文本内容。
     async fn read_last_output(&self, session_id: &str) -> Option<String> {
-        let session = Session::open(self.store.clone(), SessionId::from(session_id))
+        let session = self
+            .session_manager
+            .open(SessionId::from(session_id))
             .await
             .ok()?;
         let model = session.read_model().await.ok()?;
@@ -109,7 +112,9 @@ impl AgentSessionControl for ServerAgentSessionControl {
     }
 
     async fn list_children(&self, session_id: &str) -> Result<Vec<AgentSessionInfo>, String> {
-        let session = Session::open(self.store.clone(), SessionId::from(session_id))
+        let session = self
+            .session_manager
+            .open(SessionId::from(session_id))
             .await
             .map_err(|e| format!("open session: {e}"))?;
         let model = session

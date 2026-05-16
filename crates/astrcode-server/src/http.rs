@@ -177,7 +177,7 @@ async fn create_session(
 }
 
 async fn list_sessions(State(state): State<HttpState>) -> Response {
-    match state.runtime.event_store.list_session_summaries().await {
+    match state.runtime.session_manager.list_summaries().await {
         Ok(summaries) => Json(SessionListResponseDto {
             sessions: summaries.into_iter().map(summary_to_dto).collect(),
         })
@@ -191,12 +191,7 @@ async fn conversation_snapshot(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state
-        .runtime
-        .event_store
-        .session_read_model(&session_id)
-        .await
-    {
+    match state.runtime.session_manager.read_model(&session_id).await {
         Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }
@@ -331,7 +326,7 @@ async fn delete_project(
     State(state): State<HttpState>,
     Query(params): Query<DeleteProjectParams>,
 ) -> Response {
-    match state.runtime.event_store.list_session_summaries().await {
+    match state.runtime.session_manager.list_summaries().await {
         Ok(summaries) => {
             let matching: Vec<_> = summaries
                 .into_iter()
@@ -531,8 +526,8 @@ async fn session_stream(
     // Validate session exists before opening the stream.
     if http_state
         .runtime
-        .event_store
-        .session_read_model(&session_id)
+        .session_manager
+        .read_model(&session_id)
         .await
         .is_err()
     {
@@ -548,7 +543,7 @@ async fn session_stream(
         Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
         Some(cursor) => match http_state
             .runtime
-            .event_store
+            .session_manager
             .replay_from(&session_id, &Cursor::from(cursor.as_str()))
             .await
         {
@@ -1260,7 +1255,7 @@ async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
 
 async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
     runtime
-        .event_store
+        .session_manager
         .latest_cursor(session_id)
         .await
         .ok()

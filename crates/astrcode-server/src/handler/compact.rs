@@ -6,7 +6,6 @@ use astrcode_core::{
 };
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
-    Session,
     compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
         dispatch_post_compact,
@@ -52,7 +51,10 @@ impl CommandHandler {
             return Err(HandlerError::CompactBlocked);
         }
 
-        let session = Session::open(self.runtime.event_store.clone(), sid.clone())
+        let session = self
+            .runtime
+            .session_manager
+            .open(sid.clone())
             .await
             .map_err(|e| HandlerError::Other(format!("open session {sid}: {e}")))?;
 

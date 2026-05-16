@@ -311,6 +311,7 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
         HandlerError::NoActiveTurn
         | HandlerError::CompactBlocked
         | HandlerError::CompactionSkipped(_)
+        | HandlerError::SessionManager(_)
         | HandlerError::Other(_) => Error::internal_error().data(error.to_string()),
     }
 }
