@@ -41,6 +41,9 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                 model.created_at = event.timestamp.to_rfc3339();
             }
         },
+        EventPayload::ModelIdChanged { model_id } => {
+            model.model_id = model_id.clone();
+        },
         EventPayload::SessionDeleted => {
             model.phase = Phase::Idle;
             model.messages.clear();

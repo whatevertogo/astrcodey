@@ -60,6 +60,12 @@ pub enum EventPayload {
         parent_session_id: Option<SessionId>,
     },
 
+    /// 会话使用的模型已变更。
+    ///
+    /// 由 handler 在运行时配置的 model_id 与 session 创建时不同时写入，
+    /// 确保 session 始终反映当前生效的模型。
+    ModelIdChanged { model_id: String },
+
     /// 会话 system prompt 已固定。
     ///
     /// 这是 session 级事实：同一 session 后续回合复用这份提示词，

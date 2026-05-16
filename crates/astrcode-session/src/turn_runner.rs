@@ -108,10 +108,8 @@ pub struct TurnRunner {
 impl TurnRunner {
     /// 创建一个新的 TurnRunner 实例。
     ///
-    /// 从 `services.session` 读取 `working_dir`、`system_prompt` 等事实，
-    /// `model_id` 由调用方传入（runtime 决策，不一定等于 session 创建时的值）。
+    /// 从 `services.session` 读取所有事实：`working_dir`、`model_id`、`system_prompt`。
     pub async fn new(
-        model_id: String,
         services: crate::session_services::SessionServices,
     ) -> Result<Self, TurnError> {
         let state = services
@@ -122,7 +120,7 @@ impl TurnRunner {
         let shared = SharedTurnContext {
             session_id: services.session.id().clone(),
             working_dir: state.working_dir,
-            model_id,
+            model_id: state.model_id,
         };
         let system_prompt = state.system_prompt.unwrap_or_default();
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(

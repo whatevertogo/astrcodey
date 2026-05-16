@@ -56,8 +56,7 @@ pub(in crate::handler) struct ActiveTurn {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub handle: JoinHandle<()>,
-    pub working_dir: String,
-    pub model_id: String,
+    pub session: Arc<Session>,
     /// Turn 完成时通知等待者的通道
     pub completion_tx: Option<oneshot::Sender<TurnCompletion>>,
 }
@@ -114,7 +113,6 @@ impl CommandHandler {
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
         let working_dir = state.working_dir;
-        let model_id = state.model_id;
         let tool_registry = self.ensure_tool_registry(&sid, &working_dir).await;
         // 如未配置 system prompt，自动配置（写入 session 事件）
         if state.system_prompt.is_none() {
@@ -123,6 +121,7 @@ impl CommandHandler {
                 .map_err(HandlerError::Other)?;
         }
         let turn_id = new_turn_id();
+        let session_arc = Arc::new(session);
 
         // 记录 Turn 开始事件
         self.record_turn_payloads(
@@ -136,7 +135,7 @@ impl CommandHandler {
         // 启动 Agent 后台任务
         let handle = self.spawn_agent_turn(AgentTurnInput {
             turn_id: turn_id.clone(),
-            session: Arc::new(session),
+            session: Arc::clone(&session_arc),
             tool_registry: Arc::clone(&tool_registry),
             text: user_text,
             transient_instructions,
@@ -149,8 +148,7 @@ impl CommandHandler {
                 session_id: sid,
                 turn_id: turn_id.clone(),
                 handle,
-                working_dir,
-                model_id,
+                session: session_arc,
                 completion_tx,
             },
         );
@@ -230,11 +228,16 @@ impl CommandHandler {
             return Err(HandlerError::NoActiveTurn);
         };
 
-        // 发送 TurnAborted 生命周期事件
+        // 从 session 读取 working_dir 和 model_id 构建 lifecycle context
+        let session_state = active_turn
+            .session
+            .read_model()
+            .await
+            .map_err(|e| HandlerError::Other(format!("read session for abort: {e}")))?;
         let lifecycle_ctx = LifecycleContext {
             session_id: active_turn.session_id.to_string(),
-            working_dir: active_turn.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(active_turn.model_id.clone()),
+            working_dir: session_state.working_dir,
+            model: astrcode_core::config::ModelSelection::simple(session_state.model_id),
         };
         if let Err(e) = self
             .runtime
@@ -406,12 +409,15 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     }
 
     // model_id 来自 runtime 配置（可被热更新覆盖 session 创建时的值）
+    // 写入 session 事件，确保 session 反映当前生效的模型
     let model_id = runtime.read_effective().llm.model_id.clone();
+    if let Err(e) = session.update_model_id(&model_id).await {
+        tracing::warn!(session_id = %sid, error = %e, "failed to update session model_id");
+    }
 
-    // 组装 TurnRunner（从 session 读取 working_dir、system_prompt 等事实）
+    // 组装 TurnRunner（从 session 读取所有事实）
     let agent_session_control = runtime.agent_session_control.read().clone();
     let agent = match TurnRunner::new(
-        model_id,
         SessionServices::new(
             runtime.read_llm_provider(),
             tool_registry,

@@ -234,7 +234,6 @@ impl ServerSessionSpawner {
 
         let agent_session_control = self.agent_session_control.read().clone();
         let agent = TurnRunner::new(
-            model_id.clone(),
             SessionServices::new(
                 self.read_llm_provider(),
                 Arc::clone(&tool_registry),
