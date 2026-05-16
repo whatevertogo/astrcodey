@@ -5,7 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use astrcode_context::context_engine::LlmContextAssembler;
+use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, storage::EventStore, tool::AgentSessionControl};
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
 use astrcode_session::{SessionRuntimeRegistry, background::BackgroundTaskManager};

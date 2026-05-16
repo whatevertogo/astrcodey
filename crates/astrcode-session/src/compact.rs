@@ -1,13 +1,23 @@
-//! Compact pipeline — hook 桥接。
+//! Compact pipeline — hook 桥接与 LLM 请求构造。
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
+use astrcode_context::compaction::CompactError;
 use astrcode_core::{
     config::ModelSelection,
     extension::{
         CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactTrigger,
         ExtensionError,
     },
+    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
 };
 use astrcode_extensions::runner::ExtensionRunner;
+use tokio::sync::mpsc;
+
+type CompactRequestFn = Box<
+    dyn FnMut(Vec<LlmMessage>) -> Pin<Box<dyn Future<Output = Result<String, CompactError>> + Send>>
+        + Send,
+>;
 
 #[derive(Clone, Copy)]
 pub struct CompactHookContext<'a> {
@@ -73,4 +83,37 @@ pub fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
         CompactTrigger::AutoThreshold => "auto_threshold",
         CompactTrigger::ManualCommand => "manual_command",
     }
+}
+
+/// 从 LLM stream 收集纯文本输出，忽略 tool call 事件。
+async fn collect_stream_text(
+    mut rx: mpsc::UnboundedReceiver<LlmEvent>,
+) -> Result<String, LlmError> {
+    let mut text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            LlmEvent::ContentDelta { delta } => text.push_str(&delta),
+            LlmEvent::Done { .. } => break,
+            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message)),
+            _ => {},
+        }
+    }
+    Ok(text)
+}
+
+/// 从 LlmProvider 构造 compact 请求闭包。
+///
+/// 闭包调用 `llm.generate(messages, [])`，收集流式文本输出并返回。
+/// 用于传入 `compact_messages_with_request` 或 `prepare_messages_with_llm`。
+pub fn make_compact_request_fn(llm: Arc<dyn LlmProvider>) -> CompactRequestFn {
+    Box::new(move |messages| {
+        let llm = Arc::clone(&llm);
+        Box::pin(async move {
+            let rx = llm
+                .generate(messages, vec![])
+                .await
+                .map_err(CompactError::Llm)?;
+            collect_stream_text(rx).await.map_err(CompactError::Llm)
+        })
+    })
 }

@@ -14,7 +14,7 @@
 //!   ├─ PromptEngine::ensure(contribs, base, tools)
 //!   │    → system prompt（指纹缓存，动态内容变化时自动重建）
 //!   │
-//!   └─ ContextEngine::prepare_messages()
+//!   └─ LlmContextAssembler::prepare_messages_with_llm()
 //!        → provider-ready messages
 //! ```
 //!

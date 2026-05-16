@@ -124,7 +124,7 @@ impl From<LlmError> for CompactError {
 }
 
 /// 不调用 LLM 的 compact fallback，并使用指定的 summary 渲染选项。
-pub fn compact_messages_with_render_options(
+fn compact_messages_with_render_options(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
     render_options: &CompactSummaryRenderOptions,
@@ -216,6 +216,41 @@ where
     Err(last_error.unwrap_or_else(|| {
         CompactParseError::new("compact response did not contain a summary").into()
     }))
+}
+
+/// LLM compact + deterministic fallback 的统一入口。
+///
+/// 先尝试调用 LLM 生成摘要，失败时降级到确定性模板。
+/// 用于 auto-compact 和 manual compact 两条路径。
+pub async fn compact_messages_with_fallback<F, Fut>(
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+    settings: &ContextSettings,
+    custom_instructions: &[String],
+    render_options: &CompactSummaryRenderOptions,
+    request_text: F,
+) -> Result<CompactResult, CompactSkipReason>
+where
+    F: FnMut(Vec<LlmMessage>) -> Fut,
+    Fut: Future<Output = Result<String, CompactError>>,
+{
+    match compact_messages_with_request(
+        messages,
+        system_prompt,
+        settings,
+        custom_instructions,
+        render_options,
+        request_text,
+    )
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(CompactError::Skip(reason)) => Err(reason),
+        Err(error) => {
+            tracing::warn!(%error, "LLM compact failed, falling back to deterministic");
+            compact_messages_with_render_options(messages, system_prompt, render_options)
+        },
+    }
 }
 
 fn should_retry_prompt_too_long(error: &CompactError) -> bool {

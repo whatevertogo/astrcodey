@@ -1,5 +1,5 @@
 use astrcode_context::compaction::{
-    CompactSkipReason, CompactSummaryRenderOptions, compact_messages_with_render_options,
+    CompactSkipReason, CompactSummaryRenderOptions, compact_messages_with_fallback,
 };
 use astrcode_core::{
     event::EventPayload, extension::CompactTrigger, storage::CompactSnapshotInput, types::SessionId,
@@ -9,7 +9,7 @@ use astrcode_session::{
     EventBus,
     compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        dispatch_post_compact,
+        dispatch_post_compact, make_compact_request_fn,
     },
     post_compact::enrich_post_compact_context,
 };
@@ -101,13 +101,21 @@ impl CommandHandler {
         };
         let render_options = CompactSummaryRenderOptions {
             transcript_path: snapshot_path,
-            custom_instructions,
+            custom_instructions: custom_instructions.clone(),
         };
-        let mut compaction = match compact_messages_with_render_options(
+        let llm = self.runtime.config.read_llm_provider();
+        let request_fn = make_compact_request_fn(llm);
+        let settings = self.runtime.context_assembler.settings().clone();
+        let mut compaction = match compact_messages_with_fallback(
             &provider_messages,
             state.system_prompt.as_deref(),
+            &settings,
+            &custom_instructions,
             &render_options,
-        ) {
+            request_fn,
+        )
+        .await
+        {
             Ok(compaction) => compaction,
             Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
                 return Ok(ManualCompactOutcome::Skipped {

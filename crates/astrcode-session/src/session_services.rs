@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use astrcode_context::context_engine::LlmContextAssembler;
+use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     llm::LlmProvider,
     tool::{AgentSessionControl, FileObservationStore},

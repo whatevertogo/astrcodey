@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use astrcode_context::context_engine::{ContextPrepareInput, LlmContextAssembler};
+use astrcode_context::context_assembler::{ContextPrepareInput, LlmContextAssembler};
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
@@ -224,7 +224,8 @@ impl TurnRunner {
             .await
             .unwrap_or_default();
 
-            // 上下文准备：context assembler 内部处理阈值检查和 deterministic compact。
+            // 上下文准备：context assembler 内部处理阈值检查、LLM compact 和 deterministic
+            // fallback。
             let (system_messages, visible_messages): (Vec<_>, Vec<_>) = messages
                 .iter()
                 .cloned()
@@ -235,7 +236,11 @@ impl TurnRunner {
                 model_limits: self.llm.model_limits(),
                 custom_instructions,
             };
-            let mut prepared = self.context_assembler.prepare_messages(input);
+            let request_fn = crate::compact::make_compact_request_fn(self.llm.clone());
+            let mut prepared = self
+                .context_assembler
+                .prepare_messages_with_llm(input, request_fn)
+                .await;
 
             if let Some(ref mut compaction) = prepared.compaction {
                 send_event(event_tx.as_ref(), EventPayload::CompactionStarted);

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_context::{compaction::CompactResult, context_engine::LlmContextAssembler};
+use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
 use astrcode_core::{
     config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},

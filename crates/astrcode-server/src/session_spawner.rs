@@ -12,7 +12,7 @@ const MAX_AGENT_DEPTH: usize = 2;
 
 use std::sync::Arc;
 
-use astrcode_context::context_engine::LlmContextAssembler;
+use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     event::{Event, EventPayload, ToolOutputStream},
     types::{SessionId, ToolCallId, TurnId, new_background_task_id, new_message_id, new_turn_id},
@@ -721,7 +721,7 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::context_engine::LlmContextAssembler;
+    use astrcode_context::context_assembler::LlmContextAssembler;
     use astrcode_core::{
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::EventStore,

@@ -1,10 +1,12 @@
+use std::future::Future;
+
 use astrcode_core::llm::{LlmMessage, ModelLimits};
 
 use crate::{
     ContextSettings,
     compaction::{
-        CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
-        compact_messages_with_render_options,
+        CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
+        compact_messages_with_fallback,
     },
     token_budget::{build_prompt_snapshot, should_compact},
 };
@@ -49,22 +51,33 @@ impl LlmContextAssembler {
         Self { settings }
     }
 
-    /// 准备 provider 可见消息；达到阈值时使用 deterministic compact fallback。
-    ///
-    /// 这个入口不需要 LLM/provider，适合测试或没有 provider-backed compact 的路径。
-    pub fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+    /// 准备 provider 可见消息；达到阈值时先尝试 LLM compact，失败降级到 deterministic。
+    pub async fn prepare_messages_with_llm<F, Fut>(
+        &self,
+        input: ContextPrepareInput<'_>,
+        request_text: F,
+    ) -> PreparedContext
+    where
+        F: FnMut(Vec<LlmMessage>) -> Fut,
+        Fut: Future<Output = Result<String, CompactError>>,
+    {
         let mut messages = input.messages;
         let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
         let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
             let render_options = CompactSummaryRenderOptions {
-                custom_instructions: input.custom_instructions,
+                custom_instructions: input.custom_instructions.clone(),
                 ..Default::default()
             };
-            match compact_messages_with_render_options(
+            match compact_messages_with_fallback(
                 &messages,
                 input.system_prompt,
+                &self.settings,
+                &input.custom_instructions,
                 &render_options,
-            ) {
+                request_text,
+            )
+            .await
+            {
                 Ok(compaction) => {
                     let prepared = prepared_context_from_compaction(compaction);
                     messages = prepared.messages;
@@ -134,8 +147,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn prepare_messages_uses_current_model_limits_each_call() {
+    #[tokio::test]
+    async fn prepare_messages_with_llm_uses_current_model_limits_each_call() {
         let assembler = LlmContextAssembler::new(ContextSettings::default());
         let messages = vec![
             LlmMessage::user("old user ".repeat(400)),
@@ -143,24 +156,42 @@ mod tests {
             LlmMessage::user("current"),
         ];
 
-        let large_window = assembler.prepare_messages(ContextPrepareInput {
-            messages: messages.clone(),
-            system_prompt: None,
-            model_limits: ModelLimits {
-                max_input_tokens: 200_000,
-                max_output_tokens: 1024,
-            },
-            custom_instructions: Vec::new(),
-        });
-        let small_window = assembler.prepare_messages(ContextPrepareInput {
-            messages,
-            system_prompt: None,
-            model_limits: ModelLimits {
-                max_input_tokens: 100,
-                max_output_tokens: 1024,
-            },
-            custom_instructions: Vec::new(),
-        });
+        let large_window = assembler
+            .prepare_messages_with_llm(
+                ContextPrepareInput {
+                    messages: messages.clone(),
+                    system_prompt: None,
+                    model_limits: ModelLimits {
+                        max_input_tokens: 200_000,
+                        max_output_tokens: 1024,
+                    },
+                    custom_instructions: Vec::new(),
+                },
+                |_msgs| async {
+                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
+                        "test".into(),
+                    )))
+                },
+            )
+            .await;
+        let small_window = assembler
+            .prepare_messages_with_llm(
+                ContextPrepareInput {
+                    messages,
+                    system_prompt: None,
+                    model_limits: ModelLimits {
+                        max_input_tokens: 100,
+                        max_output_tokens: 1024,
+                    },
+                    custom_instructions: Vec::new(),
+                },
+                |_msgs| async {
+                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
+                        "test".into(),
+                    )))
+                },
+            )
+            .await;
 
         assert!(large_window.compaction.is_none());
         assert!(small_window.compaction.is_some());

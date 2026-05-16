@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
 
-use astrcode_context::{ContextSettings, context_engine::LlmContextAssembler};
+use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
 use astrcode_core::{
     config::{EffectiveConfig, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
