@@ -766,7 +766,7 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     ));
     Arc::new(ServerRuntime {
         event_store,
-        config,
+        config_manager: config,
         context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
         background_tasks: Default::default(),
         session_manager,

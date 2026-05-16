@@ -102,7 +102,7 @@ impl CommandHandler {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
             model: ModelSelection::simple(
-                self.runtime.config.read_effective().llm.model_id.clone(),
+                self.runtime.config_manager.read_effective().llm.model_id.clone(),
             ),
         };
 

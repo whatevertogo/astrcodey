@@ -379,10 +379,10 @@ async fn delete_project(
 }
 
 async fn get_config(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config.read_raw_config();
+    let raw = state.runtime.config_manager.read_raw_config();
     let config_path = state
         .runtime
-        .config
+        .config_manager
         .config_store()
         .path()
         .display()
@@ -417,7 +417,7 @@ async fn get_config(State(state): State<HttpState>) -> Response {
 }
 
 async fn reload_config(State(state): State<HttpState>) -> Response {
-    let config = match state.runtime.config.config_store().load().await {
+    let config = match state.runtime.config_manager.config_store().load().await {
         Ok(c) => c,
         Err(error) => {
             return error_response(
@@ -430,7 +430,7 @@ async fn reload_config(State(state): State<HttpState>) -> Response {
     let active_profile = config.active_profile.clone();
     let active_model = config.active_model.clone();
 
-    if let Err(error) = state.runtime.config.apply_raw_config_and_rebuild(config) {
+    if let Err(error) = state.runtime.config_manager.apply_raw_config_and_rebuild(config) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_config",
@@ -449,7 +449,7 @@ async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config.read_raw_config().clone();
+    let mut candidate = state.runtime.config_manager.read_raw_config().clone();
     candidate.active_profile = request.active_profile;
     candidate.active_model = request.active_model;
 
@@ -463,7 +463,7 @@ async fn update_active_selection(
     };
 
     // Persist the validated candidate.
-    if let Err(error) = state.runtime.config.config_store().save(&candidate).await {
+    if let Err(error) = state.runtime.config_manager.config_store().save(&candidate).await {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "save_failed",
@@ -473,7 +473,7 @@ async fn update_active_selection(
 
     // apply_raw_config_and_rebuild re-validates internally; failure here after
     // the explicit check above indicates a race or I/O issue.
-    if let Err(error) = state.runtime.config.apply_raw_config_and_rebuild(candidate) {
+    if let Err(error) = state.runtime.config_manager.apply_raw_config_and_rebuild(candidate) {
         tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
     }
 
@@ -485,8 +485,8 @@ async fn update_active_selection(
 }
 
 async fn get_current_model(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config.read_raw_config();
-    let eff = state.runtime.config.read_effective();
+    let raw = state.runtime.config_manager.read_raw_config();
+    let eff = state.runtime.config_manager.read_effective();
     Json(CurrentModelResponseDto {
         profile_name: raw.active_profile.clone(),
         model_id: eff.llm.model_id.clone(),
@@ -496,7 +496,7 @@ async fn get_current_model(State(state): State<HttpState>) -> Response {
 }
 
 async fn list_models(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config.read_raw_config();
+    let raw = state.runtime.config_manager.read_raw_config();
     let models: Vec<AvailableModelDto> = raw
         .profiles
         .iter()
@@ -515,7 +515,7 @@ async fn test_model(State(state): State<HttpState>) -> Response {
     let start = std::time::Instant::now();
     match state
         .runtime
-        .config
+        .config_manager
         .read_llm_provider()
         .generate(vec![astrcode_core::llm::LlmMessage::user("Hi")], vec![])
         .await

@@ -103,7 +103,7 @@ impl CommandHandler {
             transcript_path: snapshot_path,
             custom_instructions: custom_instructions.clone(),
         };
-        let llm = self.runtime.config.read_llm_provider();
+        let llm = self.runtime.config_manager.read_llm_provider();
         let request_fn = make_compact_request_fn(llm);
         let settings = self.runtime.context_assembler.settings().clone();
         let mut compaction = match compact_messages_with_fallback(

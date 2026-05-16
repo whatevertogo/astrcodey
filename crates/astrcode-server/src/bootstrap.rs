@@ -33,7 +33,7 @@ pub struct ServerRuntime {
     /// 事件存储后端，用于创建/恢复/删除会话等集合操作
     pub event_store: Arc<dyn EventStore>,
     /// 配置与 LLM 提供者的联合管理器
-    pub config: Arc<crate::config_manager::ConfigManager>,
+    pub config_manager: Arc<crate::config_manager::ConfigManager>,
     /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
     /// 跨回合共享的后台任务管理器。
@@ -192,7 +192,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
     Ok(ServerRuntime {
         event_store,
-        config: config_manager,
+        config_manager,
         context_assembler,
         background_tasks,
         session_manager,

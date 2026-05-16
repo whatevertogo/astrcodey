@@ -394,7 +394,7 @@ fn test_runtime_with_settings(
     ));
     Arc::new(ServerRuntime {
         event_store,
-        config,
+        config_manager: config,
         context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
         background_tasks: Default::default(),
         session_manager,
