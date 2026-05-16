@@ -81,12 +81,12 @@ pub fn router(
     event_tx: broadcast::Sender<ClientNotification>,
 ) -> Result<(Router, String), Box<dyn std::error::Error + Send + Sync>> {
     let auth_token = configured_auth_token().map_err(|e| {
-        Box::new(std::io::Error::other(e.to_string()))
-            as Box<dyn std::error::Error + Send + Sync>
+        Box::new(std::io::Error::other(e.to_string())) as Box<dyn std::error::Error + Send + Sync>
     })?;
-    let event_bus = Arc::new(
-        crate::server_event_bus::ServerEventBus::new(runtime.event_store.clone(), event_tx.clone()),
-    );
+    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
+        runtime.event_store.clone(),
+        event_tx.clone(),
+    ));
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_bus));
     let state = HttpState {
         runtime,

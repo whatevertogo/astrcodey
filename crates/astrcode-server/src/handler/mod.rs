@@ -16,7 +16,10 @@ use astrcode_protocol::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::mpsc;
 
-use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus, session_manager::SessionManagerError};
+use crate::{
+    bootstrap::ServerRuntime, server_event_bus::ServerEventBus,
+    session_manager::SessionManagerError,
+};
 
 mod actor;
 mod compact;
@@ -214,10 +217,11 @@ impl CommandHandler {
         {
             Ok(state) => {
                 let snapshot = session_snapshot(&state);
-                self.event_bus.send_notification(ClientNotification::SessionResumed {
-                    session_id: session_id.into_string(),
-                    snapshot,
-                });
+                self.event_bus
+                    .send_notification(ClientNotification::SessionResumed {
+                        session_id: session_id.into_string(),
+                        snapshot,
+                    });
             },
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
@@ -338,10 +342,11 @@ impl CommandHandler {
                     }
                 }
                 self.active_session_id = Some(session_id.clone());
-                self.event_bus.send_notification(ClientNotification::SessionResumed {
-                    session_id: session_id.into_string(),
-                    snapshot,
-                });
+                self.event_bus
+                    .send_notification(ClientNotification::SessionResumed {
+                        session_id: session_id.into_string(),
+                        snapshot,
+                    });
             },
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
@@ -420,7 +425,8 @@ impl CommandHandler {
     // ─── 事件记录与内部辅助 ──────────────────────────────────────────
 
     fn broadcast_event(&self, event: Event) {
-        self.event_bus.send_notification(ClientNotification::Event(event));
+        self.event_bus
+            .send_notification(ClientNotification::Event(event));
     }
 
     /// 发送错误通知给客户端。

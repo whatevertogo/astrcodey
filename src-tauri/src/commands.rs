@@ -228,13 +228,10 @@ pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), Stri
 pub async fn select_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .pick_folder(move |path| {
-            let _ = tx.send(path.map(|p| p.to_string()));
-        });
-    rx.await
-        .map_err(|_| "dialog cancelled".to_string())
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path.map(|p| p.to_string()));
+    });
+    rx.await.map_err(|_| "dialog cancelled".to_string())
 }
 
 #[tauri::command]

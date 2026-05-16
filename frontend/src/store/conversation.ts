@@ -516,9 +516,15 @@ function mergeDeltas(deltas: ConversationDelta[]): ConversationDelta[] {
 
   for (const delta of deltas) {
     if (delta.kind === 'patchBlock') {
-      textAcc.set(delta.blockId, (textAcc.get(delta.blockId) ?? '') + delta.textDelta)
+      textAcc.set(
+        delta.blockId,
+        (textAcc.get(delta.blockId) ?? '') + delta.textDelta
+      )
     } else if (delta.kind === 'thinkingDelta') {
-      thinkAcc.set(delta.blockId, (thinkAcc.get(delta.blockId) ?? '') + delta.delta)
+      thinkAcc.set(
+        delta.blockId,
+        (thinkAcc.get(delta.blockId) ?? '') + delta.delta
+      )
     } else {
       result.push(delta)
     }

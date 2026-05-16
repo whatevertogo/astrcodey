@@ -71,9 +71,10 @@ async fn main() {
     ));
     *runtime.agent_session_control.write() = Some(session_control);
 
-    let event_bus = Arc::new(
-        astrcode_server::server_event_bus::ServerEventBus::new(runtime.event_store.clone(), event_tx.clone()),
-    );
+    let event_bus = Arc::new(astrcode_server::server_event_bus::ServerEventBus::new(
+        runtime.event_store.clone(),
+        event_tx.clone(),
+    ));
     let handler = CommandHandler::spawn_actor(runtime, Arc::clone(&event_bus));
 
     // spawn_actor 后绑定 CommandHandle 到 agent_session_control 的共享槽。

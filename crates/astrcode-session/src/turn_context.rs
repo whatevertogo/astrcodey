@@ -23,12 +23,7 @@ pub trait EventBus: Send + Sync {
     /// `turn_id = Some(..)` 表示 turn 级事件。
     /// Option 只应出现在这个边界：上层调用方（run_turn / drive_agent）
     /// 直接接收 `&TurnId`，由它们负责传 `Some(turn_id)` 进来。
-    async fn emit(
-        &self,
-        session_id: &SessionId,
-        turn_id: Option<&TurnId>,
-        payload: EventPayload,
-    );
+    async fn emit(&self, session_id: &SessionId, turn_id: Option<&TurnId>, payload: EventPayload);
 }
 
 /// 丢弃所有事件的空实现，用于测试。

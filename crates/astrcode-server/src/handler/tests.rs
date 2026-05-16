@@ -22,7 +22,9 @@ use astrcode_core::{
     types::{SessionId, ToolCallId},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
-use astrcode_session::{Session, compact_boundary_payload, session_continued_from_compaction_payload};
+use astrcode_session::{
+    Session, compact_boundary_payload, session_continued_from_compaction_payload,
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::{broadcast, mpsc};
 
@@ -579,7 +581,8 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
 async fn create_session_configures_system_prompt() {
     let runtime = test_runtime();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let sid = handler.create_session(".".into()).await.unwrap();
 
@@ -613,7 +616,8 @@ async fn client_create_session_reports_start_hook_failure() {
         .register(Arc::new(FailSessionStartExtension))
         .await;
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let error = handler
         .handle(ClientCommand::CreateSession {
@@ -637,7 +641,8 @@ async fn client_create_session_reports_start_hook_failure() {
 async fn submit_prompt_reuses_session_system_prompt() {
     let runtime = test_runtime();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let sid = handler.create_session(".".into()).await.unwrap();
     let initial_prompt = {
@@ -669,7 +674,8 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
         .unwrap();
     let sid = session.id().clone();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     handler
         .submit_input_for_session(sid.clone(), "hello".into())
@@ -690,7 +696,8 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
 async fn submit_prompt_uses_one_turn_id_for_turn_events() {
     let runtime = test_runtime();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let sid = handler.create_session(".".into()).await.unwrap();
     handler
@@ -742,7 +749,11 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
 
     let (event_tx, _) = broadcast::channel(16);
     let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
-    let handler = CommandHandler::new(Arc::clone(&runtime), test_event_bus(&runtime, event_tx), actor_tx);
+    let handler = CommandHandler::new(
+        Arc::clone(&runtime),
+        test_event_bus(&runtime, event_tx),
+        actor_tx,
+    );
 
     handler.repair_stale_pending_tool_calls(&sid).await.unwrap();
 
@@ -809,7 +820,8 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
         }))
         .await;
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
 
     let (_turn_id, completion) = handler
@@ -839,7 +851,8 @@ async fn stream_error_still_dispatches_turn_end() {
         }))
         .await;
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
 
     let (_turn_id, completion) = handler
@@ -861,7 +874,8 @@ async fn read_before_edit_guard_survives_across_turns() {
         call_count: AtomicUsize::new(0),
     }));
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
         .create_session(workspace.to_string_lossy().into_owned())
         .await
@@ -1000,7 +1014,8 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
     let settings = astrcode_context::ContextSettings::default();
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
@@ -1048,7 +1063,8 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         astrcode_context::ContextSettings::default(),
     );
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three"] {
@@ -1084,7 +1100,8 @@ async fn slash_compact_uses_backend_command_without_user_message() {
 async fn unknown_slash_command_does_not_enter_llm_or_transcript() {
     let runtime = test_runtime();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
 
     let error = handler
@@ -1116,7 +1133,8 @@ async fn skill_slash_command_injects_transient_instructions_only() {
         .register(astrcode_extension_skill::extension())
         .await;
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
         .create_session(workspace.to_string_lossy().into_owned())
         .await
@@ -1182,7 +1200,8 @@ async fn command_list_keeps_reserved_and_plugin_priority_over_skills() {
         }))
         .await;
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
         .create_session(workspace.to_string_lossy().into_owned())
         .await
@@ -1209,7 +1228,8 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     let settings = astrcode_context::ContextSettings::default();
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let session_id = handler.create_session(".".into()).await.unwrap();
     for text in ["one", "two", "three", "four"] {
@@ -1279,7 +1299,8 @@ async fn auto_compact_applies_in_memory_during_turn() {
     };
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
     let session_id = handler.create_session(".".into()).await.unwrap();
     for index in 0..3 {

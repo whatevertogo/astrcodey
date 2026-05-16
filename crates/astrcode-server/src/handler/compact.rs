@@ -137,7 +137,9 @@ impl CommandHandler {
         })?;
 
         // Manual compact has no agent loop, so emit CompactionStarted here.
-        self.event_bus.emit(sid, None, EventPayload::CompactionStarted).await;
+        self.event_bus
+            .emit(sid, None, EventPayload::CompactionStarted)
+            .await;
 
         let fp = hex_fingerprint(system_prompt.as_bytes());
         let trigger = compact_trigger_name(CompactTrigger::ManualCommand).into();
@@ -154,10 +156,11 @@ impl CommandHandler {
             .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
-        self.event_bus.send_notification(ClientNotification::SessionResumed {
-            session_id: sid.clone().into_string(),
-            snapshot: session_snapshot(&state),
-        });
+        self.event_bus
+            .send_notification(ClientNotification::SessionResumed {
+                session_id: sid.clone().into_string(),
+                snapshot: session_snapshot(&state),
+            });
 
         Ok(ManualCompactOutcome::Compacted {
             session_id: sid.clone(),

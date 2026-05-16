@@ -117,9 +117,12 @@ impl EventLog {
             .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
         let line = serde_json::to_string(&event)?;
         writeln!(writer, "{}", line)?;
-        writer
-            .flush()
-            .map_err(|e| StorageError::Io(std::io::Error::new(e.kind(), enhance_flush_error(&self.path, e))))?;
+        writer.flush().map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                e.kind(),
+                enhance_flush_error(&self.path, e),
+            ))
+        })?;
         self.sync_pending.store(true, Ordering::Release);
         *next_seq += 1;
         Ok(event)
@@ -184,10 +187,16 @@ impl EventLog {
             .lock()
             .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
         writer.flush().map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_flush_error(&self.path, e)))
+            StorageError::Io(std::io::Error::new(
+                e.kind(),
+                enhance_flush_error(&self.path, e),
+            ))
         })?;
         writer.get_ref().sync_all().map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_sync_error(&self.path, e)))
+            StorageError::Io(std::io::Error::new(
+                e.kind(),
+                enhance_sync_error(&self.path, e),
+            ))
         })?;
         self.sync_pending.store(false, Ordering::Release);
         Ok(())

@@ -351,10 +351,18 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         let handle = tokio::spawn(async move {
             while let Some(completion) = background_result_rx.recv().await {
                 bg_event_bus
-                    .emit(&completion.session_id, None, completion.to_tool_call_completed())
+                    .emit(
+                        &completion.session_id,
+                        None,
+                        completion.to_tool_call_completed(),
+                    )
                     .await;
                 bg_event_bus
-                    .emit(&completion.session_id, None, completion.to_background_task_completed())
+                    .emit(
+                        &completion.session_id,
+                        None,
+                        completion.to_background_task_completed(),
+                    )
                     .await;
                 bg_event_bus
                     .sync_durable_events(&completion.session_id)
@@ -409,7 +417,14 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     };
 
     // 驱动 Agent 循环，事件通过 EventBus 直接持久化+广播
-    let result = run_turn(&agent, &text, transient_instructions, &turn_id, event_bus.as_ref()).await;
+    let result = run_turn(
+        &agent,
+        &text,
+        transient_instructions,
+        &turn_id,
+        event_bus.as_ref(),
+    )
+    .await;
 
     // 终态事件通过 EventBus 直接广播，避免绕 actor 通道导致的 SSE 延迟。
     match result.output {

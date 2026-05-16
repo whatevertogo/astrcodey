@@ -32,9 +32,10 @@ use crate::{
 /// error occurs.
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
     let (event_tx, _) = broadcast::channel(256);
-    let event_bus = Arc::new(
-        crate::server_event_bus::ServerEventBus::new(runtime.event_store.clone(), event_tx),
-    );
+    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
+        runtime.event_store.clone(),
+        event_tx,
+    ));
     let command_handle = CommandHandle::spawn(runtime, Arc::clone(&event_bus));
 
     Agent

@@ -20,10 +20,7 @@ pub struct CommandHandle {
 
 impl CommandHandle {
     /// 启动 CommandHandler Actor，返回可克隆的句柄。
-    pub fn spawn(
-        runtime: Arc<ServerRuntime>,
-        event_bus: Arc<ServerEventBus>,
-    ) -> Self {
+    pub fn spawn(runtime: Arc<ServerRuntime>, event_bus: Arc<ServerEventBus>) -> Self {
         CommandHandler::spawn_actor(runtime, event_bus)
     }
 

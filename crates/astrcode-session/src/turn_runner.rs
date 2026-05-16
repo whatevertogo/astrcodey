@@ -505,14 +505,8 @@ pub async fn run_turn(
     turn_id: &TurnId,
     event_bus: &dyn EventBus,
 ) -> RunTurnResult {
-    let (output, emitted_error) = drive_agent(
-        agent,
-        user_text,
-        transient_instructions,
-        turn_id,
-        event_bus,
-    )
-    .await;
+    let (output, emitted_error) =
+        drive_agent(agent, user_text, transient_instructions, turn_id, event_bus).await;
 
     RunTurnResult {
         output,
