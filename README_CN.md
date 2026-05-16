@@ -77,32 +77,32 @@ cd frontend && npm install && npm run tauri:dev
 
 | Crate | 行数 | 说明 |
 |---|---|---|
-| `astrcode-server` | 9.1k | Agent 循环、会话管理、JSON-RPC/HTTP/ACP 处理器、transport、并发控制 |
+| `astrcode-server` | 9.2k | Agent 循环、会话管理、JSON-RPC/HTTP/ACP 处理器、transport、并发控制 |
 | `astrcode-cli` | 6.7k | 终端 TUI（ratatui）、无头执行、服务器启动器 |
-| `astrcode-session` | 3.9k | 会话运行时：会话句柄、Turn 执行、事件总线 |
 | `astrcode-tools` | 4.5k | 内置工具：read、write、edit、patch、find、grep、shell、task |
 | `astrcode-core` | 4.3k | 共享类型、trait、配置系统、错误类型、提示词组合 |
+| `astrcode-session` | 4.0k | 会话运行时：会话句柄、Turn 执行、事件总线 |
 | `astrcode-ai` | 3.5k | OpenAI 兼容 Provider（Chat Completions + Responses API）、SSE 流式、重试 |
 | `astrcode-context` | 3.3k | Token 估算、上下文窗口预算、自动压缩、提示词引擎 |
-| `astrcode-storage` | 3.0k | JSONL 事件日志、会话快照、配置持久化、文件锁 |
+| `astrcode-storage` | 3.1k | JSONL 事件日志、会话快照、配置持久化、文件锁 |
 | `astrcode-extensions` | 2.4k | 扩展生命周期、钩子分发、原生扩展加载（FFI）、WASM 扩展运行时 |
 | `astrcode-extension-mcp` | 1.9k | MCP 协议客户端（stdio）、工具发现 |
 | `astrcode-protocol` | 1.1k | JSON-RPC 2.0 线协议类型、命令、事件、HTTP DTO |
 | `astrcode-extension-mode` | 1.1k | Agent 运行模式切换（Code / Plan）、计划 Artifact、Exit Gate |
 | `astrcode-extension-skill` | 950 | 斜杠命令技能发现与分发 |
 | `astrcode-support` | 929 | 路径解析、Shell 检测、工具结果持久化 |
-| `astrcode-extension-agent-tools` | 914 | 子 Agent 委派（Agent 工具） |
+| `astrcode-extension-agent-tools` | 905 | 子 Agent 委派（Agent 工具） |
 | `astrcode-extension-todo-tool` | 734 | 进度追踪 Todo 工具 |
 | `astrcode-client` | 521 | 类型化 JSON-RPC 客户端、传输层、流订阅 |
 | `astrcode-log` | 353 | 文件轮转、stderr 输出、env-filter 日志 |
 
-**共计：18 个 crate、153 个源文件、约 4.9 万行代码。**
+**共计：18 个 crate、154 个源文件、约 4.9 万行代码。**
 
 ### 前端与桌面应用
 
 | 组件 | 行数 | 说明 |
 |---|---|---|
-| `frontend/`（React + TS） | ~2.8k | Web 前端——聊天视图、侧边栏、会话管理、SSE 流式传输 |
+| `frontend/`（React + TS） | ~4.7k | Web 前端——聊天视图、侧边栏、会话管理、SSE 流式传输 |
 | `src-tauri/`（Tauri v2） | ~670 | 桌面应用外壳——sidecar 管理、原生对话框、自动端口绑定 |
 
 Web 前端（`frontend/`）是 React 19 + TypeScript + Tailwind CSS v4 + Vite 8 单页应用，通过 SSE 实时接收流式事件，通过 JSON-RPC 发送命令。支持浏览器独立运行（`npm run dev`）或打包为 Tauri 桌面应用（`npm run tauri dev`）。
