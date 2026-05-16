@@ -171,16 +171,17 @@ impl ExtensionRunner {
     pub async fn register(&self, ext: Arc<dyn Extension>) {
         let id = ext.id().to_string();
 
-        {
-            let exts = self.extensions.read().await;
-            if exts.iter().any(|e| e.id() == id) {
-                tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
-                return;
-            }
-        }
-
+        // ext.register() 只读扩展自身元数据，不涉及共享状态，在锁外调用
         let mut reg = Registrar::new();
         ext.register(&mut reg);
+
+        // 单次写锁：去重检查 + 插入，消除 TOCTOU
+        let mut exts = self.extensions.write().await;
+        if exts.iter().any(|e| e.id() == id) {
+            tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
+            return;
+        }
+
         if !reg.is_empty() {
             let mut records = self.records.write().await;
             records.push(ExtensionRecord {
@@ -190,7 +191,6 @@ impl ExtensionRunner {
             let index = Arc::new(build_handler_index(&records));
             *self.index.write() = index;
         }
-        let mut exts = self.extensions.write().await;
         exts.push(ext);
     }
 

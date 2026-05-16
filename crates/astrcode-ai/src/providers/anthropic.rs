@@ -84,11 +84,13 @@ impl AnthropicProvider {
                     let block = convert_tool_result_block(msg);
                     if let Some(last) = api_messages.last_mut() {
                         if last["role"] == "user" && has_only_tool_results(last) {
-                            last["content"]
-                                .as_array_mut()
-                                .expect("content is array")
-                                .push(block);
-                            continue;
+                            if let Some(content) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
+                                content.push(block);
+                                continue;
+                            }
+                            // has_only_tool_results returned true but content is not an array;
+                            // fall through to create a new message block.
+                            tracing::warn!("tool result merge: last user message content is not an array, creating new block");
                         }
                     }
                     api_messages.push(serde_json::json!({

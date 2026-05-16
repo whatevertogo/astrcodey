@@ -135,7 +135,7 @@ impl LlmProvider for SummaryLlm {
 async fn http_routes_require_bearer_token() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
 
     let unauthorized = app
         .clone()
@@ -168,7 +168,7 @@ async fn http_routes_require_bearer_token() {
 async fn concurrent_prompt_accepts_one_and_conflicts_one() {
     let runtime = runtime(Arc::new(PendingLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
 
@@ -190,7 +190,7 @@ async fn sse_receiver_lag_emits_rehydrate_and_closes() {
         .unwrap();
     let session_id = session.id().clone();
     let (event_tx, _) = broadcast::channel(1);
-    let (app, token) = router(Arc::clone(&runtime), event_tx.clone());
+    let (app, token) = router(Arc::clone(&runtime), event_tx.clone()).unwrap();
 
     let response = app
         .oneshot(
@@ -235,7 +235,7 @@ async fn sse_receiver_lag_emits_rehydrate_and_closes() {
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
@@ -276,7 +276,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     assert!(body.contains("hello from http"));
     assert!(body.contains(r#""status":"complete""#));
 
-    let (after_app, after_token) = router(runtime, broadcast::channel(64).0);
+    let (after_app, after_token) = router(runtime, broadcast::channel(64).0).unwrap();
     let after = get_json::<ConversationSnapshotResponseDto>(
         after_app,
         &format!("/api/sessions/{session_id}/conversation"),
@@ -290,7 +290,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let stream_response = app
@@ -323,7 +323,7 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx.clone());
+    let (app, token) = router(Arc::clone(&runtime), event_tx.clone()).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -399,7 +399,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
 async fn stream_invalid_cursor_requests_rehydrate() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let response = app
@@ -422,7 +422,7 @@ async fn stream_invalid_cursor_requests_rehydrate() {
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let body = get_json::<SlashCommandListResponseDto>(
@@ -445,7 +445,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     let runtime = runtime(Arc::new(SummaryLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -520,7 +520,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     let runtime = runtime(Arc::new(SummaryLlm));
     let (event_tx, _) = broadcast::channel(64);
-    let (app, token) = router(Arc::clone(&runtime), event_tx);
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
     let read_fixture = "target/post-compact-read-fixture.txt";

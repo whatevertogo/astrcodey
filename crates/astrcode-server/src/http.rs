@@ -79,8 +79,11 @@ struct DeleteProjectParams {
 pub fn router(
     runtime: Arc<ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
-) -> (Router, String) {
-    let auth_token = configured_auth_token();
+) -> Result<(Router, String), Box<dyn std::error::Error + Send + Sync>> {
+    let auth_token = configured_auth_token().map_err(|e| {
+        Box::new(std::io::Error::other(e.to_string()))
+            as Box<dyn std::error::Error + Send + Sync>
+    })?;
     let event_bus = Arc::new(
         crate::server_event_bus::ServerEventBus::new(runtime.event_store.clone(), event_tx.clone()),
     );
@@ -132,7 +135,7 @@ pub fn router(
         .layer(cors)
         .with_state(state);
 
-    (app, auth_token)
+    Ok((app, auth_token))
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.
@@ -142,7 +145,7 @@ pub async fn run_http_server(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (event_tx, _) = broadcast::channel(256);
     let shutdown_token = runtime.shutdown_token.clone();
-    let (app, auth_token) = router(Arc::clone(&runtime), event_tx);
+    let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!(
         "Auth token: {}...{}",
         &auth_token[..4],
@@ -1323,11 +1326,12 @@ fn generate_auth_token() -> Result<String, getrandom::Error> {
     Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
-fn configured_auth_token() -> String {
+fn configured_auth_token() -> Result<String, getrandom::Error> {
     std::env::var(ASTRCODE_HTTP_TOKEN_ENV)
         .ok()
         .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(|| generate_auth_token().expect("failed to generate auth token"))
+        .map(Ok)
+        .unwrap_or_else(generate_auth_token)
 }
 
 fn collect_allowed_origins() -> Vec<HeaderValue> {

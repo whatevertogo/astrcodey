@@ -30,7 +30,11 @@ async fn main() {
         //TODO: 更好的capacity？
     let (event_tx, _) = tokio::sync::broadcast::channel(512);
     let shutdown_token = runtime.shutdown_token.clone();
-    let (app, auth_token) = astrcode_server::http::router(runtime, event_tx);
+    let (app, auth_token) = astrcode_server::http::router(runtime, event_tx)
+        .unwrap_or_else(|error| {
+            tracing::error!("Failed to initialize HTTP router: {error}");
+            std::process::exit(1);
+        });
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|error| {
