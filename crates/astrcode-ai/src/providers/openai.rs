@@ -63,6 +63,8 @@ pub struct StandardAccumulator {
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
     done_sent: bool,
     cache_usage_reported: bool,
+    /// MiniMax reasoning_split 模式下累计的 reasoning 文本，用于 diff 提取增量。
+    reasoning_accumulated: String,
 }
 
 impl StandardAccumulator {
@@ -237,6 +239,25 @@ impl ChatAccumulator for StandardAccumulator {
                         let _ = tx.send(LlmEvent::ThinkingDelta {
                             delta: reasoning.to_string(),
                         });
+                    }
+                    // MiniMax reasoning_split: reasoning_details[].text is cumulative
+                    if let Some(details) = delta.get("reasoning_details").and_then(|v| v.as_array())
+                    {
+                        let latest = details
+                            .iter()
+                            .filter_map(|d| d.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if latest.len() > self.reasoning_accumulated.len() {
+                            let incremental =
+                                &latest[self.reasoning_accumulated.len()..];
+                            if !incremental.is_empty() {
+                                let _ = tx.send(LlmEvent::ThinkingDelta {
+                                    delta: incremental.to_string(),
+                                });
+                            }
+                            self.reasoning_accumulated = latest;
+                        }
                     }
                     if let Some(tool_calls) = delta["tool_calls"].as_array() {
                         for tc in tool_calls {
@@ -496,6 +517,9 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         }
         self.apply_temperature(&mut body);
         self.apply_prompt_cache_fields(&mut body, messages, tools);
+        if self.config.reasoning_split {
+            body["reasoning_split"] = serde_json::json!(true);
+        }
 
         body
     }

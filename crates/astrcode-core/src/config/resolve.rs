@@ -92,6 +92,7 @@ impl Config {
                 .unwrap_or(false),
             prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
             reasoning: model.reasoning.unwrap_or(false),
+            reasoning_split: model.reasoning_split.unwrap_or(false),
         };
 
         Ok(EffectiveConfig {
@@ -224,6 +225,7 @@ mod tests {
                     max_tokens: Some(1024),
                     context_limit: Some(4096),
                     reasoning: None,
+                    reasoning_split: None,
                 }],
             }],
             active_profile: "test".into(),
@@ -250,6 +252,7 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
                     reasoning: None,
+                    reasoning_split: None,
                 }],
             }],
             active_profile: "deepseek".into(),
@@ -275,6 +278,7 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
                     reasoning: None,
+                    reasoning_split: None,
                 }],
             }],
             active_profile: "deepseek".into(),

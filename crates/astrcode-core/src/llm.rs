@@ -276,6 +276,8 @@ pub struct LlmClientConfig {
     pub temperature: Option<f32>,
     /// 当前模型是否为 reasoning/thinking 模式。
     pub reasoning: bool,
+    /// 是否请求 provider 分离 reasoning/thinking 到独立字段（如 MiniMax reasoning_split）。
+    pub reasoning_split: bool,
     /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
     pub supports_prompt_cache_key: bool,
     /// 可选的 OpenAI prompt cache retention。
@@ -295,6 +297,7 @@ impl Default for LlmClientConfig {
             retry_base_delay_ms: 250,
             temperature: None,
             reasoning: false,
+            reasoning_split: false,
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             extra_headers: std::collections::HashMap::new(),
