@@ -430,7 +430,11 @@ async fn reload_config(State(state): State<HttpState>) -> Response {
     let active_profile = config.active_profile.clone();
     let active_model = config.active_model.clone();
 
-    if let Err(error) = state.runtime.config_manager.apply_raw_config_and_rebuild(config) {
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .apply_raw_config_and_rebuild(config)
+    {
         return error_response(
             StatusCode::BAD_REQUEST,
             "invalid_config",
@@ -463,7 +467,13 @@ async fn update_active_selection(
     };
 
     // Persist the validated candidate.
-    if let Err(error) = state.runtime.config_manager.config_store().save(&candidate).await {
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .config_store()
+        .save(&candidate)
+        .await
+    {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "save_failed",
@@ -473,7 +483,11 @@ async fn update_active_selection(
 
     // apply_raw_config_and_rebuild re-validates internally; failure here after
     // the explicit check above indicates a race or I/O issue.
-    if let Err(error) = state.runtime.config_manager.apply_raw_config_and_rebuild(candidate) {
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .apply_raw_config_and_rebuild(candidate)
+    {
         tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
     }
 

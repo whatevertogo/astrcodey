@@ -111,6 +111,11 @@ impl Session {
         Ok(self.store.session_read_model(&self.id).await?)
     }
 
+    /// 返回当前 system_prompt，只读单个字段避免 clone 整个读模型。
+    pub async fn current_system_prompt(&self) -> Result<Option<String>, SessionError> {
+        Ok(self.store.session_system_prompt(&self.id).await?)
+    }
+
     /// 返回最新 durable cursor。
     pub async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
         Ok(self.store.latest_cursor(&self.id).await?)

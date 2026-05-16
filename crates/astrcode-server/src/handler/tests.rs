@@ -1119,7 +1119,7 @@ async fn unknown_slash_command_does_not_enter_llm_or_transcript() {
 }
 
 #[tokio::test]
-async fn skill_slash_command_injects_transient_instructions_only() {
+async fn skill_slash_command_uses_skill_content_as_user_message() {
     let workspace = unique_workspace("skill-slash-command");
     write_project_skill(
         &workspace,
@@ -1149,16 +1149,29 @@ async fn skill_slash_command_injects_transient_instructions_only() {
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
 
     let captured = captured_messages.lock().unwrap().clone();
-    let system_text = captured
+    let user_text = captured
         .iter()
         .filter(|message| message.role == LlmRole::System)
         .map(|message| message_to_dto(message).content)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(system_text.contains("[Slash Command Instructions]"));
-    assert!(system_text.contains("<skill-name>reviewnow</skill-name>"));
-    assert!(system_text.contains("Invocation arguments: src/lib.rs"));
+    // system prompt 不应包含 skill 内容
+    assert!(!user_text.contains("<skill-name>reviewnow</skill-name>"));
 
+    // skill 内容直接作为 user message 发给 LLM
+    let user_messages: Vec<_> = captured
+        .iter()
+        .filter(|message| message.role == LlmRole::User)
+        .map(|message| message_to_dto(message).content.clone())
+        .collect();
+    assert!(
+        user_messages
+            .iter()
+            .any(|text| text.contains("<skill-name>reviewnow</skill-name>")),
+        "skill content should be sent as user message: {user_messages:?}"
+    );
+
+    // transcript 记录的是原始斜杠命令
     let state = runtime.event_store.session_read_model(&sid).await.unwrap();
     assert!(
         state

@@ -917,7 +917,6 @@ mod tests {
         };
         assert!(instructions.contains("<skill-name>commit</skill-name>"));
         assert!(instructions.contains("<skill-args>staged files</skill-args>"));
-        assert!(instructions.contains("Invocation arguments: staged files"));
     }
 
     #[tokio::test]

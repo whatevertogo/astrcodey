@@ -231,9 +231,9 @@ pub enum ExtensionCommandResult {
         /// 说明文本。
         message: String,
     },
-    /// 启动一个 agent turn，并把这些指令作为本轮 transient system context。
+    /// 启动一个 agent turn，携带附加指令合并到用户消息中。
     StartTurn {
-        /// 本轮临时指令，不写入可见 transcript。
+        /// 附加指令，合并到用户消息末尾。
         instructions: String,
     },
 }

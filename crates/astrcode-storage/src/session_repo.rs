@@ -294,6 +294,15 @@ impl EventStore for FileSystemSessionRepository {
         Ok(model)
     }
 
+    async fn session_system_prompt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let prompt = meta.projection.read().await.system_prompt.clone();
+        Ok(prompt)
+    }
+
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         let sessions = self.sessions.read().await;
         let mut summaries = Vec::new();

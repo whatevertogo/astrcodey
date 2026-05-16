@@ -102,7 +102,12 @@ impl CommandHandler {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
             model: ModelSelection::simple(
-                self.runtime.config_manager.read_effective().llm.model_id.clone(),
+                self.runtime
+                    .config_manager
+                    .read_effective()
+                    .llm
+                    .model_id
+                    .clone(),
             ),
         };
 
@@ -134,17 +139,17 @@ impl CommandHandler {
             Ok(ExtensionCommandResult::Handled { message }) => {
                 Ok(PromptSubmission::Handled { message })
             },
-            // 启动新 Turn，携带指令
-            Ok(ExtensionCommandResult::StartTurn { instructions }) => self
-                .start_turn_for_session(
-                    sid,
-                    visible_text.clone(),
-                    visible_text,
-                    Some(instructions),
-                    None,
-                )
-                .await
-                .map(|turn_id| PromptSubmission::Accepted { turn_id }),
+            // 启动新 Turn，skill 内容直接作为 user_text
+            Ok(ExtensionCommandResult::StartTurn { instructions }) => {
+                let user_text = if instructions.trim().is_empty() {
+                    visible_text.clone()
+                } else {
+                    instructions
+                };
+                self.start_turn_for_session(sid, visible_text.clone(), user_text, None)
+                    .await
+                    .map(|turn_id| PromptSubmission::Accepted { turn_id })
+            },
             // 命令不存在
             Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
                 name.trim_start_matches('/').to_string(),

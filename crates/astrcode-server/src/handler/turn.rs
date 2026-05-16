@@ -10,12 +10,12 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
+use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
     EventBus, Session, SessionServices, TurnRunner, agent_turn_completed_payloads,
     agent_turn_failed_payloads, agent_turn_started_payloads, background::BackgroundTaskCompletion,
     run_turn,
 };
-use astrcode_tools::registry::ToolRegistry;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -28,10 +28,8 @@ use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
 pub(in crate::handler) struct AgentTurnInput {
     pub turn_id: TurnId,
     pub session: Arc<Session>,
-    pub tool_registry: Arc<ToolRegistry>,
+    pub session_state: SessionReadModel,
     pub text: String,
-    /// 斜杠命令注入的一次性指令
-    pub transient_instructions: Option<String>,
     pub actor_tx: mpsc::UnboundedSender<CommandMessage>,
     pub event_bus: Arc<ServerEventBus>,
 }
@@ -78,7 +76,7 @@ impl CommandHandler {
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (tx, rx) = oneshot::channel();
         let turn_id = self
-            .start_turn_for_session(sid, text.clone(), text, None, Some(tx))
+            .start_turn_for_session(sid, text.clone(), text, Some(tx))
             .await?;
         Ok((turn_id, rx))
     }
@@ -89,7 +87,6 @@ impl CommandHandler {
         sid: SessionId,
         visible_text: String,
         user_text: String,
-        transient_instructions: Option<String>,
         completion_tx: Option<oneshot::Sender<TurnCompletion>>,
     ) -> Result<TurnId, HandlerError> {
         tracing::info!(session_id = %sid, text_len = user_text.len(), "start_turn");
@@ -110,19 +107,12 @@ impl CommandHandler {
         self.repair_stale_pending_tool_calls(&sid)
             .await
             .map_err(HandlerError::Other)?;
-        // 读取会话状态
-        let state = session
+        // 读取会话状态（唯一一次，后续全部复用）
+        let session_state = session
             .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
-        let working_dir = state.working_dir;
-        let tool_registry = self.ensure_tool_registry(&sid, &working_dir).await;
-        // 如未配置 system prompt，自动配置（写入 session 事件）
-        if state.system_prompt.is_none() {
-            self.configure_session_prompt(&sid, &working_dir, &tool_registry, None)
-                .await
-                .map_err(HandlerError::Other)?;
-        }
+
         let turn_id = new_turn_id();
         let session_arc = Arc::new(session);
 
@@ -131,13 +121,12 @@ impl CommandHandler {
             self.event_bus.emit(&sid, Some(&turn_id), payload).await;
         }
 
-        // 启动 Agent 后台任务
+        // 启动 Agent 后台任务（tool registry / system prompt 在后台构建）
         let handle = self.spawn_agent_turn(AgentTurnInput {
             turn_id: turn_id.clone(),
             session: Arc::clone(&session_arc),
-            tool_registry: Arc::clone(&tool_registry),
+            session_state,
             text: user_text,
-            transient_instructions,
             actor_tx: self.actor_tx.clone(),
             event_bus: Arc::clone(&self.event_bus),
         });
@@ -335,9 +324,8 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     let AgentTurnInput {
         turn_id,
         session,
-        tool_registry,
+        session_state,
         text,
-        transient_instructions,
         actor_tx,
         event_bus,
     } = input;
@@ -371,9 +359,28 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         tracing::warn!(session_id = %sid, error = %e, "failed to update session model_id");
     }
 
-    // 组装 TurnRunner（从 session 读取所有事实）
+    // 在后台构建 tool registry 和 system prompt（从 actor 移出以减少 HTTP 延迟）
+    let working_dir = session_state.working_dir.clone();
+    let tool_registry = runtime
+        .session_manager
+        .ensure_tool_registry(&sid, &working_dir)
+        .await;
+    if session_state.system_prompt.is_none() {
+        match runtime
+            .session_manager
+            .configure_system_prompt(&sid, &working_dir, &tool_registry, None)
+            .await
+        {
+            Ok(event) => event_bus.send_notification(ClientNotification::Event(event)),
+            Err(e) => {
+                tracing::warn!(session_id = %sid, error = %e, "configure system prompt failed")
+            },
+        }
+    }
+
+    // 组装 TurnRunner
     let agent_session_control = runtime.agent_session_control.read().clone();
-    let agent = match TurnRunner::new(
+    let mut agent = match TurnRunner::new(
         SessionServices::new(
             runtime.config_manager.read_llm_provider(),
             tool_registry,
@@ -385,9 +392,8 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         )
         .with_background_result_tx(background_result_tx)
         .with_agent_session_control(agent_session_control),
-    )
-    .await
-    {
+        &session_state,
+    ) {
         Ok(agent) => agent,
         Err(e) => {
             for payload in agent_turn_failed_payloads(Some(e.to_string()), "error".into()) {
@@ -405,14 +411,7 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     };
 
     // 驱动 Agent 循环，事件通过 EventBus 直接持久化+广播
-    let result = run_turn(
-        &agent,
-        &text,
-        transient_instructions,
-        &turn_id,
-        event_bus.as_ref(),
-    )
-    .await;
+    let result = run_turn(&mut agent, &text, &turn_id, event_bus.as_ref()).await;
 
     // 终态事件通过 EventBus 直接广播，避免绕 actor 通道导致的 SSE 延迟。
     match result.output {

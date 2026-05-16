@@ -51,6 +51,12 @@ pub trait EventStore: Send + Sync {
         session_id: &SessionId,
     ) -> Result<SessionReadModel, StorageError>;
 
+    /// 返回当前会话的 system_prompt，只读单个字段避免 clone 整个读模型。
+    async fn session_system_prompt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, StorageError>;
+
     /// 返回所有会话摘要，供列表类接口使用。
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
 

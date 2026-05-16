@@ -240,6 +240,10 @@ impl ServerSessionSpawner {
         });
 
         let agent_session_control = self.agent_session_control.read().clone();
+        let child_session_state = child_arc
+            .read_model()
+            .await
+            .map_err(|e| format!("read child session state: {e}"))?;
         let agent = TurnRunner::new(
             SessionServices::new(
                 self.config.read_llm_provider(),
@@ -252,8 +256,8 @@ impl ServerSessionSpawner {
             )
             .with_background_result_tx(child_bg_result_tx)
             .with_agent_session_control(agent_session_control),
+            &child_session_state,
         )
-        .await
         .map_err(|e| format!("create child turn runner: {e}"))?;
 
         Ok(PreparedChild {
@@ -279,14 +283,14 @@ impl ServerSessionSpawner {
             child_session,
             child_turn_id,
             user_prompt,
-            agent,
+            mut agent,
             progress,
             current_child_sid,
             ..
         } = p;
 
         let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
-            &agent,
+            &mut agent,
             &user_prompt,
             Arc::clone(&child_session),
             current_child_sid,
@@ -370,7 +374,7 @@ impl ServerSessionSpawner {
             user_prompt,
             tool_call_id,
             model_id,
-            agent,
+            mut agent,
             progress,
             current_child_sid,
         } = p;
@@ -396,7 +400,7 @@ impl ServerSessionSpawner {
 
         let agent_handle = tokio::spawn(async move {
             let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
-                &agent,
+                &mut agent,
                 &user_prompt,
                 drive_session,
                 drive_current_child_sid,
@@ -544,7 +548,7 @@ impl EventBus for ChildEventBus {
 }
 
 async fn drive_child_agent_turn(
-    agent: &TurnRunner,
+    agent: &mut TurnRunner,
     user_prompt: &str,
     child_session: Arc<Session>,
     current_child_sid: Arc<Mutex<SessionId>>,
@@ -557,7 +561,7 @@ async fn drive_child_agent_turn(
         child_turn_id: child_turn_id.clone(),
         progress,
     };
-    let result = run_turn(agent, user_prompt, None, &child_turn_id, &bus).await;
+    let result = run_turn(&mut *agent, user_prompt, &child_turn_id, &bus).await;
     (result.output, result.emitted_error, initial_sid)
 }
 

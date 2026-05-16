@@ -171,16 +171,29 @@ mod tests {
     }
 
     #[test]
-    // TODO: a better way to enforce that critical tools like "agent" are not accidentally restricted by mode definitions.
+    // TODO: a better way to enforce that critical tools like "agent" are not accidentally
+    // restricted by mode definitions.
     fn plan_mode_does_not_restrict_agent_tool() {
         let catalog = builtin_catalog();
-        assert!(!catalog.get(&ModeId::plan()).unwrap().restricted_tools.contains("agent"));
+        assert!(
+            !catalog
+                .get(&ModeId::plan())
+                .unwrap()
+                .restricted_tools
+                .contains("agent")
+        );
     }
 
     #[test]
     fn code_mode_does_not_restrict_agent_tool() {
         let catalog = builtin_catalog();
-        assert!(!catalog.get(&ModeId::code()).unwrap().restricted_tools.contains("agent"));
+        assert!(
+            !catalog
+                .get(&ModeId::code())
+                .unwrap()
+                .restricted_tools
+                .contains("agent")
+        );
     }
 
     #[test]

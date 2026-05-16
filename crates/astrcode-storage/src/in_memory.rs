@@ -108,6 +108,16 @@ impl EventStore for InMemoryEventStore {
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))
     }
 
+    async fn session_system_prompt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, StorageError> {
+        let map = self.sessions.lock().await;
+        map.get(session_id)
+            .map(|session| session.projection.system_prompt.clone())
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
+    }
+
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         let mut summaries = self
             .sessions
