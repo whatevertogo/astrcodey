@@ -26,6 +26,7 @@ use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 use parking_lot::{Mutex, RwLock};
 
+pub use crate::config_manager::ConfigManager;
 use crate::session_spawner::ServerSessionSpawner;
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
@@ -59,8 +60,8 @@ pub(crate) type FileObservationStoreMap =
 pub struct ServerRuntime {
     /// 事件存储后端，用于创建/恢复/删除会话等集合操作
     pub event_store: Arc<dyn EventStore>,
-    /// LLM 提供者，用于生成 AI 回复（运行时可重建）
-    pub llm_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
+    /// 配置与 LLM 提供者的联合管理器
+    pub config: Arc<crate::config_manager::ConfigManager>,
     /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
     /// 跨回合共享的后台任务管理器。
@@ -69,12 +70,6 @@ pub struct ServerRuntime {
     pub file_observation_stores: FileObservationStoreMap,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
-    /// 已解析的最终配置（运行时可通过 `sync_effective` 刷新）
-    pub effective: RwLock<EffectiveConfig>,
-    /// 配置持久化存储，用于运行时读写配置
-    pub config_store: Arc<dyn astrcode_core::config::ConfigStore>,
-    /// 原始配置（用于设置面板展示 profile 列表等）
-    pub raw_config: RwLock<astrcode_core::config::Config>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
     /// AgentSessionControl 延迟注入槽。
@@ -85,26 +80,6 @@ pub struct ServerRuntime {
 }
 
 impl ServerRuntime {
-    pub fn read_effective(&self) -> parking_lot::RwLockReadGuard<'_, EffectiveConfig> {
-        self.effective.read()
-    }
-
-    pub fn write_raw_config(
-        &self,
-    ) -> parking_lot::RwLockWriteGuard<'_, astrcode_core::config::Config> {
-        self.raw_config.write()
-    }
-
-    pub fn read_raw_config(
-        &self,
-    ) -> parking_lot::RwLockReadGuard<'_, astrcode_core::config::Config> {
-        self.raw_config.read()
-    }
-
-    pub fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.llm_provider.read().clone()
-    }
-
     pub fn file_observation_store(&self, session_id: &SessionId) -> Arc<dyn FileObservationStore> {
         let mut stores = self.file_observation_stores.lock();
         stores
@@ -115,50 +90,6 @@ impl ServerRuntime {
 
     pub fn remove_file_observation_store(&self, session_id: &SessionId) {
         self.file_observation_stores.lock().remove(session_id);
-    }
-
-    pub fn rebuild_provider_from_effective(&self) -> Result<(), String> {
-        let new_provider = {
-            let effective = self.read_effective();
-            build_provider_from_effective(&effective)
-        };
-        let mut guard = self.llm_provider.write();
-        *guard = new_provider;
-        Ok(())
-    }
-
-    pub fn sync_effective(&self) -> Result<(), astrcode_core::config::ResolveError> {
-        let new_effective = {
-            let raw = self.raw_config.read();
-            raw.clone().into_effective()?
-        };
-        let mut guard = self.effective.write();
-        *guard = new_effective;
-        Ok(())
-    }
-
-    /// Write raw config, re-resolve effective config, and rebuild the LLM provider.
-    ///
-    /// Returns `Err` if the config fails validation (`into_effective`). On success,
-    /// all three state updates are applied atomically. A provider rebuild failure
-    /// is logged but does not propagate — the raw and effective configs remain updated.
-    pub fn apply_raw_config_and_rebuild(
-        &self,
-        config: astrcode_core::config::Config,
-    ) -> Result<(), astrcode_core::config::ResolveError> {
-        let new_effective = config.clone().into_effective()?;
-        {
-            let mut guard = self.write_raw_config();
-            *guard = config;
-        }
-        {
-            let mut guard = self.effective.write();
-            *guard = new_effective;
-        }
-        if let Err(e) = self.rebuild_provider_from_effective() {
-            tracing::warn!("provider rebuild after config update failed: {e}");
-        }
-        Ok(())
     }
 }
 
@@ -210,7 +141,14 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     //
     // 根据 `provider_kind` 路由到对应的 provider 实现。
     // 后续所有主会话和子会话都会共享这个 provider。
-    let llm_provider = Arc::new(RwLock::new(build_provider_from_effective(&effective)));
+    let llm_provider = build_provider_from_effective(&effective);
+
+    let config_manager = Arc::new(crate::config_manager::ConfigManager::new(
+        Arc::new(config_store),
+        config,
+        effective.clone(),
+        llm_provider,
+    ));
 
     // 3. 初始化上下文组装器。
     let context_settings = effective.context.clone();
@@ -278,12 +216,11 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
     extension_runner.bind(Arc::new(ServerSessionSpawner {
         store: Arc::clone(&event_store),
-        llm_provider: Arc::clone(&llm_provider),
+        config: Arc::clone(&config_manager),
         context_assembler: Arc::clone(&context_assembler),
         background_tasks: Arc::clone(&background_tasks),
         file_observation_stores: Arc::clone(&file_observation_stores),
         extension_runner: Arc::clone(&extension_runner),
-        read_timeout_secs: effective.llm.read_timeout_secs,
         agent_session_control: Arc::clone(&agent_session_control_slot),
     }));
 
@@ -294,20 +231,17 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
     Ok(ServerRuntime {
         event_store,
-        llm_provider,
+        config: config_manager,
         context_assembler,
         background_tasks,
         file_observation_stores,
         extension_runner,
-        effective: RwLock::new(effective),
-        config_store: Arc::new(config_store),
-        raw_config: RwLock::new(config),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
         agent_session_control: agent_session_control_slot,
     })
 }
 
-fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
+pub(crate) fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
     let llm_config = LlmClientConfig {
         base_url: effective.llm.base_url.clone(),
         api_key: effective.llm.api_key.clone(),

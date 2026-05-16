@@ -718,46 +718,49 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 }
 
 fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+    let effective = EffectiveConfig {
+        llm: LlmSettings {
+            provider_kind: "mock".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            api_mode: OpenAiApiMode::ChatCompletions,
+            model_id: "mock-model".into(),
+            max_tokens: 1024,
+            context_limit: 1024,
+            connect_timeout_secs: 1,
+            read_timeout_secs: 1,
+            max_retries: 0,
+            retry_base_delay_ms: 0,
+            temperature: None,
+            supports_prompt_cache_key: false,
+            prompt_cache_retention: None,
+            reasoning: false,
+        },
+        context: ContextSettings {
+            auto_compact_enabled: true,
+            compact_threshold_percent: 83.5,
+            compact_max_retry_attempts: 3,
+            compact_max_output_tokens: 20_000,
+            post_compact_max_files: 5,
+            post_compact_token_budget: 50_000,
+            post_compact_max_tokens_per_file: 5_000,
+        },
+    };
     Arc::new(ServerRuntime {
         event_store: Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>,
-        llm_provider: Arc::new(parking_lot::RwLock::new(llm_provider)),
+        config: Arc::new(astrcode_server::bootstrap::ConfigManager::new(
+            Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+                std::path::PathBuf::from("target/test-config.json"),
+            )),
+            astrcode_core::config::Config::default(),
+            effective,
+            llm_provider,
+        )),
         context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
         background_tasks: Default::default(),
         file_observation_stores: Default::default(),
         extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        config_store: Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-config.json"),
-        )),
-        raw_config: parking_lot::RwLock::new(astrcode_core::config::Config::default()),
-        effective: parking_lot::RwLock::new(EffectiveConfig {
-            llm: LlmSettings {
-                provider_kind: "mock".into(),
-                base_url: String::new(),
-                api_key: String::new(),
-                api_mode: OpenAiApiMode::ChatCompletions,
-                model_id: "mock-model".into(),
-                max_tokens: 1024,
-                context_limit: 1024,
-                connect_timeout_secs: 1,
-                read_timeout_secs: 1,
-                max_retries: 0,
-                retry_base_delay_ms: 0,
-                temperature: None,
-                supports_prompt_cache_key: false,
-                prompt_cache_retention: None,
-                reasoning: false,
-            },
-            context: ContextSettings {
-                auto_compact_enabled: true,
-                compact_threshold_percent: 83.5,
-                compact_max_retry_attempts: 3,
-                compact_max_output_tokens: 20_000,
-                post_compact_max_files: 5,
-                post_compact_token_budget: 50_000,
-                post_compact_max_tokens_per_file: 5_000,
-            },
-        }),
         agent_session_control: Arc::new(parking_lot::RwLock::new(None)),
     })
 }

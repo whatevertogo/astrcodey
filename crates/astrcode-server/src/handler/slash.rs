@@ -106,7 +106,9 @@ impl CommandHandler {
         let cmd_ctx = astrcode_core::extension::CommandContext {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
-            model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
+            model: ModelSelection::simple(
+                self.runtime.config.read_effective().llm.model_id.clone(),
+            ),
         };
 
         match self

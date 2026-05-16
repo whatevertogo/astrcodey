@@ -10,5 +10,6 @@ pub mod handler;
 pub mod http;
 pub mod transport;
 
+pub(crate) mod config_manager;
 pub(crate) mod server_event_bus;
 pub(crate) mod session_spawner;

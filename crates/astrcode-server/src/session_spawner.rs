@@ -9,7 +9,6 @@ use std::sync::Arc;
 use astrcode_context::context_engine::LlmContextAssembler;
 use astrcode_core::{
     event::{Event, EventPayload, ToolOutputStream},
-    llm::LlmProvider,
     storage::EventStore,
     types::{SessionId, ToolCallId, TurnId, new_background_task_id, new_message_id, new_turn_id},
 };
@@ -23,7 +22,7 @@ use astrcode_session::{
     background::{BackgroundTaskCompletion, BackgroundTaskManager, complete_background_task},
     run_turn,
 };
-use parking_lot::{Mutex as StdMutex, RwLock};
+use parking_lot::Mutex as StdMutex;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::bootstrap::{
@@ -37,14 +36,11 @@ use crate::bootstrap::{
 /// 扩展运行器通过此派生器创建子会话并运行 Agent 回合。
 pub(crate) struct ServerSessionSpawner {
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) llm_provider: Arc<RwLock<Arc<dyn LlmProvider>>>,
+    pub(crate) config: Arc<crate::config_manager::ConfigManager>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
     pub(crate) file_observation_stores: crate::bootstrap::FileObservationStoreMap,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
-    // bind 时从 effective.llm 快照，不会随配置热更新变化。
-    // TODO: 如需配置热更新生效，改为持有 RwLock<EffectiveConfig> 引用，在 spawn 时动态读取。
-    pub(crate) read_timeout_secs: u64,
     pub(crate) agent_session_control: crate::bootstrap::AgentSessionControlSlot,
 }
 
@@ -84,10 +80,6 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
 }
 
 impl ServerSessionSpawner {
-    fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.llm_provider.read().clone()
-    }
-
     fn file_observation_store(
         &self,
         session_id: &SessionId,
@@ -162,7 +154,7 @@ impl ServerSessionSpawner {
         let registry_fut = build_tool_registry_snapshot(
             &self.extension_runner,
             &request.working_dir,
-            self.read_timeout_secs,
+            self.config.read_effective().llm.read_timeout_secs,
         );
         let prompt_files_fut = load_system_prompt_files(&request.working_dir);
         let (tool_registry, prompt_files) = tokio::join!(registry_fut, prompt_files_fut);
@@ -249,7 +241,7 @@ impl ServerSessionSpawner {
         let agent_session_control = self.agent_session_control.read().clone();
         let agent = TurnRunner::new(
             SessionServices::new(
-                self.read_llm_provider(),
+                self.config.read_llm_provider(),
                 Arc::clone(&tool_registry),
                 Arc::clone(&self.extension_runner),
                 Arc::clone(&self.context_assembler),
@@ -725,6 +717,7 @@ mod tests {
         runtime::{SessionSpawner, SpawnRequest},
     };
     use astrcode_storage::in_memory::InMemoryEventStore;
+    use parking_lot::RwLock;
 
     use super::*;
 
@@ -801,6 +794,39 @@ mod tests {
         }
     }
 
+    fn test_config_manager(
+        llm_provider: Arc<dyn LlmProvider>,
+    ) -> Arc<crate::config_manager::ConfigManager> {
+        use astrcode_core::config::{EffectiveConfig, LlmSettings, OpenAiApiMode};
+        Arc::new(crate::config_manager::ConfigManager::new(
+            Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+                std::path::PathBuf::from("target/test-config.json"),
+            )),
+            Default::default(),
+            EffectiveConfig {
+                llm: LlmSettings {
+                    provider_kind: "mock".into(),
+                    base_url: String::new(),
+                    api_key: String::new(),
+                    api_mode: OpenAiApiMode::ChatCompletions,
+                    model_id: "mock".into(),
+                    max_tokens: 1024,
+                    context_limit: 1024,
+                    connect_timeout_secs: 1,
+                    read_timeout_secs: 1,
+                    max_retries: 0,
+                    retry_base_delay_ms: 0,
+                    temperature: None,
+                    supports_prompt_cache_key: false,
+                    prompt_cache_retention: None,
+                    reasoning: false,
+                },
+                context: Default::default(),
+            },
+            llm_provider,
+        ))
+    }
+
     fn test_spawner(store: Arc<dyn EventStore>, llm: Arc<ToolThenTextLlm>) -> ServerSessionSpawner {
         let settings = astrcode_context::ContextSettings {
             compact_threshold_percent: 0.0,
@@ -809,12 +835,11 @@ mod tests {
         let llm_provider: Arc<dyn LlmProvider> = llm;
         ServerSessionSpawner {
             store,
-            llm_provider: Arc::new(RwLock::new(llm_provider)),
+            config: test_config_manager(llm_provider),
             context_assembler: Arc::new(LlmContextAssembler::new(settings)),
             background_tasks: Default::default(),
             file_observation_stores: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
-            read_timeout_secs: 1,
             agent_session_control: Arc::new(RwLock::new(None)),
         }
     }
@@ -880,18 +905,17 @@ mod tests {
             .await
             .unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
-        let llm_provider = Arc::new(RwLock::new(initial_provider));
+        let config = test_config_manager(initial_provider);
         let spawner = ServerSessionSpawner {
             store,
-            llm_provider: Arc::clone(&llm_provider),
+            config: Arc::clone(&config),
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             background_tasks: Default::default(),
             file_observation_stores: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
-            read_timeout_secs: 1,
             agent_session_control: Arc::new(RwLock::new(None)),
         };
-        *llm_provider.write() = Arc::new(StaticTextLlm { text: "new" });
+        config.set_llm_provider(Arc::new(StaticTextLlm { text: "new" }));
 
         let result = spawner
             .spawn(
@@ -926,12 +950,11 @@ mod tests {
         let background_tasks: Arc<StdMutex<BackgroundTaskManager>> = Default::default();
         let spawner = ServerSessionSpawner {
             store: Arc::clone(&store),
-            llm_provider: Arc::new(RwLock::new(llm_provider)),
+            config: test_config_manager(llm_provider),
             context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
             background_tasks: Arc::clone(&background_tasks),
             file_observation_stores: Default::default(),
             extension_runner: Arc::new(ExtensionRunner::new(Duration::from_secs(1))),
-            read_timeout_secs: 1,
             agent_session_control: Arc::new(RwLock::new(None)),
         };
 

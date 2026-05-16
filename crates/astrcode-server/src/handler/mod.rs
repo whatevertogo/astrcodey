@@ -144,7 +144,7 @@ impl CommandHandler {
                         session_id: session_id.to_string(),
                         working_dir: String::new(),
                         model: ModelSelection::simple(
-                            self.runtime.read_effective().llm.model_id.clone(),
+                            self.runtime.config.read_effective().llm.model_id.clone(),
                         ),
                     };
                     if let Err(e) = self
@@ -250,7 +250,7 @@ impl CommandHandler {
 
     /// 创建新会话，分发 SessionStart 事件，初始化工具表和 system prompt。
     pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
-        let model_id = self.runtime.read_effective().llm.model_id.clone();
+        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
         tracing::info!(working_dir = %working_dir, model_id = %model_id, "creating session");
         let session = Session::create(
             self.runtime.event_store.clone(),
@@ -284,7 +284,9 @@ impl CommandHandler {
         let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
             session_id: sid.to_string(),
             working_dir: working_dir.clone(),
-            model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
+            model: ModelSelection::simple(
+                self.runtime.config.read_effective().llm.model_id.clone(),
+            ),
         };
         if let Err(e) = self
             .runtime
@@ -423,7 +425,7 @@ impl CommandHandler {
             return Ok(sid.clone());
         }
 
-        let model_id = self.runtime.read_effective().llm.model_id.clone();
+        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
@@ -448,7 +450,9 @@ impl CommandHandler {
         let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
             session_id: sid.to_string(),
             working_dir: wd.clone(),
-            model: ModelSelection::simple(self.runtime.read_effective().llm.model_id.clone()),
+            model: ModelSelection::simple(
+                self.runtime.config.read_effective().llm.model_id.clone(),
+            ),
         };
         self.runtime
             .extension_runner
@@ -467,7 +471,7 @@ impl CommandHandler {
         session_id: &SessionId,
         working_dir: &str,
     ) -> Result<String, String> {
-        let timeout = self.runtime.read_effective().llm.read_timeout_secs;
+        let timeout = self.runtime.config.read_effective().llm.read_timeout_secs;
         let registry_fut =
             build_tool_registry_snapshot(&self.runtime.extension_runner, working_dir, timeout);
         let prompt_files_fut = load_system_prompt_files(working_dir);
@@ -511,7 +515,7 @@ impl CommandHandler {
 
     /// 为指定工作目录构建工具表快照。
     async fn build_tool_registry_for(&self, working_dir: &str) -> Arc<ToolRegistry> {
-        let timeout = self.runtime.read_effective().llm.read_timeout_secs;
+        let timeout = self.runtime.config.read_effective().llm.read_timeout_secs;
         build_tool_registry_snapshot(&self.runtime.extension_runner, working_dir, timeout).await
     }
 
@@ -549,7 +553,7 @@ impl CommandHandler {
             .into_iter()
             .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
             .collect();
-        let model_id = self.runtime.read_effective().llm.model_id.clone();
+        let model_id = self.runtime.config.read_effective().llm.model_id.clone();
         let (system_prompt, fingerprint) =
             build_system_prompt_snapshot_with_files(SystemPromptSnapshotInput {
                 extension_runner: &self.runtime.extension_runner,
