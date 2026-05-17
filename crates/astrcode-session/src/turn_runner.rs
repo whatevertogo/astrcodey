@@ -123,7 +123,6 @@ impl TurnRunner {
             background_tasks: services.background_tasks,
             background_task_reader,
             file_observation_store: Some(services.file_observation_store),
-            agent_session_control: services.agent_session_control,
         };
         let tools = ToolPipeline::new(
             shared.clone(),

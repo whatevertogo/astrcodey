@@ -4,7 +4,6 @@
 //! config service, and multi-session concurrency.
 
 pub mod acp;
-pub mod agent;
 pub mod bootstrap;
 pub mod handler;
 pub mod http;

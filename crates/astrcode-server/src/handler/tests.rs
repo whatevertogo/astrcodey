@@ -400,9 +400,6 @@ fn test_runtime_with_settings(
         session_manager,
         extension_runner,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        agent_session_control: crate::bootstrap::AgentSessionControlSlot::new(
-            parking_lot::RwLock::new(None),
-        ),
     })
 }
 

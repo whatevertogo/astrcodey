@@ -6,22 +6,14 @@
 use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{config::ConfigStore, storage::EventStore, tool::AgentSessionControl};
+use astrcode_core::{config::ConfigStore, storage::EventStore};
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
 use astrcode_session::{SessionRuntimeRegistry, background::BackgroundTaskManager};
 use astrcode_storage::config_store::FileConfigStore;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 pub use crate::config_manager::ConfigManager;
 use crate::{session_manager::SessionManager, session_spawner::ServerSessionSpawner};
-
-// ─── AgentSessionControl 延迟注入槽 ────────────────────────────────────
-
-/// `AgentSessionControl` 的延迟注入容器。
-///
-/// Bootstrap 时创建空槽位，spawn_actor 后注入 `CommandHandle` 实现。
-/// 消费者通过 `.read().clone()` 获取 `Option<Arc<...>>`。
-pub(crate) type AgentSessionControlSlot = Arc<RwLock<Option<Arc<dyn AgentSessionControl>>>>;
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -44,11 +36,6 @@ pub struct ServerRuntime {
     pub extension_runner: Arc<ExtensionRunner>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
-    /// AgentSessionControl 延迟注入槽。
-    ///
-    /// bootstrap 时为空；spawn_actor 后绑定 `CommandHandle` 实现。
-    /// 通过 `RwLock` 允许所有持有 `Arc` 的消费者读取当前值。
-    pub agent_session_control: AgentSessionControlSlot,
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -161,8 +148,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!("Extension load error: {err}");
     }
 
-    // 共享的 agent_session_control slot，runtime 和 spawner 都读它。
-    let agent_session_control_slot: AgentSessionControlSlot = Arc::new(RwLock::new(None));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
@@ -182,7 +167,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         background_tasks: Arc::clone(&background_tasks),
         session_manager: Arc::clone(&session_manager),
         extension_runner: Arc::clone(&extension_runner),
-        agent_session_control: Arc::clone(&agent_session_control_slot),
     }));
 
     // 8. 返回运行时容器。
@@ -198,7 +182,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager,
         extension_runner,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        agent_session_control: agent_session_control_slot,
     })
 }
 

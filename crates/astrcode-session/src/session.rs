@@ -3,8 +3,7 @@
 //! Session 是系统唯一的持久事实来源。所有关键状态变化以不可变事件
 //! 写入持久层，任何时刻都可通过事件日志和快照重建 session 状态。
 //!
-//! 内部 runtime 通过此类型操作会话；插件侧通过 `AgentSessionControl` trait
-//! 的受限接口操作会话。
+//! 内部 runtime 通过此类型操作会话。
 
 use std::sync::Arc;
 
@@ -22,7 +21,6 @@ use crate::payload::{compact_boundary_payload, session_continued_from_compaction
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
 /// 内部 runtime 通过此类型操作会话（追加事件、查询读模型等）。
-/// 插件侧通过 `AgentSessionControl` trait 的受限接口。
 ///
 /// `Clone` 是廉价的 Arc clone，可以自由复制。
 #[derive(Clone)]
@@ -73,11 +71,6 @@ impl Session {
 
     pub fn id(&self) -> &SessionId {
         &self.id
-    }
-
-    /// 返回底层事件存储引用（用于集合操作如 list/delete）。
-    pub fn store(&self) -> &Arc<dyn EventStore> {
-        &self.store
     }
 
     // ─── 事件操作 ──────────────────────────────────────────────────────

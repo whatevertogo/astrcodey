@@ -772,6 +772,5 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         session_manager,
         extension_runner,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
-        agent_session_control: Arc::new(parking_lot::RwLock::new(None)),
     })
 }

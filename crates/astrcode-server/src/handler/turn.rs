@@ -379,7 +379,6 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
     }
 
     // 组装 TurnRunner
-    let agent_session_control = runtime.agent_session_control.read().clone();
     let mut agent = match TurnRunner::new(
         SessionServices::new(
             runtime.config_manager.read_llm_provider(),
@@ -390,8 +389,7 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
             runtime.background_tasks.clone(),
             runtime.session_manager.file_observation_store(&sid),
         )
-        .with_background_result_tx(background_result_tx)
-        .with_agent_session_control(agent_session_control),
+        .with_background_result_tx(background_result_tx),
         &session_state,
     ) {
         Ok(agent) => agent,

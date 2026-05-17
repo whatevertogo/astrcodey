@@ -8,9 +8,8 @@ use astrcode_core::{
     event::EventPayload,
     storage::ToolResultArtifactReader,
     tool::{
-        AgentSessionControl, BackgroundPolicy, BackgroundTaskReader, FileObservation,
-        FileObservationStore, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolResult,
+        BackgroundPolicy, BackgroundTaskReader, FileObservation, FileObservationStore,
+        ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolResult,
     },
     types::*,
 };
@@ -30,7 +29,7 @@ use super::{
 
 /// 会话级工具运行时能力，从 ToolPipeline 透传到 ToolExecutionContext。
 ///
-/// 整合了后台任务、文件观察、agent 会话控制等按 session 生命周期存在的能力。
+/// 整合了后台任务、文件观察等按 session 生命周期存在的能力。
 #[derive(Clone)]
 pub(crate) struct ToolRuntimeCapabilities {
     /// 后台任务完成后的通知通道。
@@ -41,8 +40,6 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
-    /// Agent 会话操控能力，用于 send 等工具与子 session 交互。
-    pub agent_session_control: Option<Arc<dyn AgentSessionControl>>,
 }
 
 pub(crate) struct ToolCallRuntimeContext {
@@ -199,7 +196,6 @@ async fn execute_tool_call_blocking(
             tool_result_reader: runtime.tool_result_reader,
             background_task_reader: runtime.capabilities.background_task_reader,
             file_observation_store: runtime.capabilities.file_observation_store,
-            agent_session_control: runtime.capabilities.agent_session_control,
         },
     };
 
@@ -274,7 +270,6 @@ async fn execute_tool_call_with_background(
             tool_result_reader: runtime.tool_result_reader.clone(),
             background_task_reader: runtime.capabilities.background_task_reader.clone(),
             file_observation_store: runtime.capabilities.file_observation_store.clone(),
-            agent_session_control: runtime.capabilities.agent_session_control.clone(),
         },
     };
 

@@ -2,7 +2,6 @@
 //!
 //! 注册的工具：
 //! - `agent`: 派生子 Agent 执行委派任务
-//! - `send`: 向已运行的子 Agent 发送消息并等待回复
 
 mod agent;
 
@@ -17,14 +16,7 @@ use astrcode_core::{
         PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{
-        ExecutionMode,
-        ToolDefinition,
-        ToolOrigin,
-        ToolResult,
-        tool_metadata,
-        // AgentSessionControl,
-    },
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -52,7 +44,6 @@ impl Extension for AgentToolsExtension {
                 shared: shared.clone(),
             }),
         );
-        // reg.tool(send_tool_definition(), Arc::new(SendToolHandler));
         reg.tool_metadata(agent_tool_metadata());
         reg.on_prompt_build(
             0,
@@ -265,136 +256,6 @@ impl ToolHandler for AgentToolHandler {
     }
 }
 
-// ─── send 工具 ─────────────────────────────────────────────────────────
-//
-// TODO: send 工具暂时禁用，待 session 管理完善后重新启用。
-//
-// const SEND_TOOL_DESCRIPTION: &str = "Send a message to a running agent and wait for its response.
-// \                                      Use this to continue a conversation with an agent that was
-// \                                      started with waitForResult: false, or to give additional \
-//                                      instructions to a running agent.";
-//
-// const SEND_TOOL_PARAMETERS: &str =
-// r#"{"type":"object","properties":{"agentId":{"type":"string","description":"The agent's name or
-// session ID to send the message to"},"message":{"type":"string","description":"The message to send
-// to the agent"}},"required":["agentId","message"]}"#;
-//
-// fn send_tool_definition() -> ToolDefinition {
-//     ToolDefinition {
-//         name: "send".into(),
-//         description: SEND_TOOL_DESCRIPTION.into(),
-//         parameters: serde_json::from_str(SEND_TOOL_PARAMETERS)
-//             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
-//         origin: ToolOrigin::Bundled,
-//         execution_mode: ExecutionMode::Sequential,
-//     }
-// }
-//
-// #[derive(Debug, Deserialize)]
-// #[serde(rename_all = "camelCase")]
-// struct SendArgs {
-//     agent_id: String,
-//     message: String,
-// }
-//
-// struct SendToolHandler;
-//
-// #[async_trait::async_trait]
-// impl ToolHandler for SendToolHandler {
-//     async fn execute(
-//         &self,
-//         tool_name: &str,
-//         arguments: serde_json::Value,
-//         _working_dir: &str,
-//         ctx: &astrcode_core::tool::ToolExecutionContext,
-//     ) -> Result<ToolResult, ExtensionError> {
-//         if tool_name != "send" {
-//             return Err(ExtensionError::NotFound(tool_name.into()));
-//         }
-//
-//         let args: SendArgs = serde_json::from_value(arguments)
-//             .map_err(|e| ExtensionError::Internal(format!("invalid send args: {e}")))?;
-//
-//         let port = ctx
-//             .capabilities
-//             .agent_session_control
-//             .as_ref()
-//             .ok_or_else(|| {
-//                 ExtensionError::Internal("agent session control not available".into())
-//             })?;
-//
-//         // agent_id 可能是 agent name 或 session_id，先按 name 查找。
-//         let child_session_id =
-//             resolve_child_session_id(port, &args.agent_id, ctx.session_id.as_str())
-//                 .await
-//                 .unwrap_or_else(|| args.agent_id.clone());
-//
-//         let result = port
-//             .send_and_wait(&child_session_id, args.message.clone())
-//             .await
-//             .map_err(|e| ExtensionError::Internal(format!("send_and_wait: {e}")))?;
-//
-//         let (content, is_error) = match result {
-//             astrcode_core::tool::TurnResult::Completed { output } => {
-//                 if output.is_empty() {
-//                     ("(agent completed with no output)".into(), false)
-//                 } else {
-//                     (output, false)
-//                 }
-//             },
-//             astrcode_core::tool::TurnResult::Failed { error } => (error, true),
-//             astrcode_core::tool::TurnResult::Aborted => ("agent was aborted".into(), true),
-//         };
-//
-//         let render = RenderSpec::Box {
-//             title: None,
-//             tone: if is_error {
-//                 RenderTone::Error
-//             } else {
-//                 RenderTone::Default
-//             },
-//             children: vec![
-//                 RenderSpec::KeyValue {
-//                     entries: vec![RenderKeyValue {
-//                         key: "send".into(),
-//                         value: format!("→ {child_session_id}"),
-//                         tone: RenderTone::Muted,
-//                     }],
-//                     tone: RenderTone::Default,
-//                 },
-//                 RenderSpec::Text {
-//                     text: compact_inline(&content, 500),
-//                     tone: if is_error {
-//                         RenderTone::Error
-//                     } else {
-//                         RenderTone::Default
-//                     },
-//                 },
-//             ],
-//         };
-//         let render_json = serde_json::to_value(&render)
-//             .map_err(|e| ExtensionError::Internal(format!("serialize render: {e}")))?;
-//
-//         Ok(ToolResult::text(
-//             content,
-//             is_error,
-//             tool_metadata([(UI_RENDER_METADATA_KEY, render_json)]),
-//         ))
-//     }
-// }
-//
-// /// 按 name 查找子 Agent 的 session_id，未匹配则返回 None（调用方当作原始 session_id）。
-// async fn resolve_child_session_id(
-//     port: &Arc<dyn AgentSessionControl>,
-//     agent_id: &str,
-//     parent_session_id: &str,
-// ) -> Option<String> {
-//     let children = port.list_children(parent_session_id).await.ok()?;
-//     children
-//         .iter()
-//         .find(|c| c.agent_name == agent_id)
-//         .map(|c| c.session_id.clone())
-// }
 
 // ─── Prompt 贡献 ──────────────────────────────────────────────────────
 
@@ -434,20 +295,6 @@ fn agent_tool_metadata()
         )
         .prompt_tag("collaboration"),
     );
-    // map.insert(
-    //     "send".to_string(),
-    //     astrcode_core::tool::ToolPromptMetadata::new(
-    //         "Send a message to an already-running agent and wait for its response. Use this to \
-    //          continue a conversation with an agent that was started with waitForResult: false, or
-    // \          to give additional instructions to a running agent.",
-    //     )
-    //     .caveat(
-    //         "The agentId can be either the agent's name (e.g. 'Code Reviewer') or its session ID.
-    // \          Sending blocks until the agent responds — for long tasks, consider spawning a
-    // new \          background agent instead.",
-    //     )
-    //     .prompt_tag("collaboration"),
-    // );
     map
 }
 
@@ -625,32 +472,4 @@ mod tests {
             "error should mention subagentType: {err}"
         );
     }
-
-    // #[test]
-    // fn send_args_deserialize() {
-    //     let input = json!({
-    //         "agentId": "code-reviewer",
-    //         "message": "check this file"
-    //     });
-    //     let args: SendArgs = serde_json::from_value(input).unwrap();
-    //     assert_eq!(args.agent_id, "code-reviewer");
-    //     assert_eq!(args.message, "check this file");
-    // }
-    //
-    // #[test]
-    // fn send_args_reject_missing_fields() {
-    //     let no_message = json!({ "agentId": "x" });
-    //     assert!(serde_json::from_value::<SendArgs>(no_message).is_err());
-    //
-    //     let no_id = json!({ "message": "hi" });
-    //     assert!(serde_json::from_value::<SendArgs>(no_id).is_err());
-    // }
-    //
-    // #[test]
-    // fn send_tool_definition_has_required_fields() {
-    //     let send_def = send_tool_definition();
-    //     assert_eq!(send_def.name, "send");
-    //     assert_eq!(send_def.origin, ToolOrigin::Bundled);
-    //     assert_eq!(send_def.execution_mode, ExecutionMode::Sequential);
-    // }
 }

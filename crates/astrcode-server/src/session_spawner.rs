@@ -40,7 +40,6 @@ pub(crate) struct ServerSessionSpawner {
     pub(crate) background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
     pub(crate) session_manager: Arc<crate::session_manager::SessionManager>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
-    pub(crate) agent_session_control: crate::bootstrap::AgentSessionControlSlot,
 }
 
 // ─── spawn() 入口与准备阶段 ────────────────────────────────────────────
@@ -239,7 +238,6 @@ impl ServerSessionSpawner {
             }
         });
 
-        let agent_session_control = self.agent_session_control.read().clone();
         let child_session_state = child_arc
             .read_model()
             .await
@@ -254,8 +252,7 @@ impl ServerSessionSpawner {
                 Arc::clone(&self.background_tasks),
                 self.session_manager.file_observation_store(&child_sid),
             )
-            .with_background_result_tx(child_bg_result_tx)
-            .with_agent_session_control(agent_session_control),
+            .with_background_result_tx(child_bg_result_tx),
             &child_session_state,
         )
         .map_err(|e| format!("create child turn runner: {e}"))?;
@@ -736,7 +733,6 @@ mod tests {
         runtime::{SessionSpawner, SpawnRequest},
     };
     use astrcode_storage::in_memory::InMemoryEventStore;
-    use parking_lot::RwLock;
 
     use super::*;
 
@@ -868,7 +864,6 @@ mod tests {
             background_tasks: Default::default(),
             session_manager,
             extension_runner,
-            agent_session_control: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -948,7 +943,6 @@ mod tests {
             background_tasks: Default::default(),
             session_manager,
             extension_runner,
-            agent_session_control: Arc::new(RwLock::new(None)),
         };
         config.set_llm_provider(Arc::new(StaticTextLlm { text: "new" }));
 
@@ -998,7 +992,6 @@ mod tests {
             background_tasks: Arc::clone(&background_tasks),
             session_manager,
             extension_runner,
-            agent_session_control: Arc::new(RwLock::new(None)),
         };
 
         let result = spawner
