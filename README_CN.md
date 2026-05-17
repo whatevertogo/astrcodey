@@ -1,5 +1,8 @@
 # AstrCode
 
+<img width="1401" height="995" alt="image" src="https://github.com/user-attachments/assets/26e9b719-8911-4fdf-a989-065ce9b9ea7e" />
+
+
 用 Rust 从零构建的 AI 编程助手平台。
 
 AstrCode 是一个全栈 AI 编程助手，用约 4.9 万行 Rust 代码、18 个 crate 构建，外加 React + TypeScript 前端（约 4700 行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的 LLM Provider 层、插件/钩子扩展系统（支持通过 FFI 加载原生扩展和 WASM 扩展）、带自动压缩的上下文窗口管理，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
