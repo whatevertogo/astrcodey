@@ -169,9 +169,9 @@ pub async fn run_http_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("HTTP server ready at http://{addr}");
     axum::serve(listener, app)
-        // 见 http_main.rs 同一处注释：避免 Nagle 把末尾的 turn_completed 事件
-        // 推迟 ~40-200ms。SSE 的小事件场景必须显式开 TCP_NODELAY。
-        .tcp_nodelay(true)
+        // // 见 http_main.rs 同一处注释：避免 Nagle 把末尾的 turn_completed 事件
+        // // 推迟 ~40-200ms。SSE 的小事件场景必须显式开 TCP_NODELAY。
+        // .tcp_nodelay(true)
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
