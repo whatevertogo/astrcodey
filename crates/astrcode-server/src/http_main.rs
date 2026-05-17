@@ -49,6 +49,10 @@ async fn main() {
         &auth_token[auth_token.len() - 4..]
     );
     if let Err(error) = axum::serve(listener, app)
+        // 关键：SSE 末尾事件常常是单独一小条（如 turn_completed），如果不开 TCP_NODELAY，
+        // Linux 内核 Nagle 算法会把短小写积累 ~40-200ms 等更多数据再一起 flush，
+        // 客户端会感受到「最后一条事件晚到」→ UI 仍显示「生成中」。
+        .tcp_nodelay(true)
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
