@@ -40,6 +40,7 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
     routing::{delete, get, post},
+    serve::ListenerExt,
 };
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
@@ -166,12 +167,14 @@ pub async fn run_http_server(
         &auth_token[..4],
         &auth_token[auth_token.len() - 4..]
     );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // 避免 Nagle 把末尾的 turn_completed 事件推迟 ~40-200ms。SSE 的小事件场景必须显式开 TCP_NODELAY。
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(|stream| {
+            let _ = stream.set_nodelay(true);
+        });
     tracing::info!("HTTP server ready at http://{addr}");
     axum::serve(listener, app)
-        // // 见 http_main.rs 同一处注释：避免 Nagle 把末尾的 turn_completed 事件
-        // // 推迟 ~40-200ms。SSE 的小事件场景必须显式开 TCP_NODELAY。
-        // .tcp_nodelay(true)
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
