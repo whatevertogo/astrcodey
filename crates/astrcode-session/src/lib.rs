@@ -1,30 +1,32 @@
 //! astrcode-session：会话运行时。
 //!
-//! 负责 Session 生命周期、Turn 执行、工具管线、事件发射和 compact。
+//! Session 是系统唯一的持久事实来源，本 crate 提供：
+//!
+//! - `Session`：带存储能力的会话句柄（durable write 入口）
+//! - `TurnRunner` / `run_turn`：临时 turn 处理器与驱动
+//! - `SessionServices`：turn 执行所需的依赖容器
+//! - `EventBus`：turn 事件回投契约
+//! - `compact::*`：compact pipeline 与 hook 桥接
+//! - `background::*`：后台任务管理
+//!
+//! 上层 actor 化和编排由 `astrcode-server` 负责。
 
 pub mod background;
 pub mod compact;
-pub(crate) mod json_repair;
-pub(crate) mod llm_stream;
-pub(crate) mod mcp_visibility;
-pub mod payload;
-pub mod post_compact;
 pub mod session;
-pub mod session_runtime;
-pub mod session_services;
-pub(crate) mod tool_exec;
-pub(crate) mod tool_pipeline;
-pub(crate) mod tool_types;
-pub mod turn_context;
-pub mod turn_runner;
+pub mod turn;
 
+pub(crate) mod json_repair;
+pub(crate) mod runtime;
+pub(crate) mod services;
+pub(crate) mod tool;
 
-pub use payload::{
-    agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
-    compact_boundary_payload, session_continued_from_compaction_payload,
-};
+pub use compact::{compact_boundary_payload, session_continued_from_compaction_payload};
+pub use runtime::{SessionRuntimeRegistry, SessionRuntimeState};
+pub use services::SessionServices;
 pub use session::{Session, SessionError};
-pub use session_runtime::{SessionRuntimeRegistry, SessionRuntimeState};
-pub use session_services::SessionServices;
-pub use turn_context::{AgentSignal, EventBus, NoopEventBus, TurnError};
-pub use turn_runner::{RunTurnResult, TurnOutput, TurnRunner, drive_agent, run_turn};
+pub use turn::{
+    AgentSignal, EventBus, NoopEventBus, RunTurnResult, TurnError, TurnOutput, TurnRunner,
+    agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
+    drive_agent, run_turn,
+};

@@ -28,7 +28,7 @@ async fn main() {
             std::process::exit(1);
         });
     // TODO: 更好的capacity？
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let (event_tx, _) = tokio::sync::broadcast::channel(512);
     let shutdown_token = runtime.shutdown_token.clone();
     let (app, auth_token) =
         astrcode_server::http::router(runtime, event_tx).unwrap_or_else(|error| {

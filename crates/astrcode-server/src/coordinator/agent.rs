@@ -1,8 +1,7 @@
-//! 子会话派生器 — 当扩展返回 `RunSession` 时的处理逻辑。
+//! Agent 子会话编排器。
 //!
-//! [`ServerSessionSpawner`] 创建子会话、用子 Agent 执行一轮对话，
-//! 将事件持久化到子会话存储，并经由 [`ProgressTx`] 将关键进展
-//! 转译为 [`ToolOutputDelta`] 实时反馈给父会话的 TUI。
+//! 负责创建子会话并把父子关系事件、child turn 请求交给对应 actor；
+//! 自己不拥有任何 session 的 turn 状态或 durable 写入权限。
 //!
 //! 最大嵌套深度由 [`MAX_AGENT_DEPTH`] 控制；同层级可并发生成任意多个子 agent。
 
@@ -12,34 +11,28 @@ const MAX_AGENT_DEPTH: usize = 2;
 
 use std::sync::Arc;
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    event::{Event, EventPayload, ToolOutputStream},
-    types::{SessionId, ToolCallId, TurnId, new_background_task_id, new_message_id, new_turn_id},
+    event::{EventPayload, ToolOutputStream},
+    types::{SessionId, ToolCallId, new_background_task_id},
 };
-use astrcode_extensions::{
-    runner::ExtensionRunner,
-    runtime::{SpawnRequest, SpawnResult},
-};
+use astrcode_extensions::runtime::{SpawnRequest, SpawnResult};
 use astrcode_session::{
-    EventBus, Session, SessionServices, TurnError, TurnOutput, TurnRunner,
-    agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
-    background::{BackgroundTaskCompletion, BackgroundTaskManager, complete_background_task},
-    run_turn,
+    Session,
+    background::{BackgroundTaskManager, complete_background_task},
 };
 use parking_lot::Mutex as StdMutex;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
-/// 服务器端的会话派生器，实现 `SessionSpawner` trait。
+/// 服务器端的 agent 子会话编排器，实现 `SessionSpawner` trait。
 ///
 /// 当扩展返回 `ExtensionToolOutcome::RunSession` 时，
 /// 扩展运行器通过此派生器创建子会话并运行 Agent 回合。
-pub(crate) struct ServerSessionSpawner {
-    pub(crate) config: Arc<crate::config_manager::ConfigManager>,
-    pub(crate) context_assembler: Arc<LlmContextAssembler>,
+pub(crate) struct AgentSessionCoordinator {
     pub(crate) background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
-    pub(crate) session_manager: Arc<crate::session_manager::SessionManager>,
-    pub(crate) extension_runner: Arc<ExtensionRunner>,
+    pub(crate) session_directory: Arc<crate::session::directory::SessionDirectory>,
+    pub(crate) session_bootstrapper: Arc<crate::session::bootstrapper::SessionBootstrapper>,
+    pub(crate) session_supervisor:
+        Arc<parking_lot::RwLock<Option<Arc<crate::session::SessionSupervisor>>>>,
 }
 
 // ─── spawn() 入口与准备阶段 ────────────────────────────────────────────
@@ -48,18 +41,15 @@ pub(crate) struct ServerSessionSpawner {
 struct PreparedChild {
     parent_session: Arc<Session>,
     child_session: Arc<Session>,
-    child_turn_id: TurnId,
     child_name: String,
     user_prompt: String,
     tool_call_id: Option<String>,
     model_id: String,
-    agent: TurnRunner,
     progress: ProgressTx,
-    current_child_sid: Arc<Mutex<SessionId>>,
 }
 
 #[async_trait::async_trait]
-impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
+impl astrcode_extensions::runtime::SessionSpawner for AgentSessionCoordinator {
     async fn spawn(
         &self,
         parent_session_id: &str,
@@ -77,7 +67,14 @@ impl astrcode_extensions::runtime::SessionSpawner for ServerSessionSpawner {
     }
 }
 
-impl ServerSessionSpawner {
+impl AgentSessionCoordinator {
+    fn supervisor(&self) -> Result<Arc<crate::session::SessionSupervisor>, String> {
+        self.session_supervisor
+            .read()
+            .clone()
+            .ok_or_else(|| "session supervisor not bound".to_string())
+    }
+
     /// 沿 parent 链向上遍历，计算当前 session 的嵌套深度。
     ///
     /// root session depth=0，每向上一级 parent +1。
@@ -86,7 +83,7 @@ impl ServerSessionSpawner {
         let mut current = session_id.clone();
         loop {
             let model = self
-                .session_manager
+                .session_directory
                 .read_model(&current)
                 .await
                 .map_err(|e| format!("read session: {e}"))?;
@@ -116,7 +113,7 @@ impl ServerSessionSpawner {
             Some(model) => model,
             None => {
                 let parent = self
-                    .session_manager
+                    .session_directory
                     .open(parent_session_id.clone())
                     .await
                     .map_err(|e| format!("open parent session: {e}"))?;
@@ -136,42 +133,27 @@ impl ServerSessionSpawner {
         }
 
         let child_session = self
-            .session_manager
+            .session_directory
             .create_child(&request.working_dir, &model_id, &parent_session_id)
             .await
             .map_err(|e| format!("create child session: {e}"))?;
 
         let parent_session = Arc::new(
-            self.session_manager
+            self.session_directory
                 .open(parent_session_id.clone())
                 .await
                 .map_err(|e| format!("open parent: {e}"))?,
         );
 
-        parent_session
-            .append_event(Event::new(
-                parent_session_id.clone(),
-                None,
-                EventPayload::AgentSessionSpawned {
-                    child_session_id: child_session.id().clone(),
-                    agent_name: child_name.clone(),
-                    task: user_prompt.clone(),
-                },
-            ))
-            .await
-            .map_err(|e| format!("append parent spawn event: {e}"))?;
-
         let child_sid = child_session.id().clone();
         let child_arc = Arc::new(child_session);
 
-        let child_turn_id = new_turn_id();
-
         let tool_registry = self
-            .session_manager
+            .session_bootstrapper
             .refresh_tool_registry(&child_sid, &request.working_dir)
             .await;
         let (system_prompt, fingerprint) = self
-            .session_manager
+            .session_bootstrapper
             .build_system_prompt_snapshot(
                 &child_sid,
                 &request.working_dir,
@@ -182,92 +164,49 @@ impl ServerSessionSpawner {
             .await
             .map_err(|e| format!("build child system prompt: {e}"))?;
 
-        append_child_payload(
-            child_arc.as_ref(),
-            None,
-            EventPayload::SystemPromptConfigured {
-                text: system_prompt.clone(),
-                fingerprint,
-            },
-        )
-        .await?;
-
-        append_child_progress_payloads(
-            child_arc.as_ref(),
-            &progress,
-            Some(&child_turn_id),
-            agent_turn_started_payloads(new_message_id(), user_prompt.clone()),
-        )
-        .await?;
+        let supervisor = self
+            .session_supervisor
+            .read()
+            .clone()
+            .ok_or_else(|| "session supervisor not bound".to_string())?;
+        let parent_handle = supervisor.handle_for(&parent_session_id);
+        let child_handle = supervisor.handle_for(&child_sid);
+        parent_handle
+            .emit_session_event(
+                parent_session_id.clone(),
+                None,
+                EventPayload::AgentSessionSpawned {
+                    child_session_id: child_sid.clone(),
+                    agent_name: child_name.clone(),
+                    task: user_prompt.clone(),
+                },
+            )
+            .await
+            .map_err(|e| format!("append parent spawn event: {e}"))?;
+        child_handle
+            .emit_session_event(
+                child_sid.clone(),
+                None,
+                EventPayload::SystemPromptConfigured {
+                    text: system_prompt.clone(),
+                    fingerprint,
+                },
+            )
+            .await
+            .map_err(|e| format!("append child prompt event: {e}"))?;
         progress.emit(
             ToolOutputStream::Stdout,
             format!("child agent '{child_name}' started: {child_sid} using {model_id}\n"),
         );
 
-        let current_child_sid = Arc::new(Mutex::new(child_sid.clone()));
-        let child_bg_final_sid = Arc::clone(&current_child_sid);
-
-        let (child_bg_result_tx, mut child_bg_result_rx) =
-            mpsc::unbounded_channel::<BackgroundTaskCompletion>();
-
-        let child_bg_session = Arc::clone(&child_arc);
-        let child_bg_progress = progress.clone();
-        let child_bg_turn_id = child_turn_id.clone();
-        let handle = tokio::spawn(async move {
-            while let Some(completion) = child_bg_result_rx.recv().await {
-                let _sid = child_bg_final_sid.lock().await.clone();
-                let (tool_call_event, bg_event) = completion.into_events();
-                let _ = append_child_payload(
-                    child_bg_session.as_ref(),
-                    Some(&child_bg_turn_id),
-                    tool_call_event,
-                )
-                .await;
-                let _ = append_child_payload(
-                    child_bg_session.as_ref(),
-                    Some(&child_bg_turn_id),
-                    bg_event.clone(),
-                )
-                .await;
-                child_bg_progress.forward(&bg_event);
-            }
-        });
-        tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                tracing::error!("child background result forwarder panicked: {e}");
-            }
-        });
-
-        let child_session_state = child_arc
-            .read_model()
-            .await
-            .map_err(|e| format!("read child session state: {e}"))?;
-        let agent = TurnRunner::new(
-            SessionServices::new(
-                self.config.read_llm_provider(),
-                Arc::clone(&tool_registry),
-                Arc::clone(&self.extension_runner),
-                Arc::clone(&self.context_assembler),
-                Arc::clone(&child_arc),
-                Arc::clone(&self.background_tasks),
-                self.session_manager.file_observation_store(&child_sid),
-            )
-            .with_background_result_tx(child_bg_result_tx),
-            &child_session_state,
-        )
-        .map_err(|e| format!("create child turn runner: {e}"))?;
-
         Ok(PreparedChild {
             parent_session,
             child_session: child_arc,
-            child_turn_id,
             child_name,
             user_prompt,
             tool_call_id,
             model_id,
-            agent,
             progress,
-            current_child_sid,
         })
     }
 
@@ -278,84 +217,65 @@ impl ServerSessionSpawner {
         let PreparedChild {
             parent_session,
             child_session,
-            child_turn_id,
             user_prompt,
-            mut agent,
-            progress,
-            current_child_sid,
             ..
         } = p;
-
-        let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
-            &mut agent,
-            &user_prompt,
-            Arc::clone(&child_session),
-            current_child_sid,
-            child_turn_id.clone(),
-            progress.clone(),
-        )
-        .await;
-
-        match output {
-            Ok(output) => {
-                append_child_progress_payloads(
-                    child_session.as_ref(),
-                    &progress,
-                    Some(&child_turn_id),
-                    agent_turn_completed_payloads(output.finish_reason.clone()),
-                )
-                .await?;
-                parent_session
-                    .append_event(Event::new(
+        let child_sid = child_session.id().clone();
+        let supervisor = self.supervisor()?;
+        let child_handle = supervisor.handle_for(&child_sid);
+        let parent_handle = supervisor.handle_for(parent_session.id());
+        let (_turn_id, completion_rx) = child_handle
+            .submit_prompt_with_completion(child_sid.clone(), user_prompt)
+            .await
+            .map_err(|e| format!("start child turn: {e}"))?;
+        match completion_rx
+            .await
+            .map_err(|_| "child turn completion channel closed".to_string())?
+        {
+            crate::session::TurnCompletion::Completed { .. } => {
+                let text = read_last_assistant_text(child_session.as_ref()).await?;
+                parent_handle
+                    .emit_session_event(
                         parent_session.id().clone(),
                         None,
                         EventPayload::AgentSessionCompleted {
-                            child_session_id: child_session.id().clone(),
-                            final_session_id: final_child_sid.clone(),
-                            summary: one_line_summary(&output.text),
+                            child_session_id: child_sid.clone(),
+                            final_session_id: child_sid.clone(),
+                            summary: one_line_summary(&text),
                         },
-                    ))
+                    )
                     .await
                     .map_err(|e| format!("append parent completion event: {e}"))?;
                 Ok(SpawnResult {
-                    content: output.text,
-                    child_session_id: final_child_sid.into_string(),
+                    content: text,
+                    child_session_id: child_sid.into_string(),
                     background_task_id: None,
                 })
             },
-            Err(e) => {
-                append_child_progress_payloads(
-                    child_session.as_ref(),
-                    &progress,
-                    Some(&child_turn_id),
-                    agent_turn_failed_payloads(
-                        (!emitted_error).then(|| e.to_string()),
-                        "error".into(),
-                    ),
-                )
-                .await?;
-                progress.emit(
-                    ToolOutputStream::Stderr,
-                    format!("child agent error: {e}\n"),
-                );
-                parent_session
-                    .append_event(Event::new(
+            crate::session::TurnCompletion::Failed { error } => {
+                parent_handle
+                    .emit_session_event(
                         parent_session.id().clone(),
                         None,
                         EventPayload::AgentSessionFailed {
-                            child_session_id: child_session.id().clone(),
-                            final_session_id: final_child_sid.clone(),
-                            error: e.to_string(),
+                            child_session_id: child_sid.clone(),
+                            final_session_id: child_sid.clone(),
+                            error: error.clone(),
                         },
-                    ))
+                    )
                     .await
                     .map_err(|e| format!("append parent failure event: {e}"))?;
                 Ok(SpawnResult {
-                    content: format!("child agent error: {e}"),
-                    child_session_id: final_child_sid.into_string(),
+                    content: format!("child agent error: {error}"),
+                    child_session_id: child_sid.into_string(),
                     background_task_id: None,
                 })
             },
+            crate::session::TurnCompletion::Aborted => Ok(SpawnResult {
+                content: "child agent was aborted".into(),
+                child_session_id: child_sid.into_string(),
+                background_task_id: None,
+            }),
         }
     }
 
@@ -366,14 +286,11 @@ impl ServerSessionSpawner {
         let PreparedChild {
             parent_session,
             child_session,
-            child_turn_id,
             child_name,
             user_prompt,
             tool_call_id,
             model_id,
-            mut agent,
             progress,
-            current_child_sid,
         } = p;
 
         let task_id = new_background_task_id();
@@ -381,81 +298,59 @@ impl ServerSessionSpawner {
 
         let parent_sid = parent_session.id().clone();
         let register_sid = parent_sid.clone();
-        let parent_arc = parent_session;
+        let parent_sid = parent_session.id().clone();
         let watcher_bg_tasks = Arc::clone(&self.background_tasks);
         let watcher_task_id = task_id.clone();
-        let watcher_progress = progress.clone();
         let tool_call_id_for_result = tool_call_id.clone();
-        let cti_for_completion = child_turn_id.clone();
-        let drive_session = Arc::clone(&child_session);
-        let watcher_child_session = Arc::clone(&child_session);
-        let drive_current_child_sid = Arc::clone(&current_child_sid);
-        let drive_child_turn_id = child_turn_id.clone();
-        let drive_progress = progress.clone();
         let async_child_sid = child_session.id().clone();
         let return_child_sid = child_session.id().clone();
+        let supervisor = self.supervisor()?;
+        let child_handle = supervisor.handle_for(&async_child_sid);
+        let parent_handle = supervisor.handle_for(&parent_sid);
 
         let agent_handle = tokio::spawn(async move {
-            let (output, emitted_error, final_child_sid) = drive_child_agent_turn(
-                &mut agent,
-                &user_prompt,
-                drive_session,
-                drive_current_child_sid,
-                drive_child_turn_id,
-                drive_progress,
-            )
-            .await;
-
-            let result_content = match &output {
-                Ok(o) => {
-                    let _ = append_child_progress_payloads(
-                        watcher_child_session.as_ref(),
-                        &watcher_progress,
-                        Some(&cti_for_completion),
-                        agent_turn_completed_payloads(o.finish_reason.clone()),
-                    )
-                    .await;
-                    let _ = parent_arc
-                        .append_event(Event::new(
+            let completion = match child_handle
+                .submit_prompt_with_completion(async_child_sid.clone(), user_prompt)
+                .await
+            {
+                Ok((_turn_id, rx)) => rx.await.ok(),
+                Err(error) => Some(crate::session::TurnCompletion::Failed {
+                    error: error.to_string(),
+                }),
+            };
+            let (result_content, is_error) = match completion {
+                Some(crate::session::TurnCompletion::Completed { .. }) => {
+                    let text = read_last_assistant_text(child_session.as_ref())
+                        .await
+                        .unwrap_or_default();
+                    let _ = parent_handle
+                        .emit_session_event(
                             parent_sid.clone(),
                             None,
                             EventPayload::AgentSessionCompleted {
                                 child_session_id: async_child_sid.clone(),
-                                final_session_id: final_child_sid.clone(),
-                                summary: one_line_summary(&o.text),
+                                final_session_id: async_child_sid.clone(),
+                                summary: one_line_summary(&text),
                             },
-                        ))
+                        )
                         .await;
-                    o.text.clone()
+                    (text, false)
                 },
-                Err(e) => {
-                    let _ = append_child_progress_payloads(
-                        watcher_child_session.as_ref(),
-                        &watcher_progress,
-                        Some(&cti_for_completion),
-                        agent_turn_failed_payloads(
-                            (!emitted_error).then(|| e.to_string()),
-                            "error".into(),
-                        ),
-                    )
-                    .await;
-                    watcher_progress.emit(
-                        ToolOutputStream::Stderr,
-                        format!("child agent error: {e}\n"),
-                    );
-                    let _ = parent_arc
-                        .append_event(Event::new(
+                Some(crate::session::TurnCompletion::Failed { error }) => {
+                    let _ = parent_handle
+                        .emit_session_event(
                             parent_sid.clone(),
                             None,
                             EventPayload::AgentSessionFailed {
                                 child_session_id: async_child_sid.clone(),
-                                final_session_id: final_child_sid.clone(),
-                                error: e.to_string(),
+                                final_session_id: async_child_sid.clone(),
+                                error: error.clone(),
                             },
-                        ))
+                        )
                         .await;
-                    format!("child agent error: {e}")
+                    (format!("child agent error: {error}"), true)
                 },
+                _ => ("child agent was aborted".into(), true),
             };
 
             if let Some(call_id) = &tool_call_id_for_result {
@@ -468,13 +363,13 @@ impl ServerSessionSpawner {
                 let result = astrcode_core::tool::ToolResult {
                     call_id: call_id.clone(),
                     content: result_content,
-                    is_error: output.is_err(),
-                    error: output.as_ref().err().map(|e| e.to_string()),
+                    is_error,
+                    error: is_error.then(|| "child agent failed".into()),
                     metadata: meta,
                     duration_ms: None,
                 };
-                let _ = parent_arc
-                    .append_event(Event::new(
+                let _ = parent_handle
+                    .emit_session_event(
                         parent_sid.clone(),
                         None,
                         EventPayload::ToolCallCompleted {
@@ -482,7 +377,7 @@ impl ServerSessionSpawner {
                             tool_name: "agent".into(),
                             result,
                         },
-                    ))
+                    )
                     .await;
             }
 
@@ -517,49 +412,24 @@ impl ServerSessionSpawner {
     }
 }
 
-// ─── 子 Agent 驱动 ────────────────────────────────────────────────────
-
-/// 子会话 EventBus：持久化事件到子会话并转发进度给父会话。
-struct ChildEventBus {
-    child_session: Arc<Session>,
-    child_turn_id: TurnId,
-    progress: ProgressTx,
-}
-
-#[async_trait::async_trait]
-impl EventBus for ChildEventBus {
-    async fn emit(
-        &self,
-        _session_id: &SessionId,
-        _turn_id: Option<&TurnId>,
-        payload: EventPayload,
-    ) {
-        let _ = append_child_progress_payload(
-            &self.child_session,
-            &self.progress,
-            Some(&self.child_turn_id),
-            payload,
-        )
-        .await;
-    }
-}
-
-async fn drive_child_agent_turn(
-    agent: &mut TurnRunner,
-    user_prompt: &str,
-    child_session: Arc<Session>,
-    current_child_sid: Arc<Mutex<SessionId>>,
-    child_turn_id: TurnId,
-    progress: ProgressTx,
-) -> (Result<TurnOutput, TurnError>, bool, SessionId) {
-    let initial_sid = current_child_sid.lock().await.clone();
-    let bus = ChildEventBus {
-        child_session,
-        child_turn_id: child_turn_id.clone(),
-        progress,
-    };
-    let result = run_turn(&mut *agent, user_prompt, &child_turn_id, &bus).await;
-    (result.output, result.emitted_error, initial_sid)
+async fn read_last_assistant_text(session: &Session) -> Result<String, String> {
+    let state = session
+        .read_model()
+        .await
+        .map_err(|e| format!("read child session: {e}"))?;
+    Ok(state
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            (message.role == astrcode_core::llm::LlmRole::Assistant).then(|| {
+                message.content.iter().find_map(|content| match content {
+                    astrcode_core::llm::LlmContent::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })?
+        })
+        .unwrap_or_default())
 }
 
 // ─── 进度转发 ─────────────────────────────────────────────────────────
@@ -589,121 +459,6 @@ impl ProgressTx {
             delta,
         });
     }
-
-    fn forward(&self, payload: &EventPayload) {
-        if let Some((stream, delta)) = child_progress_delta(payload) {
-            self.emit(stream, delta);
-        }
-    }
-}
-
-// ─── 子会话事件持久化 ──────────────────────────────────────────────────
-
-async fn append_child_payload(
-    session: &Session,
-    child_turn_id: Option<&TurnId>,
-    payload: EventPayload,
-) -> Result<(), String> {
-    if payload.is_durable() {
-        session
-            .append_event(Event::new(
-                session.id().clone(),
-                child_turn_id.cloned(),
-                payload,
-            ))
-            .await
-            .map_err(|e| format!("append child event: {e}"))?;
-    }
-    Ok(())
-}
-
-async fn append_child_progress_payload(
-    session: &Session,
-    progress: &ProgressTx,
-    child_turn_id: Option<&TurnId>,
-    payload: EventPayload,
-) -> Result<(), String> {
-    progress.forward(&payload);
-    if payload.is_durable() {
-        append_child_payload(session, child_turn_id, payload).await?;
-    }
-    Ok(())
-}
-
-async fn append_child_progress_payloads<I>(
-    session: &Session,
-    progress: &ProgressTx,
-    child_turn_id: Option<&TurnId>,
-    payloads: I,
-) -> Result<(), String>
-where
-    I: IntoIterator<Item = EventPayload>,
-{
-    for payload in payloads {
-        append_child_progress_payload(session, progress, child_turn_id, payload).await?;
-    }
-    Ok(())
-}
-
-fn child_progress_delta(payload: &EventPayload) -> Option<(ToolOutputStream, String)> {
-    match payload {
-        EventPayload::AssistantMessageStarted { .. } => {
-            Some((ToolOutputStream::Stdout, "child assistant started\n".into()))
-        },
-        EventPayload::AssistantTextDelta { delta, .. } => {
-            if delta.is_empty() {
-                None
-            } else {
-                Some((ToolOutputStream::Stdout, delta.clone()))
-            }
-        },
-        EventPayload::AssistantMessageCompleted { text, .. } => {
-            let summary = one_line_summary(text);
-            if summary.is_empty() {
-                None
-            } else {
-                Some((
-                    ToolOutputStream::Stdout,
-                    format!("child assistant completed: {summary}\n"),
-                ))
-            }
-        },
-        EventPayload::ToolCallStarted { tool_name, .. } => Some((
-            ToolOutputStream::Stdout,
-            format!("child tool started: {tool_name}\n"),
-        )),
-        EventPayload::ToolOutputDelta { stream, delta, .. } => {
-            Some((*stream, format!("child tool output: {delta}")))
-        },
-        EventPayload::ToolCallCompleted {
-            tool_name, result, ..
-        } => {
-            let stream = if result.is_error {
-                ToolOutputStream::Stderr
-            } else {
-                ToolOutputStream::Stdout
-            };
-            let detail = one_line_summary(result.error.as_deref().unwrap_or(&result.content));
-            let suffix = if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            };
-            Some((
-                stream,
-                format!("child tool completed: {tool_name}{suffix}\n"),
-            ))
-        },
-        EventPayload::ErrorOccurred { message, .. } => Some((
-            ToolOutputStream::Stderr,
-            format!("child error: {message}\n"),
-        )),
-        EventPayload::TurnCompleted { finish_reason } => Some((
-            ToolOutputStream::Stdout,
-            format!("child turn completed: {finish_reason}\n"),
-        )),
-        _ => None,
-    }
 }
 
 fn one_line_summary(text: &str) -> String {
@@ -722,7 +477,6 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::context_assembler::LlmContextAssembler;
     use astrcode_core::{
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::EventStore,
@@ -843,27 +597,72 @@ mod tests {
         ))
     }
 
-    fn test_spawner(store: Arc<dyn EventStore>, llm: Arc<ToolThenTextLlm>) -> ServerSessionSpawner {
-        let settings = astrcode_context::ContextSettings {
-            compact_threshold_percent: 0.0,
-            ..Default::default()
-        };
+    fn bind_test_supervisor(
+        store: Arc<dyn EventStore>,
+        config: Arc<crate::config_manager::ConfigManager>,
+        extension_runner: Arc<ExtensionRunner>,
+        session_directory: Arc<crate::session::directory::SessionDirectory>,
+        session_bootstrapper: Arc<crate::session::bootstrapper::SessionBootstrapper>,
+        background_tasks: Arc<StdMutex<BackgroundTaskManager>>,
+        slot: &Arc<parking_lot::RwLock<Option<Arc<crate::session::SessionSupervisor>>>>,
+    ) {
+        let runtime = Arc::new(crate::bootstrap::ServerRuntime {
+            event_store: store,
+            config_manager: config,
+            context_assembler: Arc::new(
+                astrcode_context::context_assembler::LlmContextAssembler::new(Default::default()),
+            ),
+            background_tasks,
+            session_directory,
+            session_bootstrapper,
+            extension_runner,
+            session_supervisor: Arc::clone(slot),
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
+        });
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let event_publisher = Arc::new(crate::events::ClientEventPublisher::new(tx));
+        *slot.write() = Some(Arc::new(crate::session::SessionSupervisor::new(
+            runtime,
+            event_publisher,
+        )));
+    }
+
+    fn test_spawner(
+        store: Arc<dyn EventStore>,
+        llm: Arc<ToolThenTextLlm>,
+    ) -> AgentSessionCoordinator {
         let llm_provider: Arc<dyn LlmProvider> = llm;
         let config = test_config_manager(llm_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+        let runtime_registry = Arc::new(astrcode_session::SessionRuntimeRegistry::default());
+        let session_directory = Arc::new(crate::session::directory::SessionDirectory::new(
             Arc::clone(&store),
             Arc::clone(&config),
             Arc::clone(&extension_runner),
-            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Arc::clone(&runtime_registry),
             Default::default(),
         ));
-        ServerSessionSpawner {
-            config,
-            context_assembler: Arc::new(LlmContextAssembler::new(settings)),
+        let session_bootstrapper =
+            Arc::new(crate::session::bootstrapper::SessionBootstrapper::new(
+                Arc::clone(&config),
+                Arc::clone(&extension_runner),
+                runtime_registry,
+            ));
+        let session_supervisor = Arc::new(parking_lot::RwLock::new(None));
+        bind_test_supervisor(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::clone(&session_directory),
+            Arc::clone(&session_bootstrapper),
+            Default::default(),
+            &session_supervisor,
+        );
+        AgentSessionCoordinator {
             background_tasks: Default::default(),
-            session_manager,
-            extension_runner,
+            session_directory,
+            session_bootstrapper,
+            session_supervisor,
         }
     }
 
@@ -930,19 +729,35 @@ mod tests {
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
         let config = test_config_manager(initial_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+        let runtime_registry = Arc::new(astrcode_session::SessionRuntimeRegistry::default());
+        let session_directory = Arc::new(crate::session::directory::SessionDirectory::new(
             Arc::clone(&store),
             Arc::clone(&config),
             Arc::clone(&extension_runner),
-            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Arc::clone(&runtime_registry),
             Default::default(),
         ));
-        let spawner = ServerSessionSpawner {
-            config: Arc::clone(&config),
-            context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
+        let session_bootstrapper =
+            Arc::new(crate::session::bootstrapper::SessionBootstrapper::new(
+                Arc::clone(&config),
+                Arc::clone(&extension_runner),
+                runtime_registry,
+            ));
+        let session_supervisor = Arc::new(parking_lot::RwLock::new(None));
+        bind_test_supervisor(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::clone(&session_directory),
+            Arc::clone(&session_bootstrapper),
+            Default::default(),
+            &session_supervisor,
+        );
+        let spawner = AgentSessionCoordinator {
             background_tasks: Default::default(),
-            session_manager,
-            extension_runner,
+            session_directory,
+            session_bootstrapper,
+            session_supervisor,
         };
         config.set_llm_provider(Arc::new(StaticTextLlm { text: "new" }));
 
@@ -979,19 +794,35 @@ mod tests {
         let background_tasks: Arc<StdMutex<BackgroundTaskManager>> = Default::default();
         let config = test_config_manager(llm_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-        let session_manager = Arc::new(crate::session_manager::SessionManager::new(
+        let runtime_registry = Arc::new(astrcode_session::SessionRuntimeRegistry::default());
+        let session_directory = Arc::new(crate::session::directory::SessionDirectory::new(
             Arc::clone(&store),
             Arc::clone(&config),
             Arc::clone(&extension_runner),
-            Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+            Arc::clone(&runtime_registry),
             Arc::clone(&background_tasks),
         ));
-        let spawner = ServerSessionSpawner {
-            config,
-            context_assembler: Arc::new(LlmContextAssembler::new(Default::default())),
+        let session_bootstrapper =
+            Arc::new(crate::session::bootstrapper::SessionBootstrapper::new(
+                Arc::clone(&config),
+                Arc::clone(&extension_runner),
+                runtime_registry,
+            ));
+        let session_supervisor = Arc::new(parking_lot::RwLock::new(None));
+        bind_test_supervisor(
+            Arc::clone(&store),
+            Arc::clone(&config),
+            Arc::clone(&extension_runner),
+            Arc::clone(&session_directory),
+            Arc::clone(&session_bootstrapper),
+            Arc::clone(&background_tasks),
+            &session_supervisor,
+        );
+        let spawner = AgentSessionCoordinator {
             background_tasks: Arc::clone(&background_tasks),
-            session_manager,
-            extension_runner,
+            session_directory,
+            session_bootstrapper,
+            session_supervisor,
         };
 
         let result = spawner

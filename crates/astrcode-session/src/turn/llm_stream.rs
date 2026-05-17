@@ -9,8 +9,8 @@ use astrcode_core::{
 use tokio::sync::mpsc;
 
 use crate::{
-    tool_types::PendingToolCall,
-    turn_context::{AgentSignal, TurnError, send_event},
+    tool::types::PendingToolCall,
+    turn::context::{AgentSignal, TurnError, send_event},
 };
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────

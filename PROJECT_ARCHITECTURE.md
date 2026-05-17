@@ -26,10 +26,11 @@ astrcode v2 的目标是一套 session-first、extension-first、核心极简的
 - built-in tools
 
 Session owns facts.
+SessionActor owns mutations.
 TurnRunner executes.
 Extensions contribute.
 Context derives.
-Handler adapts protocol.
+Router adapts protocol.
 
 
 skills、agent profiles、自定义工具、prompt context providers 都不作为核心内建能力看待，而是统一通过扩展系统加载。
@@ -70,7 +71,9 @@ Server 对外暴露三种接入方式：
 - **HTTP/SSE**：桌面应用（Tauri）和第三方客户端通过 HTTP POST 发命令、SSE 流接收事件
 - **ACP adapter**：标准 Agent Client Protocol 客户端通过 `astrcode acp` 子命令启动的 stdio JSON-RPC 服务接入
 
-三种方式最终都汇入同一个 `CommandHandler` actor，保证命令处理逻辑一致。
+三种方式最终都汇入同一个 `CommandRouter` actor。它只负责协议适配和前台
+session 路由；真正会改变某个 session 的命令再进入对应的 per-session actor，
+保证主会话与子会话共享同一套串行执行规则。
 
 ### 5. 基础设施保持克制
 
@@ -105,10 +108,22 @@ v2 首期刻意选择保守、明确、容易落地的基础设施组合：
 │         └──────────────┼─────────────┘                              │
 │                        ▼                                             │
 │                 ┌──────────────┐                                     │
-│                 │CommandHandler│   ← actor (mpsc) 统一命令入口       │
+│                 │ router::     │   ← actor (mpsc) 协议路由入口       │
+│                 │ CommandRouter│                                     │
 │                 └──────┬───────┘                                     │
 │                        ▼                                             │
-│  SessionManager ─ Agent Loop ─ Config Service ─ Broadcast Events    │
+│                 ┌──────────────┐                                     │
+│                 │  session::   │   ← per-session SessionActor        │
+│                 │  Supervisor  │     生命周期 + 同树校验             │
+│                 └──────┬───────┘                                     │
+│                        ▼                                             │
+│  SessionActor ─ TurnRunner ─ Config Service ─ Broadcast Events      │
+│                        │                                             │
+│                        ▼                                             │
+│                 ┌──────────────┐                                     │
+│                 │ coordinator::│   ← 父子会话编排                    │
+│                 │   Agent      │                                     │
+│                 └──────────────┘                                     │
 └──────────────────────┬───────────────────────────┬───────────────────┘
                        │                           │
                        ▼                           ▼
@@ -151,7 +166,13 @@ v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 - `astrcode-tools`：内置工具、工具注册表、执行包装、agent 协作工具
 - `astrcode-storage`：JSONL event log、snapshot、config 持久化、锁
 - `astrcode-context`：token 估算、tool result 预算、裁剪、压缩、文件恢复、prompt engine
-- `astrcode-session`：会话运行时，包含 session handle、turn 执行、事件总线、工具管线
+- `astrcode-session`：会话运行时 building blocks
+  - `session`：`Session` 句柄（durable write 入口）
+  - `turn/`：`TurnRunner` / `drive_agent` / `run_turn` / `EventBus` / 生命周期 payload helpers
+  - `tool/`：`ToolPipeline` / 工具执行 / 后台化 / MCP 可见性
+  - `compact/`：compact hook 桥接 / post-compact 上下文恢复 / payload helpers
+  - `background`：后台任务管理器
+  - `services` / `runtime`：DI 容器与瞬态状态注册表
 
 ### Layer 2：Extensions
 
@@ -167,10 +188,18 @@ v2 设计把系统拆成 `crates/` 下的 18 个 crate，并分为五层。
 ### Layer 3：Server
 
 - `astrcode-protocol`：类型化 JSON-RPC 命令、事件、UI 子协议、版本协商、HTTP DTO
-- `astrcode-server`：session 生命周期、agent 编排、config service、transport handling、并发控制
-  - `transport/`：stdio JSON-RPC 适配器，供 TUI 和 exec 使用
-  - `http/`：Axum HTTP/SSE 入口，供桌面端和第三方客户端使用
-  - `acp/`：ACP (Agent Client Protocol) stdio 适配器，桥接标准 ACP 客户端
+- `astrcode-server`：session 生命周期、agent 编排、config service、transport handling、并发控制。模块按职责分层：
+  - `router/`：协议路由层（`CommandRouter` + `CommandRouterHandle`），只做协议适配 + 前台 session 路由，所有 session-mutation 命令都转发给对应 SessionActor
+  - `session/`：per-session 写入子系统
+    - `actor`：`SessionActor`（唯一可变写入者）+ `SessionHandle`（mpsc 薄壳）+ `SessionCommand`
+    - `supervisor`：`SessionSupervisor`（actor 生命周期 + 同树校验）+ `BoundSessionMessenger`
+    - `directory`：`SessionDirectory`（create / open / delete / read / list / replay）
+    - `bootstrapper`：`SessionBootstrapper`（per-session tool registry / system prompt 准备）
+    - `turn` / `slash` / `compact` / `snapshot`：actor 内部行为
+  - `coordinator/`：`AgentSessionCoordinator` 父子会话编排，子 session 通过 SessionActor 启动 turn
+  - `events/`：`ClientEventPublisher` 客户端通知发布器
+  - `bootstrap`：`ServerRuntime` 装配
+  - `transport/` / `http/` / `acp/`：三种协议接入
 
 ### Layer 4：Frontend
 
@@ -221,6 +250,8 @@ Server 支持多个 session 同时活跃。
 
 - 单个 session 内一次只处理一个 turn
 - 不同 session 之间可以并行处理
+
+每个 session 的运行时写入都由自己的 `SessionActor` 串行处理，是该 session 唯一的 durable 写入者。actor 外部只读查询可以直接访问 `SessionDirectory` / `EventStore`；任何会改变 durable state 的命令必须经 `SessionHandle` 进入 actor mailbox。
 
 这样既能保证每个 session 内部事件历史线性一致，又能保留整体吞吐。
 

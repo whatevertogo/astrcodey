@@ -24,18 +24,23 @@ use tokio::sync::mpsc;
 
 use crate::{
     compact::{CompactHookContext, collect_compact_instructions, dispatch_post_compact},
-    llm_stream::{
-        StreamOutcome, assistant_message_with_thinking, consume_llm_stream,
-        non_empty_reasoning_content, provider_visible_messages,
+    tool::{
+        mcp_visibility::{
+            activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder,
+            clone_tools_by_index, provider_visible_tool_indexes,
+        },
+        pipeline::ToolPipeline,
+        types::ExecuteToolCalls,
     },
-    mcp_visibility::{
-        activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
-        provider_visible_tool_indexes,
-    },
-    tool_pipeline::ToolPipeline,
-    tool_types::ExecuteToolCalls,
-    turn_context::{
-        AgentSignal, EventBus, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
+    turn::{
+        context::{
+            AgentSignal, EventBus, SharedTurnContext, TurnError, end_turn_with_error_typed,
+            send_event,
+        },
+        llm_stream::{
+            StreamOutcome, assistant_message_with_thinking, consume_llm_stream,
+            non_empty_reasoning_content, provider_visible_messages,
+        },
     },
 };
 
@@ -106,7 +111,7 @@ impl TurnRunner {
     ///
     /// `session_state` 由调用方提前读取并传入，避免重复 I/O。
     pub fn new(
-        services: crate::session_services::SessionServices,
+        services: crate::services::SessionServices,
         session_state: &astrcode_core::storage::SessionReadModel,
     ) -> Result<Self, TurnError> {
         let shared = SharedTurnContext {
@@ -118,11 +123,12 @@ impl TurnRunner {
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
             crate::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
         ));
-        let capabilities = crate::tool_exec::ToolRuntimeCapabilities {
+        let capabilities = crate::tool::exec::ToolRuntimeCapabilities {
             background_result_tx: services.background_result_tx,
             background_tasks: services.background_tasks,
             background_task_reader,
             file_observation_store: Some(services.file_observation_store),
+            session_messenger: services.session_messenger,
         };
         let tools = ToolPipeline::new(
             shared.clone(),
@@ -239,7 +245,7 @@ impl TurnRunner {
 
             if let Some(ref mut compaction) = prepared.compaction {
                 send_event(event_tx.as_ref(), EventPayload::CompactionStarted);
-                crate::post_compact::enrich_post_compact_context(
+                crate::compact::post_context::enrich_post_compact_context(
                     compaction,
                     self.shared.session_id.as_str(),
                     &messages,
@@ -515,7 +521,7 @@ pub async fn run_turn(
 // ─── Message construction helpers ────────────────────────────────────────
 
 fn assistant_tool_call_message(
-    prepared: &[crate::tool_types::PreparedToolCall],
+    prepared: &[crate::tool::types::PreparedToolCall],
     text: &str,
     reasoning_content: Option<String>,
 ) -> LlmMessage {

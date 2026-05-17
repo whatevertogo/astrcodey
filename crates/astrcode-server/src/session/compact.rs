@@ -5,17 +5,14 @@ use astrcode_core::{
     event::EventPayload, extension::CompactTrigger, storage::CompactSnapshotInput, types::SessionId,
 };
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::{
-    EventBus,
-    compact::{
-        CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        dispatch_post_compact, make_compact_request_fn,
-    },
-    post_compact::enrich_post_compact_context,
+use astrcode_session::compact::{
+    CompactHookContext, collect_compact_instructions, compact_trigger_name, dispatch_post_compact,
+    enrich_post_compact_context, make_compact_request_fn,
 };
 use astrcode_support::hash::hex_fingerprint;
 
-use super::{CommandHandler, HandlerError, session_snapshot};
+use super::{SessionActor, session_snapshot};
+use crate::router::HandlerError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactOutcome {
@@ -23,38 +20,20 @@ pub enum ManualCompactOutcome {
     Skipped { message: String },
 }
 
-impl CommandHandler {
-    pub(super) async fn compact_active_session(&mut self) -> Result<(), HandlerError> {
-        let Some(sid) = self.active_session_id.clone() else {
-            self.send_error(40400, "No active session");
-            return Ok(());
-        };
-        match self.compact_session(&sid).await {
-            Ok(ManualCompactOutcome::Compacted { .. }) => Ok(()),
-            Ok(ManualCompactOutcome::Skipped { message }) => {
-                self.send_error(40000, &message);
-                Ok(())
-            },
-            Err(error) => {
-                self.send_error(-32603, &error.to_string());
-                Err(error)
-            },
-        }
-    }
-
+impl SessionActor {
     /// 手动压缩指定会话。
     pub async fn compact_session(
         &mut self,
         sid: &SessionId,
     ) -> Result<ManualCompactOutcome, HandlerError> {
-        if self.active_turns.contains_key(sid) {
+        if self.active_turn.is_some() {
             self.send_error(40900, "Cannot compact while a turn is running");
             return Err(HandlerError::CompactBlocked);
         }
 
         let session = self
             .runtime
-            .session_manager
+            .session_directory
             .open(sid.clone())
             .await
             .map_err(|e| HandlerError::Other(format!("open session {sid}: {e}")))?;
@@ -63,7 +42,11 @@ impl CommandHandler {
             .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
-        let tool_registry = self.ensure_tool_registry(sid, &state.working_dir).await;
+        let tool_registry = self
+            .runtime
+            .session_bootstrapper
+            .ensure_tool_registry(sid, &state.working_dir)
+            .await;
         let provider_messages = state.provider_messages();
         let tools = tool_registry.list_definitions();
 
@@ -145,8 +128,7 @@ impl CommandHandler {
         })?;
 
         // Manual compact has no agent loop, so emit CompactionStarted here.
-        self.event_bus
-            .emit(sid, None, EventPayload::CompactionStarted)
+        self.emit_session_event(sid, None, EventPayload::CompactionStarted)
             .await;
 
         let fp = hex_fingerprint(system_prompt.as_bytes());
@@ -164,8 +146,8 @@ impl CommandHandler {
             .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
-        self.event_bus
-            .send_notification(ClientNotification::SessionResumed {
+        self.event_publisher
+            .publish(ClientNotification::SessionResumed {
                 session_id: sid.clone().into_string(),
                 snapshot: session_snapshot(&state),
             });

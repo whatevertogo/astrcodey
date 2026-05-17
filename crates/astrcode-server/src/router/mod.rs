@@ -1,48 +1,39 @@
-//! 命令处理器 — 使用 ServerRuntime 处理客户端命令。
+//! 协议路由层。
 //!
-//! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
-//! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
+//! `CommandRouter` 是 transport / acp / http 进入服务的唯一入口。它解析
+//! `ClientCommand`，把会改变 session durable state 的命令转发给对应的
+//! `SessionActor`（通过 `SessionSupervisor`），自身只持有一个"前台 session"
+//! 这样的全局交互状态。
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use astrcode_core::{
-    event::{Event, EventPayload},
-    types::*,
-};
+use astrcode_core::{event::EventPayload, types::*};
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, SessionListItem},
 };
 use astrcode_tools::registry::ToolRegistry;
-use tokio::sync::mpsc;
 
 use crate::{
-    bootstrap::ServerRuntime, server_event_bus::ServerEventBus,
-    session_manager::SessionManagerError,
+    bootstrap::ServerRuntime,
+    events::ClientEventPublisher,
+    session::{SessionDirectoryError, SessionSupervisor, session_snapshot},
 };
 
-mod actor;
-mod compact;
-pub(crate) mod slash;
-pub(crate) mod snapshot;
-pub(in crate::handler) mod turn;
+mod handle;
 
-pub use actor::CommandHandle;
-use actor::CommandMessage;
-pub use compact::ManualCompactOutcome;
-#[cfg(test)]
-use snapshot::message_to_dto;
-use snapshot::session_snapshot;
-use turn::ActiveTurn;
+pub use handle::CommandRouterHandle;
 
-/// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。
+pub(crate) use crate::session::{ManualCompactOutcome, TurnCompletion};
+
+/// 用户输入提交结果。
 #[derive(Debug)]
 pub enum PromptSubmission {
     Accepted { turn_id: TurnId },
     Handled { message: String },
 }
 
-/// Handler 错误类型，替代原来的字符串匹配。
+/// 协议层错误。
 #[derive(Debug, thiserror::Error)]
 pub enum HandlerError {
     #[error("A turn is already running")]
@@ -60,32 +51,19 @@ pub enum HandlerError {
     #[error("Compaction skipped: {0}")]
     CompactionSkipped(String),
     #[error(transparent)]
-    SessionManager(#[from] SessionManagerError),
+    SessionDirectory(#[from] SessionDirectoryError),
     #[error("{0}")]
     Other(String),
 }
 
-pub(crate) use turn::TurnCompletion;
-
-/// 命令处理器，处理客户端命令并通过广播通道发送通知。
-///
-/// 维护当前活跃会话和活跃回合的状态，确保同一时间只有一个回合在运行。
-pub struct CommandHandler {
+/// 协议路由器：把 ClientCommand 转发给对应 SessionActor，自身只保留前台 session id。
+pub struct CommandRouter {
     runtime: Arc<ServerRuntime>,
-    /// 事件总线，统一处理持久化和广播
-    event_bus: Arc<ServerEventBus>,
-    /// 当前活跃的会话 ID
+    event_publisher: Arc<ClientEventPublisher>,
     active_session_id: Option<SessionId>,
-    /// 当前正在执行的回合，按 session 隔离
-    active_turns: HashMap<SessionId, ActiveTurn>,
-    /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
-    actor_tx: mpsc::UnboundedSender<CommandMessage>,
 }
 
-impl CommandHandler {
-    // ─── 命令路由 ────────────────────────────────────────────────────────
-
-    /// 处理客户端命令，路由到对应处理方法。
+impl CommandRouter {
     pub async fn handle(&mut self, cmd: ClientCommand) -> Result<(), HandlerError> {
         match cmd {
             ClientCommand::CreateSession { working_dir } => {
@@ -99,7 +77,7 @@ impl CommandHandler {
             ClientCommand::ListSessions => {
                 let items: Vec<_> = self
                     .runtime
-                    .session_manager
+                    .session_directory
                     .list_summaries()
                     .await
                     .unwrap_or_default()
@@ -112,10 +90,8 @@ impl CommandHandler {
                         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
                     })
                     .collect();
-                let _ = self
-                    .event_bus
-                    .broadcast_sender()
-                    .send(ClientNotification::SessionList { sessions: items });
+                self.event_publisher
+                    .publish(ClientNotification::SessionList { sessions: items });
             },
 
             ClientCommand::Abort => {
@@ -137,17 +113,21 @@ impl CommandHandler {
 
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
-                match self.runtime.session_manager.delete(&session_id).await {
+                let supervisor = self.runtime.session_supervisor.read().clone();
+                if let Some(supervisor) = supervisor {
+                    let _ = supervisor.abort(session_id.clone()).await;
+                }
+                match self.runtime.session_directory.delete(&session_id).await {
                     Ok(()) => {
-                        // 中止该会话的活跃回合并清理资源
-                        if let Some(mut turn) = self.active_turns.remove(&session_id) {
-                            if !turn.handle.is_finished() {
-                                turn.handle.abort();
-                            }
-                            turn.resolve_completion(turn::TurnCompletion::Aborted);
-                        }
+                        self.runtime
+                            .session_bootstrapper
+                            .remove_session(&session_id);
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
+                        }
+                        let supervisor = self.runtime.session_supervisor.read().clone();
+                        if let Some(supervisor) = supervisor {
+                            supervisor.remove(&session_id);
                         }
                     },
                     Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
@@ -162,11 +142,13 @@ impl CommandHandler {
                         return Ok(());
                     },
                 };
-                let infos = self.command_infos_for_working_dir(&working_dir).await;
-                let _ = self
-                    .event_bus
-                    .broadcast_sender()
-                    .send(ClientNotification::ExtensionCommandList { commands: infos });
+                let infos = crate::session::slash::command_infos_for_working_dir(
+                    &self.runtime.extension_runner,
+                    &working_dir,
+                )
+                .await;
+                self.event_publisher
+                    .publish(ClientNotification::ExtensionCommandList { commands: infos });
             },
 
             ClientCommand::ExecuteExtensionCommand {
@@ -174,23 +156,17 @@ impl CommandHandler {
                 arguments,
             } => {
                 let sid = self.ensure_session().await?;
-                let visible_text = if arguments.trim().is_empty() {
+                let combined_text = if arguments.trim().is_empty() {
                     format!("/{command_name}")
                 } else {
                     format!("/{command_name} {}", arguments.trim())
                 };
-                if let Err(error) = self
-                    .execute_slash_command_for_session(
-                        sid,
-                        slash::ParsedSlashCommand {
-                            name: command_name,
-                            arguments,
-                        },
-                        visible_text,
-                    )
-                    .await
-                {
-                    self.send_error(slash::command_error_code(&error), &error.to_string());
+                let supervisor = self.session_supervisor()?;
+                if let Err(error) = supervisor.submit_input(sid, combined_text).await {
+                    self.send_error(
+                        crate::session::slash::command_error_code(&error),
+                        &error.to_string(),
+                    );
                 }
             },
 
@@ -201,9 +177,6 @@ impl CommandHandler {
         Ok(())
     }
 
-    // ─── 会话生命周期 ──────────────────────────────────────────────────
-
-    /// 发送当前会话快照，用于客户端初次同步或恢复。
     async fn send_current_state(&mut self) {
         let Some(session_id) = self.active_session_id.clone() else {
             self.send_error(40400, "No active session");
@@ -216,21 +189,19 @@ impl CommandHandler {
             .await
         {
             Ok(state) => {
-                let snapshot = session_snapshot(&state);
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
+                self.event_publisher
+                    .publish(ClientNotification::SessionResumed {
                         session_id: session_id.into_string(),
-                        snapshot,
+                        snapshot: session_snapshot(&state),
                     });
             },
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
     }
 
-    /// 创建新会话，分发 SessionStart 事件，初始化工具表和 system prompt。
     pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
         tracing::info!(working_dir = %working_dir, "creating session");
-        let created = match self.runtime.session_manager.create(&working_dir).await {
+        let created = match self.runtime.session_directory.create(&working_dir).await {
             Ok(created) => created,
             Err(error) => {
                 tracing::error!(working_dir = %working_dir, error = %error, "create session failed");
@@ -242,7 +213,8 @@ impl CommandHandler {
         self.active_session_id = Some(sid.clone());
 
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
-        self.broadcast_event(created.start_event);
+        self.event_publisher
+            .publish(ClientNotification::Event(created.start_event));
 
         match self.initialize_session_prompt(&sid, &working_dir).await {
             Ok(()) => {
@@ -257,46 +229,75 @@ impl CommandHandler {
         }
     }
 
-    /// 提交用户输入，如有已有 Turn 运行则静默忽略（返回 OK）。
     async fn submit_prompt(&mut self, text: String) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
         match self.submit_input_for_session(sid, text).await {
             Ok(_) => Ok(()),
             Err(HandlerError::TurnAlreadyRunning) => Ok(()),
             Err(error) => {
-                self.send_error(slash::command_error_code(&error), &error.to_string());
+                self.send_error(
+                    crate::session::slash::command_error_code(&error),
+                    &error.to_string(),
+                );
                 Err(error)
             },
         }
     }
 
-    /// 向指定会话提交输入。斜杠命令在此被拦截并派发，普通输入启动新 Turn。
     pub async fn submit_input_for_session(
         &mut self,
         sid: SessionId,
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
-        if let Some(command) = slash::parse_slash_command(&text) {
-            return self
-                .execute_slash_command_for_session(sid, command, text)
-                .await;
-        }
-
-        self.start_turn_for_session(sid, text.clone(), text, None)
-            .await
-            .map(|turn_id| PromptSubmission::Accepted { turn_id })
+        self.session_supervisor()?.submit_input(sid, text).await
     }
 
-    /// 获取指定会话的可用命令列表。
+    async fn abort_active_turn(&mut self) -> Result<(), HandlerError> {
+        let Some(sid) = self.active_session_id.clone() else {
+            self.send_error(40400, "No active turn");
+            return Ok(());
+        };
+        self.session_supervisor()?.abort(sid).await
+    }
+
+    async fn compact_active_session(&mut self) -> Result<(), HandlerError> {
+        let Some(sid) = self.active_session_id.clone() else {
+            self.send_error(40400, "No active session");
+            return Ok(());
+        };
+        match self.session_supervisor()?.compact(sid).await {
+            Ok(ManualCompactOutcome::Compacted { .. }) => Ok(()),
+            Ok(ManualCompactOutcome::Skipped { message }) => {
+                self.send_error(40000, &message);
+                Ok(())
+            },
+            Err(error) => {
+                self.send_error(-32603, &error.to_string());
+                Err(error)
+            },
+        }
+    }
+
+    fn session_supervisor(&self) -> Result<Arc<SessionSupervisor>, HandlerError> {
+        self.runtime
+            .session_supervisor
+            .read()
+            .clone()
+            .ok_or_else(|| HandlerError::Other("session supervisor not bound".into()))
+    }
+
     pub async fn command_infos_for_session(
         &self,
         sid: &SessionId,
     ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
-        let state = self.runtime.session_manager.read_model(sid).await?;
-        Ok(self.command_infos_for_working_dir(&state.working_dir).await)
+        let state = self.runtime.session_directory.read_model(sid).await?;
+        Ok(crate::session::slash::command_infos_for_working_dir(
+            &self.runtime.extension_runner,
+            &state.working_dir,
+        )
+        .await)
     }
 
-    /// 获取当前会话的工作目录，无活跃会话则返回当前目录。
     async fn active_session_working_dir(&self) -> Result<String, String> {
         let Some(sid) = self.active_session_id.clone() else {
             return Ok(std::env::current_dir()
@@ -305,22 +306,33 @@ impl CommandHandler {
                 .into_owned());
         };
         self.runtime
-            .session_manager
+            .session_directory
             .read_model(&sid)
             .await
             .map(|state| state.working_dir)
             .map_err(|e| format!("read session {sid}: {e}"))
     }
 
-    /// 恢复或切换到指定会话，修复可能的遗留状态后发送快照。
     async fn resume_session(&mut self, session_id: SessionId) {
-        match self.runtime.session_manager.open(session_id.clone()).await {
+        match self
+            .runtime
+            .session_directory
+            .open(session_id.clone())
+            .await
+        {
             Ok(_session) => {
-                if let Err(e) = self.repair_stale_pending_tool_calls(&session_id).await {
+                let supervisor = match self.session_supervisor() {
+                    Ok(supervisor) => supervisor,
+                    Err(error) => {
+                        self.send_error(-32603, &error.to_string());
+                        return;
+                    },
+                };
+                if let Err(e) = supervisor.repair(session_id.clone()).await {
                     self.send_error(-32603, &e);
                     return;
                 }
-                let state = match self.runtime.session_manager.read_model(&session_id).await {
+                let state = match self.runtime.session_directory.read_model(&session_id).await {
                     Ok(state) => state,
                     Err(e) => {
                         self.send_error(40401, &format!("Session not found: {e}"));
@@ -331,7 +343,11 @@ impl CommandHandler {
                 let needs_prompt = state.system_prompt.is_none();
                 let snapshot = session_snapshot(&state);
 
-                let tool_registry = self.ensure_tool_registry(&session_id, &working_dir).await;
+                let tool_registry = self
+                    .runtime
+                    .session_bootstrapper
+                    .ensure_tool_registry(&session_id, &working_dir)
+                    .await;
                 if needs_prompt {
                     if let Err(e) = self
                         .configure_session_prompt(&session_id, &working_dir, &tool_registry, None)
@@ -342,8 +358,8 @@ impl CommandHandler {
                     }
                 }
                 self.active_session_id = Some(session_id.clone());
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
+                self.event_publisher
+                    .publish(ClientNotification::SessionResumed {
                         session_id: session_id.into_string(),
                         snapshot,
                     });
@@ -352,9 +368,6 @@ impl CommandHandler {
         }
     }
 
-    // ─── 工具表与提示词配置 ────────────────────────────────────────────
-
-    /// 确保存在活跃会话，无则自动创建。
     async fn ensure_session(&mut self) -> Result<SessionId, HandlerError> {
         if let Some(ref sid) = self.active_session_id {
             return Ok(sid.clone());
@@ -363,45 +376,32 @@ impl CommandHandler {
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
-        let created = self.runtime.session_manager.create(&wd).await?;
+        let created = self.runtime.session_directory.create(&wd).await?;
         let sid = created.session.id().clone();
         self.active_session_id = Some(sid.clone());
-        self.broadcast_event(created.start_event);
+        self.event_publisher
+            .publish(ClientNotification::Event(created.start_event));
         self.initialize_session_prompt(&sid, &wd)
             .await
             .map_err(HandlerError::Other)?;
         Ok(sid)
     }
 
-    /// 初始化会话的 system prompt：加载工具表和提示词文件，生成最终 prompt。
     async fn initialize_session_prompt(
         &mut self,
         session_id: &SessionId,
         working_dir: &str,
     ) -> Result<(), String> {
-        let (_, event) = self
+        let (_, payload) = self
             .runtime
-            .session_manager
+            .session_bootstrapper
             .initialize_system_prompt(session_id, working_dir, None)
             .await
             .map_err(|error| error.to_string())?;
-        self.broadcast_event(event);
+        self.emit_via_actor(session_id, None, payload).await;
         Ok(())
     }
 
-    /// 获取会话的工具表，不存在则刷新。
-    async fn ensure_tool_registry(
-        &mut self,
-        session_id: &SessionId,
-        working_dir: &str,
-    ) -> Arc<ToolRegistry> {
-        self.runtime
-            .session_manager
-            .ensure_tool_registry(session_id, working_dir)
-            .await
-    }
-
-    /// 配置会话的 system prompt，包含工具描述和额外提示。
     async fn configure_session_prompt(
         &self,
         session_id: &SessionId,
@@ -409,32 +409,44 @@ impl CommandHandler {
         tool_registry: &ToolRegistry,
         extra_system_prompt: Option<&str>,
     ) -> Result<String, String> {
-        let event = self
+        let payload = self
             .runtime
-            .session_manager
+            .session_bootstrapper
             .configure_system_prompt(session_id, working_dir, tool_registry, extra_system_prompt)
             .await
             .map_err(|error| error.to_string())?;
-        self.broadcast_event(event.clone());
-        let EventPayload::SystemPromptConfigured { text, .. } = event.payload else {
+        self.emit_via_actor(session_id, None, payload.clone()).await;
+        let EventPayload::SystemPromptConfigured { text, .. } = payload else {
             return Err("expected system prompt event".into());
         };
         Ok(text)
     }
 
-    // ─── 事件记录与内部辅助 ──────────────────────────────────────────
-
-    fn broadcast_event(&self, event: Event) {
-        self.event_bus
-            .send_notification(ClientNotification::Event(event));
-    }
-
-    /// 发送错误通知给客户端。
     fn send_error(&self, code: i32, message: &str) {
-        self.event_bus.send_notification(ClientNotification::Error {
+        self.event_publisher.publish(ClientNotification::Error {
             code,
             message: message.into(),
         });
+    }
+
+    /// Router 不直接写 durable event；统一通过 SessionActor 持久化和广播。
+    async fn emit_via_actor(
+        &self,
+        session_id: &SessionId,
+        turn_id: Option<TurnId>,
+        payload: EventPayload,
+    ) {
+        let supervisor = self.runtime.session_supervisor.read().clone();
+        if let Some(supervisor) = supervisor {
+            if let Err(error) = supervisor
+                .emit_event(session_id.clone(), turn_id, payload)
+                .await
+            {
+                tracing::error!(session_id = %session_id, %error, "failed to forward event to session actor");
+            }
+        } else {
+            tracing::error!(session_id = %session_id, "session supervisor not bound; dropping event");
+        }
     }
 }
 

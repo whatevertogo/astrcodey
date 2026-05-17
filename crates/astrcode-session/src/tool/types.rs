@@ -10,7 +10,7 @@ use astrcode_core::{
 };
 use tokio::sync::mpsc;
 
-use super::turn_context::AgentSignal;
+use crate::turn::context::AgentSignal;
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 pub struct PendingToolCall {

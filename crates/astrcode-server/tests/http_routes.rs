@@ -757,20 +757,28 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         llm_provider,
     ));
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let session_manager = Arc::new(astrcode_server::session_manager::SessionManager::new(
+    let runtime_registry = Arc::new(astrcode_session::SessionRuntimeRegistry::default());
+    let session_directory = Arc::new(astrcode_server::session::SessionDirectory::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
         Arc::clone(&extension_runner),
-        Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
+        Arc::clone(&runtime_registry),
         Default::default(),
+    ));
+    let session_bootstrapper = Arc::new(astrcode_server::session::SessionBootstrapper::new(
+        Arc::clone(&config),
+        Arc::clone(&extension_runner),
+        runtime_registry,
     ));
     Arc::new(ServerRuntime {
         event_store,
         config_manager: config,
         context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
         background_tasks: Default::default(),
-        session_manager,
+        session_directory,
+        session_bootstrapper,
         extension_runner,
+        session_supervisor: Arc::new(parking_lot::RwLock::new(None)),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }

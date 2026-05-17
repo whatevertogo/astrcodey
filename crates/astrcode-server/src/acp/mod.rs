@@ -1,7 +1,7 @@
 //! ACP (Agent Client Protocol) server adapter.
 //!
 //! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's internal
-//! CommandHandle / broadcast event architecture. This module is purely a
+//! CommandRouterHandle / broadcast event architecture. This module is purely a
 //! DTO-mapping boundary — no session-runtime types leak through.
 
 mod events;
@@ -23,7 +23,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
     bootstrap::ServerRuntime,
-    handler::{CommandHandle, HandlerError, TurnCompletion},
+    router::{CommandRouterHandle, HandlerError, TurnCompletion},
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.
@@ -32,11 +32,8 @@ use crate::{
 /// error occurs.
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
     let (event_tx, _) = broadcast::channel(256);
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
-        runtime.event_store.clone(),
-        event_tx,
-    ));
-    let command_handle = CommandHandle::spawn(runtime, Arc::clone(&event_bus));
+    let event_publisher = Arc::new(crate::events::ClientEventPublisher::new(event_tx));
+    let command_handle = CommandRouterHandle::spawn(runtime, Arc::clone(&event_publisher));
 
     Agent
         .builder()
@@ -81,12 +78,12 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         .on_receive_request(
             {
                 let command_handle = command_handle.clone();
-                let event_bus = Arc::clone(&event_bus);
+                let event_publisher = Arc::clone(&event_publisher);
 
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    match handle_prompt(req, &command_handle, &event_bus, &cx).await {
+                    match handle_prompt(req, &command_handle, &event_publisher, &cx).await {
                         Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
                         Err(error) => responder.respond_with_error(error),
                     }
@@ -124,13 +121,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
 
 async fn handle_prompt(
     req: PromptRequest,
-    command_handle: &CommandHandle,
-    event_bus: &Arc<crate::server_event_bus::ServerEventBus>,
+    command_handle: &CommandRouterHandle,
+    event_publisher: &Arc<crate::events::ClientEventPublisher>,
     cx: &ConnectionTo<Client>,
 ) -> Result<StopReason, Error> {
     let session_id = SessionId::from(req.session_id.to_string());
     let text = prompt_to_text(&req.prompt)?;
-    let mut event_rx = event_bus.broadcast_sender().subscribe();
+    let mut event_rx = event_publisher.sender().subscribe();
 
     let (turn_id, mut completion_rx) = command_handle
         .submit_prompt_with_completion(session_id.clone(), text)
@@ -315,7 +312,7 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
         HandlerError::NoActiveTurn
         | HandlerError::CompactBlocked
         | HandlerError::CompactionSkipped(_)
-        | HandlerError::SessionManager(_)
+        | HandlerError::SessionDirectory(_)
         | HandlerError::Other(_) => Error::internal_error().data(error.to_string()),
     }
 }

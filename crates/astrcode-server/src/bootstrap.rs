@@ -13,7 +13,10 @@ use astrcode_storage::config_store::FileConfigStore;
 use parking_lot::Mutex;
 
 pub use crate::config_manager::ConfigManager;
-use crate::{session_manager::SessionManager, session_spawner::ServerSessionSpawner};
+use crate::{
+    coordinator::AgentSessionCoordinator,
+    session::{SessionBootstrapper, SessionDirectory, SessionSupervisor},
+};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -31,9 +34,13 @@ pub struct ServerRuntime {
     /// 跨回合共享的后台任务管理器。
     pub background_tasks: Arc<Mutex<BackgroundTaskManager>>,
     /// server 侧的 session 生命周期门面。
-    pub session_manager: Arc<SessionManager>,
+    pub session_directory: Arc<SessionDirectory>,
+    /// session 执行前准备服务。
+    pub session_bootstrapper: Arc<SessionBootstrapper>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
+    /// transport 启动后绑定的 per-session actor 监督器。
+    pub session_supervisor: Arc<parking_lot::RwLock<Option<Arc<SessionSupervisor>>>>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -57,7 +64,7 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 /// 使用指定选项引导服务器运行时。
 ///
 /// 这个函数只负责“把长期共享服务装起来”，不会为某个会话创建工具表。
-/// 工具表现在是 session 级快照，由 `SessionManager` 在创建/恢复 session 时
+/// 工具表现在是 session 级快照，由 `SessionDirectory` 在创建/恢复 session 时
 /// 按对应 working_dir 单独构建。
 ///
 /// 启动顺序：
@@ -107,7 +114,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // 5. 构建 session manager 和事件存储。
+    // 5. 构建 session directory 和事件存储。
     //
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
@@ -148,25 +155,30 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!("Extension load error: {err}");
     }
 
-    let session_manager = Arc::new(SessionManager::new(
+    let session_directory = Arc::new(SessionDirectory::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
         Arc::clone(&extension_runner),
-        session_runtime_registry,
+        Arc::clone(&session_runtime_registry),
         Arc::clone(&background_tasks),
+    ));
+    let session_bootstrapper = Arc::new(SessionBootstrapper::new(
+        Arc::clone(&config_manager),
+        Arc::clone(&extension_runner),
+        session_runtime_registry,
     ));
 
     // 7. 给扩展运行时绑定”创建子会话”的宿主能力。
     //
     // 扩展本身不能直接拿到 EventStore；当扩展工具返回 RunSession 声明式结果时，
-    // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
+    // 绑定 child session 编排器，使扩展工具可通过 RunSession 声明式结果创建子 session。
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
-    extension_runner.bind(Arc::new(ServerSessionSpawner {
-        config: Arc::clone(&config_manager),
-        context_assembler: Arc::clone(&context_assembler),
+    let session_supervisor = Arc::new(parking_lot::RwLock::new(None));
+    extension_runner.bind(Arc::new(AgentSessionCoordinator {
         background_tasks: Arc::clone(&background_tasks),
-        session_manager: Arc::clone(&session_manager),
-        extension_runner: Arc::clone(&extension_runner),
+        session_directory: Arc::clone(&session_directory),
+        session_bootstrapper: Arc::clone(&session_bootstrapper),
+        session_supervisor: Arc::clone(&session_supervisor),
     }));
 
     // 8. 返回运行时容器。
@@ -179,8 +191,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         config_manager,
         context_assembler,
         background_tasks,
-        session_manager,
+        session_directory,
+        session_bootstrapper,
         extension_runner,
+        session_supervisor,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }

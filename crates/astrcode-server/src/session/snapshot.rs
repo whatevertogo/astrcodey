@@ -18,7 +18,7 @@ pub(crate) fn agent_status_to_dto(status: AgentSessionStatus) -> AgentSessionSta
 }
 
 /// 构建会话快照 DTO，用于客户端同步。
-pub(super) fn session_snapshot(
+pub(crate) fn session_snapshot(
     state: &astrcode_core::storage::SessionReadModel,
 ) -> SessionSnapshot {
     SessionSnapshot {
@@ -41,7 +41,7 @@ pub(super) fn session_snapshot(
 }
 
 /// 将 LLM 消息转换为传输层 DTO。
-pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
+pub(crate) fn message_to_dto(message: &LlmMessage) -> MessageDto {
     MessageDto {
         role: message.role.as_str().to_string(),
         content: message

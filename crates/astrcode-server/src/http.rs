@@ -1,6 +1,6 @@
 //! Axum HTTP/SSE 入口。
 //!
-//! 这层只做 wire 适配：命令统一进入 [`CommandHandler`]，读接口从 storage
+//! 这层只做 wire 适配：命令统一进入 [`CommandRouter`]，读接口从 storage
 //! read model 映射到 `astrcode_protocol::http` DTO。
 
 use std::{
@@ -48,7 +48,8 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::{
     bootstrap::ServerRuntime,
-    handler::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, snapshot},
+    router::{CommandRouter, HandlerError, ManualCompactOutcome, PromptSubmission},
+    session::snapshot,
 };
 
 pub const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
@@ -74,8 +75,8 @@ impl From<getrandom::Error> for HttpServerError {
 #[derive(Clone)]
 pub struct HttpState {
     runtime: Arc<ServerRuntime>,
-    handler: crate::handler::CommandHandle,
-    event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+    handler: crate::router::CommandRouterHandle,
+    event_publisher: Arc<crate::events::ClientEventPublisher>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,15 +99,12 @@ pub fn router(
     event_tx: broadcast::Sender<ClientNotification>,
 ) -> Result<(Router, String), HttpServerError> {
     let auth_token = configured_auth_token()?;
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
-        runtime.event_store.clone(),
-        event_tx.clone(),
-    ));
-    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_bus));
+    let event_publisher = Arc::new(crate::events::ClientEventPublisher::new(event_tx.clone()));
+    let handler = CommandRouter::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_publisher));
     let state = HttpState {
         runtime,
         handler,
-        event_bus,
+        event_publisher,
     };
     let expected_bearer = format!("Bearer {auth_token}");
 
@@ -198,7 +196,7 @@ async fn create_session(
 }
 
 async fn list_sessions(State(state): State<HttpState>) -> Response {
-    match state.runtime.session_manager.list_summaries().await {
+    match state.runtime.session_directory.list_summaries().await {
         Ok(summaries) => Json(SessionListResponseDto {
             sessions: summaries.into_iter().map(summary_to_dto).collect(),
         })
@@ -212,7 +210,12 @@ async fn conversation_snapshot(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.runtime.session_manager.read_model(&session_id).await {
+    match state
+        .runtime
+        .session_directory
+        .read_model(&session_id)
+        .await
+    {
         Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }
@@ -347,7 +350,7 @@ async fn delete_project(
     State(state): State<HttpState>,
     Query(params): Query<DeleteProjectParams>,
 ) -> Response {
-    match state.runtime.session_manager.list_summaries().await {
+    match state.runtime.session_directory.list_summaries().await {
         Ok(summaries) => {
             let matching: Vec<_> = summaries
                 .into_iter()
@@ -561,7 +564,7 @@ async fn session_stream(
     // Validate session exists before opening the stream.
     if http_state
         .runtime
-        .session_manager
+        .session_directory
         .read_model(&session_id)
         .await
         .is_err()
@@ -573,12 +576,12 @@ async fn session_stream(
         );
     }
 
-    let rx = http_state.event_bus.broadcast_sender().subscribe();
+    let rx = http_state.event_publisher.sender().subscribe();
     let (missed_events, replay_error) = match query.cursor.as_ref() {
         Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
         Some(cursor) => match http_state
             .runtime
-            .session_manager
+            .session_directory
             .replay_from(&session_id, &Cursor::from(cursor.as_str()))
             .await
         {
@@ -1274,7 +1277,7 @@ fn visible_message_text(message: &LlmMessage) -> String {
         .iter()
         .filter_map(|content| match content {
             LlmContent::ToolCall { .. } => None,
-            other => Some(crate::handler::snapshot::content_to_text(other)),
+            other => Some(crate::session::snapshot::content_to_text(other)),
         })
         .collect::<Vec<_>>()
         .join("")
@@ -1289,7 +1292,7 @@ async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
 }
 
 async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
-    match runtime.session_manager.latest_cursor(session_id).await {
+    match runtime.session_directory.latest_cursor(session_id).await {
         Ok(Some(cursor)) => cursor,
         Ok(None) => "0".to_string(),
         Err(error) => {

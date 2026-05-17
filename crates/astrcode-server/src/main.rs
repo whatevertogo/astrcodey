@@ -15,7 +15,7 @@ use astrcode_protocol::{
     version::negotiate_version,
 };
 use astrcode_server::{
-    handler::CommandHandler,
+    router::CommandRouter,
     transport::{ServerTransport, StdioTransport, write_error_response, write_initialize_response},
 };
 
@@ -62,11 +62,10 @@ async fn main() {
 
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
 
-    let event_bus = Arc::new(astrcode_server::server_event_bus::ServerEventBus::new(
-        runtime.event_store.clone(),
+    let event_publisher = Arc::new(astrcode_server::events::ClientEventPublisher::new(
         event_tx.clone(),
     ));
-    let handler = CommandHandler::spawn_actor(runtime, Arc::clone(&event_bus));
+    let handler = CommandRouter::spawn_actor(runtime, Arc::clone(&event_publisher));
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();

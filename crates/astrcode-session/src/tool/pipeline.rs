@@ -19,17 +19,19 @@ use astrcode_support::tool_results::{
 use astrcode_tools::registry::ToolRegistry;
 use tokio::{sync::mpsc, task::JoinSet};
 
-use super::{
+use crate::{
     json_repair::parse_and_repair_json,
-    mcp_visibility::{TOOL_SEARCH_TOOL_NAME, discovered_mcp_tool_names, tool_is_visible},
-    tool_exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, execute_tool_call},
-    tool_types::{
-        CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
-        PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
+    session::Session,
+    tool::{
+        exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, execute_tool_call},
+        mcp_visibility::{TOOL_SEARCH_TOOL_NAME, discovered_mcp_tool_names, tool_is_visible},
+        types::{
+            CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
+            PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
+        },
     },
-    turn_context::{AgentSignal, SharedTurnContext, TurnError, send_event},
+    turn::context::{AgentSignal, SharedTurnContext, TurnError, send_event},
 };
-use crate::session::Session;
 
 // TODO:Config可配置
 const MAX_PARALLEL_TOOL_CALLS: usize = 5;

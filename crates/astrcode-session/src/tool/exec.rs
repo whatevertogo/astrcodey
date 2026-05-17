@@ -9,7 +9,8 @@ use astrcode_core::{
     storage::ToolResultArtifactReader,
     tool::{
         BackgroundPolicy, BackgroundTaskReader, FileObservation, FileObservationStore,
-        ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolResult,
+        SessionMessenger, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolResult,
     },
     types::*,
 };
@@ -17,12 +18,12 @@ use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use super::{
+use crate::{
     background::{
         BackgroundTaskCompletion, BackgroundTaskManager, backgrounded_placeholder_result,
     },
-    tool_types::ExecutableToolCall,
-    turn_context::{AgentSignal, send_event},
+    tool::types::ExecutableToolCall,
+    turn::context::{AgentSignal, send_event},
 };
 
 // ─── Runtime context types ──────────────────────────────────────────────
@@ -40,6 +41,8 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
+    /// 跨 session 消息发送能力。
+    pub session_messenger: Option<Arc<dyn SessionMessenger>>,
 }
 
 pub(crate) struct ToolCallRuntimeContext {
@@ -196,6 +199,7 @@ async fn execute_tool_call_blocking(
             tool_result_reader: runtime.tool_result_reader,
             background_task_reader: runtime.capabilities.background_task_reader,
             file_observation_store: runtime.capabilities.file_observation_store,
+            session_messenger: runtime.capabilities.session_messenger,
         },
     };
 
@@ -270,6 +274,7 @@ async fn execute_tool_call_with_background(
             tool_result_reader: runtime.tool_result_reader.clone(),
             background_task_reader: runtime.capabilities.background_task_reader.clone(),
             file_observation_store: runtime.capabilities.file_observation_store.clone(),
+            session_messenger: runtime.capabilities.session_messenger.clone(),
         },
     };
 

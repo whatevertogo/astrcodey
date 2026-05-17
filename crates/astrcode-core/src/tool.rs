@@ -205,6 +205,15 @@ pub trait FileObservationStore: Send + Sync {
     fn load(&self, path: &str) -> Option<FileObservation>;
 }
 
+/// 可由工具使用的最小 session 消息发送能力。
+///
+/// 发送方身份由宿主绑定，工具只能把普通文本消息投递给目标 session，
+/// 不能直接消费或修改目标 session 的 mailbox。
+pub trait SessionMessenger: Send + Sync {
+    /// 向目标 session 投递一条待处理消息。
+    fn send(&self, target: &SessionId, message: String) -> Result<(), String>;
+}
+
 /// 工具调用时按需注入的会话能力。
 ///
 /// 大多数工具不需要这些能力；`Default::default()` 产生全部为 `None` 的空集。
@@ -221,6 +230,8 @@ pub struct ToolCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
+    /// 当前 session 可用的跨 session 消息发送能力。
+    pub session_messenger: Option<Arc<dyn SessionMessenger>>,
 }
 
 /// 每次工具调用时传递的上下文。
@@ -299,6 +310,10 @@ impl std::fmt::Debug for ToolCapabilities {
             .field(
                 "background_task_reader",
                 &self.background_task_reader.as_ref().map(|_| "<bg_reader>"),
+            )
+            .field(
+                "session_messenger",
+                &self.session_messenger.as_ref().map(|_| "<messenger>"),
             )
             .finish()
     }

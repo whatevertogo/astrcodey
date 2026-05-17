@@ -105,7 +105,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话成功完成。
     ///
-    /// 由 `ServerSessionSpawner` 在子会话 agent turn 正常结束后追加到父会话。
+    /// 由 `AgentSessionCoordinator` 通过父会话 actor 写入。
     AgentSessionCompleted {
         /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。
         child_session_id: SessionId,
@@ -117,7 +117,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话失败。
     ///
-    /// 由 `ServerSessionSpawner` 在子会话 agent turn 出错后追加到父会话。
+    /// 由 `AgentSessionCoordinator` 通过父会话 actor 写入。
     AgentSessionFailed {
         /// 初始子会话 ID。
         child_session_id: SessionId,

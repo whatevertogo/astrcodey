@@ -16,7 +16,7 @@ use astrcode_core::{
     types::*,
 };
 
-use crate::payload::{compact_boundary_payload, session_continued_from_compaction_payload};
+use crate::compact::{compact_boundary_payload, session_continued_from_compaction_payload};
 
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
@@ -42,23 +42,6 @@ impl Session {
             .create_session(&sid, working_dir, model_id, parent)
             .await?;
         Ok(Self { id: sid, store })
-    }
-
-    /// 从当前会话派生子会话，共享同一 EventStore。
-    ///
-    /// 子会话通过 `parent_session_id` 引用父会话，支持后续 fork/branch/replay。
-    // TODO: fork 目前无调用方，待会话树功能实现后启用。
-    #[allow(dead_code)]
-    pub async fn fork(&self, working_dir: &str) -> Result<Self, SessionError> {
-        let sid = new_session_id();
-        let model_id = self.read_model().await?.model_id;
-        self.store
-            .create_session(&sid, working_dir, &model_id, Some(&self.id))
-            .await?;
-        Ok(Self {
-            id: sid,
-            store: self.store.clone(),
-        })
     }
 
     /// 从磁盘恢复已有会话。
