@@ -167,12 +167,11 @@ pub async fn run_http_server(
         &auth_token[..4],
         &auth_token[auth_token.len() - 4..]
     );
-    // 避免 Nagle 把末尾的 turn_completed 事件推迟 ~40-200ms。SSE 的小事件场景必须显式开 TCP_NODELAY。
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await?
-        .tap_io(|stream| {
-            let _ = stream.set_nodelay(true);
-        });
+    // 避免 Nagle 把末尾的 turn_completed 事件推迟 ~40-200ms。SSE 的小事件场景必须显式开
+    // TCP_NODELAY。
+    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|stream| {
+        let _ = stream.set_nodelay(true);
+    });
     tracing::info!("HTTP server ready at http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
