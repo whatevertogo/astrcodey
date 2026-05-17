@@ -237,6 +237,19 @@ impl Session {
         extra_system_prompt: Option<&str>,
         stored_fingerprint: Option<&str>,
     ) -> Result<bool, SessionError> {
+        self.refresh_prompt_with_state(working_dir, extra_system_prompt, stored_fingerprint, None)
+            .await
+    }
+
+    /// `refresh_prompt` 的内部版本，调用方可传入已读取的 `SessionReadModel` 避免内部
+    /// 在 `extra=None` 路径再读一次 projection。`Session::submit` 走这个入口。
+    pub(crate) async fn refresh_prompt_with_state(
+        &self,
+        working_dir: &str,
+        extra_system_prompt: Option<&str>,
+        stored_fingerprint: Option<&str>,
+        cached_state: Option<&SessionReadModel>,
+    ) -> Result<bool, SessionError> {
         let caps = &self.caps;
         let runtime = &self.runtime;
 
@@ -246,11 +259,14 @@ impl Session {
             Some(s) => Some(s.to_string()),
             None => match runtime_extra {
                 Some(s) => Some(s),
-                None => self
-                    .read_model()
-                    .await
-                    .map(|m| m.extra_system_prompt)
-                    .unwrap_or_default(),
+                None => match cached_state {
+                    Some(state) => state.extra_system_prompt.clone(),
+                    None => self
+                        .read_model()
+                        .await
+                        .map(|m| m.extra_system_prompt)
+                        .unwrap_or_default(),
+                },
             },
         };
 
@@ -350,10 +366,15 @@ impl Session {
         }
 
         // system prompt：fingerprint 命中时跳过。`None` extra 表示保留——refresh_prompt
-        // 内部会优先读 runtime，runtime 空时从 projection 恢复（处理跨进程重启）。
+        // 内部用 cached_state 解析当前值，避免再读一次 projection。
         let stored_fingerprint = pre_state.system_prompt_fingerprint.clone();
         let prompt_changed = match self
-            .refresh_prompt(&working_dir, None, stored_fingerprint.as_deref())
+            .refresh_prompt_with_state(
+                &working_dir,
+                None,
+                stored_fingerprint.as_deref(),
+                Some(&pre_state),
+            )
             .await
         {
             Ok(changed) => changed,

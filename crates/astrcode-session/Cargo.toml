@@ -17,3 +17,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+astrcode-ai = { path = "../astrcode-ai" }
+astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
