@@ -49,6 +49,11 @@ impl ServerEventBus {
     /// 创建一个长生命周期的 forwarder task，session 的 broadcast sender drop
     /// 时 task 自然结束。Session 删除（registry 移除）后调用方应调 `detach`
     /// 释放 sid 占位，否则后续同 sid 重建的 session 不会被重新 attach。
+    ///
+    /// **Lag 处理**：session 内 broadcast 的 capacity 是有限的；一旦本桥的接收
+    /// 端跟不上，被丢弃的事件无法补回。此时本 forwarder 主动从 EventStore
+    /// 重新拉一份 `SessionResumed` 快照推到下游，触发客户端 rehydrate，避免
+    /// UI 与持久状态出现不可恢复的偏差。仅在事件被丢失时才做这次快照。
     pub fn attach(&self, session: &Session) {
         let session_id = session.id().clone();
         if !self.attached.lock().insert(session_id.clone()) {
@@ -56,6 +61,7 @@ impl ServerEventBus {
         }
         let mut rx = session.subscribe();
         let tx = self.tx.clone();
+        let store = Arc::clone(&self.store);
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -67,8 +73,9 @@ impl ServerEventBus {
                         tracing::warn!(
                             session_id = %session_id,
                             skipped = n,
-                            "ServerEventBus session forwarder lagged, dropped events",
+                            "ServerEventBus session forwarder lagged, broadcasting rehydrate snapshot",
                         );
+                        emit_rehydrate_snapshot(&store, &tx, &session_id).await;
                     },
                 }
             }
@@ -85,5 +92,32 @@ impl ServerEventBus {
         if let Err(e) = self.store.sync_durable_events(session_id).await {
             tracing::error!(session_id = %session_id, error = %e, "failed to sync durable events");
         }
+    }
+}
+
+/// Lag 后用 EventStore 重建快照并以 `SessionResumed` 推下去，让客户端 rehydrate。
+///
+/// 失败（session 已删除、存储瞬时错误）时仅记日志：此处属于「补救路径」，再失败
+/// 就只能让上层超时/重连兜底，不应反复重试以免风暴。
+async fn emit_rehydrate_snapshot(
+    store: &Arc<dyn EventStore>,
+    tx: &broadcast::Sender<ClientNotification>,
+    session_id: &SessionId,
+) {
+    match store.session_read_model(session_id).await {
+        Ok(state) => {
+            let snapshot = crate::handler::snapshot::session_snapshot(&state);
+            let _ = tx.send(ClientNotification::SessionResumed {
+                session_id: session_id.to_string(),
+                snapshot,
+            });
+        },
+        Err(e) => {
+            tracing::error!(
+                session_id = %session_id,
+                error = %e,
+                "failed to build rehydrate snapshot after lag",
+            );
+        },
     }
 }

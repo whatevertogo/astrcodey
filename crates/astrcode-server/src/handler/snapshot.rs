@@ -18,7 +18,7 @@ pub(crate) fn agent_status_to_dto(status: AgentSessionStatus) -> AgentSessionSta
 }
 
 /// 构建会话快照 DTO，用于客户端同步。
-pub(super) fn session_snapshot(
+pub(crate) fn session_snapshot(
     state: &astrcode_core::storage::SessionReadModel,
 ) -> SessionSnapshot {
     SessionSnapshot {

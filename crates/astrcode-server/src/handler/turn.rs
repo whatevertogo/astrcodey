@@ -19,7 +19,7 @@ use tokio::{
 };
 
 use super::{CommandHandler, CommandMessage, HandlerError};
-use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
+use crate::server_event_bus::ServerEventBus;
 
 /// Agent Turn 的输入参数，用于启动后台任务。
 pub(in crate::handler) struct AgentTurnInput {
@@ -138,8 +138,7 @@ impl CommandHandler {
 
     /// 在后台启动 Agent Turn 任务。
     pub(in crate::handler) fn spawn_agent_turn(&self, input: AgentTurnInput) -> JoinHandle<()> {
-        let runtime = self.runtime.clone();
-        tokio::spawn(run_agent_turn_task(runtime, input))
+        tokio::spawn(run_agent_turn_task(input))
     }
 
     /// 清理已完成的 Agent Turn（终态事件已由 turn task 广播，此处仅做 map 清理）。
@@ -327,7 +326,7 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
 /// 1. 调用 `Session::submit` 启动 turn；
 /// 2. 等待 `TurnHandle::wait` 拿到 `RunTurnResult`；
 /// 3. 写 `TurnCompleted` / `TurnFailed` 事件并通知 actor 清理。
-async fn run_agent_turn_task(_runtime: Arc<ServerRuntime>, input: AgentTurnInput) {
+async fn run_agent_turn_task(input: AgentTurnInput) {
     let AgentTurnInput {
         turn_id,
         session,

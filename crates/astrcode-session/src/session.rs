@@ -198,8 +198,9 @@ impl Session {
 
     /// 重建本 session 的工具表快照并写入 runtime。
     ///
-    /// 当前 `Session` 始终持有 runtime，因此此方法会直接更新 runtime
-    /// 中保存的工具表快照，不依赖额外的 “full” 构造入口，也不会因此 panic。
+    /// `Session` 总是带 runtime（由构造函数参数强制），所以本函数不会 panic。
+    /// 调用时机：新建/恢复 session、扩展加载状态变化、运行时检测到 `tool_registry`
+    /// 为空（首次 submit / resume）。
     pub async fn refresh_tools(
         &self,
         working_dir: &str,
@@ -243,6 +244,11 @@ impl Session {
 
     /// `refresh_prompt` 的内部版本，调用方可传入已读取的 `SessionReadModel` 避免内部
     /// 在 `extra=None` 路径再读一次 projection。`Session::submit` 走这个入口。
+    ///
+    /// 错误处理：`extra=None` 且 runtime/cached_state 都没有值时需要从 store 拉
+    /// projection；如果存储层报错，本函数 **必须** 把错误向上传，而不是把 extra
+    /// 视为 None 继续——否则一次瞬时存储抖动会被记成「extra 真的没了」并写入新的
+    /// `SystemPromptConfigured` 事件覆盖原值。
     pub(crate) async fn refresh_prompt_with_state(
         &self,
         working_dir: &str,
@@ -253,21 +259,29 @@ impl Session {
         let caps = &self.caps;
         let runtime = &self.runtime;
 
+        // 入口规范化：trim 后空串视为 None。后续整段按 Option<String> 处理，
+        // 避免「Some("") vs None」的语义漂移和重复规范化。
+        let explicit_extra: Option<String> = extra_system_prompt.and_then(|s| {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
         // None 语义 = 保留：先看 runtime，再看 projection。Some(_) 直接采用。
-        let runtime_extra = runtime.extra_system_prompt();
-        let resolved_extra: Option<String> = match extra_system_prompt {
-            Some(s) => Some(s.to_string()),
-            None => match runtime_extra {
+        // 注意 explicit_extra 用 `is_some()` 区分而非 unwrap_or_else，因为调用方
+        // 显式传 Some("") 表示「清空 extra」（已 trim 成 None），需走 None 分支
+        // 之外的「显式」路径——但这里 trim 后两者等价，所以直接复用。
+        let resolved_extra: Option<String> = if extra_system_prompt.is_some() {
+            // 调用方显式指定（含 Some("") → None 表示清空）
+            explicit_extra
+        } else {
+            match runtime.extra_system_prompt() {
                 Some(s) => Some(s),
                 None => match cached_state {
                     Some(state) => state.extra_system_prompt.clone(),
-                    None => self
-                        .read_model()
-                        .await
-                        .map(|m| m.extra_system_prompt)
-                        .unwrap_or_default(),
+                    // 关键：read_model 错误必须传播，不能 unwrap_or_default 默默吞掉
+                    None => self.read_model().await?.extra_system_prompt,
                 },
-            },
+            }
         };
 
         let model_id = caps.read_effective().llm.model_id.clone();
@@ -296,25 +310,18 @@ impl Session {
         .await
         .map_err(|e| SessionError::Other(format!("build system prompt: {e}")))?;
 
-        let normalized_extra = resolved_extra.and_then(|s| {
-            let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-
         if stored_fingerprint == Some(fingerprint.as_str()) {
-            // 把 normalized_extra 同步进 runtime（保险），但不写事件
-            runtime.set_extra_system_prompt(normalized_extra);
+            runtime.set_extra_system_prompt(resolved_extra);
             return Ok(false);
         }
 
-        // 同步 runtime（保险：runtime 与 projection / event 保持一致）
-        runtime.set_extra_system_prompt(normalized_extra.clone());
+        runtime.set_extra_system_prompt(resolved_extra.clone());
         self.emit(
             None,
             EventPayload::SystemPromptConfigured {
                 text,
                 fingerprint,
-                extra_system_prompt: normalized_extra,
+                extra_system_prompt: resolved_extra,
             },
         )
         .await;
@@ -386,16 +393,15 @@ impl Session {
 
         // 后台工具结果泵：把 BackgroundTaskCompletion 翻译成事件写入 session
         // （store + runtime 广播），可选 sink 同步收到副本。
+        // `spawn_background_forwarder` 内部已经 `tokio::spawn`，丢弃返回的 JoinHandle
+        // 让其在 rx 关闭（所有 sender drop）时自然结束；panic 时 task 终止，下一次
+        // background 完成会因 sender 端 mpsc 已关闭而走 None 分支退出，不会泄漏。
         let (background_result_tx, background_result_rx) =
             mpsc::unbounded_channel::<BackgroundTaskCompletion>();
         let bg_session = Arc::new(self.clone());
         let bg_sink = sink.clone();
-        let forwarder = spawn_background_forwarder(background_result_rx, bg_session, bg_sink);
-        tokio::spawn(async move {
-            if let Err(e) = forwarder.await {
-                tracing::error!("background result forwarder panicked: {e}");
-            }
-        });
+        // TODO: 更好的后台处理？
+        let _forwarder = spawn_background_forwarder(background_result_rx, bg_session, bg_sink);
 
         // refresh_prompt 写过事件时 projection 已变，需要 re-read；命中 fingerprint
         // 跳过的情况下 pre_state 仍然反映最新状态。

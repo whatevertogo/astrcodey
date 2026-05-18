@@ -86,7 +86,17 @@ impl ConfigManager {
 
     fn sync_to_capabilities(&self) {
         let caps = self.capabilities.read();
-        let Some(caps) = caps.as_ref() else { return };
+        let Some(caps) = caps.as_ref() else {
+            // 正常的早期窗口：bootstrap 构造 ConfigManager 之后、attach_capabilities
+            // 之前发生的写入会走到这里。debug 构建里把这条路径做断言以便 catch
+            // 「先开始热更新配置才挂 capabilities」的反模式；release 下静默吞掉。
+            debug_assert!(
+                false,
+                "sync_to_capabilities called before attach_capabilities; a config write happened \
+                 before the runtime was wired up",
+            );
+            return;
+        };
         caps.swap_llm(self.llm_provider.read().clone());
         caps.update_effective(self.effective.read().clone());
     }
