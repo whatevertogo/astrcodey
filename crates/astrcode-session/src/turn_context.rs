@@ -1,43 +1,29 @@
-//! Turn 基础设施 — 事件总线、信号类型、共享上下文、错误类型。
+//! Turn 基础设施 — 事件发射 sink、信号类型、共享上下文、错误类型。
 
 use astrcode_core::{
     config::ModelSelection,
-    event::EventPayload,
-    extension::{ExtensionEvent, LifecycleContext},
+    event::{Event, EventPayload},
+    extension::{ExtensionEvent, LifecycleContext, ProviderContext},
+    llm::LlmMessage,
     types::*,
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::sync::mpsc;
 
-// ─── EventBus ───────────────────────────────────────────────────────────
+// ─── EventSink ───────────────────────────────────────────────────────────
 
-/// 事件发射目标。
+/// 在 turn 内对每个事件做「副作用」的旁路 sink。
 ///
-/// TurnRunner 每产生一个事件就调 `emit()`。
-/// 实现方负责持久化和/或广播。
+/// 与持久化 / 广播相互独立：持久化由 `Session::emit` 负责（写 store + fanout 到
+/// `runtime.event_tx`），广播由 `ServerEventBus::attach` 通过订阅 fanout 完成。
+/// `EventSink` 只用于「我还想在此处再做点别的」的需求——典型例子是子 agent
+/// 把事件翻译成父 session 的 progress（lossless mpsc，不能丢）。
+///
+/// 如果未来需要为某 turn 注入一个 lossless 监听器（比如测试中收集事件），实现这个
+/// trait 即可。普通路径传 `None` 不需要 sink。
 #[async_trait::async_trait]
-pub trait EventBus: Send + Sync {
-    /// 发射一个事件。实现应同时处理持久化和客户端广播。
-    ///
-    /// `turn_id = None` 表示会话级事件（不属于任何 turn），
-    /// `turn_id = Some(..)` 表示 turn 级事件。
-    /// Option 只应出现在这个边界：上层调用方（run_turn / drive_agent）
-    /// 直接接收 `&TurnId`，由它们负责传 `Some(turn_id)` 进来。
-    async fn emit(&self, session_id: &SessionId, turn_id: Option<&TurnId>, payload: EventPayload);
-}
-
-/// 丢弃所有事件的空实现，用于测试。
-pub struct NoopEventBus;
-
-#[async_trait::async_trait]
-impl EventBus for NoopEventBus {
-    async fn emit(
-        &self,
-        _session_id: &SessionId,
-        _turn_id: Option<&TurnId>,
-        _payload: EventPayload,
-    ) {
-    }
+pub trait EventSink: Send + Sync {
+    async fn on_event(&self, event: &Event);
 }
 
 // ─── Signal ──────────────────────────────────────────────────────────────
@@ -65,13 +51,8 @@ pub async fn end_turn_with_error_typed<T, E>(
 where
     E: Into<TurnError>,
 {
-    let ctx = LifecycleContext {
-        session_id: shared.session_id.to_string(),
-        working_dir: shared.working_dir.clone(),
-        model: ModelSelection::simple(shared.model_id.clone()),
-    };
     let _ = extension_runner
-        .emit_lifecycle(ExtensionEvent::TurnEnd, ctx)
+        .emit_lifecycle(ExtensionEvent::TurnEnd, shared.lifecycle_ctx())
         .await;
     Err(error.into())
 }
@@ -79,11 +60,40 @@ where
 // ─── SharedTurnContext ───────────────────────────────────────────────────
 
 /// Session-level identifiers shared across all agent sub-objects.
+///
+/// 提供 `lifecycle_ctx` / `provider_ctx` 工厂方法，避免散落在 hook 调用点
+/// 重复构造 3-字段 LifecycleContext / 4-字段 ProviderContext。
 #[derive(Clone)]
 pub struct SharedTurnContext {
     pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
+}
+
+impl SharedTurnContext {
+    /// 构造扩展 lifecycle hook 的 ctx。
+    pub fn lifecycle_ctx(&self) -> LifecycleContext {
+        LifecycleContext {
+            session_id: self.session_id.to_string(),
+            working_dir: self.working_dir.clone(),
+            model: self.model_selection(),
+        }
+    }
+
+    /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
+    pub fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
+        ProviderContext {
+            session_id: self.session_id.to_string(),
+            working_dir: self.working_dir.clone(),
+            model: self.model_selection(),
+            messages,
+        }
+    }
+
+    /// 构造各 tool hook ctx 共用的 `ModelSelection`。
+    pub fn model_selection(&self) -> ModelSelection {
+        ModelSelection::simple(self.model_id.clone())
+    }
 }
 
 // ─── TurnError ───────────────────────────────────────────────────────────

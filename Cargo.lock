@@ -424,12 +424,15 @@ dependencies = [
 name = "astrcode-session"
 version = "0.1.0"
 dependencies = [
+ "astrcode-ai",
  "astrcode-context",
  "astrcode-core",
  "astrcode-extensions",
+ "astrcode-storage",
  "astrcode-support",
  "astrcode-tools",
  "async-trait",
+ "chrono",
  "parking_lot",
  "serde_json",
  "thiserror 2.0.18",

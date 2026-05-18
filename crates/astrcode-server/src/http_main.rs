@@ -7,6 +7,8 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
+use axum::serve::ListenerExt;
+
 #[tokio::main]
 async fn main() {
     let _guard = astrcode_log::init();
@@ -35,11 +37,17 @@ async fn main() {
             tracing::error!("Failed to initialize HTTP router: {error}");
             std::process::exit(1);
         });
+    // 关键：SSE 末尾事件常常是单独一小条（如 turn_completed），如果不开 TCP_NODELAY，
+    // Linux 内核 Nagle 算法会把短小写积累 ~40-200ms 等更多数据再一起 flush，
+    // 客户端会感受到「最后一条事件晚到」→ UI 仍显示「生成中」。
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|error| {
             tracing::error!("Failed to bind {addr}: {error}");
             std::process::exit(1);
+        })
+        .tap_io(|stream| {
+            let _ = stream.set_nodelay(true);
         });
 
     tracing::info!("HTTP server ready at http://{addr}");

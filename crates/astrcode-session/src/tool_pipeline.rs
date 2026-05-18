@@ -4,7 +4,6 @@
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use astrcode_core::{
-    config::ModelSelection,
     event::EventPayload,
     extension::{PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult},
     llm::{LlmContent, LlmMessage, LlmRole},
@@ -122,7 +121,7 @@ impl ToolPipeline {
             let pre_ctx = PreToolUseContext {
                 session_id: self.shared.session_id.to_string(),
                 working_dir: self.shared.working_dir.clone(),
-                model: ModelSelection::simple(self.shared.model_id.clone()),
+                model: self.shared.model_selection(),
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
@@ -399,7 +398,7 @@ impl ToolPipeline {
                 let post_ctx = PostToolUseContext {
                     session_id: self.shared.session_id.to_string(),
                     working_dir: self.shared.working_dir.clone(),
-                    model: ModelSelection::simple(self.shared.model_id.clone()),
+                    model: self.shared.model_selection(),
                     tool_name: call.name.clone(),
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
@@ -426,7 +425,7 @@ impl ToolPipeline {
                     let fail_ctx = astrcode_core::extension::PostToolUseFailureContext {
                         session_id: self.shared.session_id.to_string(),
                         working_dir: self.shared.working_dir.clone(),
-                        model: ModelSelection::simple(self.shared.model_id.clone()),
+                        model: self.shared.model_selection(),
                         tool_name: call.name.clone(),
                         tool_input: call.tool_input.clone(),
                         error: result

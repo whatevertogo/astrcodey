@@ -75,6 +75,9 @@ pub enum EventPayload {
         text: String,
         /// system prompt 文本的稳定指纹，用于调试 prompt 是否漂移。
         fingerprint: String,
+        /// 额外注入的 system prompt（子会话场景）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra_system_prompt: Option<String>,
     },
 
     /// 会话已删除。

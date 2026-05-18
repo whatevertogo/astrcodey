@@ -11,6 +11,7 @@ use astrcode_core::{
     types::{BackgroundTaskId, SessionId, ToolCallId},
 };
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 /// 后台任务完成通知的载荷。
 pub struct BackgroundTaskCompletion {
@@ -171,6 +172,37 @@ pub fn complete_background_task(
     task_id: &BackgroundTaskId,
 ) {
     manager.lock().remove(task_id);
+}
+
+/// 后台任务完成事件的统一转发器。
+///
+/// 监听 `rx`，把每个 `BackgroundTaskCompletion` 翻译成
+/// `(ToolCallCompleted, BackgroundTaskCompleted)` 两个事件，先经可选 `sink`，
+/// 再通过 `Session::emit` 写入（store + runtime 广播）。
+/// 这个函数替代了 `handler/turn.rs` 与 `session_spawner.rs` 各写一份的转发循环。
+pub fn spawn_background_forwarder(
+    mut rx: mpsc::UnboundedReceiver<BackgroundTaskCompletion>,
+    session: Arc<crate::session::Session>,
+    sink: Option<Arc<dyn crate::turn_context::EventSink>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(completion) = rx.recv().await {
+            let (tool_call_event, bg_event) = completion.into_events();
+            if let Some(sink) = sink.as_deref() {
+                let preview_a = astrcode_core::event::Event::new(
+                    session.id().clone(),
+                    None,
+                    tool_call_event.clone(),
+                );
+                let preview_b =
+                    astrcode_core::event::Event::new(session.id().clone(), None, bg_event.clone());
+                sink.on_event(&preview_a).await;
+                sink.on_event(&preview_b).await;
+            }
+            session.emit(None, tool_call_event).await;
+            session.emit(None, bg_event).await;
+        }
+    })
 }
 
 /// 为后台化的工具调用构造占位 `ToolResult`。

@@ -7,19 +7,14 @@
 
 use std::sync::Arc;
 
-use astrcode_context::context_assembler::{ContextPrepareInput, LlmContextAssembler};
+use astrcode_context::context_assembler::ContextPrepareInput;
 use astrcode_core::{
-    config::ModelSelection,
-    event::EventPayload,
-    extension::{
-        CompactTrigger, ExtensionEvent, LifecycleContext, ProviderContext, ProviderEvent,
-        ProviderResult,
-    },
-    llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    tool::{BackgroundTaskReader, ToolDefinition},
+    event::{Event, EventPayload},
+    extension::{CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
+    llm::{LlmContent, LlmEvent, LlmMessage, LlmRole},
+    tool::ToolDefinition,
     types::*,
 };
-use astrcode_extensions::runner::ExtensionRunner;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -32,40 +27,43 @@ use crate::{
         activate_discovered_mcp_tools, append_deferred_mcp_tools_reminder, clone_tools_by_index,
         provider_visible_tool_indexes,
     },
+    session::Session,
     tool_pipeline::ToolPipeline,
     tool_types::ExecuteToolCalls,
     turn_context::{
-        AgentSignal, EventBus, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
+        AgentSignal, EventSink, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
     },
 };
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
-/// 每个事件通过 `EventBus::emit()` 处理持久化和广播。
+/// 每个事件先经 `Session::emit` 写 store + fanout 到 runtime 广播，再可选地
+/// 调用 `sink.on_event(&event)` 做副作用（lossless，例如子 agent 的进度桥）。
 /// 返回 `(output, emitted_error)`。
 pub async fn drive_agent(
     agent: &mut TurnRunner,
     user_text: &str,
     turn_id: &TurnId,
-    event_bus: &dyn EventBus,
+    sink: Option<&dyn EventSink>,
 ) -> (Result<TurnOutput, TurnError>, bool) {
-    let session_id = agent.shared.session_id.clone();
+    let session = Arc::clone(&agent.session);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let agent_future = agent.process_prompt(user_text, Some(event_tx));
     tokio::pin!(agent_future);
 
     let mut emitted_error = false;
     let mut events_closed = false;
+
     let output = loop {
         tokio::select! {
             result = &mut agent_future => break result,
             payload = event_rx.recv(), if !events_closed => {
                 match payload {
-                    Some(AgentSignal::Event(ref payload)) => {
+                    Some(AgentSignal::Event(payload)) => {
                         if matches!(payload, EventPayload::ErrorOccurred { .. }) {
                             emitted_error = true;
                         }
-                        event_bus.emit(&session_id, Some(turn_id), payload.clone()).await;
+                        dispatch_agent_event(&session, turn_id, sink, payload).await;
                     },
                     None => events_closed = true,
                 }
@@ -73,32 +71,49 @@ pub async fn drive_agent(
         }
     };
 
-    while let Some(AgentSignal::Event(ref payload)) = event_rx.recv().await {
+    while let Some(AgentSignal::Event(payload)) = event_rx.recv().await {
         if matches!(payload, EventPayload::ErrorOccurred { .. }) {
             emitted_error = true;
         }
-        event_bus
-            .emit(&session_id, Some(turn_id), payload.clone())
-            .await;
+        dispatch_agent_event(&session, turn_id, sink, payload).await;
     }
 
     (output, emitted_error)
 }
 
-/// Agent — a transient turn processor.
+/// 把一个 turn 内事件写入 session（持久化 + fanout），并通知可选 sink。
+async fn dispatch_agent_event(
+    session: &Session,
+    turn_id: &TurnId,
+    sink: Option<&dyn EventSink>,
+    payload: EventPayload,
+) {
+    if let Some(sink) = sink {
+        // 给 sink 一份事件副本——它不关心 seq，只需 payload 用于翻译进度。
+        let preview = Event::new(session.id().clone(), Some(turn_id.clone()), payload.clone());
+        sink.on_event(&preview).await;
+    }
+    session.emit(Some(turn_id), payload).await;
+}
+
+/// AgentTurn — 一个临时的回合处理器。
 ///
-/// Created from a session projection, processes one turn, emits event payloads,
-/// and is discarded. Durable event persistence stays in the handler; compact
-/// transcript snapshots are written through the injected session manager.
+/// 字段语义：
+/// - `session`: 持有运行 turn 所需的全部依赖（store / runtime / caps / event_tx）。 `caps()`
+///   提供按需拉取的 LLM provider / extension runner / context assembler。
+/// - `system_prompt`: 当前 turn 起始时的 system prompt。turn 内若 session 的 prompt
+///   被外部刷新（例如扩展注册新 skill），下一轮 LLM 调用前会从 `session.current_system_prompt`
+///   重新读取。
+/// - `initial_history`: 启动时 session_state 的 `provider_messages()`
+///   快照；首轮循环消费一次后置空。
+/// - `shared`: 缓存 turn 期间不变的标识三元组，避免反复 clone。
+/// - `tools`: 工具调度管线。
 pub struct TurnRunner {
-    session: Arc<crate::session::Session>,
+    session: Arc<Session>,
+    shared: SharedTurnContext,
     system_prompt: String,
     initial_history: Vec<LlmMessage>,
-    shared: SharedTurnContext,
-    llm: Arc<dyn LlmProvider>,
-    extension_runner: Arc<ExtensionRunner>,
     tools: ToolPipeline,
-    context_assembler: Arc<LlmContextAssembler>,
 }
 
 impl TurnRunner {
@@ -106,40 +121,45 @@ impl TurnRunner {
     ///
     /// `session_state` 由调用方提前读取并传入，避免重复 I/O。
     pub fn new(
-        services: crate::session_services::SessionServices,
+        session: Arc<Session>,
         session_state: &astrcode_core::storage::SessionReadModel,
+        background_result_tx: Option<
+            mpsc::UnboundedSender<crate::background::BackgroundTaskCompletion>,
+        >,
     ) -> Result<Self, TurnError> {
         let shared = SharedTurnContext {
-            session_id: services.session.id().clone(),
+            session_id: session.id().clone(),
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
         };
         let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
-        let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
-            crate::background::BackgroundTaskReaderImpl::new(services.background_tasks.clone()),
-        ));
+        let initial_history = session_state.provider_messages();
+        let runtime = Arc::clone(session.runtime());
+        let caps = Arc::clone(session.caps());
+
+        let background_task_reader: Option<Arc<dyn astrcode_core::tool::BackgroundTaskReader>> =
+            Some(Arc::new(crate::background::BackgroundTaskReaderImpl::new(
+                runtime.background_tasks(),
+            )));
         let capabilities = crate::tool_exec::ToolRuntimeCapabilities {
-            background_result_tx: services.background_result_tx,
-            background_tasks: services.background_tasks,
+            background_result_tx,
+            background_tasks: runtime.background_tasks(),
             background_task_reader,
-            file_observation_store: Some(services.file_observation_store),
+            file_observation_store: Some(runtime.file_observation_store()),
         };
         let tools = ToolPipeline::new(
             shared.clone(),
-            services.tool_registry,
-            services.extension_runner.clone(),
-            services.session.clone(),
+            runtime.tool_registry(),
+            Arc::clone(caps.extension_runner()),
+            Arc::clone(&session),
             capabilities,
         );
         Ok(Self {
-            session: services.session,
-            system_prompt,
-            initial_history: session_state.provider_messages(),
+            session,
             shared,
-            llm: services.llm,
-            extension_runner: services.extension_runner,
+            system_prompt,
+            initial_history,
             tools,
-            context_assembler: services.context_assembler,
         })
     }
 
@@ -154,29 +174,28 @@ impl TurnRunner {
         let mut tool_indexes = provider_visible_tool_indexes(&all_tools, &active_mcp_tools);
         let mut tools = clone_tools_by_index(&all_tools, &tool_indexes);
 
-        let lifecycle_ctx = LifecycleContext {
-            session_id: self.shared.session_id.to_string(),
-            working_dir: self.shared.working_dir.clone(),
-            model: ModelSelection::simple(self.shared.model_id.clone()),
-        };
+        let extension_runner = Arc::clone(self.session.caps().extension_runner());
+        let context_assembler = Arc::clone(self.session.caps().context_assembler());
+
+        let lifecycle_ctx = self.shared.lifecycle_ctx();
         let (turn_start_res, prompt_submit_res) = tokio::join!(
-            self.extension_runner
-                .emit_lifecycle(ExtensionEvent::TurnStart, lifecycle_ctx.clone()),
-            self.extension_runner
+            extension_runner.emit_lifecycle(ExtensionEvent::TurnStart, lifecycle_ctx.clone()),
+            extension_runner
                 .emit_lifecycle(ExtensionEvent::UserPromptSubmit, lifecycle_ctx.clone()),
         );
         turn_start_res?;
         if let Err(e) = prompt_submit_res {
-            return end_turn_with_error_typed(&self.extension_runner, &self.shared, e).await;
+            return end_turn_with_error_typed(&extension_runner, &self.shared, e).await;
         }
 
-        let history = std::mem::take(&mut self.initial_history);
-        let mut messages = Vec::with_capacity(history.len() + 2);
+        // 用启动时缓存的初始历史构建 messages，避免在 process_prompt 入口又读一次 session。
+        let initial_history = std::mem::take(&mut self.initial_history);
+        let mut messages = Vec::with_capacity(initial_history.len() + 2);
         if !self.system_prompt.trim().is_empty() {
             messages.push(LlmMessage::system(&self.system_prompt));
         }
         messages.extend(
-            history
+            initial_history
                 .into_iter()
                 .filter(|message| message.role != LlmRole::System),
         );
@@ -196,7 +215,6 @@ impl TurnRunner {
                 if prompt != self.system_prompt {
                     tracing::info!(session_id = %self.shared.session_id, "system_prompt changed mid-turn, refreshing");
                     self.system_prompt = prompt;
-                    // 同步更新 messages 中的 system message
                     if let Some(msg) = messages.iter_mut().find(|m| m.role == LlmRole::System) {
                         msg.content = vec![LlmContent::Text {
                             text: self.system_prompt.clone(),
@@ -205,9 +223,12 @@ impl TurnRunner {
                 }
             }
 
+            // 每轮重新拉 llm 快照，跟随 ConfigManager 热更新
+            let llm = self.session.caps().llm();
+
             // 收集插件 compact 指令
             let custom_instructions = collect_compact_instructions(
-                &self.extension_runner,
+                &extension_runner,
                 CompactHookContext {
                     session_id: self.shared.session_id.as_str(),
                     working_dir: &self.shared.working_dir,
@@ -228,12 +249,11 @@ impl TurnRunner {
             let input = ContextPrepareInput {
                 messages: visible_messages,
                 system_prompt: Some(&self.system_prompt),
-                model_limits: self.llm.model_limits(),
+                model_limits: llm.model_limits(),
                 custom_instructions,
             };
-            let request_fn = crate::compact::make_compact_request_fn(self.llm.clone());
-            let mut prepared = self
-                .context_assembler
+            let request_fn = crate::compact::make_compact_request_fn(Arc::clone(&llm));
+            let mut prepared = context_assembler
                 .prepare_messages_with_llm(input, request_fn)
                 .await;
 
@@ -246,7 +266,7 @@ impl TurnRunner {
                     &self.shared.working_dir,
                     Some(&self.system_prompt),
                     &tools,
-                    self.context_assembler.settings(),
+                    context_assembler.settings(),
                 )
                 .await;
                 let hook_ctx = CompactHookContext {
@@ -256,8 +276,7 @@ impl TurnRunner {
                     trigger: CompactTrigger::AutoThreshold,
                     message_count: messages.len(),
                 };
-                if let Err(e) =
-                    dispatch_post_compact(&self.extension_runner, hook_ctx, compaction).await
+                if let Err(e) = dispatch_post_compact(&extension_runner, hook_ctx, compaction).await
                 {
                     tracing::warn!(error = %e, "PostCompact extension dispatch failed");
                 }
@@ -271,19 +290,22 @@ impl TurnRunner {
             );
 
             let send_messages = self
-                .apply_before_provider_request_hook(system_messages, context_messages)
+                .apply_before_provider_request_hook(
+                    &extension_runner,
+                    system_messages,
+                    context_messages,
+                )
                 .await?;
 
             let rx = self
-                .start_provider_stream(send_messages, &tools, &event_tx)
+                .start_provider_stream(&llm, &extension_runner, send_messages, &tools, &event_tx)
                 .await?;
             let message_id = new_message_id();
 
             let outcome = match consume_llm_stream(rx, &event_tx, message_id).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    return end_turn_with_error_typed(&self.extension_runner, &self.shared, error)
-                        .await;
+                    return end_turn_with_error_typed(&extension_runner, &self.shared, error).await;
                 },
             };
 
@@ -313,9 +335,9 @@ impl TurnRunner {
                             );
                         }
                     }
-                    self.dispatch_after_provider_response(&lifecycle_ctx)
+                    self.dispatch_after_provider_response(&extension_runner)
                         .await?;
-                    self.extension_runner
+                    extension_runner
                         .emit_lifecycle(ExtensionEvent::TurnEnd, lifecycle_ctx.clone())
                         .await?;
                     return Ok(TurnOutput {
@@ -347,7 +369,7 @@ impl TurnRunner {
                         );
                     }
 
-                    self.dispatch_after_provider_response(&lifecycle_ctx)
+                    self.dispatch_after_provider_response(&extension_runner)
                         .await?;
 
                     let prepared_tool_calls = match self
@@ -358,7 +380,7 @@ impl TurnRunner {
                         Ok(prepared_tool_calls) => prepared_tool_calls,
                         Err(error) => {
                             return end_turn_with_error_typed(
-                                &self.extension_runner,
+                                &extension_runner,
                                 &self.shared,
                                 error,
                             )
@@ -384,7 +406,7 @@ impl TurnRunner {
                         Ok(discovered_tools) => discovered_tools,
                         Err(error) => {
                             return end_turn_with_error_typed(
-                                &self.extension_runner,
+                                &extension_runner,
                                 &self.shared,
                                 error,
                             )
@@ -406,29 +428,21 @@ impl TurnRunner {
 
     async fn apply_before_provider_request_hook(
         &self,
+        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
         system_messages: Vec<LlmMessage>,
         context_messages: Vec<LlmMessage>,
     ) -> Result<Vec<LlmMessage>, TurnError> {
         let send_messages = provider_visible_messages([system_messages, context_messages].concat());
-        let provider_ctx = ProviderContext {
-            session_id: self.shared.session_id.to_string(),
-            working_dir: self.shared.working_dir.clone(),
-            model: ModelSelection::simple(self.shared.model_id.clone()),
-            messages: send_messages.clone(),
-        };
-        match self
-            .extension_runner
-            .emit_provider(ProviderEvent::BeforeRequest, provider_ctx)
+        match extension_runner
+            .emit_provider(
+                ProviderEvent::BeforeRequest,
+                self.shared.provider_ctx(send_messages.clone()),
+            )
             .await?
         {
             ProviderResult::Block { reason } => {
-                let lifecycle_ctx = LifecycleContext {
-                    session_id: self.shared.session_id.to_string(),
-                    working_dir: self.shared.working_dir.clone(),
-                    model: ModelSelection::simple(self.shared.model_id.clone()),
-                };
-                self.extension_runner
-                    .emit_lifecycle(ExtensionEvent::TurnEnd, lifecycle_ctx)
+                extension_runner
+                    .emit_lifecycle(ExtensionEvent::TurnEnd, self.shared.lifecycle_ctx())
                     .await?;
                 Err(TurnError::Internal(reason))
             },
@@ -444,11 +458,13 @@ impl TurnRunner {
 
     async fn start_provider_stream(
         &self,
+        llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
+        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
         send_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, TurnError> {
-        match self.llm.generate(send_messages, tools.to_vec()).await {
+        match llm.generate(send_messages, tools.to_vec()).await {
             Ok(rx) => Ok(rx),
             Err(e) => {
                 send_event(
@@ -459,21 +475,23 @@ impl TurnRunner {
                         recoverable: false,
                     },
                 );
-                end_turn_with_error_typed(&self.extension_runner, &self.shared, e).await
+                end_turn_with_error_typed(extension_runner, &self.shared, e).await
             },
         }
     }
 
     async fn dispatch_after_provider_response(
         &self,
-        lifecycle_ctx: &LifecycleContext,
+        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
     ) -> Result<(), TurnError> {
-        if let Err(e) = self
-            .extension_runner
-            .emit_lifecycle(ExtensionEvent::AfterProviderResponse, lifecycle_ctx.clone())
+        if let Err(e) = extension_runner
+            .emit_lifecycle(
+                ExtensionEvent::AfterProviderResponse,
+                self.shared.lifecycle_ctx(),
+            )
             .await
         {
-            return end_turn_with_error_typed(&self.extension_runner, &self.shared, e).await;
+            return end_turn_with_error_typed(extension_runner, &self.shared, e).await;
         }
         Ok(())
     }
@@ -497,14 +515,15 @@ pub struct RunTurnResult {
 
 /// 执行一轮完整的 agent turn。
 ///
-/// 封装 `drive_agent` 调用。所有事件通过 `EventBus::emit()` 处理。
+/// 封装 `drive_agent` 调用。所有事件通过 `Session::emit` 持久化 + fanout，
+/// 可选 `sink` 收到副本（lossless）。
 pub async fn run_turn(
     agent: &mut TurnRunner,
     user_text: &str,
     turn_id: &TurnId,
-    event_bus: &dyn EventBus,
+    sink: Option<&dyn EventSink>,
 ) -> RunTurnResult {
-    let (output, emitted_error) = drive_agent(agent, user_text, turn_id, event_bus).await;
+    let (output, emitted_error) = drive_agent(agent, user_text, turn_id, sink).await;
 
     RunTurnResult {
         output,

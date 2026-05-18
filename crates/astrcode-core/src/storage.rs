@@ -281,6 +281,12 @@ pub struct SessionReadModel {
     pub phase: Phase,
     /// 会话级 system prompt。
     pub system_prompt: Option<String>,
+    /// 会话额外 system prompt（子会话场景）。
+    #[serde(default)]
+    pub extra_system_prompt: Option<String>,
+    /// 最近一次 system prompt 的 fingerprint，用于检测工具/skill/agents.md 变化。
+    #[serde(default)]
+    pub system_prompt_fingerprint: Option<String>,
     /// 尚未完成的工具调用。
     pub pending_tool_calls: HashSet<ToolCallId>,
     /// 后台化工具调用状态，用于从快照恢复 UI 状态。
@@ -313,6 +319,8 @@ impl SessionReadModel {
             model_id: String::new(),
             phase: Phase::Idle,
             system_prompt: None,
+            extra_system_prompt: None,
+            system_prompt_fingerprint: None,
             pending_tool_calls: HashSet::new(),
             background_tool_calls: HashMap::new(),
             created_at: String::new(),

@@ -19,12 +19,10 @@ use astrcode_core::{
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
-    types::{SessionId, ToolCallId},
+    types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
-use astrcode_session::{
-    Session, compact_boundary_payload, session_continued_from_compaction_payload,
-};
+use astrcode_session::{compact_boundary_payload, session_continued_from_compaction_payload};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::{broadcast, mpsc};
 
@@ -385,20 +383,27 @@ fn test_runtime_with_settings(
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
         Duration::from_secs(1),
     ));
+    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
+    let capabilities = Arc::new(astrcode_session::Capabilities::new(
+        config.read_llm_provider(),
+        Arc::clone(&extension_runner),
+        Arc::clone(&context_assembler),
+        config.read_effective().clone(),
+    ));
+    config.attach_capabilities(Arc::clone(&capabilities));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
         Arc::clone(&extension_runner),
-        Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
-        Default::default(),
+        Arc::clone(&capabilities),
     ));
     Arc::new(ServerRuntime {
         event_store,
         config_manager: config,
-        context_assembler: Arc::new(LlmContextAssembler::new(context_settings.clone())),
-        background_tasks: Default::default(),
+        context_assembler,
         session_manager,
         extension_runner,
+        capabilities,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
@@ -549,10 +554,12 @@ fn compact_payload_helpers_split_projection_and_audit_fields() {
 #[tokio::test]
 async fn record_and_broadcast_updates_projection_before_broadcast() {
     let runtime = test_runtime();
-    let session = Session::create(runtime.event_store.clone(), ".", "mock-model", None)
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock-model", None)
         .await
         .unwrap();
-    let sid = session.id().clone();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
 
     let event = Event::new(
@@ -561,6 +568,7 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
         EventPayload::SystemPromptConfigured {
             text: "ordered prompt".into(),
             fingerprint: "fingerprint".into(),
+            extra_system_prompt: None,
         },
     );
     let event = runtime.event_store.append_event(event).await.unwrap();
@@ -587,7 +595,10 @@ async fn create_session_configures_system_prompt() {
     let mut saw_configured = false;
     for _ in 0..2 {
         if let ClientNotification::Event(event) = recv_event(&mut event_rx).await {
-            if let EventPayload::SystemPromptConfigured { text, fingerprint } = event.payload {
+            if let EventPayload::SystemPromptConfigured {
+                text, fingerprint, ..
+            } = event.payload
+            {
                 saw_configured = true;
                 assert!(text.contains("[Identity]"));
                 assert!(!fingerprint.is_empty());
@@ -667,10 +678,12 @@ async fn submit_prompt_reuses_session_system_prompt() {
 #[tokio::test]
 async fn submit_prompt_configures_missing_session_system_prompt() {
     let runtime = test_runtime();
-    let session = Session::create(runtime.event_store.clone(), ".", "mock-model", None)
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock-model", None)
         .await
         .unwrap();
-    let sid = session.id().clone();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -720,10 +733,12 @@ async fn submit_prompt_uses_one_turn_id_for_turn_events() {
 #[tokio::test]
 async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     let runtime = test_runtime();
-    let session = Session::create(runtime.event_store.clone(), ".", "mock", None)
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock", None)
         .await
         .unwrap();
-    let sid = session.id().clone();
     runtime
         .event_store
         .append_event(Event::new(

@@ -84,8 +84,14 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
                 };
             }
         },
-        EventPayload::SystemPromptConfigured { text, .. } => {
+        EventPayload::SystemPromptConfigured {
+            text,
+            fingerprint,
+            extra_system_prompt,
+        } => {
             model.system_prompt = Some(text.clone());
+            model.extra_system_prompt = extra_system_prompt.clone();
+            model.system_prompt_fingerprint = Some(fingerprint.clone());
         },
         EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
             model.phase = Phase::Thinking;

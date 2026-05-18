@@ -7,7 +7,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::EventStore,
     tool::{ToolDefinition, ToolResult},
-    types::{SessionId, new_message_id},
+    types::{SessionId, new_message_id, new_session_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
@@ -18,7 +18,6 @@ use astrcode_protocol::{
     },
 };
 use astrcode_server::{bootstrap::ServerRuntime, http::router};
-use astrcode_session::Session;
 use astrcode_storage::in_memory::InMemoryEventStore;
 use axum::{
     Router,
@@ -185,10 +184,12 @@ async fn concurrent_prompt_accepts_one_and_conflicts_one() {
 #[tokio::test]
 async fn sse_receiver_lag_emits_rehydrate_and_closes() {
     let runtime = runtime(Arc::new(ImmediateLlm));
-    let session = Session::create(runtime.event_store.clone(), ".", "mock-model", None)
+    let session_id = new_session_id();
+    runtime
+        .event_store
+        .create_session(&session_id, ".", "mock-model", None)
         .await
         .unwrap();
-    let session_id = session.id().clone();
     let (event_tx, _) = broadcast::channel(1);
     let (app, token) = router(Arc::clone(&runtime), event_tx.clone()).unwrap();
 
@@ -757,20 +758,27 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         llm_provider,
     ));
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
+    let capabilities = Arc::new(astrcode_session::Capabilities::new(
+        config.read_llm_provider(),
+        Arc::clone(&extension_runner),
+        Arc::clone(&context_assembler),
+        config.read_effective().clone(),
+    ));
+    config.attach_capabilities(Arc::clone(&capabilities));
     let session_manager = Arc::new(astrcode_server::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
         Arc::clone(&extension_runner),
-        Arc::new(astrcode_session::SessionRuntimeRegistry::default()),
-        Default::default(),
+        Arc::clone(&capabilities),
     ));
     Arc::new(ServerRuntime {
         event_store,
         config_manager: config,
-        context_assembler: Arc::new(LlmContextAssembler::new(ContextSettings::default())),
-        background_tasks: Default::default(),
+        context_assembler,
         session_manager,
         extension_runner,
+        capabilities,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }

@@ -10,11 +10,8 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
-use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
-    EventBus, Session, SessionServices, TurnRunner, agent_turn_completed_payloads,
-    agent_turn_failed_payloads, agent_turn_started_payloads, background::BackgroundTaskCompletion,
-    run_turn,
+    Session, agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -22,13 +19,12 @@ use tokio::{
 };
 
 use super::{CommandHandler, CommandMessage, HandlerError};
-use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
+use crate::server_event_bus::ServerEventBus;
 
 /// Agent Turn 的输入参数，用于启动后台任务。
 pub(in crate::handler) struct AgentTurnInput {
     pub turn_id: TurnId,
     pub session: Arc<Session>,
-    pub session_state: SessionReadModel,
     pub text: String,
     pub actor_tx: mpsc::UnboundedSender<CommandMessage>,
     pub event_bus: Arc<ServerEventBus>,
@@ -104,28 +100,25 @@ impl CommandHandler {
             .open(sid.clone())
             .await
             .map_err(|e| HandlerError::SessionNotFound(format!("Session {sid} not found: {e}")))?;
+        // attach 是幂等的；此处保证 session 已经接入 event_bus 的 broadcast 桥。
+        // 测试或外部直连 event_store 创建的 session 在此首次接入。
+        self.event_bus.attach(&session);
         self.repair_stale_pending_tool_calls(&sid)
             .await
             .map_err(HandlerError::Other)?;
-        // 读取会话状态（唯一一次，后续全部复用）
-        let session_state = session
-            .read_model()
-            .await
-            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
 
         let turn_id = new_turn_id();
         let session_arc = Arc::new(session);
 
         // 记录 Turn 开始事件
         for payload in agent_turn_started_payloads(new_message_id(), visible_text) {
-            self.event_bus.emit(&sid, Some(&turn_id), payload).await;
+            session_arc.emit(Some(&turn_id), payload).await;
         }
 
-        // 启动 Agent 后台任务（tool registry / system prompt 在后台构建）
+        // 启动 Agent 后台任务（Session::submit 内部刷新 tool registry / system prompt）
         let handle = self.spawn_agent_turn(AgentTurnInput {
             turn_id: turn_id.clone(),
             session: Arc::clone(&session_arc),
-            session_state,
             text: user_text,
             actor_tx: self.actor_tx.clone(),
             event_bus: Arc::clone(&self.event_bus),
@@ -145,8 +138,7 @@ impl CommandHandler {
 
     /// 在后台启动 Agent Turn 任务。
     pub(in crate::handler) fn spawn_agent_turn(&self, input: AgentTurnInput) -> JoinHandle<()> {
-        let runtime = self.runtime.clone();
-        tokio::spawn(run_agent_turn_task(runtime, input))
+        tokio::spawn(run_agent_turn_task(input))
     }
 
     /// 清理已完成的 Agent Turn（终态事件已由 turn task 广播，此处仅做 map 清理）。
@@ -195,18 +187,23 @@ impl CommandHandler {
             tracing::warn!(error = %e, "TurnAborted extension dispatch failed");
         }
 
-        // 中止后台任务并清理
+        // 中止后台任务并清理：从 active_turn 的 session runtime 上找到 bg_tasks，
+        // cleanup_session 会 abort 该 session 内所有挂着的工具/子 agent task。
         if !active_turn.handle.is_finished() {
             active_turn.handle.abort();
         }
-        self.runtime
-            .session_manager
-            .cleanup_background_tasks(&active_turn.session_id);
+        active_turn
+            .session
+            .runtime()
+            .background_tasks()
+            .lock()
+            .cleanup_session(&active_turn.session_id);
 
         // 记录中止完成事件
         for payload in agent_turn_completed_payloads("aborted".into()) {
-            self.event_bus
-                .emit(&active_turn.session_id, Some(&active_turn.turn_id), payload)
+            active_turn
+                .session
+                .emit(Some(&active_turn.turn_id), payload)
                 .await;
         }
         self.event_bus
@@ -247,10 +244,14 @@ impl CommandHandler {
             return Ok(());
         }
 
-        let state = self
+        let session = self
             .runtime
             .session_manager
-            .read_model(session_id)
+            .open(session_id.clone())
+            .await
+            .map_err(|e| format!("open session {session_id}: {e}"))?;
+        let state = session
+            .read_model()
             .await
             .map_err(|e| format!("read session {session_id}: {e}"))?;
         // 仅处理 CallingTool 阶段且有待处理调用的会话
@@ -260,9 +261,8 @@ impl CommandHandler {
 
         // 标记所有待处理调用为中断
         for pending in pending_requested_tool_calls(&state) {
-            self.event_bus
+            session
                 .emit(
-                    session_id,
                     None,
                     EventPayload::ToolCallCompleted {
                         call_id: pending.call_id.clone().into(),
@@ -274,7 +274,7 @@ impl CommandHandler {
         }
         // 标记 Turn 为中断完成
         for payload in agent_turn_completed_payloads("interrupted".into()) {
-            self.event_bus.emit(session_id, None, payload).await;
+            session.emit(None, payload).await;
         }
         self.event_bus.sync_durable_events(session_id).await;
         Ok(())
@@ -319,83 +319,29 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
     }
 }
 
-/// Agent Turn 后台任务：组装 TurnRunner 并驱动 LLM ↔ 工具循环。
-async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput) {
+/// Agent Turn 后台任务：通过 `Session::submit` 启动，等待完成后写终态事件。
+///
+/// 历史上这里手动装配 `TurnRunner` 与 background forwarder，现在已搬到
+/// `Session::submit` 内部。本函数只负责：
+/// 1. 调用 `Session::submit` 启动 turn；
+/// 2. 等待 `TurnHandle::wait` 拿到 `RunTurnResult`；
+/// 3. 写 `TurnCompleted` / `TurnFailed` 事件并通知 actor 清理。
+async fn run_agent_turn_task(input: AgentTurnInput) {
     let AgentTurnInput {
         turn_id,
         session,
-        session_state,
         text,
         actor_tx,
         event_bus,
     } = input;
     let sid = session.id().clone();
 
-    // 后台子任务结果通过 EventBus 直接持久化+广播，不经过 Actor
-    let (background_result_tx, mut background_result_rx) =
-        mpsc::unbounded_channel::<BackgroundTaskCompletion>();
-    {
-        let bg_event_bus = Arc::clone(&event_bus);
-        let handle = tokio::spawn(async move {
-            while let Some(completion) = background_result_rx.recv().await {
-                let session_id = completion.session_id.clone();
-                let (tool_call_event, bg_event) = completion.into_events();
-                bg_event_bus.emit(&session_id, None, tool_call_event).await;
-                bg_event_bus.emit(&session_id, None, bg_event).await;
-                bg_event_bus.sync_durable_events(&session_id).await;
-            }
-        });
-        tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                tracing::error!("background result forwarder panicked: {e}");
-            }
-        });
-    }
-
-    // model_id 来自 runtime 配置（可被热更新覆盖 session 创建时的值）
-    // 仅在 model_id 与 session 当前值不同时写入事件
-    let model_id = runtime.config_manager.read_effective().llm.model_id.clone();
-    if let Err(e) = session.update_model_id(&model_id).await {
-        tracing::warn!(session_id = %sid, error = %e, "failed to update session model_id");
-    }
-
-    // 在后台构建 tool registry 和 system prompt（从 actor 移出以减少 HTTP 延迟）
-    let working_dir = session_state.working_dir.clone();
-    let tool_registry = runtime
-        .session_manager
-        .ensure_tool_registry(&sid, &working_dir)
-        .await;
-    if session_state.system_prompt.is_none() {
-        match runtime
-            .session_manager
-            .configure_system_prompt(&sid, &working_dir, &tool_registry, None)
-            .await
-        {
-            Ok(event) => event_bus.send_notification(ClientNotification::Event(event)),
-            Err(e) => {
-                tracing::warn!(session_id = %sid, error = %e, "configure system prompt failed")
-            },
-        }
-    }
-
-    // 组装 TurnRunner
-    let mut agent = match TurnRunner::new(
-        SessionServices::new(
-            runtime.config_manager.read_llm_provider(),
-            tool_registry,
-            runtime.extension_runner.clone(),
-            runtime.context_assembler.clone(),
-            session,
-            runtime.background_tasks.clone(),
-            runtime.session_manager.file_observation_store(&sid),
-        )
-        .with_background_result_tx(background_result_tx),
-        &session_state,
-    ) {
-        Ok(agent) => agent,
+    let event_bus_dyn: Option<std::sync::Arc<dyn astrcode_session::EventSink>> = None;
+    let handle = match session.submit(text, turn_id.clone(), event_bus_dyn).await {
+        Ok(handle) => handle,
         Err(e) => {
             for payload in agent_turn_failed_payloads(Some(e.to_string()), "error".into()) {
-                event_bus.emit(&sid, Some(&turn_id), payload).await;
+                session.emit(Some(&turn_id), payload).await;
             }
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
                 session_id: sid,
@@ -408,14 +354,20 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
         },
     };
 
-    // 驱动 Agent 循环，事件通过 EventBus 直接持久化+广播
-    let result = run_turn(&mut agent, &text, &turn_id, event_bus.as_ref()).await;
+    let Some(result) = handle.wait().await else {
+        // task panicked or was aborted before completion
+        let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
+            session_id: sid,
+            turn_id,
+            completion: TurnCompletion::Aborted,
+        });
+        return;
+    };
 
-    // 终态事件通过 EventBus 直接广播，避免绕 actor 通道导致的 SSE 延迟。
     match result.output {
         Ok(output) => {
             for payload in agent_turn_completed_payloads(output.finish_reason.clone()) {
-                event_bus.emit(&sid, Some(&turn_id), payload).await;
+                session.emit(Some(&turn_id), payload).await;
             }
             event_bus.sync_durable_events(&sid).await;
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
@@ -431,7 +383,7 @@ async fn run_agent_turn_task(runtime: Arc<ServerRuntime>, input: AgentTurnInput)
                 (!result.emitted_error).then(|| error.to_string()),
                 "error".into(),
             ) {
-                event_bus.emit(&sid, Some(&turn_id), payload).await;
+                session.emit(Some(&turn_id), payload).await;
             }
             event_bus.sync_durable_events(&sid).await;
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {

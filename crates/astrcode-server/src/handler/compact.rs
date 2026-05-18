@@ -6,7 +6,6 @@ use astrcode_core::{
 };
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
-    EventBus,
     compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
         dispatch_post_compact, make_compact_request_fn,
@@ -63,7 +62,15 @@ impl CommandHandler {
             .read_model()
             .await
             .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
-        let tool_registry = self.ensure_tool_registry(sid, &state.working_dir).await;
+        // Session runtime 已持有当前 session 的工具表快照；空时按需刷新。
+        let tool_registry = {
+            let current = session.runtime().tool_registry();
+            if current.list_definitions().is_empty() {
+                session.refresh_tools(&state.working_dir).await
+            } else {
+                current
+            }
+        };
         let provider_messages = state.provider_messages();
         let tools = tool_registry.list_definitions();
 
@@ -145,14 +152,18 @@ impl CommandHandler {
         })?;
 
         // Manual compact has no agent loop, so emit CompactionStarted here.
-        self.event_bus
-            .emit(sid, None, EventPayload::CompactionStarted)
-            .await;
+        session.emit(None, EventPayload::CompactionStarted).await;
 
         let fp = hex_fingerprint(system_prompt.as_bytes());
         let trigger = compact_trigger_name(CompactTrigger::ManualCommand).into();
         let events = session
-            .append_compact_boundary(system_prompt, fp, trigger, compaction)
+            .append_compact_boundary(
+                system_prompt,
+                fp,
+                state.extra_system_prompt.clone(),
+                trigger,
+                compaction,
+            )
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 

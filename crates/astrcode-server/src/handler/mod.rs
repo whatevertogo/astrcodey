@@ -5,15 +5,11 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::{
-    event::{Event, EventPayload},
-    types::*,
-};
+use astrcode_core::{event::Event, types::*};
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, SessionListItem},
 };
-use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -149,6 +145,8 @@ impl CommandHandler {
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
                         }
+                        // session 已被销毁，释放 forwarder 占位（同 sid 重建时能重新 attach）
+                        self.event_bus.detach(&session_id);
                     },
                     Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
                 }
@@ -239,6 +237,7 @@ impl CommandHandler {
             },
         };
         let sid = created.session.id().clone();
+        self.event_bus.attach(&created.session);
         self.active_session_id = Some(sid.clone());
 
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
@@ -315,7 +314,8 @@ impl CommandHandler {
     /// 恢复或切换到指定会话，修复可能的遗留状态后发送快照。
     async fn resume_session(&mut self, session_id: SessionId) {
         match self.runtime.session_manager.open(session_id.clone()).await {
-            Ok(_session) => {
+            Ok(session) => {
+                self.event_bus.attach(&session);
                 if let Err(e) = self.repair_stale_pending_tool_calls(&session_id).await {
                     self.send_error(-32603, &e);
                     return;
@@ -331,13 +331,18 @@ impl CommandHandler {
                 let needs_prompt = state.system_prompt.is_none();
                 let snapshot = session_snapshot(&state);
 
-                let tool_registry = self.ensure_tool_registry(&session_id, &working_dir).await;
+                // 恢复 session 的工具表快照（首次 resume 时为空）。
+                if session
+                    .runtime()
+                    .tool_registry()
+                    .list_definitions()
+                    .is_empty()
+                {
+                    session.refresh_tools(&working_dir).await;
+                }
                 if needs_prompt {
-                    if let Err(e) = self
-                        .configure_session_prompt(&session_id, &working_dir, &tool_registry, None)
-                        .await
-                    {
-                        self.send_error(-32603, &e);
+                    if let Err(e) = session.refresh_prompt(&working_dir, None, None).await {
+                        self.send_error(-32603, &e.to_string());
                         return;
                     }
                 }
@@ -365,11 +370,15 @@ impl CommandHandler {
             .unwrap_or_else(|_| ".".into());
         let created = self.runtime.session_manager.create(&wd).await?;
         let sid = created.session.id().clone();
+        let session = created.session;
+        self.event_bus.attach(&session);
         self.active_session_id = Some(sid.clone());
         self.broadcast_event(created.start_event);
-        self.initialize_session_prompt(&sid, &wd)
-            .await
-            .map_err(HandlerError::Other)?;
+        // 隐式创建的 session 立即装配工具表与 system prompt。
+        session.refresh_tools(&wd).await;
+        if let Err(e) = session.refresh_prompt(&wd, None, None).await {
+            return Err(HandlerError::Other(e.to_string()));
+        }
         Ok(sid)
     }
 
@@ -379,47 +388,18 @@ impl CommandHandler {
         session_id: &SessionId,
         working_dir: &str,
     ) -> Result<(), String> {
-        let (_, event) = self
+        let session = self
             .runtime
             .session_manager
-            .initialize_system_prompt(session_id, working_dir, None)
+            .open(session_id.clone())
             .await
             .map_err(|error| error.to_string())?;
-        self.broadcast_event(event);
+        session.refresh_tools(working_dir).await;
+        session
+            .refresh_prompt(working_dir, None, None)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
-    }
-
-    /// 获取会话的工具表，不存在则刷新。
-    async fn ensure_tool_registry(
-        &mut self,
-        session_id: &SessionId,
-        working_dir: &str,
-    ) -> Arc<ToolRegistry> {
-        self.runtime
-            .session_manager
-            .ensure_tool_registry(session_id, working_dir)
-            .await
-    }
-
-    /// 配置会话的 system prompt，包含工具描述和额外提示。
-    async fn configure_session_prompt(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        tool_registry: &ToolRegistry,
-        extra_system_prompt: Option<&str>,
-    ) -> Result<String, String> {
-        let event = self
-            .runtime
-            .session_manager
-            .configure_system_prompt(session_id, working_dir, tool_registry, extra_system_prompt)
-            .await
-            .map_err(|error| error.to_string())?;
-        self.broadcast_event(event.clone());
-        let EventPayload::SystemPromptConfigured { text, .. } = event.payload else {
-            return Err("expected system prompt event".into());
-        };
-        Ok(text)
     }
 
     // ─── 事件记录与内部辅助 ──────────────────────────────────────────

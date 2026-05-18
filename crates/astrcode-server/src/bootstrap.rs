@@ -8,9 +8,8 @@ use std::{sync::Arc, time::Duration};
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, storage::EventStore};
 use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
-use astrcode_session::{SessionRuntimeRegistry, background::BackgroundTaskManager};
+use astrcode_session::Capabilities;
 use astrcode_storage::config_store::FileConfigStore;
-use parking_lot::Mutex;
 
 pub use crate::config_manager::ConfigManager;
 use crate::{session_manager::SessionManager, session_spawner::ServerSessionSpawner};
@@ -28,12 +27,17 @@ pub struct ServerRuntime {
     pub config_manager: Arc<crate::config_manager::ConfigManager>,
     /// 上下文组装器，负责窗口估算和摘要压缩
     pub context_assembler: Arc<LlmContextAssembler>,
-    /// 跨回合共享的后台任务管理器。
-    pub background_tasks: Arc<Mutex<BackgroundTaskManager>>,
     /// server 侧的 session 生命周期门面。
     pub session_manager: Arc<SessionManager>,
     /// 扩展运行器，负责加载和分发扩展钩子事件
     pub extension_runner: Arc<ExtensionRunner>,
+    /// 跨 session 共享的运行时能力（LLM / 扩展 / 上下文 / 配置）。
+    ///
+    /// 与 `config_manager` 等并存：`Capabilities` 是 session crate 不依赖 server 类型的视图，
+    /// 用于将来 `Session::create_full` / `submit` 路径。`config_manager`
+    /// 仍是配置热更新的主入口；写入 ConfigManager 的同时会通过
+    /// `ConfigManager::sync_capabilities` 推到这里。
+    pub capabilities: Arc<Capabilities>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -95,8 +99,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 3. 初始化上下文组装器。
     let context_settings = effective.context.clone();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
-    let background_tasks = Arc::new(Mutex::new(BackgroundTaskManager::default()));
-    let session_runtime_registry = Arc::new(SessionRuntimeRegistry::default());
 
     // 4. 确定当前项目工作目录。
     //
@@ -148,28 +150,36 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!("Extension load error: {err}");
     }
 
+    // 7. 组装跨 session 共享的运行时能力快照。
+    //
+    // 这一份 Capabilities 是 session crate 视角的依赖入口，与 ConfigManager 并存。
+    // 通过 `attach_capabilities` 让 ConfigManager 在配置热更新时把新的 LLM provider
+    // 与 EffectiveConfig 同步推到这里。
+    let capabilities = Arc::new(Capabilities::new(
+        config_manager.read_llm_provider(),
+        Arc::clone(&extension_runner),
+        Arc::clone(&context_assembler),
+        config_manager.read_effective().clone(),
+    ));
+    config_manager.attach_capabilities(Arc::clone(&capabilities));
+
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
         Arc::clone(&extension_runner),
-        session_runtime_registry,
-        Arc::clone(&background_tasks),
+        Arc::clone(&capabilities),
     ));
 
-    // 7. 给扩展运行时绑定”创建子会话”的宿主能力。
+    // 8. 给扩展运行时绑定”创建子会话”的宿主能力。
     //
     // 扩展本身不能直接拿到 EventStore；当扩展工具返回 RunSession 声明式结果时，
     // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
     extension_runner.bind(Arc::new(ServerSessionSpawner {
-        config: Arc::clone(&config_manager),
-        context_assembler: Arc::clone(&context_assembler),
-        background_tasks: Arc::clone(&background_tasks),
         session_manager: Arc::clone(&session_manager),
-        extension_runner: Arc::clone(&extension_runner),
     }));
 
-    // 8. 返回运行时容器。
+    // 9. 返回运行时容器。
     //
     // ServerRuntime 保存的是”共享基础设施”：session、LLM、prompt、扩展、
     // 配置和上下文预算。注意这里故意没有 tool_registry：
@@ -178,9 +188,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         event_store,
         config_manager,
         context_assembler,
-        background_tasks,
         session_manager,
         extension_runner,
+        capabilities,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
