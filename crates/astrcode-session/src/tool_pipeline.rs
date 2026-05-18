@@ -289,6 +289,7 @@ impl ToolPipeline {
         .await
     }
 
+    /// 将单个工具结果（通常是 Blocked 或 Sequential 调用）包装后委托给 `commit_tool_results`。
     async fn commit_single_tool_result(
         &self,
         input: &mut ExecuteToolCalls<'_>,
@@ -490,6 +491,7 @@ impl ToolPipeline {
         Ok(discovered_tools)
     }
 
+    /// 检查工具结果是否超过 inline 限制，超限则持久化到磁盘并替换为摘要引用。
     async fn persist_large_tool_result(
         &self,
         tool_name: &str,
@@ -505,6 +507,7 @@ impl ToolPipeline {
         self.persist_tool_result(tool_name, call_id, result).await
     }
 
+    /// 将工具结果写入 session 存储并替换为摘要引用（含 preview 和 artifact 路径）。
     async fn persist_tool_result(
         &self,
         tool_name: &str,
@@ -542,6 +545,7 @@ impl ToolPipeline {
         Ok(())
     }
 
+    /// 当累计工具结果超过消息字符预算时，按体积从大到小持久化，直到总量回到预算内。
     async fn enforce_tool_result_message_budget(
         &self,
         committed_tool_result_chars: usize,
