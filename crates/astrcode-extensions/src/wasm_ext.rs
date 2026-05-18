@@ -41,7 +41,28 @@ struct WasmInner {
 
 type SharedInner = Arc<Mutex<WasmInner>>;
 
-fn call_guest(
+/// 在 blocking 池里调用 WASM guest 函数。
+///
+/// `parking_lot::Mutex::lock()` + `wasmtime::Store::call()` 都是同步阻塞调用，
+/// wasmtime 执行任意 guest 代码可能持续数十毫秒到数秒。如果直接在 tokio
+/// runtime 的 worker 线程上 `mutex.lock()`，会让该 worker 完全无法处理其他
+/// async task——多个 hook 共享同一个 `WasmExtension` 时还会串行起来。
+///
+/// 用 `spawn_blocking` 把整段同步工作搬到 blocking 线程池，runtime 的 worker
+/// 线程可以继续处理其他 task；同 inner 上的并发调用在 blocking 池里串行（受
+/// `Mutex` 保护，wasmtime Store 不能并发使用），但不会拖累 async runtime。
+async fn call_guest(
+    inner: &SharedInner,
+    func: wasmtime::TypedFunc<(i32, i32), i32>,
+    request_json: String,
+) -> Result<(i8, String), ExtensionError> {
+    let inner = Arc::clone(inner);
+    tokio::task::spawn_blocking(move || call_guest_blocking(&inner, &func, &request_json))
+        .await
+        .map_err(|e| ExtensionError::Internal(format!("wasm join error: {e}")))?
+}
+
+fn call_guest_blocking(
     inner: &Mutex<WasmInner>,
     func: &wasmtime::TypedFunc<(i32, i32), i32>,
     request_json: &str,
@@ -68,12 +89,14 @@ fn call_guest(
 
 /// 调用 WASM guest 的 handle_event 函数。
 /// 无 handle_event_fn 导出时返回 (GUEST_EFFECT_OK, "")。
-fn call_wasm_event(
-    inner: &Mutex<WasmInner>,
+async fn call_wasm_event(
+    inner: &SharedInner,
     event: &str,
     context: serde_json::Value,
 ) -> Result<(i8, String), ExtensionError> {
     let func = {
+        // 子作用域：MutexGuard 在 await 之前 drop。parking_lot::MutexGuard 不是 Send，
+        // 显式 `drop()` 不够——必须用 scope 让编译器看到它已经离开了 future state。
         let guard = inner.lock();
         guard.handle_event_fn.clone()
     };
@@ -81,7 +104,7 @@ fn call_wasm_event(
         return Ok((GUEST_EFFECT_OK, String::new()));
     };
     let request = json!({ "event": event, "context": context });
-    call_guest(inner, &func, &request.to_string())
+    call_guest(inner, func, request.to_string()).await
 }
 
 // ─── WasmExtension ──────────────────────────────────────────────────────
@@ -290,12 +313,16 @@ impl ToolHandler for WasmToolHandler {
         working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
-        let inner = self.inner.lock();
-        let Some(func) = &inner.handle_tool_fn else {
-            return Err(ExtensionError::NotFound(tool_name.into()));
+        // 把 MutexGuard 限制在子作用域里，确保 await 之前已经 drop——
+        // parking_lot::MutexGuard 不是 Send，即便手动 drop 编译器仍可能把
+        // future 推断为 !Send，子作用域是最稳妥的写法。
+        let func = {
+            let inner = self.inner.lock();
+            let Some(func) = &inner.handle_tool_fn else {
+                return Err(ExtensionError::NotFound(tool_name.into()));
+            };
+            func.clone()
         };
-        let func = func.clone();
-        drop(inner);
 
         let request = json!({
             "tool_name": tool_name,
@@ -305,7 +332,7 @@ impl ToolHandler for WasmToolHandler {
             "tool_call_id": ctx.tool_call_id,
         });
 
-        let (status, response) = call_guest(&self.inner, &func, &request.to_string())?;
+        let (status, response) = call_guest(&self.inner, func, request.to_string()).await?;
 
         match status {
             GUEST_EFFECT_OK => {
@@ -352,12 +379,13 @@ impl CommandHandler for WasmCommandHandler {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let inner = self.inner.lock();
-        let Some(func) = &inner.handle_command_fn else {
-            return Err(ExtensionError::NotFound(command_name.into()));
+        let func = {
+            let inner = self.inner.lock();
+            let Some(func) = &inner.handle_command_fn else {
+                return Err(ExtensionError::NotFound(command_name.into()));
+            };
+            func.clone()
         };
-        let func = func.clone();
-        drop(inner);
 
         let request = json!({
             "command_name": command_name,
@@ -367,7 +395,7 @@ impl CommandHandler for WasmCommandHandler {
             "model": ctx.model,
         });
 
-        let (status, response) = call_guest(&self.inner, &func, &request.to_string())?;
+        let (status, response) = call_guest(&self.inner, func, request.to_string()).await?;
 
         match status {
             GUEST_EFFECT_OK => serde_json::from_str(&response)
@@ -511,7 +539,7 @@ struct WasmPreToolUseHandler {
 impl PreToolUseHandler for WasmPreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         let context = build_pre_tool_use_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "PreToolUse", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "PreToolUse", context).await?;
         parse_pre_tool_use_result(effect, content)
     }
 }
@@ -524,7 +552,7 @@ struct WasmPostToolUseHandler {
 impl PostToolUseHandler for WasmPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         let context = build_post_tool_use_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "PostToolUse", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "PostToolUse", context).await?;
         parse_post_tool_use_result(effect, content)
     }
 }
@@ -537,7 +565,7 @@ struct WasmProviderHandler {
 impl ProviderHandler for WasmProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
         let context = build_provider_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "Provider", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "Provider", context).await?;
         parse_provider_result(effect, content)
     }
 }
@@ -550,7 +578,7 @@ struct WasmPromptBuildHandler {
 impl PromptBuildHandler for WasmPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let context = build_prompt_build_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "PromptBuild", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "PromptBuild", context).await?;
         parse_prompt_build_result(effect, content)
     }
 }
@@ -563,7 +591,7 @@ struct WasmCompactHandler {
 impl CompactHandler for WasmCompactHandler {
     async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
         let context = build_compact_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "Compact", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "Compact", context).await?;
         parse_compact_result(effect, content)
     }
 }
@@ -576,7 +604,7 @@ struct WasmLifecycleHandler {
 impl LifecycleHandler for WasmLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         let context = build_lifecycle_context(&ctx);
-        let (effect, content) = call_wasm_event(&self.inner, "Lifecycle", context)?;
+        let (effect, content) = call_wasm_event(&self.inner, "Lifecycle", context).await?;
         parse_lifecycle_result(effect, content)
     }
 }

@@ -70,6 +70,26 @@ pub fn mode_from_discriminant(d: u8) -> Option<HookMode> {
     }
 }
 
+// ─── Tool execution mode discriminants ───────────────────────────────────
+
+pub const fn execution_mode_discriminant(mode: ExecutionMode) -> u8 {
+    match mode {
+        ExecutionMode::Sequential => 0,
+        ExecutionMode::Parallel => 1,
+    }
+}
+
+/// 把 guest 传过来的判别值转成 `ExecutionMode`。
+///
+/// 未知值默认回退到 `Sequential` ——这是更安全的选择：并发执行可能与共享文件
+/// 状态、subprocess 等冲突。明确想要 `Parallel` 的扩展必须传 `1`。
+pub fn execution_mode_from_discriminant(d: u8) -> ExecutionMode {
+    match d {
+        1 => ExecutionMode::Parallel,
+        _ => ExecutionMode::Sequential,
+    }
+}
+
 // ─── Guest response effect codes ─────────────────────────────────────────
 
 /// WASM guest `handle_event` / `handle_tool` 返回的 effect code。
@@ -141,6 +161,7 @@ fn read_memory_string(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) ->
 
 // ─── Host import functions ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn host_register_tool(
     mut caller: Caller<'_, HostState>,
     name_ptr: i32,
@@ -149,17 +170,19 @@ fn host_register_tool(
     desc_len: i32,
     schema_ptr: i32,
     schema_len: i32,
+    execution_mode_disc: i32,
 ) {
     let name = read_memory_string(&mut caller, name_ptr as u32, name_len as u32);
     let desc = read_memory_string(&mut caller, desc_ptr as u32, desc_len as u32);
     let schema = read_memory_string(&mut caller, schema_ptr as u32, schema_len as u32);
     let params: serde_json::Value = serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
+    let execution_mode = execution_mode_from_discriminant(execution_mode_disc as u8);
     caller.data_mut().tools.push(ToolDefinition {
         name,
         description: desc,
         parameters: params,
         origin: ToolOrigin::Extension,
-        execution_mode: ExecutionMode::Sequential,
+        execution_mode,
     });
 }
 

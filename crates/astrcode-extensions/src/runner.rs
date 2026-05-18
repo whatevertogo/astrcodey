@@ -175,6 +175,72 @@ where
     map
 }
 
+/// 在 debug 级日志里输出每个事件的 handler 调度顺序（按优先级降序，extension_id 标注）。
+///
+/// 排查「我的 hook 没生效 / 顺序不对」时打开 `RUST_LOG=astrcode_extensions=debug`
+/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由 records 的注册
+/// 顺序决定（即 loader 加载顺序），日志按这个顺序原样输出。
+fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let mut pre: Vec<(&str, i32, HookMode)> = Vec::new();
+    let mut post: Vec<(&str, i32, HookMode)> = Vec::new();
+    let mut provider: Vec<(&str, ProviderEvent, i32, HookMode)> = Vec::new();
+    let mut prompt: Vec<(&str, i32)> = Vec::new();
+    let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
+    let mut lifecycle: Vec<(&str, ExtensionEvent, i32, HookMode)> = Vec::new();
+
+    for record in records {
+        let id = record.id.as_str();
+        for (mode, pri, _) in record.reg.pre_tool_use() {
+            pre.push((id, *pri, *mode));
+        }
+        for (mode, pri, _) in record.reg.post_tool_use() {
+            post.push((id, *pri, *mode));
+        }
+        for (ev, mode, pri, _) in record.reg.provider() {
+            provider.push((id, *ev, *pri, *mode));
+        }
+        for (pri, _) in record.reg.prompt_build() {
+            prompt.push((id, *pri));
+        }
+        for (ev, pri, _) in record.reg.compact() {
+            compact.push((id, *ev, *pri));
+        }
+        for (ev, mode, pri, _) in record.reg.lifecycle() {
+            lifecycle.push((id, ev.clone(), *pri, *mode));
+        }
+    }
+
+    pre.sort_by_key(|x| std::cmp::Reverse(x.1));
+    post.sort_by_key(|x| std::cmp::Reverse(x.1));
+    provider.sort_by_key(|x| std::cmp::Reverse(x.2));
+    prompt.sort_by_key(|x| std::cmp::Reverse(x.1));
+    compact.sort_by_key(|x| std::cmp::Reverse(x.2));
+    lifecycle.sort_by_key(|x| std::cmp::Reverse(x.2));
+
+    if !pre.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?pre, "pre_tool_use dispatch order");
+    }
+    if !post.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?post, "post_tool_use dispatch order");
+    }
+    if !provider.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?provider, "provider dispatch order");
+    }
+    if !prompt.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?prompt, "prompt_build dispatch order");
+    }
+    if !compact.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?compact, "compact dispatch order");
+    }
+    if !lifecycle.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?lifecycle, "lifecycle dispatch order");
+    }
+}
+
 // ─── ExtensionRunner impl ───────────────────────────────────────────────
 
 impl ExtensionRunner {
@@ -203,30 +269,34 @@ impl ExtensionRunner {
     }
 
     /// 注册一个扩展。
+    ///
+    /// 锁持有顺序：`extensions` → `records` → `index`，全程不释放，确保
+    /// 「ext 已加入 extensions」与「records/index 已重建」对外原子可见。
+    /// 否则同 sid 并发 register 时可能出现 A 已 push 进 extensions 但还没
+    /// 写到 records，B 看到 extensions 重复短路返回，但 A 的 records 永远
+    /// 没机会 push 进去。
     pub async fn register(&self, ext: Arc<dyn Extension>) {
         let id = ext.id().to_string();
 
-        // ext.register() 只读扩展自身元数据，不涉及共享状态，在锁外调用
+        // ext.register() 只读扩展自身元数据，不涉及共享状态，在锁外调用。
         let mut reg = Registrar::new();
         ext.register(&mut reg);
 
-        // 单次写锁：去重检查 + 插入，消除 TOCTOU
         let mut exts = self.extensions.write().await;
         if exts.iter().any(|e| e.id() == id) {
             tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
             return;
         }
-
-        // 在释放 extensions 锁之前先插入 ext，确保去重结果一致
         exts.push(ext);
-        drop(exts);
 
-        // records + index 的更新与 extensions 写锁解耦，减少阻塞读并发的时间
+        // 立刻在持有 extensions 写锁的同时更新 records/index，让三者保持原子一致。
+        // register 是 startup 一次性路径，多持几毫秒锁不影响性能。
         if !reg.is_empty() {
             let mut records = self.records.write().await;
             records.push(ExtensionRecord { id, reg });
-            let index = Arc::new(build_handler_index(&records));
-            *self.index.write() = index;
+            log_handler_dispatch_order(&records);
+            let new_index = Arc::new(build_handler_index(&records));
+            *self.index.write() = new_index;
         }
     }
 
@@ -492,16 +562,19 @@ impl ExtensionRunner {
     }
 
     /// 通用生命周期事件分发。
+    ///
+    /// `HookResult::Block` 转换成 `Err(ExtensionError::Blocked)` 返回，让调用方
+    /// 的 `?` 正常传播——历史上 callers 拿到 `Ok(Block)` 后没人 match，导致 Block
+    /// 形同虚设。这条转换让 lifecycle 的 Block 与 `PreToolUse::Block` 语义对齐：
+    /// 都是「显式拦截」，调用方拿到 ExtensionError 后决定中止/降级。
     pub async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
         ctx: LifecycleContext,
-    ) -> Result<HookResult, ExtensionError> {
+    ) -> Result<(), ExtensionError> {
         let index = self.load_index();
-        let handlers = index.lifecycle.get(&event);
-
-        let Some(handlers) = handlers else {
-            return Ok(HookResult::Allow);
+        let Some(handlers) = index.lifecycle.get(&event) else {
+            return Ok(());
         };
 
         for (mode, handler) in handlers {
@@ -511,7 +584,7 @@ impl ExtensionRunner {
                         .await
                         .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
                     if let HookResult::Block { reason } = result {
-                        return Ok(HookResult::Block { reason });
+                        return Err(ExtensionError::Blocked { reason });
                     }
                 },
                 HookMode::Advisory => {
@@ -530,7 +603,7 @@ impl ExtensionRunner {
                 },
             }
         }
-        Ok(HookResult::Allow)
+        Ok(())
     }
 
     // ─── 收集方法（仍从 records 读取，注册时不变） ──────────────────

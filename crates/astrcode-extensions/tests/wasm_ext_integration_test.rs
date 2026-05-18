@@ -36,6 +36,7 @@ enum InitCall {
         desc_len: u32,
         schema_off: u32,
         schema_len: u32,
+        execution_mode: u32,
     },
     Subscribe {
         event_disc: u32,
@@ -83,6 +84,9 @@ impl WasmModuleBuilder {
             desc_len: d_len,
             schema_off: s_off,
             schema_len: s_len,
+            // 0 = Sequential（默认）。当前 host import 协议要求显式传 execution_mode；
+            // 测试 fixture 用 Sequential 与之前的隐式行为对齐。
+            execution_mode: 0,
         });
     }
 
@@ -117,7 +121,8 @@ impl WasmModuleBuilder {
 
         // ── Type section ──
         let mut types = TypeSection::new();
-        types.ty().function([ValType::I32; 6], []);
+        // host_register_tool: 6 string-buffer i32s + 1 execution-mode discriminant
+        types.ty().function([ValType::I32; 7], []);
         types.ty().function([ValType::I32; 4], []);
         types.ty().function([ValType::I32; 2], []);
         types.ty().function([ValType::I32; 2], []);
@@ -239,6 +244,7 @@ impl WasmModuleBuilder {
                         desc_len,
                         schema_off,
                         schema_len,
+                        execution_mode,
                     } => {
                         insns.i32_const(*name_off as i32);
                         insns.i32_const(*name_len as i32);
@@ -246,6 +252,7 @@ impl WasmModuleBuilder {
                         insns.i32_const(*desc_len as i32);
                         insns.i32_const(*schema_off as i32);
                         insns.i32_const(*schema_len as i32);
+                        insns.i32_const(*execution_mode as i32);
                         // host_register_tool is import index 0
                         insns.call(0);
                     },

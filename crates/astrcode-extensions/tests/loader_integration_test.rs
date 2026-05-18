@@ -59,28 +59,27 @@ fn discriminants_roundtrip() {
     }
 }
 
-/// 测试清单订阅优先级使用显式协议字段。
+/// 测试清单解析丢弃未声明的 legacy 字段，仅保留显式定义的 metadata。
+///
+/// 历史上 manifest 还携带过 `subscriptions` / `tools` / `slash_commands` 字段；
+/// 现在这些字段已迁移到 `extension_init` 中通过 host imports 注册。serde 默认
+/// 忽略多余字段，所以老格式仍能反序列化（不报错），但这些字段不再有任何 runtime
+/// 效果。
 #[test]
-fn manifest_subscription_priority_is_explicit() {
+fn manifest_ignores_legacy_capability_fields() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "id": "priority-test",
-        "name": "Priority Test",
-        "library": "priority-test.dll",
+        "id": "legacy-test",
+        "name": "Legacy Test",
+        "library": "legacy-test.wasm",
+        // 老字段：当前实现不再读取，但不应导致解析失败。
         "subscriptions": [
-            {
-                "event": "pre_tool_use",
-                "mode": "blocking",
-                "priority": 10
-            },
-            {
-                "event": "post_tool_use",
-                "mode": "advisory",
-                "priority": 25
-            }
-        ]
+            { "event": "pre_tool_use", "mode": "blocking", "priority": 10 }
+        ],
+        "tools": [],
+        "slash_commands": []
     }))
-    .expect("manifest should deserialize");
+    .expect("manifest should deserialize, ignoring legacy fields");
 
-    assert_eq!(manifest.subscriptions[0].priority, 10);
-    assert_eq!(manifest.subscriptions[1].priority, 25);
+    assert_eq!(manifest.id, "legacy-test");
+    assert_eq!(manifest.library, "legacy-test.wasm");
 }
