@@ -63,6 +63,7 @@ fn test_caps() -> Arc<Capabilities> {
             reasoning_split: false,
         },
         context: ContextSettings::default(),
+        agent: astrcode_core::config::AgentSettings::default(),
     };
     Arc::new(Capabilities::new(
         llm,

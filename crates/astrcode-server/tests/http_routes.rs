@@ -747,6 +747,7 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             post_compact_token_budget: 50_000,
             post_compact_max_tokens_per_file: 5_000,
         },
+        agent: astrcode_core::config::AgentSettings::default(),
     };
     let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
     let config = Arc::new(astrcode_server::bootstrap::ConfigManager::new(

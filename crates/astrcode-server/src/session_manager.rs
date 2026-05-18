@@ -72,6 +72,10 @@ impl SessionManager {
             .clone()
     }
 
+    pub(crate) fn config(&self) -> &Arc<ConfigManager> {
+        &self.config
+    }
+
     pub(crate) async fn create(
         &self,
         working_dir: &str,

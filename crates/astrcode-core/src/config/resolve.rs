@@ -127,6 +127,16 @@ impl Config {
                     .post_compact_max_tokens_per_file
                     .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
             },
+            agent: AgentSettings {
+                max_depth: self
+                    .runtime
+                    .agent_max_depth
+                    .unwrap_or(super::defaults::DEFAULT_AGENT_MAX_DEPTH),
+                tool_max_parallel_calls: self
+                    .runtime
+                    .agent_tool_max_parallel_calls
+                    .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
+            },
         })
     }
 }

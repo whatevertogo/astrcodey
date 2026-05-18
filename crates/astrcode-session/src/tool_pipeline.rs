@@ -30,9 +30,6 @@ use super::{
 };
 use crate::session::Session;
 
-// TODO:Config可配置
-const MAX_PARALLEL_TOOL_CALLS: usize = 5;
-
 pub struct ToolPipeline {
     shared: SharedTurnContext,
     tool_registry: Arc<ToolRegistry>,
@@ -312,7 +309,7 @@ impl ToolPipeline {
 
     /// 刷新并行工具调用批次。
     ///
-    /// 使用 `JoinSet` 同时启动最多 `MAX_PARALLEL_TOOL_CALLS` 个工具调用任务，
+    /// 使用 `JoinSet` 同时启动最多 `agent.tool_max_parallel_calls` 个工具调用任务，
     /// 每当一个任务完成后立即补充下一个待执行调用，保持并发水位不变。
     async fn flush_parallel_batch(
         &self,
@@ -325,18 +322,21 @@ impl ToolPipeline {
             return Ok(());
         }
 
+        let max_parallel = self
+            .session
+            .caps()
+            .read_effective()
+            .agent
+            .tool_max_parallel_calls
+            .max(1);
         let batch_len = batch.len();
         let batch_started_at = Instant::now();
-        tracing::debug!(
-            batch_len,
-            max_parallel = MAX_PARALLEL_TOOL_CALLS,
-            "flushing parallel tool batch"
-        );
+        tracing::debug!(batch_len, max_parallel, "flushing parallel tool batch");
 
         let mut pending = std::mem::take(batch).into_iter();
         let mut join_set = JoinSet::new();
 
-        for _ in 0..MAX_PARALLEL_TOOL_CALLS {
+        for _ in 0..max_parallel {
             let Some(call) = pending.next() else { break };
             self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
         }

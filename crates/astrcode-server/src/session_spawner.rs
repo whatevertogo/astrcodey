@@ -4,11 +4,7 @@
 //! 将事件持久化到子会话存储，并经由 [`ProgressTx`] 将关键进展
 //! 转译为 [`ToolOutputDelta`] 实时反馈给父会话的 TUI。
 //!
-//! 最大嵌套深度由 [`MAX_AGENT_DEPTH`] 控制；同层级可并发生成任意多个子 agent。
-
-/// 子 agent 最大嵌套深度（root=0, child=1, grandchild=2）。
-// TODO: 可配置
-const MAX_AGENT_DEPTH: usize = 2;
+//! 最大嵌套深度由 [`EffectiveConfig::agent.max_depth`] 控制；同层级可并发生成任意多个子 agent。
 
 use std::sync::Arc;
 
@@ -126,9 +122,15 @@ impl ServerSessionSpawner {
         };
 
         let depth = self.session_depth(&parent_session_id).await?;
-        if depth >= MAX_AGENT_DEPTH {
+        let max_depth = self
+            .session_manager
+            .config()
+            .read_effective()
+            .agent
+            .max_depth;
+        if depth >= max_depth {
             return Err(format!(
-                "已达最大 agent 嵌套深度 ({MAX_AGENT_DEPTH})，无法继续创建子 agent"
+                "已达最大 agent 嵌套深度 ({max_depth})，无法继续创建子 agent"
             ));
         }
 
@@ -679,6 +681,7 @@ mod tests {
                     reasoning_split: false,
                 },
                 context: Default::default(),
+                agent: Default::default(),
             },
             llm_provider,
         ))
