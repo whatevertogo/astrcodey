@@ -12,8 +12,9 @@ use std::{
 
 use astrcode_core::{
     extension::{
-        EXTENSION_TOOL_OUTCOME_KEY, Extension, ExtensionError, ExtensionToolOutcome,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
+        ChildToolPolicy, EXTENSION_TOOL_OUTCOME_KEY, Extension, ExtensionError,
+        ExtensionToolOutcome, PromptBuildContext, PromptBuildHandler, PromptContributions,
+        Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
@@ -172,7 +173,11 @@ fn build_agent_run(
             user_prompt: args.prompt,
             model_preference: matched.model.clone(),
             wait_for_result: args.wait_for_result,
-            tool_policy: None,
+            // 子 agent 不再持有 agent 工具，避免递归生成 agent 形成无界扩散。
+            // max_depth 配置项是兜底；这条 policy 是声明式护栏，让递归在工具表层就不可能发生。
+            tool_policy: Some(ChildToolPolicy::Deny {
+                tools: vec!["agent".into()],
+            }),
         },
     })
 }
