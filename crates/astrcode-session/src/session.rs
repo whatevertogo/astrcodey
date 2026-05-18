@@ -198,8 +198,8 @@ impl Session {
 
     /// 重建本 session 的工具表快照并写入 runtime。
     ///
-    /// 调用方必须确保 session 是用 `create_full` / `open_full` 创建的，
-    /// 否则会 panic — 这是 Phase 6+ 的目标态：runtime 不再可选。
+    /// 当前 `Session` 始终持有 runtime，因此此方法会直接更新 runtime
+    /// 中保存的工具表快照，不依赖额外的 “full” 构造入口，也不会因此 panic。
     pub async fn refresh_tools(
         &self,
         working_dir: &str,
