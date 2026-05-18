@@ -651,6 +651,7 @@ mod tests {
                 working_dir: "/tmp".into(),
                 model_id: "test-model".into(),
                 parent_session_id: None,
+                tool_policy: None,
             },
         )
     }

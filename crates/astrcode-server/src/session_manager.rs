@@ -91,6 +91,7 @@ impl SessionManager {
             working_dir,
             &model_id,
             None,
+            None,
             runtime,
             Arc::clone(&self.capabilities),
         )

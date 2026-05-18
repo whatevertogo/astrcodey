@@ -187,7 +187,7 @@ async fn sse_receiver_lag_emits_rehydrate_and_closes() {
     let session_id = new_session_id();
     runtime
         .event_store
-        .create_session(&session_id, ".", "mock-model", None)
+        .create_session(&session_id, ".", "mock-model", None, None)
         .await
         .unwrap();
     let (event_tx, _) = broadcast::channel(1);

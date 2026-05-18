@@ -58,6 +58,13 @@ pub enum EventPayload {
         /// 父会话 ID，用于子会话场景。根会话为 `None`。
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_session_id: Option<SessionId>,
+        /// 子会话出生时被注入的工具集策略。
+        ///
+        /// 写在子 session 的事件日志而不仅仅父 session 的 `AgentSessionSpawned`，
+        /// 是为了让子 session resume 时能从自己的事件流里恢复 policy，不必跨 session 查父。
+        /// 根会话始终为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_policy: Option<ChildToolPolicy>,
     },
 
     /// 会话使用的模型已变更。

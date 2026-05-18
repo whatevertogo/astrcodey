@@ -26,12 +26,14 @@ pub trait EventStore: Send + Sync {
     /// - `working_dir`：工作目录路径
     /// - `model_id`：使用的模型标识
     /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
+    /// - `tool_policy`：子会话工具集策略，根会话为 `None`
     async fn create_session(
         &self,
         session_id: &SessionId,
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
+        tool_policy: Option<&crate::extension::ChildToolPolicy>,
     ) -> Result<Event, StorageError>;
 
     /// 向会话的事件日志追加一个事件。
@@ -298,6 +300,12 @@ pub struct SessionReadModel {
     pub updated_at: String,
     /// 父会话 ID。
     pub parent_session_id: Option<SessionId>,
+    /// 子会话生效的工具集策略。
+    ///
+    /// 来自 `SessionStarted.tool_policy`，由 `Session::open` 注入到 runtime
+    /// 让 resume 后的工具表与首次创建一致。根会话始终为 `None`。
+    #[serde(default)]
+    pub tool_policy: Option<crate::extension::ChildToolPolicy>,
     /// 父会话派生的子 Agent 会话列表。
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkView>,
@@ -326,6 +334,7 @@ impl SessionReadModel {
             created_at: String::new(),
             updated_at: String::new(),
             parent_session_id: None,
+            tool_policy: None,
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),
             latest_seq: None,

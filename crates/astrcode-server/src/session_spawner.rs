@@ -752,7 +752,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None)
+            .create_session(&parent_id, ".", "mock", None, None)
             .await
             .unwrap();
         let llm = Arc::new(ToolThenTextLlm {
@@ -806,7 +806,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None)
+            .create_session(&parent_id, ".", "mock", None, None)
             .await
             .unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
@@ -853,7 +853,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None)
+            .create_session(&parent_id, ".", "mock", None, None)
             .await
             .unwrap();
         let llm = Arc::new(StaticTextLlm {

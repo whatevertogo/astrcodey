@@ -32,10 +32,12 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             working_dir,
             model_id,
             parent_session_id,
+            tool_policy,
         } => {
             model.working_dir = working_dir.clone();
             model.model_id = model_id.clone();
             model.parent_session_id = parent_session_id.clone();
+            model.tool_policy = tool_policy.clone();
             model.phase = Phase::Idle;
             if model.created_at.is_empty() {
                 model.created_at = event.timestamp.to_rfc3339();

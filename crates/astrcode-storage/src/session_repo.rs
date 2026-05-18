@@ -236,6 +236,7 @@ impl EventStore for FileSystemSessionRepository {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
+        tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
     ) -> Result<Event, StorageError> {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
@@ -250,6 +251,7 @@ impl EventStore for FileSystemSessionRepository {
                 working_dir: working_dir.into(),
                 model_id: model_id.into(),
                 parent_session_id: parent_session_id.cloned(),
+                tool_policy: tool_policy.cloned(),
             },
         );
 
@@ -550,6 +552,7 @@ impl FileSystemSessionRepository {
                 working_dir,
                 model_id,
                 parent_session_id,
+                tool_policy: _,
             } => (
                 working_dir.clone(),
                 model_id.clone(),
@@ -599,7 +602,7 @@ mod tests {
             projects_base: temp_dir.path().join("projects"),
         };
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
 
@@ -631,7 +634,7 @@ mod tests {
         let projects_base = temp_dir.path().join("projects");
         let repo = test_repo(projects_base.clone());
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
 
@@ -674,7 +677,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
 
@@ -723,7 +726,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
 
@@ -750,7 +753,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -779,7 +782,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -816,7 +819,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -856,7 +859,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -885,7 +888,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -926,9 +929,15 @@ mod tests {
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
         let parent_id = SessionId::from("parent");
-        repo.create_session(&session_id, "D:/work/project", "mock", Some(&parent_id))
-            .await
-            .unwrap();
+        repo.create_session(
+            &session_id,
+            "D:/work/project",
+            "mock",
+            Some(&parent_id),
+            None,
+        )
+        .await
+        .unwrap();
 
         let reopened = test_repo(base_path);
         let summaries = reopened.list_session_summaries().await.unwrap();
@@ -956,9 +965,15 @@ mod tests {
 
         let repo = FileSystemSessionRepository::with_projects_base(projects_base);
         let current_session = SessionId::from("current-session");
-        repo.create_session(&current_session, workspace.to_str().unwrap(), "mock", None)
-            .await
-            .unwrap();
+        repo.create_session(
+            &current_session,
+            workspace.to_str().unwrap(),
+            "mock",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let sessions = repo.list_sessions().await.unwrap();
 
@@ -978,7 +993,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1016,7 +1031,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let session_id = SessionId::from("test-session");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1105,7 +1120,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-reasoning-tool");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1172,7 +1187,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-parallel");
-        repo.create_session(&session_id, ".", "mock", None)
+        repo.create_session(&session_id, ".", "mock", None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(

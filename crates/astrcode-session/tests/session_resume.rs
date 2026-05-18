@@ -88,6 +88,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         ".",
         "mock-model",
         None,
+        None,
         Arc::clone(&runtime_a),
         Arc::clone(&caps),
     )
