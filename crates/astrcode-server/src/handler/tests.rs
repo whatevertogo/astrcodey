@@ -558,7 +558,7 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     let sid = new_session_id();
     runtime
         .event_store
-        .create_session(&sid, ".", "mock-model", None, None)
+        .create_session(&sid, ".", "mock-model", None, None, None)
         .await
         .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
@@ -682,7 +682,7 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
     let sid = new_session_id();
     runtime
         .event_store
-        .create_session(&sid, ".", "mock-model", None, None)
+        .create_session(&sid, ".", "mock-model", None, None, None)
         .await
         .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
@@ -737,7 +737,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     let sid = new_session_id();
     runtime
         .event_store
-        .create_session(&sid, ".", "mock", None, None)
+        .create_session(&sid, ".", "mock", None, None, None)
         .await
         .unwrap();
     runtime

@@ -57,11 +57,19 @@ impl Session {
         model_id: &str,
         parent: Option<&SessionId>,
         tool_policy: Option<&ChildToolPolicy>,
+        source_plugin: Option<&str>,
         runtime: Arc<SessionRuntimeState>,
         caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store
-            .create_session(&sid, working_dir, model_id, parent, tool_policy)
+            .create_session(
+                &sid,
+                working_dir,
+                model_id,
+                parent,
+                tool_policy,
+                source_plugin,
+            )
             .await?;
         // tool_policy 走 event log 持久化；同步注入 runtime 让首次 refresh_tools 立刻生效。
         if let Some(policy) = tool_policy {
@@ -512,6 +520,7 @@ impl Session {
     /// 注入子 runtime，在 `submit` 时被 `refresh_prompt` / `refresh_tools` 读取。
     ///
     /// 调用方拿到 child Session 后通常立刻调 `child.submit(...)` 启动 turn。
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_child(
         &self,
         working_dir: &str,
@@ -520,6 +529,7 @@ impl Session {
         task: String,
         extra_system_prompt: Option<String>,
         tool_policy: Option<ChildToolPolicy>,
+        source_plugin: Option<&str>,
     ) -> Result<Session, SessionError> {
         let child_runtime = Arc::new(SessionRuntimeState::default());
         if extra_system_prompt.is_some() {
@@ -533,6 +543,7 @@ impl Session {
             model_id,
             Some(&self.id),
             tool_policy.as_ref(),
+            source_plugin,
             child_runtime,
             Arc::clone(&self.caps),
         )

@@ -87,6 +87,7 @@ impl SessionManager {
             &model_id,
             None,
             None,
+            None,
             runtime,
             Arc::clone(&self.capabilities),
         )

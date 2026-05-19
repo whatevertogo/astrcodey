@@ -652,6 +652,7 @@ mod tests {
                 model_id: "test-model".into(),
                 parent_session_id: None,
                 tool_policy: None,
+                source_plugin: None,
             },
         )
     }

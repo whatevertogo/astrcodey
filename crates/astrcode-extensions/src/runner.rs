@@ -67,8 +67,8 @@ struct HandlerIndex {
     lifecycle: HashMap<ExtensionEvent, Vec<(HookMode, Arc<dyn LifecycleHandler>)>>,
     // 预计算的 collect 缓存
     tool_metadata: std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>,
-    static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)>,
-    tool_discoveries: Vec<Arc<dyn ToolDiscoveryHandler>>,
+    static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)>,
+    tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)>,
     static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)>,
     command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
 }
@@ -82,8 +82,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
     let mut lc: Vec<(ExtensionEvent, i32, HookMode, Arc<dyn LifecycleHandler>)> = Vec::new();
     let mut tool_metadata = std::collections::HashMap::new();
-    let mut static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)> = Vec::new();
-    let mut tool_discoveries: Vec<Arc<dyn ToolDiscoveryHandler>> = Vec::new();
+    let mut static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)> = Vec::new();
+    let mut tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)> = Vec::new();
     let mut static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = Vec::new();
     let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
 
@@ -112,10 +112,10 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         // collect 缓存
         tool_metadata.extend(record.reg.all_tool_metadata().clone());
         for (def, handler) in record.reg.tools().iter() {
-            static_tools.push((def.clone(), Arc::clone(handler)));
+            static_tools.push((def.clone(), Arc::clone(handler), record.id.clone()));
         }
         for discovery in record.reg.tool_discoveries().iter() {
-            tool_discoveries.push(Arc::clone(discovery));
+            tool_discoveries.push((record.id.clone(), Arc::clone(discovery)));
         }
         for (cmd, handler) in record.reg.commands().iter() {
             static_commands.push((record.id.clone(), cmd.clone(), Arc::clone(handler)));
@@ -612,17 +612,18 @@ impl ExtensionRunner {
     pub async fn collect_tool_adapters_typed(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
         let index = self.load_index();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        for (def, handler) in &index.static_tools {
+        for (def, handler, ext_id) in &index.static_tools {
             let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
             tools.push(Arc::new(HandlerTool {
                 definition: def.clone(),
                 handler: Arc::clone(handler),
                 prompt_metadata,
                 working_dir: working_dir.to_string(),
+                extension_id: ext_id.clone(),
                 spawner: Arc::clone(&self.spawner),
             }));
         }
-        for discovery in &index.tool_discoveries {
+        for (ext_id, discovery) in &index.tool_discoveries {
             match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                 Ok(discovered) => {
                     for discovered_tool in discovered {
@@ -631,6 +632,7 @@ impl ExtensionRunner {
                             handler: discovered_tool.handler,
                             prompt_metadata: discovered_tool.prompt_metadata,
                             working_dir: working_dir.to_string(),
+                            extension_id: ext_id.clone(),
                             spawner: Arc::clone(&self.spawner),
                         }));
                     }
@@ -734,6 +736,7 @@ struct HandlerTool {
     handler: Arc<dyn ToolHandler>,
     prompt_metadata: Option<astrcode_core::tool::ToolPromptMetadata>,
     working_dir: String,
+    extension_id: String,
     spawner: Arc<StdRwLock<Option<Arc<dyn SessionSpawner>>>>,
 }
 
@@ -811,6 +814,8 @@ impl Tool for HandlerTool {
                     event_tx: _ctx.event_tx.clone(),
                     wait_for_result,
                     tool_policy,
+                    source_plugin: (!self.extension_id.is_empty())
+                        .then(|| self.extension_id.clone()),
                 };
 
                 match self.spawn(_ctx.session_id.as_str(), request).await {

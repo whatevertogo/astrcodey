@@ -130,6 +130,9 @@ pub struct SessionListItemDto {
     /// 首条用户消息内容，无消息时为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_user_message: Option<String>,
+    /// 创建该子 session 的扩展 ID。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_plugin: Option<String>,
 }
 
 /// 会话列表响应。

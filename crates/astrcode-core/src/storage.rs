@@ -27,6 +27,7 @@ pub trait EventStore: Send + Sync {
     /// - `model_id`：使用的模型标识
     /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
     /// - `tool_policy`：子会话工具集策略，根会话为 `None`
+    /// - `source_plugin`：创建该子 session 的扩展 ID，根会话为 `None`
     async fn create_session(
         &self,
         session_id: &SessionId,
@@ -34,6 +35,7 @@ pub trait EventStore: Send + Sync {
         model_id: &str,
         parent_session_id: Option<&SessionId>,
         tool_policy: Option<&crate::extension::ChildToolPolicy>,
+        source_plugin: Option<&str>,
     ) -> Result<Event, StorageError>;
 
     /// 向会话的事件日志追加一个事件。
@@ -306,6 +308,9 @@ pub struct SessionReadModel {
     /// 让 resume 后的工具表与首次创建一致。根会话始终为 `None`。
     #[serde(default)]
     pub tool_policy: Option<crate::extension::ChildToolPolicy>,
+    /// 创建该子 session 的扩展 ID。
+    #[serde(default)]
+    pub source_plugin: Option<String>,
     /// 父会话派生的子 Agent 会话列表。
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkView>,
@@ -335,6 +340,7 @@ impl SessionReadModel {
             updated_at: String::new(),
             parent_session_id: None,
             tool_policy: None,
+            source_plugin: None,
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),
             latest_seq: None,
@@ -406,6 +412,8 @@ pub struct SessionSummary {
     pub latest_cursor: Cursor,
     /// 首条用户消息内容，无消息时为 None。
     pub first_user_message: Option<String>,
+    /// 创建该子 session 的扩展 ID。
+    pub source_plugin: Option<String>,
 }
 
 impl From<SessionReadModel> for SessionSummary {
@@ -422,6 +430,7 @@ impl From<SessionReadModel> for SessionSummary {
             phase: model.phase,
             latest_cursor,
             first_user_message,
+            source_plugin: model.source_plugin,
         }
     }
 }

@@ -39,6 +39,8 @@ pub struct SpawnRequest {
     pub wait_for_result: bool,
     /// 子会话的工具集策略。`None` 表示继承父 session 的工具全集。
     pub tool_policy: Option<ChildToolPolicy>,
+    /// 创建该子 session 的扩展 ID，用于按插件组织存储目录。
+    pub source_plugin: Option<String>,
 }
 
 /// 子会话执行结果。

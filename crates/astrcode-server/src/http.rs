@@ -794,6 +794,7 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
         parent_storage_seq: None,
         phase: summary.phase,
         first_user_message: summary.first_user_message,
+        source_plugin: summary.source_plugin,
     }
 }
 

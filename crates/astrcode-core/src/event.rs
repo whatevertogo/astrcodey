@@ -65,6 +65,9 @@ pub enum EventPayload {
         /// 根会话始终为 `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_policy: Option<ChildToolPolicy>,
+        /// 创建该子 session 的扩展 ID，用于按插件组织存储目录。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_plugin: Option<String>,
     },
 
     /// 会话使用的模型已变更。

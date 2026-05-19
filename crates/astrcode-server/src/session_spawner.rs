@@ -166,6 +166,7 @@ impl ServerSessionSpawner {
                 user_prompt.clone(),
                 Some(request.system_prompt),
                 tool_policy,
+                request.source_plugin.as_deref(),
             )
             .await
             .map_err(|e| format!("spawn child session: {e}"))?;
@@ -762,7 +763,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None, None)
+            .create_session(&parent_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         let llm = Arc::new(ToolThenTextLlm {
@@ -816,7 +817,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None, None)
+            .create_session(&parent_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
@@ -862,7 +863,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
         let parent_id = new_session_id();
         store
-            .create_session(&parent_id, ".", "mock", None, None)
+            .create_session(&parent_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         let llm = Arc::new(StaticTextLlm {

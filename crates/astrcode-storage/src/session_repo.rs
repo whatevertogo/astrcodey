@@ -29,6 +29,24 @@ use crate::{
     tool_artifacts::{slice_tool_result, write_tool_result_file},
 };
 
+fn source_plugin_dir_component(source_plugin: &str) -> Result<String, StorageError> {
+    if source_plugin.is_empty() {
+        return Err(StorageError::InvalidId(
+            "source_plugin cannot be empty".into(),
+        ));
+    }
+
+    let mut encoded = String::new();
+    for byte in source_plugin.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Ok(encoded)
+}
+
 /// 基于文件系统的会话仓库。
 ///
 /// 管理按项目组织的会话事件日志，目录结构为：
@@ -114,14 +132,58 @@ impl FileSystemSessionRepository {
     }
 
     /// 在所有项目目录中查找指定会话的目录。
+    ///
+    /// 先检查 flat 位置（根 session），再递归搜索 `subagents/` 子目录树。
     async fn find_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
         for root in self.all_session_roots().await {
             let dir = root.join(id.as_str());
             if tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
                 return Some(dir);
             }
+            if let Some(found) = self.search_subagents_tree(&root, id).await {
+                return Some(found);
+            }
         }
         None
+    }
+
+    /// 递归搜索 `base` 下所有 session 目录的 `subagents/{plugin}/` 子树。
+    fn search_subagents_tree<'a>(
+        &'a self,
+        base: &'a Path,
+        id: &'a SessionId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + 'a>> {
+        Box::pin(async move {
+            let Ok(mut entries) = tokio::fs::read_dir(base).await else {
+                return None;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let subagents = entry.path().join("subagents");
+                if !tokio::fs::metadata(&subagents)
+                    .await
+                    .is_ok_and(|m| m.is_dir())
+                {
+                    continue;
+                }
+                let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                    continue;
+                };
+                while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
+                    let plugin_dir = plugin_entry.path();
+                    let candidate = plugin_dir.join(id.as_str());
+                    if tokio::fs::metadata(&candidate)
+                        .await
+                        .is_ok_and(|m| m.is_dir())
+                    {
+                        return Some(candidate);
+                    }
+                    if let Some(found) = self.search_subagents_tree(&plugin_dir, id).await {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        })
     }
 
     /// 获取指定会话的目录路径。
@@ -239,11 +301,22 @@ impl EventStore for FileSystemSessionRepository {
         model_id: &str,
         parent_session_id: Option<&SessionId>,
         tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
+        source_plugin: Option<&str>,
     ) -> Result<Event, StorageError> {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
-        let dir = self.session_dir_from_working_dir(working_dir, session_id);
+        let dir = match (parent_session_id, source_plugin) {
+            (Some(parent_id), Some(plugin)) => {
+                let parent_dir = self.existing_session_dir(parent_id).await?;
+                let plugin_dir = source_plugin_dir_component(plugin)?;
+                parent_dir
+                    .join("subagents")
+                    .join(plugin_dir)
+                    .join(session_id.as_str())
+            },
+            _ => self.session_dir_from_working_dir(working_dir, session_id),
+        };
         tokio::fs::create_dir_all(&dir).await?;
 
         let start_event = Event::new(
@@ -254,6 +327,7 @@ impl EventStore for FileSystemSessionRepository {
                 model_id: model_id.into(),
                 parent_session_id: parent_session_id.cloned(),
                 tool_policy: tool_policy.cloned(),
+                source_plugin: source_plugin.map(String::from),
             },
         );
 
@@ -377,17 +451,8 @@ impl EventStore for FileSystemSessionRepository {
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         let mut ids: Vec<SessionId> = self.sessions.read().await.keys().cloned().collect();
         for base_path in self.session_roots().await {
-            let Ok(mut entries) = tokio::fs::read_dir(&base_path).await else {
-                continue;
-            };
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.file_type().await?.is_dir() {
-                    let id = SessionId::from(entry.file_name().to_string_lossy().to_string());
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            }
+            self.collect_session_ids_recursive(&base_path, &mut ids)
+                .await;
         }
         ids.sort();
         Ok(ids)
@@ -397,12 +462,14 @@ impl EventStore for FileSystemSessionRepository {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
-        self.sessions.write().await.remove(session_id);
-        for base_path in self.session_roots().await {
-            let dir = base_path.join(session_id.as_str());
-            if tokio::fs::metadata(&dir).await.is_ok() {
-                tokio::fs::remove_dir_all(&dir).await?;
-            }
+        if let Some(dir) = self.find_session_dir(session_id).await {
+            self.sessions
+                .write()
+                .await
+                .retain(|_, meta| !meta.dir.starts_with(&dir));
+            tokio::fs::remove_dir_all(&dir).await?;
+        } else {
+            self.sessions.write().await.remove(session_id);
         }
         Ok(())
     }
@@ -510,20 +577,57 @@ impl FileSystemSessionRepository {
     async fn list_session_dirs(&self) -> Result<Vec<SessionId>, StorageError> {
         let mut ids: Vec<SessionId> = self.sessions.read().await.keys().cloned().collect();
         for base_path in self.session_roots().await {
-            let Ok(mut entries) = tokio::fs::read_dir(&base_path).await else {
-                continue;
-            };
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.file_type().await?.is_dir() {
-                    let id = SessionId::from(entry.file_name().to_string_lossy().to_string());
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
-                }
-            }
+            self.collect_session_ids_recursive(&base_path, &mut ids)
+                .await;
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// 递归收集 base 目录下所有 session ID，包含 subagents/ 子树。
+    fn collect_session_ids_recursive<'a>(
+        &'a self,
+        base: &'a Path,
+        ids: &'a mut Vec<SessionId>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let Ok(mut entries) = tokio::fs::read_dir(base).await else {
+                return;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str == "subagents"
+                    || name_str == "snapshots"
+                    || name_str == "compact-snapshots"
+                    || name_str == "tool-results"
+                {
+                    continue;
+                }
+                let id = SessionId::from(name_str.to_string());
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                let subagents = entry.path().join("subagents");
+                if tokio::fs::metadata(&subagents)
+                    .await
+                    .is_ok_and(|m| m.is_dir())
+                {
+                    let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                        continue;
+                    };
+                    while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
+                        if plugin_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                            self.collect_session_ids_recursive(&plugin_entry.path(), ids)
+                                .await;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// 从事件日志的首行和末行事件构造轻量级 SessionSummary。
@@ -545,16 +649,18 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
 
-        let (working_dir, model_id, parent_session_id) = match &first_event.payload {
+        let (working_dir, model_id, parent_session_id, source_plugin) = match &first_event.payload {
             EventPayload::SessionStarted {
                 working_dir,
                 model_id,
                 parent_session_id,
                 tool_policy: _,
+                source_plugin,
             } => (
                 working_dir.clone(),
                 model_id.clone(),
                 parent_session_id.clone(),
+                source_plugin.clone(),
             ),
             _ => return Ok(None),
         };
@@ -577,6 +683,7 @@ impl FileSystemSessionRepository {
             phase: astrcode_core::event::Phase::default(),
             latest_cursor,
             first_user_message,
+            source_plugin,
         }))
     }
 }
@@ -600,7 +707,7 @@ mod tests {
             projects_base: temp_dir.path().join("projects"),
         };
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
 
@@ -632,7 +739,7 @@ mod tests {
         let projects_base = temp_dir.path().join("projects");
         let repo = test_repo(projects_base.clone());
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
 
@@ -675,7 +782,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
 
@@ -724,7 +831,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
 
@@ -751,7 +858,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -780,7 +887,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -817,7 +924,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -857,7 +964,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -886,7 +993,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let session_id = SessionId::from("session-test");
         let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -933,6 +1040,7 @@ mod tests {
             "mock",
             Some(&parent_id),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -954,6 +1062,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_child_sessions_use_safe_plugin_dir_and_can_reopen() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_path = temp_dir.path().join("projects");
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
+        let repo = test_repo(base_path.clone());
+        repo.create_session(&parent_id, ".", "mock", None, None, None)
+            .await
+            .unwrap();
+        repo.create_session(
+            &child_id,
+            ".",
+            "mock",
+            Some(&parent_id),
+            None,
+            Some("owner/plugin.alpha"),
+        )
+        .await
+        .unwrap();
+
+        let project_key = project_key_from_path(std::path::Path::new("."));
+        assert!(
+            base_path
+                .join(project_key)
+                .join("sessions")
+                .join(parent_id.as_str())
+                .join("subagents")
+                .join("owner%2Fplugin%2Ealpha")
+                .join(child_id.as_str())
+                .exists()
+        );
+
+        let reopened = test_repo(base_path);
+        let sessions = reopened.list_sessions().await.unwrap();
+        let child = reopened.session_read_model(&child_id).await.unwrap();
+
+        assert_eq!(sessions, vec![child_id.clone(), parent_id]);
+        assert_eq!(
+            child.parent_session_id.as_ref(),
+            Some(&SessionId::from("parent"))
+        );
+        assert_eq!(child.source_plugin.as_deref(), Some("owner/plugin.alpha"));
+    }
+
+    #[tokio::test]
+    async fn delete_parent_session_removes_cached_child_sessions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(temp_dir.path().join("projects"));
+        let parent_id = SessionId::from("parent");
+        let child_id = SessionId::from("child");
+        repo.create_session(&parent_id, ".", "mock", None, None, None)
+            .await
+            .unwrap();
+        repo.create_session(
+            &child_id,
+            ".",
+            "mock",
+            Some(&parent_id),
+            None,
+            Some("test-plugin"),
+        )
+        .await
+        .unwrap();
+        repo.session_read_model(&child_id).await.unwrap();
+
+        repo.delete_session(&parent_id).await.unwrap();
+
+        assert!(repo.list_sessions().await.unwrap().is_empty());
+        assert!(matches!(
+            repo.session_read_model(&child_id).await,
+            Err(StorageError::NotFound(id)) if id == child_id
+        ));
+    }
+
+    #[tokio::test]
     async fn project_path_repository_writes_readable_dir() {
         let temp_dir = tempfile::tempdir().unwrap();
         let workspace = temp_dir.path().join("workspace");
@@ -967,6 +1150,7 @@ mod tests {
             &current_session,
             workspace.to_str().unwrap(),
             "mock",
+            None,
             None,
             None,
         )
@@ -991,7 +1175,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1029,7 +1213,7 @@ mod tests {
         let base_path = temp_dir.path().join("projects");
         let repo = test_repo(base_path.clone());
         let session_id = SessionId::from("test-session");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1118,7 +1302,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-reasoning-tool");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
@@ -1185,7 +1369,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = test_repo(temp_dir.path().join("projects"));
         let session_id = SessionId::from("session-parallel");
-        repo.create_session(&session_id, ".", "mock", None, None)
+        repo.create_session(&session_id, ".", "mock", None, None, None)
             .await
             .unwrap();
         repo.append_event(Event::new(
