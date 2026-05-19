@@ -180,13 +180,17 @@ pub async fn run_http_server(
     let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|stream| {
         let _ = stream.set_nodelay(true);
     });
+    let local_port = addr.port();
+    write_run_info(local_port, &auth_token);
     tracing::info!("HTTP server ready at http://{addr}");
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
         })
-        .await?;
+        .await;
+    remove_run_info();
+    result?;
     Ok(())
 }
 
@@ -1495,6 +1499,30 @@ pub(crate) fn compact_inline(text: &str, max_chars: usize) -> String {
     let mut preview = compact.chars().take(max_chars).collect::<String>();
     preview.push('…');
     preview
+}
+
+/// 将运行时端口写入 `~/.astrcode/run.json`，供前端 dev server 发现后端地址。
+fn write_run_info(port: u16, auth_token: &str) {
+    let dir = astrcode_support::hostpaths::astrcode_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
+        return;
+    }
+    let path = dir.join("run.json");
+    let content = serde_json::json!({
+        "port": port,
+        "authToken": auth_token,
+    })
+    .to_string();
+    if let Err(e) = std::fs::write(&path, &content) {
+        tracing::warn!(path = %path.display(), error = %e, "failed to write run.json");
+    }
+}
+
+/// 退出时清理 `run.json`。
+fn remove_run_info() {
+    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
+    let _ = std::fs::remove_file(path);
 }
 
 #[cfg(test)]
