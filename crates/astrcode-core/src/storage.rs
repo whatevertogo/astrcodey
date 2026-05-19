@@ -343,8 +343,9 @@ impl SessionReadModel {
 
     /// 返回 provider 可见消息。
     ///
-    /// 包含防御性归一化：将连续的 assistant+tool_calls 消息合并为一条，
-    /// 以满足 OpenAI API 对 `tool_calls` 消息的协议要求。
+    /// 包含防御性归一化：
+    /// 1. 将连续的 assistant+tool_calls 消息合并为一条
+    /// 2. 截断尾部未回应的 tool_calls，避免 DeepSeek 等严格 provider 拒绝请求
     pub fn provider_messages(&self) -> Vec<LlmMessage> {
         let mut messages = Vec::with_capacity(
             self.context_messages
@@ -359,6 +360,7 @@ impl SessionReadModel {
             .filter(LlmMessage::has_provider_visible_content)
             .collect();
         normalize_tool_call_messages(&mut messages);
+        truncate_unanswered_tool_calls(&mut messages);
         messages
     }
 
