@@ -6,7 +6,7 @@
 
 ## 高优先级
 
-BackgroundTaskOutput 只有 task_id 没有原始 call_id，当前以 agent message chunk 展示，协议上可见但不如 tool-call 原生关联完美。
+- [ ] BackgroundTaskOutput 只有 task_id 没有原始 call_id，当前以 agent message chunk 展示，协议上可见但不如 tool-call 原生关联完美。
 ToolOutputDelta 在 ACP 里用 tool update 承载 delta，客户端如何累积展示取决于 ACP client 实现。
 
 - [ ] 引入 fd、rg、sed、cat 等外部依赖
