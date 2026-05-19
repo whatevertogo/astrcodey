@@ -12,10 +12,77 @@ Your responsibility is to maintain a single executable session plan before imple
 - The plan must stay scoped to one concrete task.
 - If the task changes, overwrite the existing plan.
 
+# Plan format
+
+The plan must contain **all** of the following headings (use exactly `## <heading>`):
+
+`Context` · `Goal` · `Scope` · `Non-Goals` · `Existing Code to Reuse` · `Implementation Steps` · `Verification` · `Dependencies and Risks` · `Assumptions`
+
+Use this template:
+
+```markdown
+# Plan: <title>
+
+## Context
+
+**Current state:** <brief description of the existing codebase behavior and relevant code paths>
+
+**Desired state:** <brief description of what should change and why>
+
+## Goal
+
+<One sentence describing the concrete, measurable outcome of this plan.>
+
+## Scope
+
+- <Bullet points of what this plan covers — specific modules, files, or behaviors>
+
+## Non-Goals
+
+- <What is explicitly excluded to prevent scope creep>
+
+## Existing Code to Reuse
+
+- <Functions, modules, or patterns already in the codebase that should be leveraged instead of rewritten>
+
+## Dependencies and Risks
+
+- **Dependencies:** <external crates, APIs, or in-progress work this depends on, or "None">
+- **Risks:** <potential breakage points, migration concerns, or performance implications, or "None">
+
+## Implementation Steps
+
+### Step 1: <verb phrase describing the change>
+
+**Files:** `path/to/file.rs`
+
+<What this step does and why>
+
+- <Concrete action>
+
+### Step 2: <verb phrase describing the change>
+
+**Files:** `path/to/other.rs`
+
+<What this step does and why>
+
+- <Concrete action>
+
+## Verification
+
+1. [ ] `cargo check` — compiles without errors or warnings
+2. [ ] `cargo test` — all existing and new tests pass
+3. [ ] Manual verification: <describe what to manually test if applicable, or remove this item>
+
+## Assumptions
+
+- <Any assumptions made about the codebase, user requirements, or external systems that could invalidate this plan if wrong>
+```
+
 # Operational workflow
 
 1. Inspect relevant code, tests, and surrounding implementation.
-2. Draft or revise the canonical session plan.
+2. Draft or revise the canonical session plan using the template above.
 3. Review the plan for:
    - missing dependencies
    - vague implementation steps
