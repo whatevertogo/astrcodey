@@ -258,6 +258,19 @@ impl PromptCacheRetention {
 }
 
 /// LLM 客户端配置。
+///
+/// TODO: `reasoning_split`、`supports_prompt_cache_key`、`prompt_cache_retention` 是
+/// OpenAI/MiniMax 特有概念，不应出现在通用配置里。引入第二个需要完全不同配置的
+/// provider 时（如 Anthropic native API），应将它们抽入 `ProviderExt` tagged enum：
+///
+/// ```ignore
+/// pub enum ProviderExt {
+///     OpenAi(OpenAiExt),
+///     // Anthropic(AnthropicExt), ...
+/// }
+/// ```
+///
+/// `reasoning_content` 留在 `LlmMessage` 上没问题——推理/思考输出已是跨 provider 概念。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmClientConfig {
     /// API 端点的基础 URL。
