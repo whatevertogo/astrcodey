@@ -17,10 +17,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-dirs = "6"
-parking_lot = "0.12"
+dirs = { workspace = true }
+parking_lot = { workspace = true }
 wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime"] }
 
 [dev-dependencies]
 wasm-encoder = "0.245"
-tempfile = "3"
+tempfile = { workspace = true }

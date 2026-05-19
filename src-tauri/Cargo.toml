@@ -9,16 +9,16 @@ tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-dirs = "6"
-fs2 = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
 rand = "0.9"
 portpicker = "0.1"
-reqwest = { version = "0.12", features = ["json"] }
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { workspace = true, features = ["json"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

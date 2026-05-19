@@ -41,10 +41,10 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 astrcode-log = { path = "../astrcode-log" }
 notify = "8.2.0"
-parking_lot = "0.12"
+parking_lot = { workspace = true }
 axum = "0.8.9"
-futures-util = "0.3"
-tokio-util = "0.7"
+futures-util = { workspace = true }
+tokio-util = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 getrandom = "0.3"
 agent-client-protocol = "0.11"
@@ -52,7 +52,7 @@ agent-client-protocol = "0.11"
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
-tokio-util = "0.7"
+tokio-util = { workspace = true }
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
