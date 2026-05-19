@@ -53,6 +53,13 @@ jobs:
           tool: cargo-audit
       - run: cargo audit
 
+  deps:
+    name: Dependency Direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check-deps.py
+
   check:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
