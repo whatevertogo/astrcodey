@@ -477,6 +477,49 @@ fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
     }
 }
 
+/// 截断尾部未回应的 tool_calls。
+///
+/// 如果消息序列以 `assistant(tool_calls)` 结尾，但后续没有对应的 `tool` 结果消息，
+/// 则回溯截断到这个不完整 tool-call 轮的起始位置（包括部分已到达的 tool 结果）。
+/// 这防止 DeepSeek 等严格校验 tool_calls 配对的 provider 拒绝请求。
+fn truncate_unanswered_tool_calls(messages: &mut Vec<LlmMessage>) {
+    use crate::llm::{LlmContent, LlmRole};
+    if messages.is_empty() {
+        return;
+    }
+    // 从尾部向前找第一个 assistant 带 tool_calls 的消息
+    let last_assistant_with_calls = messages.iter().rposition(|m| {
+        m.role == LlmRole::Assistant
+            && m.content.iter().any(|c| matches!(c, LlmContent::ToolCall { .. }))
+    });
+    let Some(cut_from) = last_assistant_with_calls else {
+        return;
+    };
+    // 收集这个 assistant 消息里的所有 tool_call_id
+    let call_ids: std::collections::HashSet<String> = messages[cut_from]
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            LlmContent::ToolCall { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    // 从 assistant 之后的 tool 消息中收集已回应的 tool_call_id
+    let answered: std::collections::HashSet<String> = messages[cut_from + 1..]
+        .iter()
+        .filter_map(|m| match m.content.first() {
+            Some(LlmContent::ToolResult { tool_call_id, .. }) => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    // 所有 tool_call 都有结果，无需截断
+    if call_ids.iter().all(|id| answered.contains(id)) {
+        return;
+    }
+    // 截断：去掉这个不完整的 tool-call 轮及之后的所有消息
+    messages.truncate(cut_from);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
