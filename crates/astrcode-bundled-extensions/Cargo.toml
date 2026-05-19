@@ -13,7 +13,9 @@ todo-tool = ["dep:astrcode-extension-todo-tool"]
 mode = ["dep:astrcode-extension-mode"]
 
 [dependencies]
+astrcode-core = { path = "../astrcode-core" }
 astrcode-extensions = { path = "../astrcode-extensions" }
+async-trait = { workspace = true }
 astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", optional = true, default-features = false }
 astrcode-extension-mcp = { path = "../astrcode-extension-mcp", optional = true, default-features = false }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", optional = true, default-features = false }

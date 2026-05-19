@@ -1,13 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    config::ModelSelection,
     event::Event,
     extension::ExtensionEvent,
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
 };
-use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{Capabilities, Session, SessionError, SessionRuntimeState};
 use parking_lot::Mutex;
 
@@ -41,7 +39,6 @@ pub enum SessionManagerError {
 pub struct SessionManager {
     event_store: Arc<dyn EventStore>,
     config: Arc<ConfigManager>,
-    extension_runner: Arc<ExtensionRunner>,
     runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
     capabilities: Arc<Capabilities>,
 }
@@ -52,13 +49,11 @@ impl SessionManager {
     pub fn new(
         event_store: Arc<dyn EventStore>,
         config: Arc<ConfigManager>,
-        extension_runner: Arc<ExtensionRunner>,
         capabilities: Arc<Capabilities>,
     ) -> Self {
         Self {
             event_store,
             config,
-            extension_runner,
             runtime_states: Mutex::new(HashMap::new()),
             capabilities,
         }
@@ -105,14 +100,7 @@ impl SessionManager {
             .next()
             .ok_or(SessionManagerError::MissingStartEvent)?;
 
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: working_dir.to_string(),
-            model: ModelSelection::simple(model_id),
-        };
-        self.extension_runner
-            .emit_lifecycle(ExtensionEvent::SessionStart, lifecycle_ctx)
-            .await?;
+        session.emit_lifecycle(ExtensionEvent::SessionStart).await?;
 
         Ok(CreatedSession {
             session,
@@ -133,14 +121,14 @@ impl SessionManager {
     }
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
-            session_id: session_id.to_string(),
-            working_dir: String::new(),
-            model: ModelSelection::simple(self.config.read_effective().llm.model_id.clone()),
-        };
-        self.extension_runner
-            .emit_lifecycle(ExtensionEvent::SessionShutdown, lifecycle_ctx)
-            .await?;
+        let model = self.event_store.session_read_model(session_id).await?;
+        Session::emit_lifecycle_for_read_model(
+            &self.capabilities,
+            session_id,
+            &model,
+            ExtensionEvent::SessionShutdown,
+        )
+        .await?;
         self.event_store.delete_session(session_id).await?;
         // 清理本 session 的 runtime（含 bg_tasks）后从 registry 移除。
         if let Some(runtime) = self.runtime_states.lock().remove(session_id) {
@@ -202,11 +190,10 @@ mod tests {
         extension::{Extension, Registrar, ToolHandler},
         tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
     };
+    use astrcode_extensions::runner::ExtensionRunner;
     use astrcode_session::session_setup::{
         SystemPromptSnapshotInput, build_system_prompt_snapshot, build_tool_registry_snapshot,
     };
-
-    use super::*;
 
     struct StaticToolExtension {
         id: &'static str,

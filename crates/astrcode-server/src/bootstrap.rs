@@ -7,7 +7,10 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, storage::EventStore};
-use astrcode_extensions::{loader::ExtensionLoader, runner::ExtensionRunner};
+use astrcode_extensions::{
+    loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
+    runner::ExtensionRunner,
+};
 use astrcode_session::Capabilities;
 use astrcode_storage::config_store::FileConfigStore;
 
@@ -132,30 +135,27 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 
     // 6. 加载扩展并创建 extension runner。
     //
-    // 加载顺序：
-    // - 先从磁盘加载项目/用户扩展；
-    // - 再注册内置 agent/task 扩展；
-    // - 最后注册磁盘扩展。
-    //
     // 扩展工具不会在这里写入全局工具表；这里只保存扩展列表。
     // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
     let cwd_str = cwd.to_string_lossy().to_string();
-    let load_result = ExtensionLoader::load_all(
-        Some(&cwd_str),
-        &astrcode_extensions::loader::WasmLimits {
-            fuel: effective.wasm.fuel,
-            memory_bytes: effective.wasm.memory_bytes,
+    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource;
+    let disk_source = DiskExtensionSource;
+    let extension_runtime = ExtensionRuntime::load(
+        ExtensionLoadContext {
+            working_dir: Some(cwd_str),
+            wasm_limits: WasmLimits {
+                fuel: effective.wasm.fuel,
+                memory_bytes: effective.wasm.memory_bytes,
+            },
         },
+        Duration::from_secs(30),
+        &[&bundled_source, &disk_source],
     )
     .await;
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
-    astrcode_bundled_extensions::register_bundled_extensions(&extension_runner).await;
-    for ext in load_result.extensions {
-        extension_runner.register(ext).await;
-    }
-    for err in &load_result.errors {
+    for err in &extension_runtime.load_errors {
         tracing::warn!("Extension load error: {err}");
     }
+    let extension_runner = extension_runtime.runner;
 
     // 7. 组装跨 session 共享的运行时能力快照。
     //
@@ -173,7 +173,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
-        Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
     ));
 

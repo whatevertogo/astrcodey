@@ -771,7 +771,6 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     let session_manager = Arc::new(astrcode_server::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
-        Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
     ));
     Arc::new(ServerRuntime {

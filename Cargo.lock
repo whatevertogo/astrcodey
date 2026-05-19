@@ -187,12 +187,14 @@ dependencies = [
 name = "astrcode-bundled-extensions"
 version = "0.1.0"
 dependencies = [
+ "astrcode-core",
  "astrcode-extension-agent-tools",
  "astrcode-extension-mcp",
  "astrcode-extension-mode",
  "astrcode-extension-skill",
  "astrcode-extension-todo-tool",
  "astrcode-extensions",
+ "async-trait",
 ]
 
 [[package]]

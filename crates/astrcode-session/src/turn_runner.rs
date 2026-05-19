@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use astrcode_context::context_assembler::ContextPrepareInput;
+use astrcode_context::{compaction::CompactResult, context_assembler::ContextPrepareInput};
 use astrcode_core::{
     event::{Event, EventPayload},
     extension::{CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
@@ -315,27 +315,14 @@ impl TurnRunner {
             .await;
 
         if let Some(ref mut compaction) = prepared.compaction {
-            send_event(event_tx.as_ref(), EventPayload::CompactionStarted);
-            crate::post_compact::enrich_post_compact_context(
+            self.handle_compaction_stage(
+                extension_runner,
+                state,
                 compaction,
-                self.shared.session_id.as_str(),
-                &state.messages,
-                &self.shared.working_dir,
-                Some(&self.system_prompt),
-                state.visible_tools(),
                 context_assembler.settings(),
+                event_tx,
             )
             .await;
-            let hook_ctx = CompactHookContext {
-                session_id: self.shared.session_id.as_str(),
-                working_dir: &self.shared.working_dir,
-                model_id: &self.shared.model_id,
-                trigger: CompactTrigger::AutoThreshold,
-                message_count: state.messages.len(),
-            };
-            if let Err(e) = dispatch_post_compact(extension_runner, hook_ctx, compaction).await {
-                tracing::warn!(error = %e, "PostCompact extension dispatch failed");
-            }
         }
 
         let mut context_messages = prepared.messages;
@@ -349,6 +336,37 @@ impl TurnRunner {
             .apply_before_provider_request_hook(extension_runner, system_messages, context_messages)
             .await?;
         Ok(PreparedProviderRequest { llm, messages })
+    }
+
+    async fn handle_compaction_stage(
+        &self,
+        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        state: &TurnState,
+        compaction: &mut CompactResult,
+        settings: &astrcode_context::ContextSettings,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    ) {
+        send_event(event_tx.as_ref(), EventPayload::CompactionStarted);
+        crate::post_compact::enrich_post_compact_context(
+            compaction,
+            self.shared.session_id.as_str(),
+            &state.messages,
+            &self.shared.working_dir,
+            Some(&self.system_prompt),
+            state.visible_tools(),
+            settings,
+        )
+        .await;
+        let hook_ctx = CompactHookContext {
+            session_id: self.shared.session_id.as_str(),
+            working_dir: &self.shared.working_dir,
+            model_id: &self.shared.model_id,
+            trigger: CompactTrigger::AutoThreshold,
+            message_count: state.messages.len(),
+        };
+        if let Err(e) = dispatch_post_compact(extension_runner, hook_ctx, compaction).await {
+            tracing::warn!(error = %e, "PostCompact extension dispatch failed");
+        }
     }
 
     async fn refresh_system_prompt(&mut self, state: &mut TurnState) -> Result<(), TurnError> {

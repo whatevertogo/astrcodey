@@ -396,7 +396,6 @@ fn test_runtime_with_settings(
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
-        Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
     ));
     Arc::new(ServerRuntime {

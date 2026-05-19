@@ -7,12 +7,16 @@
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use astrcode_core::extension::Extension;
 use astrcode_support::hostpaths;
 
+use crate::runner::ExtensionRunner;
+
 /// 从磁盘加载所有扩展的结果。
+#[derive(Default)]
 pub struct LoadExtensionsResult {
     /// 成功加载的扩展列表
     pub extensions: Vec<Arc<dyn Extension>>,
@@ -24,6 +28,59 @@ pub struct LoadExtensionsResult {
 pub struct WasmLimits {
     pub fuel: u64,
     pub memory_bytes: usize,
+}
+
+/// Extension source loading context.
+pub struct ExtensionLoadContext {
+    pub working_dir: Option<String>,
+    pub wasm_limits: WasmLimits,
+}
+
+/// A source of extensions that can contribute to one [`ExtensionRunner`].
+#[async_trait::async_trait]
+pub trait ExtensionSource: Send + Sync {
+    async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult;
+}
+
+/// Runtime container for loaded extensions.
+pub struct ExtensionRuntime {
+    pub runner: Arc<ExtensionRunner>,
+    pub load_errors: Vec<String>,
+}
+
+impl ExtensionRuntime {
+    /// Load sources in order and register their extensions into one runner.
+    pub async fn load(
+        ctx: ExtensionLoadContext,
+        timeout: Duration,
+        sources: &[&dyn ExtensionSource],
+    ) -> Self {
+        let runner = Arc::new(ExtensionRunner::new(timeout));
+        let mut load_errors = Vec::new();
+
+        for source in sources {
+            let load_result = source.load(&ctx).await;
+            for ext in load_result.extensions {
+                runner.register(ext).await;
+            }
+            load_errors.extend(load_result.errors);
+        }
+
+        Self {
+            runner,
+            load_errors,
+        }
+    }
+}
+
+/// Disk-backed extension source for global and project WASM extensions.
+pub struct DiskExtensionSource;
+
+#[async_trait::async_trait]
+impl ExtensionSource for DiskExtensionSource {
+    async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
+        ExtensionLoader::load_all(ctx.working_dir.as_deref(), &ctx.wasm_limits).await
+    }
 }
 
 /// 从全局和项目级目录加载扩展。

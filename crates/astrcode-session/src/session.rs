@@ -8,8 +8,9 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    config::ModelSelection,
     event::{Event, EventPayload},
-    extension::ChildToolPolicy,
+    extension::{ChildToolPolicy, ExtensionEvent, LifecycleContext},
     storage::{
         CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
         ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
@@ -150,6 +151,32 @@ impl Session {
         self.runtime.fanout(event);
     }
 
+    /// 发射 session 生命周期事件。
+    pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
+        let model = self.read_model().await?;
+        Self::emit_lifecycle_for_read_model(&self.caps, &self.id, &model, event).await
+    }
+
+    /// 发射 session 生命周期事件，不要求构造完整 [`Session`]。
+    pub async fn emit_lifecycle_for_read_model(
+        caps: &Capabilities,
+        session_id: &SessionId,
+        model: &SessionReadModel,
+        event: ExtensionEvent,
+    ) -> Result<(), SessionError> {
+        caps.extension_runner()
+            .emit_lifecycle(
+                event,
+                LifecycleContext {
+                    session_id: session_id.to_string(),
+                    working_dir: model.working_dir.clone(),
+                    model: ModelSelection::simple(model.model_id.clone()),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     /// 更新会话使用的模型标识。
     ///
     /// 仅在 model_id 与当前值不同时写入 `ModelIdChanged` 事件，避免冗余事件。
@@ -261,6 +288,25 @@ impl Session {
     ) -> Result<bool, SessionError> {
         self.refresh_prompt_with_state(working_dir, extra_system_prompt, stored_fingerprint, None)
             .await
+    }
+
+    /// 初始化当前 session 的运行时工具快照与 system prompt。
+    pub async fn initialize_runtime(&self, working_dir: &str) -> Result<(), SessionError> {
+        self.refresh_tools(working_dir).await;
+        self.refresh_prompt(working_dir, None, None).await?;
+        Ok(())
+    }
+
+    /// 确保恢复后的 session 具备运行 turn 所需的工具快照与 system prompt。
+    pub async fn ensure_runtime_ready(&self) -> Result<(), SessionError> {
+        let state = self.read_model().await?;
+        if self.runtime.tool_registry().list_definitions().is_empty() {
+            self.refresh_tools(&state.working_dir).await;
+        }
+        if state.system_prompt.is_none() {
+            self.refresh_prompt(&state.working_dir, None, None).await?;
+        }
+        Ok(())
     }
 
     /// `refresh_prompt` 的内部版本，调用方可传入已读取的 `SessionReadModel` 避免内部
@@ -578,6 +624,8 @@ impl Session {
 pub enum SessionError {
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("Extension error: {0}")]
+    Extension(#[from] astrcode_core::extension::ExtensionError),
     #[error("{0}")]
     Other(String),
 }

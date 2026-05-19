@@ -243,15 +243,15 @@ impl CommandHandler {
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
         self.broadcast_event(created.start_event);
 
-        match self.initialize_session_prompt(&sid, &working_dir).await {
+        match created.session.initialize_runtime(&working_dir).await {
             Ok(()) => {
                 tracing::info!(session_id = %sid, "session fully initialized");
                 Ok(sid)
             },
             Err(e) => {
                 tracing::error!(session_id = %sid, error = %e, "session prompt init failed");
-                self.send_error(-32603, &e);
-                Err(HandlerError::Other(e))
+                self.send_error(-32603, &e.to_string());
+                Err(HandlerError::Other(e.to_string()))
             },
         }
     }
@@ -327,24 +327,11 @@ impl CommandHandler {
                         return;
                     },
                 };
-                let working_dir = state.working_dir.clone();
-                let needs_prompt = state.system_prompt.is_none();
                 let snapshot = session_snapshot(&state);
 
-                // 恢复 session 的工具表快照（首次 resume 时为空）。
-                if session
-                    .runtime()
-                    .tool_registry()
-                    .list_definitions()
-                    .is_empty()
-                {
-                    session.refresh_tools(&working_dir).await;
-                }
-                if needs_prompt {
-                    if let Err(e) = session.refresh_prompt(&working_dir, None, None).await {
-                        self.send_error(-32603, &e.to_string());
-                        return;
-                    }
+                if let Err(e) = session.ensure_runtime_ready().await {
+                    self.send_error(-32603, &e.to_string());
+                    return;
                 }
                 self.active_session_id = Some(session_id.clone());
                 self.event_bus
@@ -375,31 +362,10 @@ impl CommandHandler {
         self.active_session_id = Some(sid.clone());
         self.broadcast_event(created.start_event);
         // 隐式创建的 session 立即装配工具表与 system prompt。
-        session.refresh_tools(&wd).await;
-        if let Err(e) = session.refresh_prompt(&wd, None, None).await {
+        if let Err(e) = session.initialize_runtime(&wd).await {
             return Err(HandlerError::Other(e.to_string()));
         }
         Ok(sid)
-    }
-
-    /// 初始化会话的 system prompt：加载工具表和提示词文件，生成最终 prompt。
-    async fn initialize_session_prompt(
-        &mut self,
-        session_id: &SessionId,
-        working_dir: &str,
-    ) -> Result<(), String> {
-        let session = self
-            .runtime
-            .session_manager
-            .open(session_id.clone())
-            .await
-            .map_err(|error| error.to_string())?;
-        session.refresh_tools(working_dir).await;
-        session
-            .refresh_prompt(working_dir, None, None)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
     }
 
     // ─── 事件记录与内部辅助 ──────────────────────────────────────────

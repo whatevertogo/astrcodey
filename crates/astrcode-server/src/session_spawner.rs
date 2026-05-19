@@ -742,7 +742,6 @@ mod tests {
         let session_manager = Arc::new(crate::session_manager::SessionManager::new(
             Arc::clone(&store),
             Arc::clone(&config),
-            Arc::clone(&extension_runner),
             capabilities,
         ));
         ServerSessionSpawner { session_manager }
@@ -822,7 +821,6 @@ mod tests {
         let session_manager = Arc::new(crate::session_manager::SessionManager::new(
             Arc::clone(&store),
             Arc::clone(&config),
-            Arc::clone(&extension_runner),
             capabilities,
         ));
         let spawner = ServerSessionSpawner { session_manager };
@@ -872,7 +870,6 @@ mod tests {
         let session_manager = Arc::new(crate::session_manager::SessionManager::new(
             Arc::clone(&store),
             Arc::clone(&config),
-            Arc::clone(&extension_runner),
             capabilities,
         ));
         // 通过 session_manager.open 拿到与 spawner 共享的 parent_session runtime；
