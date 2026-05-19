@@ -20,7 +20,7 @@ use astrcode_core::{
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
-    capabilities::Capabilities,
+    session_runtime_capabilities::SessionRuntimeServices,
     payload::{compact_boundary_payload, session_continued_from_compaction_payload},
     session_runtime::SessionRuntimeState,
 };
@@ -39,7 +39,7 @@ pub struct Session {
     id: SessionId,
     store: Arc<dyn EventStore>,
     runtime: Arc<SessionRuntimeState>,
-    caps: Arc<Capabilities>,
+    caps: Arc<SessionRuntimeServices>,
 }
 
 impl Session {
@@ -58,7 +58,7 @@ impl Session {
         parent: Option<&SessionId>,
         tool_policy: Option<&ChildToolPolicy>,
         runtime: Arc<SessionRuntimeState>,
-        caps: Arc<Capabilities>,
+        caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store
             .create_session(&sid, working_dir, model_id, parent, tool_policy)
@@ -86,7 +86,7 @@ impl Session {
         store: Arc<dyn EventStore>,
         id: SessionId,
         runtime: Arc<SessionRuntimeState>,
-        caps: Arc<Capabilities>,
+        caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
         // 优先信任 runtime 中已存在的 policy（spawn_child 注入路径），
@@ -113,7 +113,7 @@ impl Session {
         &self.runtime
     }
 
-    pub fn caps(&self) -> &Arc<Capabilities> {
+    pub fn caps(&self) -> &Arc<SessionRuntimeServices> {
         &self.caps
     }
 
@@ -159,7 +159,7 @@ impl Session {
 
     /// 发射 session 生命周期事件，不要求构造完整 [`Session`]。
     pub async fn emit_lifecycle_for_read_model(
-        caps: &Capabilities,
+        caps: &SessionRuntimeServices,
         session_id: &SessionId,
         model: &SessionReadModel,
         event: ExtensionEvent,

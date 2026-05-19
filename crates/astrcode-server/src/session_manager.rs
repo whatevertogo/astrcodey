@@ -6,7 +6,7 @@ use astrcode_core::{
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
 };
-use astrcode_session::{Capabilities, Session, SessionError, SessionRuntimeState};
+use astrcode_session::{SessionRuntimeServices, Session, SessionError, SessionRuntimeState};
 use parking_lot::Mutex;
 
 use crate::config_manager::ConfigManager;
@@ -40,7 +40,7 @@ pub struct SessionManager {
     event_store: Arc<dyn EventStore>,
     config: Arc<ConfigManager>,
     runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
-    capabilities: Arc<Capabilities>,
+    capabilities: Arc<SessionRuntimeServices>,
 }
 
 impl SessionManager {
@@ -49,7 +49,7 @@ impl SessionManager {
     pub fn new(
         event_store: Arc<dyn EventStore>,
         config: Arc<ConfigManager>,
-        capabilities: Arc<Capabilities>,
+        capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
         Self {
             event_store,

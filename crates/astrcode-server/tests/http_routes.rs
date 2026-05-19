@@ -761,7 +761,7 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     ));
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
-    let capabilities = Arc::new(astrcode_session::Capabilities::new(
+    let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         config.read_llm_provider(),
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),

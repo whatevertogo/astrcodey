@@ -386,7 +386,7 @@ fn test_runtime_with_settings(
         Duration::from_secs(1),
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
-    let capabilities = Arc::new(astrcode_session::Capabilities::new(
+    let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         config.read_llm_provider(),
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),

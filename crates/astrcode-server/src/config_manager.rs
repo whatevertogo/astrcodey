@@ -10,7 +10,7 @@ use astrcode_core::{
     config::{Config, ConfigStore, EffectiveConfig},
     llm::{LlmClientConfig, LlmProvider},
 };
-use astrcode_session::Capabilities;
+use astrcode_session::SessionRuntimeServices;
 use parking_lot::RwLock;
 
 pub struct ConfigManager {
@@ -23,7 +23,7 @@ pub struct ConfigManager {
     /// `apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` / `set_llm_provider`
     /// 会同步把新的 LLM provider 与 EffectiveConfig 推到这里，让正在运行的 session
     /// 在下一轮 LLM 调用前看到新值。`Bootstrap` 之后通过 `attach_capabilities` 注入。
-    capabilities: RwLock<Option<Arc<Capabilities>>>,
+    capabilities: RwLock<Option<Arc<SessionRuntimeServices>>>,
 }
 
 fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
@@ -80,7 +80,7 @@ impl ConfigManager {
     ///
     /// `bootstrap` 在构造完 `Capabilities` 后调用此方法。后续 ConfigManager 写入
     /// 都会顺带推到 Capabilities，保证正在运行的 session 不读到陈旧的 LLM provider 与配置。
-    pub fn attach_capabilities(&self, capabilities: Arc<Capabilities>) {
+    pub fn attach_capabilities(&self, capabilities: Arc<SessionRuntimeServices>) {
         *self.capabilities.write() = Some(capabilities);
     }
 

@@ -13,14 +13,14 @@ use astrcode_core::{config::EffectiveConfig, llm::LlmProvider};
 use astrcode_extensions::runner::ExtensionRunner;
 use parking_lot::{RwLock, RwLockReadGuard};
 
-pub struct Capabilities {
+pub struct SessionRuntimeServices {
     llm: RwLock<Arc<dyn LlmProvider>>,
     extension_runner: Arc<ExtensionRunner>,
     context_assembler: Arc<LlmContextAssembler>,
     effective_config: RwLock<EffectiveConfig>,
 }
 
-impl Capabilities {
+impl SessionRuntimeServices {
     pub fn new(
         llm: Arc<dyn LlmProvider>,
         extension_runner: Arc<ExtensionRunner>,

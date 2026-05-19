@@ -3,7 +3,7 @@
 //! 负责 Session 生命周期、Turn 执行、工具管线、事件发射和 compact。
 
 pub mod background;
-pub mod capabilities;
+pub mod session_runtime_capabilities;
 pub mod compact;
 pub(crate) mod tool_json_repair;
 pub(crate) mod llm_stream;
@@ -22,7 +22,7 @@ pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
 pub use background::{BackgroundTaskManager, spawn_background_forwarder};
-pub use capabilities::Capabilities;
+pub use session_runtime_capabilities::SessionRuntimeServices;
 pub use payload::{
     agent_turn_completed_payloads, agent_turn_failed_payloads, agent_turn_started_payloads,
     compact_boundary_payload, session_continued_from_compaction_payload,

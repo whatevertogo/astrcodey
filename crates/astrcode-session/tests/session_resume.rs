@@ -15,7 +15,7 @@ use astrcode_core::{
     types::new_session_id,
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_session::{Capabilities, Session, SessionRuntimeState};
+use astrcode_session::{SessionRuntimeServices, Session, SessionRuntimeState};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
@@ -39,7 +39,7 @@ impl LlmProvider for UnusedLlm {
     }
 }
 
-fn test_caps() -> Arc<Capabilities> {
+fn test_caps() -> Arc<SessionRuntimeServices> {
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
@@ -66,7 +66,7 @@ fn test_caps() -> Arc<Capabilities> {
         agent: astrcode_core::config::AgentSettings::default(),
         wasm: astrcode_core::config::WasmSettings::default(),
     };
-    Arc::new(Capabilities::new(
+    Arc::new(SessionRuntimeServices::new(
         llm,
         extension_runner,
         context_assembler,

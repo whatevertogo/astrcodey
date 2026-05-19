@@ -11,7 +11,7 @@ use astrcode_extensions::{
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
 };
-use astrcode_session::Capabilities;
+use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::config_store::FileConfigStore;
 
 pub use crate::config_manager::ConfigManager;
@@ -40,7 +40,7 @@ pub struct ServerRuntime {
     /// 用于将来 `Session::create_full` / `submit` 路径。`config_manager`
     /// 仍是配置热更新的主入口；写入 ConfigManager 的同时会通过
     /// `ConfigManager::sync_capabilities` 推到这里。
-    pub capabilities: Arc<Capabilities>,
+    pub capabilities: Arc<SessionRuntimeServices>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -162,7 +162,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 这一份 Capabilities 是 session crate 视角的依赖入口，与 ConfigManager 并存。
     // 通过 `attach_capabilities` 让 ConfigManager 在配置热更新时把新的 LLM provider
     // 与 EffectiveConfig 同步推到这里。
-    let capabilities = Arc::new(Capabilities::new(
+    let capabilities = Arc::new(SessionRuntimeServices::new(
         config_manager.read_llm_provider(),
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),

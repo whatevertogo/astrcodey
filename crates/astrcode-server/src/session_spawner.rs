@@ -714,8 +714,8 @@ mod tests {
         config: &Arc<crate::config_manager::ConfigManager>,
         extension_runner: Arc<ExtensionRunner>,
         context_assembler: Arc<LlmContextAssembler>,
-    ) -> Arc<astrcode_session::Capabilities> {
-        let caps = Arc::new(astrcode_session::Capabilities::new(
+    ) -> Arc<astrcode_session::SessionRuntimeServices> {
+        let caps = Arc::new(astrcode_session::SessionRuntimeServices::new(
             config.read_llm_provider(),
             extension_runner,
             context_assembler,
