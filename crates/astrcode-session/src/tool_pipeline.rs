@@ -35,7 +35,7 @@ pub struct ToolPipeline {
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<ExtensionRunner>,
     session: Arc<Session>,
-    capabilities: ToolRuntimeCapabilities,
+    tool_runtime_capabilities: ToolRuntimeCapabilities,
 }
 
 impl ToolPipeline {
@@ -44,14 +44,14 @@ impl ToolPipeline {
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
         session: Arc<Session>,
-        capabilities: ToolRuntimeCapabilities,
+        tool_runtime_capabilities: ToolRuntimeCapabilities,
     ) -> Self {
         Self {
             shared,
             tool_registry,
             extension_runner,
             session,
-            capabilities,
+            tool_runtime_capabilities,
         }
     }
 
@@ -72,7 +72,7 @@ impl ToolPipeline {
             tools: tools.to_vec(),
             tool_result_reader: Some(Arc::clone(&self.session) as Arc<dyn ToolResultArtifactReader>),
             event_tx,
-            capabilities: self.capabilities.clone(),
+            capabilities: self.tool_runtime_capabilities.clone(),
         }
     }
 

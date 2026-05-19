@@ -88,11 +88,7 @@ struct UpsertPlanArgs {
 /// Transition context messages for mode entry/exit.
 fn transition_context(from: &ModeId, to: &ModeId) -> Option<String> {
     match (from.as_str(), to.as_str()) {
-        ("code", "plan") => Some(format!(
-            "{}\n\n{}",
-            crate::prompts::plan_entry_prompt().trim(),
-            include_str!("../builtin_prompts/plan_mode.md").trim(),
-        )),
+        ("code", "plan") => Some(crate::prompts::plan_entry_prompt().trim().to_string()),
         ("plan", "code") => Some(crate::prompts::plan_exit_prompt().trim().to_string()),
         _ => None,
     }
