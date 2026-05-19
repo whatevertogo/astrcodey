@@ -95,13 +95,13 @@ impl AgentShared {
 
 const AGENT_TOOL_DESCRIPTION: &str =
     "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific \
-     capabilities and tools available to it.\n\n\
-     When NOT to use this tool:\n\
-     - If you want to read a specific file, use the Read tool directly\n\
-     - If you are searching for a specific symbol or class definition, use grep directly\n\
-     - If you are searching within a specific file or a set of 2-3 files, use Read or grep directly\n\
-     - If you can accomplish the task with 2-3 direct tool calls, do it yourself\n\n\
-     See the [Agents] section in the system prompt for available agent types.";
+     capabilities and tools available to it.\n\nWhen NOT to use this tool:\n- If you want to read \
+     a specific file, use the Read tool directly\n- If you are searching for a specific symbol or \
+     class definition, use grep directly\n- If you are searching within a specific file or a set \
+     of 2-3 files, use Read or grep directly\n- If you can accomplish the task with 2-3 direct \
+     tool calls, do it yourself\n\nMultiple agents can be launched in a single response to handle \
+     independent tasks concurrently.\n\nSee the [Agents] section in the system prompt for \
+     available agent types.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description of the task"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"waitForResult":{"type":"boolean","default":false,"description":"If true, block until the agent completes. If false (default), run in the background and return immediately."}},"required":["prompt","description"]}"#;
 
@@ -298,8 +298,8 @@ fn agent_tool_metadata()
         .caveat(
             "Subagents are valuable for parallelizing independent queries or protecting the main \
              context window from excessive results, but they should not be used excessively when \
-             not needed. Avoid duplicating work that subagents are already doing — if you delegate \
-             research to a subagent, do not also perform the same searches yourself.",
+             not needed. Avoid duplicating work that subagents are already doing — if you \
+             delegate research to a subagent, do not also perform the same searches yourself.",
         )
         .prompt_tag("collaboration"),
     );
