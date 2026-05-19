@@ -221,6 +221,9 @@ pub enum ConversationBlockDto {
         /// 后台任务 ID（仅后台化任务携带，用于前端面板追踪）。
         #[serde(skip_serializing_if = "Option::is_none")]
         task_id: Option<String>,
+        /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     Error {
         id: String,

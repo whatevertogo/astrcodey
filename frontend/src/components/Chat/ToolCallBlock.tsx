@@ -1,4 +1,6 @@
 import { memo, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { ConversationBlock } from '../../services/types'
 import {
   pillNeutral,
@@ -47,6 +49,12 @@ function compactLine(text: string): string {
 function ToolCallBlock({ block }: ToolCallBlockProps) {
   const [isOpen, setIsOpen] = useState(false)
 
+  const planContent =
+    block.metadata?.planContent &&
+    typeof block.metadata.planContent === 'string'
+      ? (block.metadata.planContent as string)
+      : null
+
   // 折叠摘要行：显示 LLM 调用的参数（如果有的话），否则回退到结果摘要
   const summaryLine = compactLine(
     block.arguments ||
@@ -93,11 +101,19 @@ function ToolCallBlock({ block }: ToolCallBlockProps) {
       </summary>
       <div className="mt-2 flex min-w-0 flex-col gap-3 rounded-[18px] border border-border bg-surface-soft px-4 py-3.5 shadow-soft">
         <div className="min-w-0 overflow-y-auto overscroll-contain pr-1 max-h-[min(58vh,560px)]">
-          <div className={codeBlockShell}>
-            <pre className={codeBlockContent}>
-              <code>{resultText}</code>
-            </pre>
-          </div>
+          {planContent ? (
+            <div className="prose-chat min-w-0 max-w-full">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {planContent}
+              </ReactMarkdown>
+            </div>
+          ) : (
+            <div className={codeBlockShell}>
+              <pre className={codeBlockContent}>
+                <code>{resultText}</code>
+              </pre>
+            </div>
+          )}
         </div>
       </div>
     </details>

@@ -116,6 +116,7 @@ export type ConversationBlock =
       text: string
       status: BlockStatus
       taskId?: string
+      metadata?: Record<string, unknown>
     }
   | { kind: 'error'; id: string; message: string }
   | { kind: 'systemNote'; id: string; text: string }

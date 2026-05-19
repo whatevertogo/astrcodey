@@ -65,6 +65,16 @@ function requiredBoolean(source: JsonObject, name: string): boolean {
   return value
 }
 
+function optionalObject(
+  source: JsonObject,
+  name: string,
+): Record<string, unknown> | undefined {
+  const value = source[name]
+  if (value == null || typeof value !== 'object' || Array.isArray(value))
+    return undefined
+  return value as Record<string, unknown>
+}
+
 function optionalNumber(source: JsonObject, name: string): number | undefined {
   const value = source[name]
   if (value == null) return undefined
@@ -143,6 +153,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         text: requiredString(object, 'text'),
         status: decodeBlockStatus(object.status),
         taskId: optionalString(object, 'taskId'),
+        metadata: optionalObject(object, 'metadata'),
       }
     case 'error':
       return { kind, id, message: requiredString(object, 'message') }

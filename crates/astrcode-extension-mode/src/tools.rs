@@ -288,6 +288,7 @@ pub fn handle_upsert_plan(
                 "operation",
                 json!(if is_create { "create" } else { "update" }),
             ),
+            ("planContent", json!(args.content)),
         ]),
     ))
 }

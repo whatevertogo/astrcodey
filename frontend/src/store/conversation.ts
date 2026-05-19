@@ -69,6 +69,7 @@ function mergeBlock(
       text: incoming.text ?? current.text,
       // taskId 不随 FinalizeBlock 返回，保留当前值
       taskId: incoming.taskId ?? current.taskId,
+      metadata: incoming.metadata ?? current.metadata,
     }
   }
 

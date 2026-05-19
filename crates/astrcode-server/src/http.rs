@@ -865,6 +865,7 @@ fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
                     text: String::new(),
                     status: ConversationBlockStatusDto::Streaming,
                     task_id: None,
+                    metadata: None,
                 },
             }]
         },
@@ -1028,22 +1029,32 @@ fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
             call_id,
             tool_name,
             result,
-        } => Some(ConversationBlockDto::ToolCall {
-            id: call_id.to_string(),
-            name: tool_name.clone(),
-            arguments: String::new(),
-            text: result.content.clone(),
-            status: if result.is_error {
-                ConversationBlockStatusDto::Error
+        } => {
+            let metadata: serde_json::Value = serde_json::to_value(&result.metadata)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            let metadata = if metadata.as_object().map_or(false, |m| !m.is_empty()) {
+                Some(metadata)
             } else {
-                ConversationBlockStatusDto::Complete
-            },
-            task_id: result
-                .metadata
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        }),
+                None
+            };
+            Some(ConversationBlockDto::ToolCall {
+                id: call_id.to_string(),
+                name: tool_name.clone(),
+                arguments: String::new(),
+                text: result.content.clone(),
+                status: if result.is_error {
+                    ConversationBlockStatusDto::Error
+                } else {
+                    ConversationBlockStatusDto::Complete
+                },
+                task_id: result
+                    .metadata
+                    .get("task_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                metadata,
+            })
+        },
         EventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
             message: message.clone(),
@@ -1114,6 +1125,7 @@ fn event_to_replay_deltas(event: &Event) -> Vec<ConversationDeltaDto> {
                 text: String::new(),
                 status: ConversationBlockStatusDto::Streaming,
                 task_id: None,
+                metadata: None,
             },
         }];
     }
@@ -1199,6 +1211,7 @@ fn messages_to_blocks(
                         text: String::new(),
                         status: ConversationBlockStatusDto::Streaming,
                         task_id: None,
+                        metadata: None,
                     });
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }
@@ -1270,6 +1283,7 @@ fn push_tool_result_block(
             text: content.clone(),
             status,
             task_id: background_task.map(|task| task.task_id.to_string()),
+            metadata: None,
         });
         pushed_result = true;
     }
@@ -1282,6 +1296,7 @@ fn push_tool_result_block(
             text: visible_message_text(message),
             status: ConversationBlockStatusDto::Complete,
             task_id: None,
+            metadata: None,
         });
     }
 }
@@ -1571,6 +1586,7 @@ mod tests {
                 text,
                 status,
                 task_id: _,
+                metadata: _,
             } => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(name, "read");
