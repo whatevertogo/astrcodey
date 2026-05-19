@@ -624,10 +624,20 @@ mod tests {
             name: None,
             reasoning_content: None,
         });
+        model.messages.push(LlmMessage {
+            role: LlmRole::Tool,
+            content: vec![LlmContent::ToolResult {
+                tool_call_id: "call_1".into(),
+                content: "file content".into(),
+                is_error: false,
+            }],
+            name: Some("read".into()),
+            reasoning_content: None,
+        });
 
         let messages = model.provider_messages();
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].role, LlmRole::Assistant);
         assert_eq!(
             messages[1].reasoning_content.as_deref(),
@@ -643,6 +653,7 @@ mod tests {
                 .iter()
                 .any(|content| matches!(content, LlmContent::ToolCall { .. }))
         );
+        assert_eq!(messages[2].role, LlmRole::Tool);
     }
 
     #[test]
@@ -674,5 +685,100 @@ mod tests {
             &messages[2].content[0],
             LlmContent::Text { text } if text == "answer"
         ));
+    }
+
+    #[test]
+    fn provider_messages_truncates_unanswered_tool_calls() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.messages.push(LlmMessage::user("look at this"));
+        model.messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call_1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "a.rs"}),
+            }],
+            name: None,
+            reasoning_content: None,
+        });
+        // no tool result for call_1
+
+        let messages = model.provider_messages();
+
+        // The unanswered tool call round is truncated
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, LlmRole::User);
+    }
+
+    #[test]
+    fn provider_messages_truncates_partially_answered_tool_calls() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.messages.push(LlmMessage::user("look"));
+        model.messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![
+                LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                },
+                LlmContent::ToolCall {
+                    call_id: "call_2".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "b.rs"}),
+                },
+            ],
+            name: None,
+            reasoning_content: None,
+        });
+        // only call_1 has a result, call_2 is unanswered
+        model.messages.push(LlmMessage {
+            role: LlmRole::Tool,
+            content: vec![LlmContent::ToolResult {
+                tool_call_id: "call_1".into(),
+                content: "file a".into(),
+                is_error: false,
+            }],
+            name: Some("read".into()),
+            reasoning_content: None,
+        });
+
+        let messages = model.provider_messages();
+
+        // The partially answered round is truncated entirely
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, LlmRole::User);
+    }
+
+    #[test]
+    fn provider_messages_keeps_fully_answered_tool_calls() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.messages.push(LlmMessage::user("look"));
+        model.messages.push(LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call_1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "a.rs"}),
+            }],
+            name: None,
+            reasoning_content: None,
+        });
+        model.messages.push(LlmMessage {
+            role: LlmRole::Tool,
+            content: vec![LlmContent::ToolResult {
+                tool_call_id: "call_1".into(),
+                content: "file a".into(),
+                is_error: false,
+            }],
+            name: Some("read".into()),
+            reasoning_content: None,
+        });
+        model.messages.push(LlmMessage::assistant("done"));
+
+        let messages = model.provider_messages();
+
+        // All tool calls have results, nothing truncated
+        assert_eq!(messages.len(), 4);
     }
 }
