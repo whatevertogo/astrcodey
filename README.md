@@ -5,7 +5,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~49k lines of Rust across 18 crates, plus a React + TypeScript web frontend (~4.7k lines). It features an agent loop with tool execution, a streaming SSE-based LLM provider layer, a plugin/hook extension system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~50k lines of Rust across 19 crates, plus a React + TypeScript web frontend (~4.7k lines). It features an agent loop with tool execution, a streaming SSE-based LLM provider layer, a plugin/hook extension system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
 
 > **Why?** I wanted to understand how an AI coding agent works at every layer — from SSE stream parsing to context window compaction — so I built one. The architecture draws on engineering practices from several coding agents, but all code is original.
 
@@ -25,7 +25,7 @@ cargo run -- tui
 cargo run -- exec "explain the agent loop architecture"
 
 # HTTP/SSE server
-cargo run --bin astrcode-server
+cargo run -- server
 
 # Web frontend (dev server)
 cd frontend && npm install && npm run dev
@@ -80,33 +80,34 @@ cd frontend && npm install && npm run tauri:dev
 
 | Crate | Lines | Description |
 |---|---|---|
-| `astrcode-server` | 9.2k | Agent loop, session management, JSON-RPC/HTTP/ACP handlers, transport, concurrency control |
+| `astrcode-server` | 8.7k | Agent loop, session management, JSON-RPC/HTTP/ACP handlers, transport, concurrency control |
 | `astrcode-cli` | 6.7k | Terminal UI (ratatui), headless exec, server launcher |
+| `astrcode-session` | 5.2k | Session runtime: session handle, turn execution, tool pipeline, event bus |
 | `astrcode-tools` | 4.5k | Built-in tools: read, write, edit, patch, find, grep, shell, task |
-| `astrcode-core` | 4.3k | Shared types, traits, config system, error types, prompt composition |
-| `astrcode-session` | 4.0k | Session runtime: session handle, turn execution, event bus |
+| `astrcode-core` | 4.4k | Shared types, traits, config system, error types, prompt composition |
 | `astrcode-ai` | 3.5k | OpenAI-compatible provider (Chat Completions + Responses API), SSE streaming, retry |
 | `astrcode-context` | 3.3k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| `astrcode-storage` | 3.1k | JSONL event log, session snapshots, config persistence, file locking |
-| `astrcode-extensions` | 2.4k | Extension lifecycle, hook dispatch, native extension loading (FFI), WASM extension runtime |
+| `astrcode-storage` | 3.3k | JSONL event log, session snapshots, config persistence, file locking |
+| `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native extension loading (FFI), WASM extension runtime |
 | `astrcode-extension-mcp` | 1.9k | MCP protocol client via stdio, tool discovery |
 | `astrcode-protocol` | 1.1k | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
 | `astrcode-extension-mode` | 1.1k | Agent running mode switching (Code / Plan), plan artifact, exit gate |
-| `astrcode-extension-skill` | 950 | Slash-command skill discovery and dispatch |
-| `astrcode-support` | 929 | Path resolution, shell detection, tool result persistence |
-| `astrcode-extension-agent-tools` | 905 | Sub-agent delegation (Agent tool) |
+| `astrcode-extension-skill` | 949 | Slash-command skill discovery and dispatch |
 | `astrcode-extension-todo-tool` | 734 | Progress tracking todo list tool |
+| `astrcode-extension-agent-tools` | 730 | Sub-agent delegation (Agent tool) |
+| `astrcode-support` | 613 | Path resolution, shell detection |
 | `astrcode-client` | 521 | Typed JSON-RPC client, transport, stream subscription |
 | `astrcode-log` | 353 | File rotation, stderr output, env-filter logging |
+| `astrcode-bundled-extensions` | 39 | Composition root for optional extension crates |
 
-**Total: ~49k lines across 18 Rust crates, 154 source files.**
+**Total: ~50k lines across 19 Rust crates, 158 source files.**
 
 ### Frontend & Desktop App
 
 | Component | Lines | Description |
 |---|---|---|
 | `frontend/` (React + TS) | ~4.7k | Web frontend — chat view, sidebar, session management, SSE streaming |
-| `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, native dialogs, auto port binding |
+| `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, native dialogs, HTTP plugin |
 
 The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite 8 single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri dev`).
 
@@ -181,7 +182,7 @@ The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Proto
 |---|---|---|
 | **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands |
 | **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl` streaming output |
-| **Server** | `cargo run --bin astrcode-server` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
+| **Server** | `cargo run -- server` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
 | **Web** | `cd frontend && npm run dev` | Browser-based chat interface connected to the server via SSE |
 | **Desktop** | `cd frontend && npm run tauri:dev` | Tauri desktop app (auto-launches server as sidecar) |
 
