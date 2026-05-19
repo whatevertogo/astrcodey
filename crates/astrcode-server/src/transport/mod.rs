@@ -5,8 +5,8 @@
 
 mod stdio;
 
+use astrcode_protocol::commands::ClientCommand;
 pub use astrcode_protocol::transport::TransportError;
-use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 pub use stdio::{StdioTransport, write_error_response, write_initialize_response};
 
 /// Transport trait for server communication.
@@ -16,9 +16,6 @@ pub use stdio::{StdioTransport, write_error_response, write_initialize_response}
 pub trait ServerTransport: Send + Sync {
     /// Read the next command from the transport.
     async fn read_command(&mut self) -> Option<ClientCommand>;
-
-    /// Write an event to the transport.
-    async fn write_event(&self, event: &ClientNotification) -> Result<(), TransportError>;
 
     /// Initialize the connection with version negotiation.
     async fn initialize(

@@ -70,21 +70,22 @@ async fn main() {
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();
-    let broadcast_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
-            let line = notification_to_jsonrpc_message(&event)
+            let line = match notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
-                .unwrap_or_default();
+            {
+                Ok(line) => line,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to serialize event to JSON-RPC");
+                    continue;
+                },
+            };
             use std::io::Write;
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
             let _ = handle.write_all(line.as_bytes());
             let _ = handle.flush();
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = broadcast_handle.await {
-            tracing::error!("event broadcast task panicked: {e}");
         }
     });
 

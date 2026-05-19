@@ -4,10 +4,9 @@ use std::io::{BufRead, BufReader, Write};
 
 use astrcode_protocol::{
     commands::ClientCommand,
-    events::ClientNotification,
     framing::{
         JsonRpcMessage, PROTOCOL_VERSION, command_from_jsonrpc_request, error_message,
-        from_jsonl_line, notification_to_jsonrpc_message, to_jsonl_line,
+        from_jsonl_line, to_jsonl_line,
     },
     version::{InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo},
 };
@@ -124,17 +123,6 @@ impl ServerTransport for StdioTransport {
             }
         }
         None
-    }
-
-    async fn write_event(&self, event: &ClientNotification) -> Result<(), TransportError> {
-        let message = notification_to_jsonrpc_message(event)?;
-        let line = to_jsonl_line(&message)?;
-        // Write to stdout
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        handle.write_all(line.as_bytes())?;
-        handle.flush()?;
-        Ok(())
     }
 
     async fn initialize(&mut self) -> Result<InitializeRequest, TransportError> {

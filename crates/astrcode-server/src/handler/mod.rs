@@ -355,17 +355,7 @@ impl CommandHandler {
         let wd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
-        let created = self.runtime.session_manager.create(&wd).await?;
-        let sid = created.session.id().clone();
-        let session = created.session;
-        self.event_bus.attach(&session);
-        self.active_session_id = Some(sid.clone());
-        self.broadcast_event(created.start_event);
-        // 隐式创建的 session 立即装配工具表与 system prompt。
-        if let Err(e) = session.initialize_runtime(&wd).await {
-            return Err(HandlerError::Other(e.to_string()));
-        }
-        Ok(sid)
+        self.create_session(wd).await
     }
 
     // ─── 事件记录与内部辅助 ──────────────────────────────────────────

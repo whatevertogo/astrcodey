@@ -94,11 +94,14 @@ impl AgentShared {
 // 定义 → 参数 → 构建逻辑 → 渲染 → Handler，自上而下阅读即可理解完整流程。
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Launch a specialized subagent for one narrow, delegated task. Agents run in the background \
-     by default — you can continue working and results arrive in the next turn. Set waitForResult \
-     to true only when your next step depends on the agent's output. You may launch multiple \
-     agents in a single response to parallelize independent tasks. See the [Agents] section in \
-     the system prompt for available agent types.";
+    "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific \
+     capabilities and tools available to it.\n\n\
+     When NOT to use this tool:\n\
+     - If you want to read a specific file, use the Read tool directly\n\
+     - If you are searching for a specific symbol or class definition, use grep directly\n\
+     - If you are searching within a specific file or a set of 2-3 files, use Read or grep directly\n\
+     - If you can accomplish the task with 2-3 direct tool calls, do it yourself\n\n\
+     See the [Agents] section in the system prompt for available agent types.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description of the task"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"waitForResult":{"type":"boolean","default":false,"description":"If true, block until the agent completes. If false (default), run in the background and return immediately."}},"required":["prompt","description"]}"#;
 
@@ -286,18 +289,17 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
-            "Use `agent` to delegate isolated tasks to specialized subagents. Agents run in the \
-             background by default — launch them and continue working; results arrive in the next \
-             turn. Prefer launching multiple agents in a single response to parallelize \
-             independent tasks (e.g. investigate bug A while agent B searches for related code). \
-             Only set waitForResult to true when your very next step depends on the agent's \
-             output.",
+            "Use the agent tool with specialized agents when the task genuinely requires \
+             multi-step exploration or isolated execution context. For broader codebase \
+             exploration, use the agent with subagentType=explore — but only when a simple, \
+             directed search with find/grep proves insufficient or when the task clearly requires \
+             more than 3 queries.",
         )
         .caveat(
-            "For simple file reads or targeted searches, use Read/Grep directly instead of \
-             spawning an agent. When launching multiple background agents, ensure their tasks are \
-             non-overlapping to avoid duplicated work. Background agents are automatically \
-             cancelled if the session ends.",
+            "Subagents are valuable for parallelizing independent queries or protecting the main \
+             context window from excessive results, but they should not be used excessively when \
+             not needed. Avoid duplicating work that subagents are already doing — if you delegate \
+             research to a subagent, do not also perform the same searches yourself.",
         )
         .prompt_tag("collaboration"),
     );

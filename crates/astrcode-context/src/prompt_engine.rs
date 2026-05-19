@@ -545,8 +545,11 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
         lines.push(String::new());
         lines.push("Agent Collaboration Tools".into());
         lines.push(
-            "- Use these tools to spawn and inspect child agents. Keep the original agent \
-             identifier byte-for-byte across related calls."
+            "- Use the agent tool to delegate isolated tasks to specialized subagents, but do \
+             not use it excessively. For simple, directed searches (e.g. for a specific file, \
+             symbol, or function), use find/grep directly. For broader exploration, use agent \
+             with subagentType=explore only when a simple search proves insufficient or when the \
+             task will clearly require more than 3 queries."
                 .into(),
         );
         for tool in &collab {
