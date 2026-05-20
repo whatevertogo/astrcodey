@@ -57,6 +57,15 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
 }
 
 fn apply_event(app: &mut App, event: &Event) {
+    // 只处理当前活跃 session 的事件；子 session 的事件通过 ToolOutputDelta 在父上呈现。
+    // SessionStarted 例外：它设置 active_session_id。
+    if !matches!(&event.payload, EventPayload::SessionStarted { .. }) {
+        if let Some(active) = &app.active_session_id {
+            if event.session_id.as_str() != active.as_str() {
+                return;
+            }
+        }
+    }
     match &event.payload {
         EventPayload::SessionStarted {
             working_dir,

@@ -51,6 +51,14 @@ pub fn router(
         runtime.event_store.clone(),
         event_tx.clone(),
     ));
+    {
+        let event_bus = Arc::clone(&event_bus);
+        runtime
+            .session_manager
+            .set_attach_hook(Arc::new(move |session| {
+                event_bus.attach(session);
+            }));
+    }
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_bus));
     let state = HttpState {
         runtime,

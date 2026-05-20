@@ -39,6 +39,18 @@ pub(in crate::http) fn event_to_replay_deltas(event: &Event) -> Vec<Conversation
     if let Some(block) = completed_block_from_payload(event) {
         return vec![ConversationDeltaDto::AppendBlock { block }];
     }
+    // 子会话重放时，AssistantMessageStarted 应产生流式 AppendBlock，
+    // 让前端为后续的 PatchBlock / FinalizeBlock 准备占位。
+    if let EventPayload::AssistantMessageStarted { message_id } = &event.payload {
+        return vec![ConversationDeltaDto::AppendBlock {
+            block: ConversationBlockDto::Assistant {
+                id: message_id.to_string(),
+                text: String::new(),
+                reasoning_content: None,
+                status: ConversationBlockStatusDto::Streaming,
+            },
+        }];
+    }
     if let EventPayload::ToolCallRequested {
         call_id,
         tool_name,

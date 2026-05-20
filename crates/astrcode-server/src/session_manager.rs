@@ -11,6 +11,9 @@ use parking_lot::Mutex;
 
 use crate::config_manager::ConfigManager;
 
+/// 会话创建后的回调类型，用于在 session 注册到 manager 时自动执行副作用（如 attach 到 event_bus）。
+pub type SessionAttachHook = Arc<dyn Fn(&Session) + Send + Sync>;
+
 pub(crate) struct CreatedSession {
     pub(crate) session: Session,
     pub(crate) start_event: Event,
@@ -41,6 +44,8 @@ pub struct SessionManager {
     config: Arc<ConfigManager>,
     runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
     capabilities: Arc<SessionRuntimeServices>,
+    /// 可选的 attach 回调：子会话注册 runtime 后自动把 session 接入 event_bus 广播。
+    attach_hook: Mutex<Option<SessionAttachHook>>,
 }
 
 impl SessionManager {
@@ -56,6 +61,7 @@ impl SessionManager {
             config,
             runtime_states: Mutex::new(HashMap::new()),
             capabilities,
+            attach_hook: Mutex::new(None),
         }
     }
 
@@ -69,6 +75,24 @@ impl SessionManager {
 
     pub(crate) fn config(&self) -> &Arc<ConfigManager> {
         &self.config
+    }
+
+    /// 设置 attach 回调。event_bus 创建后由调用方注入，子会话注册 runtime 时自动触发。
+    pub fn set_attach_hook(&self, hook: SessionAttachHook) {
+        *self.attach_hook.lock() = Some(hook);
+    }
+
+    /// 把子会话的 runtime 注册到 manager，并自动 attach 到 event_bus（如果 hook 已设置）。
+    ///
+    /// 子会话由 `Session::spawn_child` 创建，其 runtime 不经过 `get_or_create_runtime`，
+    /// 必须手动注册才能让后续 `open(child_sid)` 拿到同一个 runtime（共享广播通道）。
+    pub(crate) fn register_child_session(&self, session: &Session) {
+        let sid = session.id().clone();
+        let runtime = session.runtime().clone();
+        self.runtime_states.lock().insert(sid, runtime);
+        if let Some(hook) = self.attach_hook.lock().as_ref() {
+            hook(session);
+        }
     }
 
     pub(crate) async fn create(

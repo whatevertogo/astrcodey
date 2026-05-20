@@ -66,7 +66,8 @@ pub async fn run() -> io::Result<()> {
     let mut chunking_policy = AdaptiveChunkingPolicy::new();
 
     // Initial draw
-    draw_frame(&mut terminal, &app, &theme)?;
+    let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
+    terminal.draw_frame(panel_lines, cursor_col, cursor_row_offset)?;
 
     // Query extension commands
     client
@@ -123,10 +124,12 @@ pub async fn run() -> io::Result<()> {
             break;
         }
         if dirty {
-            // Flush scrollback entries to terminal native scrollback
+            // Flush scrollback entries into terminal history buffer.
             let entries = std::mem::take(&mut app.scrollback_queue);
             terminal.flush_scrollback(entries, &theme)?;
-            draw_frame(&mut terminal, &app, &theme)?;
+            // Redraw the entire screen (history tail + bottom panel).
+            let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
+            terminal.draw_frame(panel_lines, cursor_col, cursor_row_offset)?;
         }
     }
 
@@ -415,20 +418,20 @@ async fn execute_slash_command(
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
-fn draw_frame(terminal: &mut TerminalSession, app: &App, theme: &Theme) -> io::Result<()> {
+/// Build the bottom panel lines + cursor position for the frame.
+fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, u16, u16) {
     use ratatui::text::{Line, Span};
     use render::layout_visual_text;
 
-    let width = terminal.composer_width();
+    let width = 80usize; // will be clamped by terminal anyway
 
-    // Build composer lines
     let vl = layout_visual_text(app.composer.text(), width, Some(app.composer.cursor()));
     let cursor_col = 2 + vl.cursor_column.unwrap_or(0) as u16;
     let cursor_row_offset = vl.cursor_row.unwrap_or(0) as u16;
 
     let mut panel_lines: Vec<Line<'static>> = Vec::new();
 
-    // Composer line(s) — only show first line in the fixed panel
+    // Composer line(s).
     if app.composer.text().is_empty() {
         panel_lines.push(Line::from(vec![
             Span::styled("> ", theme.assistant_label),
@@ -445,35 +448,35 @@ fn draw_frame(terminal: &mut TerminalSession, app: &App, theme: &Theme) -> io::R
                 Span::styled(line, theme.composer),
             ]));
             if panel_lines.len() >= 2 {
-                break; // Cap at 2 lines for the composer area
+                break;
             }
         }
     }
 
-    // Status/activity line
-    let status_text = if let Some(ref _activity) = None::<()> {
-        app.status_text.clone()
-    } else {
-        app.status_text.clone()
-    };
+    // Pad to 2 lines for composer area.
+    while panel_lines.len() < 2 {
+        panel_lines.push(Line::from(""));
+    }
+
+    // Status line.
     panel_lines.push(Line::from(Span::styled(
-        format!("  {status_text}"),
+        format!("  {}", app.status_text),
         theme.dim,
     )));
 
-    // Footer
+    // Footer.
     let session = app
         .active_session_id
         .as_deref()
         .map(|id| id.get(..8).unwrap_or(id))
         .unwrap_or("none");
     let model = if app.model_name.is_empty() {
-        "model: pending".to_string()
+        "model: pending"
     } else {
-        app.model_name.clone()
+        &app.model_name
     };
     let cwd = if app.working_dir.is_empty() {
-        "cwd pending".into()
+        "cwd pending".to_string()
     } else {
         compact_path(&app.working_dir)
     };
@@ -487,7 +490,7 @@ fn draw_frame(terminal: &mut TerminalSession, app: &App, theme: &Theme) -> io::R
         theme.footer,
     )));
 
-    terminal.draw_bottom_panel_with_cursor(panel_lines, cursor_col, cursor_row_offset)
+    (panel_lines, cursor_col, cursor_row_offset)
 }
 
 fn compact_path(path: &str) -> String {
