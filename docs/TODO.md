@@ -17,10 +17,6 @@
   - [ ] 分支点管理
   - [ ] 合并/变基支持
 
-- [x] 性能优化
-  - [x] 启动时间优化
-  - [x] 大文件处理优化
-  - [x] 内存占用优化
 
 - [ ] Eval 框架
 - [ ] ACP 协议完善
@@ -75,3 +71,7 @@
 - [x] TUI Ctrl+C 二次确认退出
 - [x] 复用稳定系统提示词前缀 KV 缓存
 - [x] BackgroundTaskOutput 增加 call_id 原生关联 tool-call block（ACP 使用 ToolCallUpdate，HTTP/SSE 使用 ToolOutput delta）
+- [x] 性能优化
+  - [x] 启动时间优化
+  - [x] 大文件处理优化
+  - [x] 内存占用优化
