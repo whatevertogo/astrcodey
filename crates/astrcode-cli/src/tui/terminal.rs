@@ -1,8 +1,10 @@
-//! TerminalSession: raw mode, CSI 2026, inline viewport, resize heuristic.
+//! TerminalSession with transcript reflow (codex-rs design).
 //!
-//! Thin wrapper around the existing custom_terminal + insert_history infrastructure.
+//! Wraps custom_terminal + insert_history with an in-memory history buffer.
+//! On resize: clear visible history rows, re-insert from buffer for the new width.
+//! This prevents "swallowed lines" on terminal resize.
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 
 use crossterm::{
     SynchronizedUpdate,
@@ -10,7 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, layout::Position};
+use ratatui::{backend::CrosstermBackend, layout::Position, text::Line};
 
 use crate::tui::{
     custom_terminal::Terminal as CustomTerminal, insert_history::insert_history_lines,
@@ -18,9 +20,15 @@ use crate::tui::{
 };
 
 const INLINE_VIEWPORT_HEIGHT: u16 = 4;
+/// Maximum number of history lines to replay on resize (prevents lag on huge sessions).
+const REFLOW_MAX_LINES: usize = 500;
 
 pub struct TerminalSession {
     pub terminal: CustomTerminal<CrosstermBackend<Stdout>>,
+    /// All history lines ever written, kept for resize reflow.
+    history_source: Vec<Line<'static>>,
+    /// Last known terminal width (to detect width changes that need reflow).
+    last_width: u16,
 }
 
 impl TerminalSession {
@@ -48,38 +56,61 @@ impl TerminalSession {
             .unwrap_or(Position { x: 0, y: 0 });
 
         let terminal = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
-        Ok(Self { terminal })
+        let last_width = terminal.viewport_area.width;
+
+        Ok(Self {
+            terminal,
+            history_source: Vec::new(),
+            last_width,
+        })
     }
 
     pub fn composer_width(&self) -> usize {
         self.terminal.composer_width()
     }
 
-    /// Flush scrollback entries into terminal native scrollback.
+    /// Flush scrollback entries. Stores lines in history_source for reflow.
     pub fn flush_scrollback(
         &mut self,
         entries: Vec<ScrollbackEntry>,
         theme: &Theme,
     ) -> io::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let width = self.terminal.viewport_area.width;
         for entry in entries {
-            let width = self.terminal.viewport_area.width;
             let lines = scrollback_entry_to_lines(&entry, width, theme);
+            // Store in memory for reflow.
+            self.history_source.extend(lines.clone());
+            // Insert into terminal scrollback.
             insert_history_lines(&mut self.terminal, lines)?;
         }
         Ok(())
     }
 
-    /// Draw the bottom inline viewport.
+    /// Draw the bottom inline viewport. Handles resize + reflow.
     pub fn draw_frame<F>(&mut self, render_fn: F) -> io::Result<()>
     where
         F: FnOnce(&mut crate::tui::custom_terminal::Frame<'_>),
     {
-        let pending_viewport_area = self.pending_viewport_area()?;
-        let _ = io::stdout().sync_update(|_| {
-            if let Some(new_area) = pending_viewport_area {
+        let screen_size = self.terminal.size()?;
+        let width_changed = screen_size.width != self.last_width;
+
+        if width_changed {
+            // Width changed → need to reflow. Clear everything and rebuild.
+            self.last_width = screen_size.width;
+            self.reflow_history(screen_size)?;
+        } else {
+            // Normal path: just handle viewport position adjustments.
+            let pending = self.pending_viewport_area()?;
+            if let Some(new_area) = pending {
                 self.terminal.set_viewport_area(new_area);
                 self.terminal.clear()?;
             }
+        }
+
+        let _ = io::stdout().sync_update(|_| {
             let needs_full_repaint = self
                 .terminal
                 .update_inline_viewport(INLINE_VIEWPORT_HEIGHT)?;
@@ -88,6 +119,40 @@ impl TerminalSession {
             }
             self.terminal.draw(render_fn)
         })?;
+        Ok(())
+    }
+
+    /// Clear all visible history and re-insert from history_source at the new width.
+    fn reflow_history(&mut self, screen_size: ratatui::layout::Size) -> io::Result<()> {
+        // Reset viewport to top of screen (as if starting fresh).
+        let new_area = ratatui::layout::Rect::new(0, 0, screen_size.width, 0);
+        self.terminal.set_viewport_area(new_area);
+
+        // Clear the entire visible screen.
+        let writer = self.terminal.backend_mut();
+        crossterm::queue!(writer, crossterm::cursor::MoveTo(0, 0))?;
+        crossterm::queue!(
+            writer,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+        )?;
+        writer.flush()?;
+        self.terminal.last_known_screen_size = screen_size;
+        self.terminal.last_known_cursor_pos = Position { x: 0, y: 0 };
+
+        // Re-insert the tail of history that fits on screen.
+        let available_rows = screen_size.height.saturating_sub(INLINE_VIEWPORT_HEIGHT) as usize;
+        let replay_count = self
+            .history_source
+            .len()
+            .min(available_rows)
+            .min(REFLOW_MAX_LINES);
+        let start = self.history_source.len().saturating_sub(replay_count);
+        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..].to_vec();
+
+        if !lines_to_replay.is_empty() {
+            insert_history_lines(&mut self.terminal, lines_to_replay)?;
+        }
+
         Ok(())
     }
 
