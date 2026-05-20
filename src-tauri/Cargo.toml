@@ -8,7 +8,6 @@ publish = false
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
-# 前端通过此 plugin 代理 HTTP 请求到 sidecar
 tauri-plugin-http = "2"
 anyhow = "1"
 serde = { workspace = true }
@@ -17,10 +16,8 @@ dirs = { workspace = true }
 fs2 = { workspace = true }
 rand = "0.9"
 portpicker = "0.1"
-# 仅用于 sidecar health check 和 shutdown，不需要 stream/multipart 等
 reqwest = { workspace = true, features = ["json"] }
-# tauri 内置 tokio runtime，这里只需 sync + time 用于命令处理
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
