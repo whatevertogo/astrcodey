@@ -1,26 +1,33 @@
 //! Tool registry for managing built-in and extension-registered tools.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrcode_core::tool::{
     BackgroundPolicy, ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext,
     ToolPromptMetadata, ToolResult,
 };
 
+/// 单个已注册工具的全部元数据与实例。
+struct RegisteredTool {
+    tool: Arc<dyn Tool>,
+    definition: ToolDefinition,
+    prompt_metadata: Option<ToolPromptMetadata>,
+}
+
 /// Registry of available tools (built-in + extension-registered).
 ///
-/// 使用 HashMap 按工具名索引，O(1) 查找替代 Vec 的 O(n) 线性扫描。
+/// 用 `BTreeMap` 同时承载 O(log n) 命名查找、按名稱有序遍历，以及单一事实
+/// 来源——避免之前 `HashMap` + sorted `Vec` 双结构在 `register` 时做 O(n)
+/// sorted insert。`list_definitions()` 走迭代，仍按名稱有序输出。
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
-    definitions: Vec<(ToolDefinition, Option<ToolPromptMetadata>)>,
+    tools: BTreeMap<String, RegisteredTool>,
 }
 
 impl ToolRegistry {
     /// 创建一个空的工具注册表。
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
-            definitions: Vec::new(),
+            tools: BTreeMap::new(),
         }
     }
 
@@ -33,24 +40,32 @@ impl ToolRegistry {
         if self.tools.contains_key(&name) {
             tracing::warn!("Tool '{}' already registered, overwriting", name);
         }
-        self.tools.insert(name, tool);
-        self.upsert_cached_definition(definition, prompt_metadata);
+        self.tools.insert(
+            name,
+            RegisteredTool {
+                tool,
+                definition,
+                prompt_metadata,
+            },
+        );
     }
 
-    /// 返回所有已注册工具的定义列表。
+    /// 返回所有已注册工具的定义列表（按工具名升序）。
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
-        self.definitions
-            .iter()
-            .map(|(def, _)| def)
-            .cloned()
+        self.tools
+            .values()
+            .map(|entry| entry.definition.clone())
             .collect()
     }
 
-    /// 返回所有已注册工具的定义及提示词元数据。
+    /// 返回所有已注册工具的定义及提示词元数据（按工具名升序）。
     pub fn list_definitions_with_prompt_metadata(
         &self,
     ) -> Vec<(ToolDefinition, Option<ToolPromptMetadata>)> {
-        self.definitions.clone()
+        self.tools
+            .values()
+            .map(|entry| (entry.definition.clone(), entry.prompt_metadata.clone()))
+            .collect()
     }
 
     /// 按名称执行已注册的工具。
@@ -67,39 +82,35 @@ impl ToolRegistry {
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         match self.tools.get(name) {
-            Some(tool) => tool.execute(args, ctx).await,
+            Some(entry) => entry.tool.execute(args, ctx).await,
             None => Err(ToolError::NotFound(name.into())),
         }
     }
 
     /// 返回指定工具的执行模式，未找到时保守地按顺序执行处理。
     pub fn execution_mode(&self, name: &str) -> ExecutionMode {
-        self.definitions
-            .binary_search_by(|(definition, _)| definition.name.as_str().cmp(name))
-            .ok()
-            .map(|index| self.definitions[index].0.execution_mode)
+        self.tools
+            .get(name)
+            .map(|entry| entry.definition.execution_mode)
             .unwrap_or(ExecutionMode::Sequential)
     }
 
     /// 按名称查找工具定义，未找到返回 `None`。
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
-        self.definitions
-            .binary_search_by(|(definition, _)| definition.name.as_str().cmp(name))
-            .ok()
-            .map(|index| self.definitions[index].0.clone())
+        self.tools.get(name).map(|entry| entry.definition.clone())
     }
 
     /// 按名称查询工具的后台化策略，未找到返回 `Never`。
     pub fn background_policy(&self, name: &str) -> BackgroundPolicy {
         self.tools
             .get(name)
-            .map(|tool| tool.background_policy())
+            .map(|entry| entry.tool.background_policy())
             .unwrap_or(BackgroundPolicy::Never)
     }
 
     /// Drain all registered tools into a Vec (consumes the registry).
     pub fn into_tools(self) -> Vec<std::sync::Arc<dyn Tool>> {
-        self.tools.into_values().collect()
+        self.tools.into_values().map(|entry| entry.tool).collect()
     }
 
     /// 按名称移除一个已注册的工具。
@@ -107,30 +118,7 @@ impl ToolRegistry {
     /// 用于子 agent 场景：从工具列表中排除不允许递归调用的工具
     /// （如 `agent`），使递归在架构层面不可能发生。
     pub fn unregister(&mut self, name: &str) {
-        if self.tools.remove(name).is_some() {
-            if let Ok(idx) = self
-                .definitions
-                .binary_search_by(|(def, _)| def.name.as_str().cmp(name))
-            {
-                self.definitions.remove(idx);
-            }
-        }
-    }
-
-    fn upsert_cached_definition(
-        &mut self,
-        definition: ToolDefinition,
-        prompt_metadata: Option<ToolPromptMetadata>,
-    ) {
-        match self
-            .definitions
-            .binary_search_by(|(cached, _)| cached.name.cmp(&definition.name))
-        {
-            Ok(index) => self.definitions[index] = (definition, prompt_metadata),
-            Err(index) => self
-                .definitions
-                .insert(index, (definition, prompt_metadata)),
-        }
+        self.tools.remove(name);
     }
 }
 

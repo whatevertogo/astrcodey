@@ -1,7 +1,12 @@
 //! 配置与 LLM 提供者的联合管理器。
 //!
-//! 封装 `config_store` / `raw_config` / `effective` / `llm_provider` 的联动更新：
-//! 每次配置变更都会原子地更新三者并重建 provider。
+//! 封装 `config_store` / `raw_config` 的写入路径；`effective` 和 `llm_provider`
+//! 的存储位置统一在 [`SessionRuntimeServices`] 内，`ConfigManager` 只持有引用。
+//! 这样消除了「ConfigManager 持一份、Capabilities 持一份再手动 sync」的双份事实。
+//!
+//! 写入路径（`apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` /
+//! `set_llm_provider`）直接更新 `Capabilities` 内的 `llm` 与 `effective_config`，
+//! 正在运行的 session 在下一轮 LLM 调用前看到新值。
 
 use std::sync::Arc;
 
@@ -11,19 +16,15 @@ use astrcode_core::{
     llm::{LlmClientConfig, LlmProvider},
 };
 use astrcode_session::SessionRuntimeServices;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard};
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
     raw_config: RwLock<Config>,
-    effective: RwLock<EffectiveConfig>,
-    llm_provider: RwLock<Arc<dyn LlmProvider>>,
-    /// 共享给所有 session 的能力快照。
+    /// 共享给所有 session 的运行时能力。
     ///
-    /// `apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` / `set_llm_provider`
-    /// 会同步把新的 LLM provider 与 EffectiveConfig 推到这里，让正在运行的 session
-    /// 在下一轮 LLM 调用前看到新值。`Bootstrap` 之后通过 `attach_capabilities` 注入。
-    capabilities: RwLock<Option<Arc<SessionRuntimeServices>>>,
+    /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
+    capabilities: Arc<SessionRuntimeServices>,
 }
 
 fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
@@ -52,65 +53,61 @@ fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProv
 }
 
 impl ConfigManager {
+    /// 从已解析的配置组装 `ConfigManager` 与共享的 `SessionRuntimeServices`。
+    ///
+    /// `extension_runner` 与 `context_assembler` 由 `bootstrap` 提前构造，因为
+    /// 它们和配置无关。返回的 `(ConfigManager, Capabilities)` 共享同一份
+    /// `effective` / `llm_provider` 存储；后续配置写入由 `ConfigManager` 触发，
+    /// session 通过 `Capabilities` 读取。
     pub(crate) fn from_loaded_config(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
         effective: EffectiveConfig,
-    ) -> Self {
+        extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
+        context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
+    ) -> (Self, Arc<SessionRuntimeServices>) {
         let llm_provider = build_provider_from_effective(&effective);
-        Self::new(config_store, raw_config, effective, llm_provider)
+        let capabilities = Arc::new(SessionRuntimeServices::new(
+            llm_provider,
+            extension_runner,
+            context_assembler,
+            effective,
+        ));
+        let manager = Self {
+            config_store,
+            raw_config: RwLock::new(raw_config),
+            capabilities: Arc::clone(&capabilities),
+        };
+        (manager, capabilities)
     }
 
+    /// 测试用构造：调用方负责传入预先组装好的 `Capabilities`。
     pub fn new(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
-        effective: EffectiveConfig,
-        llm_provider: Arc<dyn LlmProvider>,
+        capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
-            effective: RwLock::new(effective),
-            llm_provider: RwLock::new(llm_provider),
-            capabilities: RwLock::new(None),
+            capabilities,
         }
     }
 
-    /// 注入 session 共享的 `Capabilities`，建立配置→运行时的同步桥。
-    ///
-    /// `bootstrap` 在构造完 `Capabilities` 后调用此方法。后续 ConfigManager 写入
-    /// 都会顺带推到 Capabilities，保证正在运行的 session 不读到陈旧的 LLM provider 与配置。
-    pub fn attach_capabilities(&self, capabilities: Arc<SessionRuntimeServices>) {
-        *self.capabilities.write() = Some(capabilities);
+    pub fn capabilities(&self) -> &Arc<SessionRuntimeServices> {
+        &self.capabilities
     }
 
-    fn sync_to_capabilities(&self) {
-        let caps = self.capabilities.read();
-        let Some(caps) = caps.as_ref() else {
-            // 正常的早期窗口：bootstrap 构造 ConfigManager 之后、attach_capabilities
-            // 之前发生的写入会走到这里。debug 构建里把这条路径做断言以便 catch
-            // 「先开始热更新配置才挂 capabilities」的反模式；release 下静默吞掉。
-            debug_assert!(
-                false,
-                "sync_to_capabilities called before attach_capabilities; a config write happened \
-                 before the runtime was wired up",
-            );
-            return;
-        };
-        caps.swap_llm(self.llm_provider.read().clone());
-        caps.update_effective(self.effective.read().clone());
+    pub fn read_effective(&self) -> RwLockReadGuard<'_, EffectiveConfig> {
+        self.capabilities.read_effective()
     }
 
-    pub fn read_effective(&self) -> parking_lot::RwLockReadGuard<'_, EffectiveConfig> {
-        self.effective.read()
-    }
-
-    pub fn read_raw_config(&self) -> parking_lot::RwLockReadGuard<'_, Config> {
+    pub fn read_raw_config(&self) -> RwLockReadGuard<'_, Config> {
         self.raw_config.read()
     }
 
     pub fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.llm_provider.read().clone()
+        self.capabilities.llm()
     }
 
     pub fn config_store(&self) -> &Arc<dyn ConfigStore> {
@@ -119,8 +116,7 @@ impl ConfigManager {
 
     #[cfg(test)]
     pub fn set_llm_provider(&self, provider: Arc<dyn LlmProvider>) {
-        *self.llm_provider.write() = provider;
-        self.sync_to_capabilities();
+        self.capabilities.swap_llm(provider);
     }
 
     pub fn rebuild_provider_from_effective(&self) -> Result<(), String> {
@@ -128,11 +124,7 @@ impl ConfigManager {
             let effective = self.read_effective();
             build_provider_from_effective(&effective)
         };
-        {
-            let mut guard = self.llm_provider.write();
-            *guard = new_provider;
-        }
-        self.sync_to_capabilities();
+        self.capabilities.swap_llm(new_provider);
         Ok(())
     }
 
@@ -145,14 +137,10 @@ impl ConfigManager {
             let mut guard = self.raw_config.write();
             *guard = config;
         }
-        {
-            let mut guard = self.effective.write();
-            *guard = new_effective;
-        }
+        self.capabilities.update_effective(new_effective);
         if let Err(e) = self.rebuild_provider_from_effective() {
             tracing::warn!("provider rebuild after config update failed: {e}");
         }
-        // `rebuild_provider_from_effective` 已 sync_to_capabilities，无需重复
         Ok(())
     }
 }

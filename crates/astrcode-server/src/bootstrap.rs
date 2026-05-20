@@ -36,10 +36,9 @@ pub struct ServerRuntime {
     pub extension_runner: Arc<ExtensionRunner>,
     /// 跨 session 共享的运行时能力（LLM / 扩展 / 上下文 / 配置）。
     ///
-    /// 与 `config_manager` 等并存：`Capabilities` 是 session crate 不依赖 server 类型的视图，
-    /// 用于将来 `Session::create_full` / `submit` 路径。`config_manager`
-    /// 仍是配置热更新的主入口；写入 ConfigManager 的同时会通过
-    /// `ConfigManager::sync_capabilities` 推到这里。
+    /// 是 session crate 不依赖 server 类型的视图，所有 session 通过它读取 LLM
+    /// provider 与生效配置。`ConfigManager` 是配置写入入口，但 `effective` 与
+    /// `llm_provider` 的存储位置只在这里，二者共享同一个 `Arc`。
     pub capabilities: Arc<SessionRuntimeServices>,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
@@ -89,21 +88,15 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let config = config_store.load().await?;
     let effective = config.clone().into_effective()?;
 
-    // 2. 构建配置管理器及其初始 LLM provider。
+    // 2. 构建配置管理器与共享的运行时能力。
     //
-    // 根据 `provider_kind` 路由到对应的 provider 实现。
-    // 后续所有主会话和子会话都会共享这个 provider。
-    let config_manager = Arc::new(crate::config_manager::ConfigManager::from_loaded_config(
-        Arc::new(config_store),
-        config,
-        effective.clone(),
-    ));
-
-    // 3. 初始化上下文组装器。
+    // ConfigManager 不再持有自己的 effective/llm_provider 副本，而是让
+    // SessionRuntimeServices 成为唯一存储。配置写入路径直接更新 Capabilities，
+    // session 读到的就是最新值。
     let context_settings = effective.context.clone();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
 
-    // 4. 确定当前项目工作目录。
+    // 3. 确定当前项目工作目录。
     //
     // 这个目录只用于启动期项目识别、扩展加载和默认隐式会话。
     // 显式创建 session 时，工具快照会使用 session 自己的 working_dir。
@@ -112,7 +105,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // 5. 构建 session manager 和事件存储。
+    // 4. 构建 session manager 和事件存储。
     //
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
@@ -133,7 +126,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     );
     let event_store = store;
 
-    // 6. 加载扩展并创建 extension runner。
+    // 5. 加载扩展并创建 extension runner。
     //
     // 扩展工具不会在这里写入全局工具表；这里只保存扩展列表。
     // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
@@ -157,18 +150,17 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     }
     let extension_runner = extension_runtime.runner;
 
-    // 7. 组装跨 session 共享的运行时能力快照。
+    // 6. 组装 ConfigManager 与 Capabilities。
     //
-    // 这一份 Capabilities 是 session crate 视角的依赖入口，与 ConfigManager 并存。
-    // 通过 `attach_capabilities` 让 ConfigManager 在配置热更新时把新的 LLM provider
-    // 与 EffectiveConfig 同步推到这里。
-    let capabilities = Arc::new(SessionRuntimeServices::new(
-        config_manager.read_llm_provider(),
+    // 二者共享同一份 effective/llm_provider 存储，配置写入直接更新 Capabilities。
+    let (config_manager, capabilities) = crate::config_manager::ConfigManager::from_loaded_config(
+        Arc::new(config_store),
+        config,
+        effective,
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),
-        config_manager.read_effective().clone(),
-    ));
-    config_manager.attach_capabilities(Arc::clone(&capabilities));
+    );
+    let config_manager = Arc::new(config_manager);
 
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
@@ -176,7 +168,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&capabilities),
     ));
 
-    // 8. 给扩展运行时绑定”创建子会话”的宿主能力。
+    // 7. 给扩展运行时绑定"创建子会话"的宿主能力。
     //
     // 扩展本身不能直接拿到 EventStore；当扩展工具返回 RunSession 声明式结果时，
     // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
@@ -185,9 +177,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager: Arc::clone(&session_manager),
     }));
 
-    // 9. 返回运行时容器。
+    // 8. 返回运行时容器。
     //
-    // ServerRuntime 保存的是”共享基础设施”：session、LLM、prompt、扩展、
+    // ServerRuntime 保存的是"共享基础设施"：session、LLM、prompt、扩展、
     // 配置和上下文预算。注意这里故意没有 tool_registry：
     // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
     Ok(ServerRuntime {

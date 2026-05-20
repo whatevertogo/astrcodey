@@ -406,25 +406,23 @@ fn test_runtime_with_settings(
         wasm: astrcode_core::config::WasmSettings::default(),
     };
     let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
-    let config = Arc::new(crate::config_manager::ConfigManager::new(
-        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-config.json"),
-        )),
-        astrcode_core::config::Config::default(),
-        effective,
-        llm_provider,
-    ));
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
         Duration::from_secs(1),
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
-        config.read_llm_provider(),
+        llm_provider,
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),
-        config.read_effective().clone(),
+        effective,
     ));
-    config.attach_capabilities(Arc::clone(&capabilities));
+    let config = Arc::new(crate::config_manager::ConfigManager::new(
+        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
+            std::path::PathBuf::from("target/test-config.json"),
+        )),
+        astrcode_core::config::Config::default(),
+        Arc::clone(&capabilities),
+    ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),

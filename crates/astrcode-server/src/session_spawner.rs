@@ -723,55 +723,52 @@ mod tests {
         }
     }
 
-    fn test_config_manager(
+    fn test_config_and_caps(
         llm_provider: Arc<dyn LlmProvider>,
-    ) -> Arc<crate::config_manager::ConfigManager> {
+        extension_runner: Arc<ExtensionRunner>,
+        context_assembler: Arc<LlmContextAssembler>,
+    ) -> (
+        Arc<crate::config_manager::ConfigManager>,
+        Arc<astrcode_session::SessionRuntimeServices>,
+    ) {
         use astrcode_core::config::{EffectiveConfig, LlmSettings, OpenAiApiMode, WasmSettings};
-        Arc::new(crate::config_manager::ConfigManager::new(
+        let effective = EffectiveConfig {
+            llm: LlmSettings {
+                provider_kind: "mock".into(),
+                base_url: String::new(),
+                api_key: String::new(),
+                api_mode: OpenAiApiMode::ChatCompletions,
+                model_id: "mock".into(),
+                max_tokens: 1024,
+                context_limit: 1024,
+                connect_timeout_secs: 1,
+                read_timeout_secs: 1,
+                max_retries: 0,
+                retry_base_delay_ms: 0,
+                temperature: None,
+                supports_prompt_cache_key: false,
+                prompt_cache_retention: None,
+                reasoning: false,
+                reasoning_split: false,
+            },
+            context: Default::default(),
+            agent: Default::default(),
+            wasm: WasmSettings::default(),
+        };
+        let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
+            llm_provider,
+            extension_runner,
+            context_assembler,
+            effective,
+        ));
+        let config = Arc::new(crate::config_manager::ConfigManager::new(
             Arc::new(astrcode_storage::config_store::FileConfigStore::new(
                 std::path::PathBuf::from("target/test-config.json"),
             )),
             Default::default(),
-            EffectiveConfig {
-                llm: LlmSettings {
-                    provider_kind: "mock".into(),
-                    base_url: String::new(),
-                    api_key: String::new(),
-                    api_mode: OpenAiApiMode::ChatCompletions,
-                    model_id: "mock".into(),
-                    max_tokens: 1024,
-                    context_limit: 1024,
-                    connect_timeout_secs: 1,
-                    read_timeout_secs: 1,
-                    max_retries: 0,
-                    retry_base_delay_ms: 0,
-                    temperature: None,
-                    supports_prompt_cache_key: false,
-                    prompt_cache_retention: None,
-                    reasoning: false,
-                    reasoning_split: false,
-                },
-                context: Default::default(),
-                agent: Default::default(),
-                wasm: WasmSettings::default(),
-            },
-            llm_provider,
-        ))
-    }
-
-    fn test_capabilities(
-        config: &Arc<crate::config_manager::ConfigManager>,
-        extension_runner: Arc<ExtensionRunner>,
-        context_assembler: Arc<LlmContextAssembler>,
-    ) -> Arc<astrcode_session::SessionRuntimeServices> {
-        let caps = Arc::new(astrcode_session::SessionRuntimeServices::new(
-            config.read_llm_provider(),
-            extension_runner,
-            context_assembler,
-            config.read_effective().clone(),
+            Arc::clone(&capabilities),
         ));
-        config.attach_capabilities(Arc::clone(&caps));
-        caps
+        (config, capabilities)
     }
 
     fn test_spawner(store: Arc<dyn EventStore>, llm: Arc<ToolThenTextLlm>) -> ServerSessionSpawner {
@@ -780,14 +777,14 @@ mod tests {
             ..Default::default()
         };
         let llm_provider: Arc<dyn LlmProvider> = llm;
-        let config = test_config_manager(llm_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
         let context_assembler = Arc::new(LlmContextAssembler::new(settings));
-        let capabilities = test_capabilities(
-            &config,
+        let (config, capabilities) = test_config_and_caps(
+            llm_provider,
             Arc::clone(&extension_runner),
             Arc::clone(&context_assembler),
         );
+
         let session_manager = Arc::new(crate::session_manager::SessionManager::new(
             Arc::clone(&store),
             Arc::clone(&config),
@@ -859,11 +856,10 @@ mod tests {
             .await
             .unwrap();
         let initial_provider: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm { text: "old" });
-        let config = test_config_manager(initial_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
         let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
-        let capabilities = test_capabilities(
-            &config,
+        let (config, capabilities) = test_config_and_caps(
+            initial_provider,
             Arc::clone(&extension_runner),
             Arc::clone(&context_assembler),
         );
@@ -908,11 +904,10 @@ mod tests {
             text: "async result",
         });
         let llm_provider: Arc<dyn LlmProvider> = llm;
-        let config = test_config_manager(llm_provider);
         let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
         let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
-        let capabilities = test_capabilities(
-            &config,
+        let (config, capabilities) = test_config_and_caps(
+            llm_provider,
             Arc::clone(&extension_runner),
             Arc::clone(&context_assembler),
         );

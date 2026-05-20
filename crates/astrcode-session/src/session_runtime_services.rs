@@ -5,6 +5,13 @@
 //!
 //! `llm` 与 `effective_config` 支持热替换：server 端配置变更时通过 `swap_llm` /
 //! `update_effective` 原子更新，正在运行的 turn 在下一轮 LLM 调用前看到新值。
+//!
+//! TODO: 当前热替换走 `RwLock<Arc<dyn LlmProvider>>` —— 写者每次配置变更才动一次锁，
+//! 读者每个 turn 拉一次快照，实践上没冲突。但读者落在快路径，未来若 provider 切换
+//! 更频繁（例如多 profile 在 turn 之间动态切换），应换成 `arc_swap::ArcSwap` 实现
+//! 无锁原子读，避免 `parking_lot::RwLock::read` 的原子计数。`effective_config` 若
+//! 也改成 `Arc<EffectiveConfig>` + `ArcSwap` 路径，可以一并消除 `read_effective`
+//! 返回 `RwLockReadGuard` 限制（持有期间不能 await）的隐式约束。
 
 use std::sync::Arc;
 

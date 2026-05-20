@@ -591,24 +591,31 @@ pub struct DiscoveredTool {
 /// 扩展能力注册器。
 ///
 /// 在 `Extension::register()` 调用期间有效，扩展通过它声明自己提供的能力。
+///
+/// 字段全部私有，外部只能通过 `tool` / `command` / `on_pre_tool_use` 等
+/// 写入方法和 `tools()` / `commands()` 等读取 accessor 访问。这样保证：
+/// 1. 扩展作者只能用受控 API 注册能力，无法旁路构造非法状态；
+/// 2. 字段重构（合并、增加索引）不会破坏外部代码；
+/// 3. `Registrar` 只在 `Extension::register()` 生命周期内有效，私有字段
+///    阻止外部把它当成长寿数据持有。
 pub struct Registrar {
-    pub(crate) tools: Vec<(ToolDefinition, std::sync::Arc<dyn ToolHandler>)>,
-    pub(crate) tool_discovery: Vec<std::sync::Arc<dyn ToolDiscoveryHandler>>,
-    pub(crate) tool_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
-    pub(crate) commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
-    pub(crate) command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
-    pub(crate) pre_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)>,
-    pub(crate) post_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)>,
-    pub(crate) provider: Vec<(
+    tools: Vec<(ToolDefinition, std::sync::Arc<dyn ToolHandler>)>,
+    tool_discovery: Vec<std::sync::Arc<dyn ToolDiscoveryHandler>>,
+    tool_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
+    commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
+    command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
+    pre_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)>,
+    post_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)>,
+    provider: Vec<(
         ProviderEvent,
         HookMode,
         i32,
         std::sync::Arc<dyn ProviderHandler>,
     )>,
-    pub(crate) prompt_build: Vec<(i32, std::sync::Arc<dyn PromptBuildHandler>)>,
-    pub(crate) compact: Vec<(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)>,
-    pub(crate) post_tool_use_failure: Vec<(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)>,
-    pub(crate) lifecycle: Vec<(
+    prompt_build: Vec<(i32, std::sync::Arc<dyn PromptBuildHandler>)>,
+    compact: Vec<(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)>,
+    post_tool_use_failure: Vec<(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)>,
+    lifecycle: Vec<(
         ExtensionEvent,
         HookMode,
         i32,
