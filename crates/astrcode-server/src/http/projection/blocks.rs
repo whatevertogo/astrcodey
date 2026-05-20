@@ -82,6 +82,10 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
                 transcript_path: transcript_path.clone(),
             })
         },
+        EventPayload::RecapGenerated { text, .. } => Some(ConversationBlockDto::SystemNote {
+            id: event.id.to_string(),
+            text: text.clone(),
+        }),
         _ => None,
     }
 }

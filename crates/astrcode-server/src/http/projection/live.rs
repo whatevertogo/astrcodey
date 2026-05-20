@@ -51,7 +51,9 @@ pub(in crate::http) fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDt
         }],
 
         // Completed blocks — shared construction, different delta wrappers
-        EventPayload::UserMessage { .. } | EventPayload::ErrorOccurred { .. } => {
+        EventPayload::UserMessage { .. }
+        | EventPayload::ErrorOccurred { .. }
+        | EventPayload::RecapGenerated { .. } => {
             completed_block_from_payload(event)
                 .map(|block| ConversationDeltaDto::AppendBlock { block })
                 .into_iter()
