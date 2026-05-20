@@ -361,7 +361,17 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
     }
 
     if app.is_streaming {
-        app.status_text = "Turn running · Esc stop".into();
+        let input = app.take_input();
+        if input.trim().is_empty() {
+            return Ok(());
+        }
+        app.remember_input(&input);
+        app.push_user(&input);
+        app.status_text = "Message queued".into();
+        client
+            .send_command(&ClientCommand::InjectMessage { text: input })
+            .await
+            .map_err(io_error)?;
         return Ok(());
     }
 

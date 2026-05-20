@@ -52,6 +52,12 @@ pub enum ExtensionEvent {
     /// 用户中止正在运行的轮次。
     TurnAborted,
 
+    // ── Step 级别 ──
+    /// Step 开始（loop 迭代顶部，prepare_stage 之前）。
+    StepStart,
+    /// Step 结束（loop 迭代末尾，tool_calls 执行完毕或 LLM 返回 Complete 后）。
+    StepEnd,
+
     // ── 工具级别（主要钩子点） ──
     /// 工具执行前。
     PreToolUse,

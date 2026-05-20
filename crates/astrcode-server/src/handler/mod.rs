@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::{event::Event, types::*};
+use astrcode_core::{event::{Event, EventPayload}, types::*};
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, SessionListItem},
@@ -90,6 +90,10 @@ impl CommandHandler {
 
             ClientCommand::SubmitPrompt { text, .. } => {
                 self.submit_prompt(text).await?;
+            },
+
+            ClientCommand::InjectMessage { text } => {
+                self.inject_mid_turn_message(text).await?;
             },
 
             ClientCommand::ListSessions => {
@@ -283,17 +287,49 @@ impl CommandHandler {
         }
     }
 
-    /// 提交用户输入，如有已有 Turn 运行则静默忽略（返回 OK）。
+    /// 提交用户输入，如有已有 Turn 运行则路由为中途消息注入。
     async fn submit_prompt(&mut self, text: String) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        match self.submit_input_for_session(sid, text).await {
+        match self.submit_input_for_session(sid.clone(), text.clone()).await {
             Ok(_) => Ok(()),
-            Err(HandlerError::TurnAlreadyRunning) => Ok(()),
+            Err(HandlerError::TurnAlreadyRunning) => {
+                // 已有 active turn → 视为中途消息注入（兼容未升级到 InjectMessage 的客户端）
+                self.inject_mid_turn_message_for_session(&sid, text).await
+            },
             Err(error) => {
                 self.send_error(slash::command_error_code(&error), &error.to_string());
                 Err(error)
             },
         }
+    }
+
+    /// 向正在执行的 turn 注入中途消息。
+    async fn inject_mid_turn_message(&mut self, text: String) -> Result<(), HandlerError> {
+        let sid = self.ensure_session().await?;
+        self.inject_mid_turn_message_for_session(&sid, text).await
+    }
+
+    /// 向指定 session 的 active turn 注入中途消息。
+    async fn inject_mid_turn_message_for_session(
+        &mut self,
+        sid: &SessionId,
+        text: String,
+    ) -> Result<(), HandlerError> {
+        let active_turn = self
+            .active_turns
+            .get(sid)
+            .ok_or(HandlerError::NoActiveTurn)?;
+        let turn_id = active_turn.turn_id.clone();
+        let message_id = new_message_id();
+        active_turn
+            .session
+            .emit_durable(
+                Some(&turn_id),
+                EventPayload::UserMessage { message_id, text },
+            )
+            .await
+            .map_err(|e| HandlerError::Other(format!("inject message: {e}")))?;
+        Ok(())
     }
 
     /// 向指定会话提交输入。斜杠命令在此被拦截并派发，普通输入启动新 Turn。

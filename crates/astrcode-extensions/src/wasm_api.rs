@@ -30,6 +30,8 @@ pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
         ExtensionEvent::PostCompact => 11,
         ExtensionEvent::TurnAborted => 12,
         ExtensionEvent::PostToolUseFailure => 13,
+        ExtensionEvent::StepStart => 14,
+        ExtensionEvent::StepEnd => 15,
     }
 }
 
@@ -49,6 +51,8 @@ pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
         11 => Some(ExtensionEvent::PostCompact),
         12 => Some(ExtensionEvent::TurnAborted),
         13 => Some(ExtensionEvent::PostToolUseFailure),
+        14 => Some(ExtensionEvent::StepStart),
+        15 => Some(ExtensionEvent::StepEnd),
         _ => None,
     }
 }

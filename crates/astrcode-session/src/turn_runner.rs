@@ -18,7 +18,7 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::*,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     compact::{CompactHookContext, collect_compact_instructions, dispatch_post_compact},
@@ -119,6 +119,8 @@ pub struct TurnRunner {
     system_prompt: String,
     initial_history: Vec<LlmMessage>,
     tools: ToolPipeline,
+    /// 订阅 session broadcast，用于在 step 边界接收中途注入的 UserMessage。
+    event_rx: broadcast::Receiver<Event>,
 }
 
 impl TurnRunner {
@@ -159,12 +161,14 @@ impl TurnRunner {
             Arc::clone(&session),
             capabilities,
         );
+        let event_rx = session.subscribe();
         Ok(Self {
             session,
             shared,
             system_prompt,
             initial_history,
             tools,
+            event_rx,
         })
     }
 
@@ -196,6 +200,14 @@ impl TurnRunner {
         );
 
         loop {
+            // === Step Boundary: drain mid-turn user messages ===
+            self.drain_mid_turn_messages(&mut state, &event_tx);
+
+            // StepStart hook
+            extension_runner
+                .emit_lifecycle(ExtensionEvent::StepStart, lifecycle_ctx.clone())
+                .await?;
+
             let prepared = self
                 .prepare_stage(&extension_runner, &mut state, &event_tx)
                 .await?;
@@ -230,6 +242,10 @@ impl TurnRunner {
                             );
                         }
                     }
+                    // StepEnd hook (final step — LLM returned complete)
+                    let _ = extension_runner
+                        .emit_lifecycle(ExtensionEvent::StepEnd, lifecycle_ctx.clone())
+                        .await;
                     return self
                         .postprocess_complete_stage(
                             &extension_runner,
@@ -271,7 +287,45 @@ impl TurnRunner {
                         &event_tx,
                     )
                     .await?;
+
+                    // StepEnd hook (tool calls executed, next iteration will start new step)
+                    let _ = extension_runner
+                        .emit_lifecycle(ExtensionEvent::StepEnd, lifecycle_ctx.clone())
+                        .await;
                 },
+            }
+        }
+    }
+
+    /// 在 step 边界非阻塞 drain broadcast 中所有已到达的 `UserMessage` 事件，
+    /// 将其作为 user role 消息追加到 `state.messages`。
+    ///
+    /// TODO: 当前从 session broadcast（容量 256，混合所有事件类型）中过滤 UserMessage，
+    /// 存在噪音遍历开销。若未来多 agent 并发导致事件量激增使 Lagged 频繁发生，
+    /// 考虑改用专用 mpsc channel（TurnHandle 暴露 sender）或 Session 级
+    /// `Arc<Mutex<VecDeque<MidTurnMessage>>>` 替代 broadcast 过滤方案。
+    fn drain_mid_turn_messages(
+        &mut self,
+        state: &mut TurnState,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    ) {
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(event) => {
+                    if let EventPayload::UserMessage { message_id, text } = event.payload {
+                        state.messages.push(LlmMessage::user(&text));
+                        send_event(
+                            event_tx.as_ref(),
+                            EventPayload::UserMessage { message_id, text },
+                        );
+                    }
+                    // 非 UserMessage 事件忽略
+                },
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "broadcast receiver lagged, skipping lost events");
+                },
+                Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
     }

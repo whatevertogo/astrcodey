@@ -76,6 +76,15 @@ pub enum ClientCommand {
         attachments: Vec<Attachment>,
     },
 
+    /// 向正在执行的 turn 注入中途消息。
+    ///
+    /// 仅在 session 有 active turn 时有效。消息通过 `emit_durable` 持久化后
+    /// 由 TurnRunner 在下一个 step boundary 消费并注入 LLM 上下文。
+    ///
+    /// # 参数
+    /// - `text`: 要注入的消息文本
+    InjectMessage { text: String },
+
     /// 中止当前正在进行的 AI 处理操作。
     Abort,
 

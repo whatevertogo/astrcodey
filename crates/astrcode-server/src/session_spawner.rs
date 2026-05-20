@@ -237,7 +237,7 @@ impl ServerSessionSpawner {
         });
 
         let handle = match child_session
-            .submit(user_prompt, child_turn_id.clone(), Some(sink), None)
+            .submit(user_prompt, child_turn_id.clone(), Some(sink))
             .await
         {
             Ok(handle) => handle,
