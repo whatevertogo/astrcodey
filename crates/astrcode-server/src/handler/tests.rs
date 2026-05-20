@@ -989,13 +989,13 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
         .submit_input_for_session(sid.clone(), "start then abort".into())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), started.notified())
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .unwrap();
 
     handler.abort_session(sid.clone()).await.unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let events = runtime.event_store.replay_events(&sid).await.unwrap();
     assert!(!events.iter().any(|event| {

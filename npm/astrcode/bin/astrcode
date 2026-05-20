@@ -1,0 +1,4 @@
+#!/bin/sh
+# Placeholder — replaced by install.js with the actual binary.
+echo "astrcode binary not installed. Run: npm rebuild astrcode"
+exit 1
