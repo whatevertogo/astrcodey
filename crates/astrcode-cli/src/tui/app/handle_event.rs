@@ -381,30 +381,30 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
 }
 
 fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
-    app.available_sessions = sessions.iter().map(|s| s.session_id.clone()).collect();
+    use crate::tui::app::SessionEntry;
+    app.available_sessions = sessions
+        .iter()
+        .map(|s| {
+            let title = s
+                .title
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| astrcode_support::text::compact_inline(t, 60))
+                .unwrap_or_else(|| short_id(&s.session_id).to_string());
+            SessionEntry {
+                session_id: s.session_id.clone(),
+                title,
+                working_dir: s.working_dir.clone(),
+                is_child: s.parent_session_id.is_some(),
+            }
+        })
+        .collect();
     app.status_text = format!("{} session(s)", sessions.len());
-    let body = if sessions.is_empty() {
-        "No sessions".into()
-    } else {
-        sessions
-            .iter()
-            .map(|s| {
-                let marker = if app.active_session_id.as_deref() == Some(s.session_id.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
-                let dir = if s.working_dir.is_empty() {
-                    "unknown".into()
-                } else {
-                    astrcode_support::text::compact_inline(&s.working_dir, 72)
-                };
-                format!("{marker} {} · {dir}", short_id(&s.session_id))
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    app.push_message(MessageRole::System, "Sessions".into(), body, false, None);
+
+    // 如果 session_picker 处于打开状态，刷新 picker 内容（仅当前项目的 session）
+    if app.session_picker.is_some() {
+        app.open_session_picker();
+    }
 }
 
 fn apply_extension_command_list(

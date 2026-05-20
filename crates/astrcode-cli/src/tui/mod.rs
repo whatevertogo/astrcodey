@@ -160,6 +160,32 @@ async fn handle_key(
     client: &Arc<Client>,
     terminal: &mut TerminalSession,
 ) -> io::Result<()> {
+    // Session picker 模式：拦截 Up/Down/Enter/Esc
+    if app.session_picker.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.close_session_picker();
+            },
+            KeyCode::Up => {
+                app.session_picker_up();
+            },
+            KeyCode::Down => {
+                app.session_picker_down();
+            },
+            KeyCode::Enter => {
+                if let Some(sid) = app.session_picker_accept() {
+                    client
+                        .send_command(&ClientCommand::ResumeSession { session_id: sid })
+                        .await
+                        .map_err(io_error)?;
+                    app.status_text = "Resuming session".into();
+                }
+            },
+            _ => {},
+        }
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc => {
             if app.show_slash_palette {
@@ -369,13 +395,12 @@ async fn execute_slash_command(
         },
         SlashCommand::Resume(session_id) => {
             if session_id.trim().is_empty() {
-                app.push_message(
-                    store::transcript::MessageRole::System,
-                    "Usage".into(),
-                    "/resume <session-id>".into(),
-                    false,
-                    None,
-                );
+                // 无参数：打开 session picker
+                client
+                    .send_command(&ClientCommand::ListSessions)
+                    .await
+                    .map_err(io_error)?;
+                app.open_session_picker();
             } else {
                 let sid = app.resolve_session_id(&session_id);
                 client
@@ -386,11 +411,12 @@ async fn execute_slash_command(
             }
         },
         SlashCommand::Sessions => {
+            // /sessions 等同于 /resume（打开 session picker）
             client
                 .send_command(&ClientCommand::ListSessions)
                 .await
                 .map_err(io_error)?;
-            app.status_text = "Listing sessions".into();
+            app.open_session_picker();
         },
         SlashCommand::Compact => {
             client
@@ -511,14 +537,12 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         let selected = app.slash_selected.min(total.saturating_sub(1));
 
         // 滑动窗口：保证选中项始终可见
-        let window_start = if total <= max_visible {
+        let window_start = if total <= max_visible || selected < max_visible / 2 {
             0
-        } else if selected < max_visible / 2 {
-            0
-        } else if selected >= total - max_visible / 2 {
-            total - max_visible
+        } else if selected >= total.saturating_sub(max_visible / 2) {
+            total.saturating_sub(max_visible)
         } else {
-            selected - max_visible / 2
+            selected.saturating_sub(max_visible / 2)
         };
         let window_end = (window_start + max_visible).min(total);
 
@@ -532,16 +556,16 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
             )));
         }
 
-        for i in window_start..window_end {
-            let cmd = &commands[i];
-            let marker = if i == selected { "▸" } else { " " };
+        for (i, cmd) in commands[window_start..window_end].iter().enumerate() {
+            let abs_i = window_start + i;
+            let marker = if abs_i == selected { "▸" } else { " " };
             let desc = if cmd.description.chars().count() > 40 {
                 let truncated: String = cmd.description.chars().take(39).collect();
                 format!("{truncated}…")
             } else {
                 cmd.description.clone()
             };
-            if i == selected {
+            if abs_i == selected {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("  {marker} /{:<16} ", cmd.name),
@@ -566,6 +590,43 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
             )));
         }
 
+        lines
+    } else if let Some(picker) = &app.session_picker {
+        // Session picker 渲染（滑动窗口）
+        let max_visible = 8usize;
+        let total = picker.items.len();
+        let selected = picker.selected.min(total.saturating_sub(1));
+        let window_start = if total <= max_visible || selected < max_visible / 2 {
+            0
+        } else if selected >= total.saturating_sub(max_visible / 2) {
+            total.saturating_sub(max_visible)
+        } else {
+            selected.saturating_sub(max_visible / 2)
+        };
+        let window_end = (window_start + max_visible).min(total);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled("  Select session (↑↓ Enter Esc):", theme.dim)));
+        if window_start > 0 {
+            lines.push(Line::from(Span::styled(format!("    ↑ {} more", window_start), theme.dim)));
+        }
+        for i in window_start..window_end {
+            let entry = &picker.items[i];
+            let marker = if i == selected { "▸" } else { " " };
+            let id_short = entry.session_id.get(..8).unwrap_or(&entry.session_id);
+            let display = format!("  {marker} {id_short}  {}", entry.title);
+            if i == selected {
+                lines.push(Line::from(Span::styled(display, theme.popup_selected)));
+            } else {
+                lines.push(Line::from(Span::styled(display, theme.body)));
+            }
+        }
+        if window_end < total {
+            lines.push(Line::from(Span::styled(format!("    ↓ {} more", total - window_end), theme.dim)));
+        }
+        if total == 0 {
+            lines.push(Line::from(Span::styled("    No other sessions in this project", theme.dim)));
+        }
         lines
     } else {
         Vec::new()

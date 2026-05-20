@@ -24,7 +24,7 @@ pub struct App {
     pub active_session_id: Option<String>,
     pub working_dir: String,
     pub model_name: String,
-    pub available_sessions: Vec<String>,
+    pub available_sessions: Vec<SessionEntry>,
     // UI state
     pub status_text: String,
     pub error: Option<String>,
@@ -35,6 +35,8 @@ pub struct App {
     pub status_items: BTreeMap<String, String>,
     /// 插件注册的快捷键绑定（启动时从服务端获取）。
     pub keybindings: Vec<crate::tui::keybinding::RegisteredKeybinding>,
+    // Session picker（/resume 触发的选择模式）
+    pub session_picker: Option<SessionPicker>,
     // Composer
     pub composer: ComposerState,
     pub show_slash_palette: bool,
@@ -51,6 +53,22 @@ pub struct App {
     pub message_renderers: MessageRendererRegistry,
     // Theme
     pub theme: Theme,
+}
+
+/// 会话列表中的一条会话。
+#[derive(Debug, Clone)]
+pub struct SessionEntry {
+    pub session_id: String,
+    pub title: String,
+    pub working_dir: String,
+    pub is_child: bool,
+}
+
+/// Session picker 交互状态（/resume 触发）。
+#[derive(Debug, Clone)]
+pub struct SessionPicker {
+    pub items: Vec<SessionEntry>,
+    pub selected: usize,
 }
 
 impl App {
@@ -72,6 +90,7 @@ impl App {
             extension_commands: Vec::new(),
             status_items: BTreeMap::new(),
             keybindings: Vec::new(),
+            session_picker: None,
             composer: ComposerState::default(),
             show_slash_palette: false,
             slash_filter: String::new(),
@@ -224,8 +243,50 @@ impl App {
         let needle = input.trim();
         self.available_sessions
             .iter()
-            .find(|id| id.starts_with(needle))
-            .cloned()
+            .find(|s| s.session_id.starts_with(needle))
+            .map(|s| s.session_id.clone())
             .unwrap_or_else(|| needle.to_string())
+    }
+
+    /// 打开 session picker：筛选当前项目的 session（排除子会话和当前活跃 session）。
+    pub fn open_session_picker(&mut self) {
+        let cwd = &self.working_dir;
+        let active = self.active_session_id.as_deref();
+        let items: Vec<SessionEntry> = self
+            .available_sessions
+            .iter()
+            .filter(|s| {
+                !s.is_child
+                    && s.working_dir == *cwd
+                    && active.is_none_or(|a| s.session_id != a)
+            })
+            .cloned()
+            .collect();
+        self.session_picker = Some(SessionPicker { items, selected: 0 });
+    }
+
+    pub fn close_session_picker(&mut self) {
+        self.session_picker = None;
+    }
+
+    pub fn session_picker_up(&mut self) {
+        if let Some(picker) = &mut self.session_picker {
+            if picker.selected > 0 {
+                picker.selected -= 1;
+            }
+        }
+    }
+
+    pub fn session_picker_down(&mut self) {
+        if let Some(picker) = &mut self.session_picker {
+            if picker.selected + 1 < picker.items.len() {
+                picker.selected += 1;
+            }
+        }
+    }
+
+    pub fn session_picker_accept(&mut self) -> Option<String> {
+        let picker = self.session_picker.take()?;
+        picker.items.get(picker.selected).map(|s| s.session_id.clone())
     }
 }

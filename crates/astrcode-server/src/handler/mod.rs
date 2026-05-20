@@ -104,8 +104,9 @@ impl CommandHandler {
                         session_id: summary.session_id.into_string(),
                         created_at: summary.created_at,
                         last_active_at: summary.updated_at,
-                        working_dir: summary.working_dir,
+                        working_dir: summary.working_dir.clone(),
                         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
+                        title: summary.first_user_message.clone(),
                     })
                     .collect();
                 let _ = self

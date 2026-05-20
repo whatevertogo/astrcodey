@@ -91,6 +91,9 @@ pub struct SessionListItem {
     pub last_active_at: String,
     pub working_dir: String,
     pub parent_session_id: Option<String>,
+    /// 会话标题（首条用户消息摘要或工作目录名）。
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// 子 Agent 会话的运行状态。
