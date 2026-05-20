@@ -683,7 +683,7 @@ mod tests {
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
     fn make_app() -> App {
-        App::new()
+        App::new(crate::tui::theme::Theme::detect())
     }
 
     fn apply_payload(app: &mut App, payload: EventPayload) {
@@ -872,7 +872,7 @@ mod codex_style_tests {
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
     fn make_app() -> App {
-        App::new()
+        App::new(crate::tui::theme::Theme::detect())
     }
     fn apply_payload(app: &mut App, payload: EventPayload) {
         let event = Event::new("session".into(), Some("turn".into()), payload);

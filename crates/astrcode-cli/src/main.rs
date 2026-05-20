@@ -66,6 +66,9 @@ enum Commands {
         /// 保留临时工作目录
         #[arg(long)]
         keep_workdir: bool,
+        /// 存储根目录（eval 数据隔离，默认 tempdir）
+        #[arg(long)]
+        storage: Option<std::path::PathBuf>,
         /// 服务器地址（若已有运行中的 server）
         #[arg(long)]
         server_addr: Option<String>,
@@ -144,6 +147,7 @@ async fn main() {
             concurrency,
             tags,
             keep_workdir,
+            storage,
             server_addr,
             auth_token,
         }) => {
@@ -152,6 +156,7 @@ async fn main() {
                 concurrency,
                 tags_filter: tags,
                 keep_workdir,
+                storage_root: storage,
                 server_addr,
                 auth_token,
             };

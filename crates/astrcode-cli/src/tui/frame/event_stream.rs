@@ -68,6 +68,8 @@ impl EventBroker {
 
 // ─── TerminalFocus ────────────────────────────────────────────────────────────
 
+// TODO: TerminalFocus 已被捕获但未被任何消费者使用。
+// 未来可用于焦点感知：当终端失焦时暂停流式输出或降低刷新频率。
 #[derive(Clone)]
 pub struct TerminalFocus(Arc<AtomicBool>);
 

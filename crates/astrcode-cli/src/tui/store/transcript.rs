@@ -15,6 +15,10 @@ pub enum MessageRole {
 pub struct MessageBody {
     plain: String,
     render: Option<RenderSpec>,
+    /// 扩展自定义消息类型标识，用于分发到 MessageRendererRegistry。
+    pub custom_type: Option<String>,
+    /// 扩展自定义消息 payload（JSON），供 MessageRenderer 消费。
+    pub payload: Option<serde_json::Value>,
 }
 
 impl MessageBody {
@@ -22,6 +26,8 @@ impl MessageBody {
         Self {
             plain: text,
             render: None,
+            custom_type: None,
+            payload: None,
         }
     }
 
@@ -44,6 +50,8 @@ impl MessageBody {
     pub fn set_text(&mut self, text: String) {
         self.plain = text;
         self.render = None;
+        self.custom_type = None;
+        self.payload = None;
     }
 
     pub fn append_text(&mut self, text: &str) {

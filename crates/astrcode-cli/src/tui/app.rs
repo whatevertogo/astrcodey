@@ -80,7 +80,7 @@ pub struct SessionPicker {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(theme: Theme) -> Self {
         let fallback = std::sync::Arc::new(DefaultToolRenderer);
         let mut tool_renderers = ToolRendererRegistry::new(fallback);
         let mut message_renderers = MessageRendererRegistry::new();
@@ -111,7 +111,7 @@ impl App {
             child_session_map: BTreeMap::new(),
             tool_renderers,
             message_renderers,
-            theme: Theme::detect(),
+            theme,
         }
     }
 

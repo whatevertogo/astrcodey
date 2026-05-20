@@ -28,10 +28,17 @@ pub struct EvalConfig {
     pub tags_filter: Option<Vec<String>>,
     /// 是否保留临时工作目录供调试。
     pub keep_workdir: bool,
-    /// 服务地址（若已有运行中的 server 则指定，否则自动启动）。
+    /// 服务地址（若已有运行中的 server 则指定，否则从 run.json 读取）。
     pub server_addr: Option<String>,
     /// Auth token（与 server_addr 配合使用）。
     pub auth_token: Option<String>,
+    /// 存储根目录（eval session 数据隔离）。
+    ///
+    /// 指定后通过 `ASTRCODE_TEST_HOME` 环境变量注入，server 使用此目录
+    /// 代替 `~/.astrcode/` 存放 session 数据。
+    /// - `None`：使用自动创建的 tempdir（默认，最安全的隔离）
+    /// - `Some(path)`：使用指定路径（可累积历史结果）
+    pub storage_root: Option<PathBuf>,
 }
 
 impl Default for EvalConfig {
@@ -43,12 +50,16 @@ impl Default for EvalConfig {
             keep_workdir: false,
             server_addr: None,
             auth_token: None,
+            storage_root: None,
         }
     }
 }
 
 /// 执行评测并返回报告。
 pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
+    // 设置存储隔离：通过 ASTRCODE_TEST_HOME 注入 eval 专用存储目录
+    let _storage_dir = setup_storage_isolation(&config)?;
+
     let mut cases = case::load_case_set(&config.cases_dir)?;
 
     // 按 tag 过滤
@@ -63,6 +74,29 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
     let runner = EvalRunner::start(&config).await?;
     let report = runner.run_all(cases).await;
     Ok(report)
+}
+
+/// 设置存储隔离，返回实际使用的目录路径（需要保持存活防止 tempdir 被清理）。
+fn setup_storage_isolation(config: &EvalConfig) -> Result<PathBuf, EvalError> {
+    let storage_path = match &config.storage_root {
+        Some(path) => {
+            std::fs::create_dir_all(path)
+                .map_err(|e| EvalError::Setup(format!("create storage dir: {e}")))?;
+            path.clone()
+        },
+        None => {
+            // 默认使用 tempdir 完全隔离
+            let dir = tempfile::tempdir()
+                .map_err(|e| EvalError::Setup(format!("create storage tempdir: {e}")))?;
+            let path = dir.path().to_path_buf();
+            std::mem::forget(dir); // 保持存活，eval 完成后由 OS 在进程退出时清理
+            path
+        },
+    };
+    // 注入环境变量，server 启动时 hostpaths::resolve_home_dir() 会读取
+    std::env::set_var("ASTRCODE_TEST_HOME", &storage_path);
+    tracing::info!(storage = %storage_path.display(), "eval storage isolated");
+    Ok(storage_path)
 }
 
 /// Eval 框架错误类型。

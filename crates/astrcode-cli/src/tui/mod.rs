@@ -55,7 +55,7 @@ pub async fn run() -> io::Result<()> {
 
     let mut terminal = TerminalSession::enter()?;
     let theme = Theme::detect();
-    let mut app = App::new();
+    let mut app = App::new(theme.clone());
 
     // Frame scheduling — draw_tx drives the event_stream's draw channel
     let (draw_tx, draw_rx) = tokio::sync::broadcast::channel::<()>(16);
@@ -133,7 +133,7 @@ pub async fn run() -> io::Result<()> {
         if dirty {
             // Flush scrollback entries into terminal native scrollback.
             let entries = std::mem::take(&mut app.scrollback_queue);
-            terminal.flush_scrollback(entries, &theme)?;
+            terminal.flush_scrollback(entries, &theme, &app.message_renderers)?;
             // Redraw the bottom panel (inline viewport).
             let panel = build_panel(&app, &theme);
             let panel_height = panel_total_height(&panel);
