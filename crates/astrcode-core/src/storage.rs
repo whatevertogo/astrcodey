@@ -103,6 +103,16 @@ pub trait EventStore: Send + Sync {
         self.delete_session(session_id).await
     }
 
+    /// 从 .recycled/ 恢复一个已回收的 session。
+    ///
+    /// 默认返回 Unsupported。文件系统实现应将 session 从 `.recycled/` 移回原位。
+    async fn restore_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        let _ = session_id;
+        Err(StorageError::Unsupported(
+            "restore_session is not supported by this storage implementation".into(),
+        ))
+    }
+
     /// 写入 compact 前的 provider transcript snapshot。
     ///
     /// 返回值是可供用户或后续工具读取的快照路径；不支持快照的存储实现可以返回

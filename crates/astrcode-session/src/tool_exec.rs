@@ -40,6 +40,8 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
+    /// 会话原子操作能力，供 agent 工具使用。
+    pub session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
 }
 
 pub(crate) struct ToolCallRuntimeContext {
@@ -196,6 +198,7 @@ async fn execute_tool_call_blocking(
             tool_result_reader: runtime.tool_result_reader,
             background_task_reader: runtime.capabilities.background_task_reader,
             file_observation_store: runtime.capabilities.file_observation_store,
+            session_ops: runtime.capabilities.session_ops,
         },
     };
 
@@ -272,6 +275,7 @@ async fn execute_tool_call_with_background(
             tool_result_reader: runtime.tool_result_reader.clone(),
             background_task_reader: runtime.capabilities.background_task_reader.clone(),
             file_observation_store: runtime.capabilities.file_observation_store.clone(),
+            session_ops: runtime.capabilities.session_ops.clone(),
         },
     };
 

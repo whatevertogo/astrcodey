@@ -65,4 +65,11 @@ impl SessionRuntimeServices {
     pub fn update_effective(&self, new: EffectiveConfig) {
         *self.effective_config.write() = new;
     }
+
+    /// 获取 session_ops 能力引用（从 extension_runner 读取）。
+    pub fn session_ops(&self) -> Option<Arc<dyn astrcode_core::tool::SessionOperations>> {
+        let ops_ref = self.extension_runner.session_ops_ref();
+        let guard = ops_ref.read().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    }
 }

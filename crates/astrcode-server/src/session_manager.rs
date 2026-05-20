@@ -231,6 +231,17 @@ impl SessionManager {
         Ok(())
     }
 
+    /// 从 .recycled/ 恢复一个已回收的 session。
+    pub(crate) async fn restore_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        self.event_store
+            .restore_session(session_id)
+            .await
+            .map_err(SessionManagerError::from)
+    }
+
     /// Fork 一个已有会话，创建新 session 并复制 fork 点之前的消息前缀。
     ///
     /// fork 保证新 session 发送给 LLM 的 system prompt + 消息前缀与源 session 完全一致，

@@ -224,6 +224,144 @@ pub trait FileObservationStore: Send + Sync {
     fn load(&self, path: &str) -> Option<FileObservation>;
 }
 
+// ─── SessionOperations：会话原子操作 trait ────────────────────────────────
+
+/// 会话原子操作 trait。
+///
+/// 由 server 层实现，通过 `ToolCapabilities.session_ops` 暴露给工具/插件。
+/// 插件在 `ToolHandler::execute` 中通过此接口自主编排子会话生命周期。
+#[async_trait::async_trait]
+pub trait SessionOperations: Send + Sync {
+    /// 创建子会话。
+    async fn create_session(
+        &self,
+        parent_session_id: &str,
+        request: CreateSessionRequest,
+    ) -> Result<SessionHandle, SessionApiError>;
+
+    /// 向目标 session 注入一条 UserMessage。
+    async fn inject_message(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+        content: String,
+    ) -> Result<(), SessionApiError>;
+
+    /// 向目标 session 提交一个 turn。
+    async fn submit_turn(
+        &self,
+        caller_session_id: &str,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResult, SessionApiError>;
+
+    /// 查询目标 session 状态。
+    async fn query_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<SessionStatus, SessionApiError>;
+
+    /// 回收目标 session 到 .recycled/ 目录（默认的清理方式）。
+    ///
+    /// 数据保留用于调试/审计，可通过 `restore_session` 恢复。
+    async fn recycle_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<(), SessionApiError>;
+
+    /// 永久删除目标 session 及其所有数据。
+    async fn delete_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<(), SessionApiError>;
+
+    /// 从 .recycled/ 恢复一个已回收的 session。
+    async fn restore_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<(), SessionApiError>;
+}
+
+/// 创建子会话请求。
+#[derive(Debug, Clone, Default)]
+pub struct CreateSessionRequest {
+    /// 子会话显示名称。
+    pub name: String,
+    /// 工作目录。`None` 表示继承父 session。
+    pub working_dir: Option<String>,
+    /// 额外系统提示词。
+    pub system_prompt: Option<String>,
+    /// 模型偏好。`None` 表示继承父 session。
+    pub model_preference: Option<String>,
+    /// 子会话工具集策略。
+    pub tool_policy: Option<crate::extension::ChildToolPolicy>,
+    /// 创建该子 session 的扩展 ID。
+    pub source_plugin: Option<String>,
+    /// 一次性子 session，首个 turn 完成后自动回收。
+    pub ephemeral: bool,
+}
+
+/// 创建成功后返回的句柄。
+#[derive(Debug, Clone)]
+pub struct SessionHandle {
+    pub session_id: String,
+}
+
+/// 提交 turn 请求。
+#[derive(Debug, Clone)]
+pub struct SubmitTurnRequest {
+    /// 目标 session ID。
+    pub target_session_id: String,
+    /// 用户提示词。
+    pub user_prompt: String,
+    /// 是否同步阻塞等待 turn 完成。
+    pub wait_for_result: bool,
+    /// 异步模式完成后向父 session 注入的通知文本。
+    pub notify_parent_on_complete: Option<String>,
+    /// 异步模式 turn 完成后自动回收目标 session。
+    pub recycle_on_complete: bool,
+    /// 触发此次 turn 的工具调用 ID。
+    pub tool_call_id: Option<String>,
+    /// 父 agent 的事件发送器。
+    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+}
+
+/// 提交 turn 结果。
+#[derive(Debug, Clone)]
+pub enum SubmitTurnResult {
+    /// 同步完成。
+    Completed { content: String },
+    /// 异步后台执行。
+    Backgrounded { task_id: String, session_id: String },
+}
+
+/// 会话状态查询结果。
+#[derive(Debug, Clone)]
+pub struct SessionStatus {
+    pub alive: bool,
+    pub has_active_turn: bool,
+    pub last_finish_reason: Option<String>,
+    pub message_count: usize,
+}
+
+/// Session API 错误。
+#[derive(Debug, thiserror::Error)]
+pub enum SessionApiError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+    #[error("session busy: {0}")]
+    SessionBusy(String),
+    #[error("max depth exceeded: current={current}, max={max}")]
+    MaxDepthExceeded { current: usize, max: usize },
+    #[error("{0}")]
+    Internal(String),
+}
+
 /// 工具调用时按需注入的会话能力。
 ///
 /// 大多数工具不需要这些能力；`Default::default()` 产生全部为 `None` 的空集。
@@ -240,6 +378,8 @@ pub struct ToolCapabilities {
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
+    /// 会话原子操作能力（仅子 agent 工具需要）。
+    pub session_ops: Option<Arc<dyn SessionOperations>>,
 }
 
 /// 每次工具调用时传递的上下文。

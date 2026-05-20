@@ -493,21 +493,60 @@ impl EventStore for FileSystemSessionRepository {
             .await
             .retain(|_, meta| !meta.dir.starts_with(&dir));
 
-        // 向上找 subagents/ 目录：子 session 结构为 subagents/{plugin}/{child_id}/
-        let subagents_dir = dir
-            .parent()
-            .and_then(|p| p.parent())
-            .filter(|p| p.file_name().is_some_and(|n| n == "subagents"));
+        // 结构：subagents/{plugin}/{child_id}/
+        // 回收到：subagents/.recycled/{plugin}/{child_id}/
+        // 这样 restore 时能直接 rename 回原位。
+        let plugin_dir = dir.parent(); // subagents/{plugin}/
+        let subagents_dir = plugin_dir.and_then(|p| p.parent()); // subagents/
 
-        if let Some(subagents) = subagents_dir {
-            let recycled = subagents.join(".recycled");
-            tokio::fs::create_dir_all(&recycled).await?;
-            let dest = recycled.join(dir.file_name().unwrap_or_default());
-            tokio::fs::rename(&dir, &dest).await?;
-        } else {
-            // 非子 session 或非标准目录结构，回退到删除
-            tokio::fs::remove_dir_all(&dir).await?;
+        if let (Some(plugin_dir), Some(subagents_dir)) = (plugin_dir, subagents_dir) {
+            if subagents_dir.file_name().is_some_and(|n| n == "subagents") {
+                let plugin_name = plugin_dir.file_name().unwrap_or_default().to_string_lossy();
+                let recycled = subagents_dir.join(".recycled").join(plugin_name.as_ref());
+                tokio::fs::create_dir_all(&recycled).await?;
+                let dest = recycled.join(dir.file_name().unwrap_or_default());
+                tokio::fs::rename(&dir, &dest).await?;
+                return Ok(());
+            }
         }
+
+        // 非子 session 或非标准目录结构，回退到删除
+        tokio::fs::remove_dir_all(&dir).await?;
+        Ok(())
+    }
+
+    async fn restore_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        validate_session_id(session_id.as_str())
+            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+
+        // 在所有 .recycled/{plugin}/{session_id} 目录中搜索
+        let recycled_path = self
+            .find_recycled_session_dir(session_id)
+            .await
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+
+        // 结构：subagents/.recycled/{plugin}/{session_id}
+        // 还原到：subagents/{plugin}/{session_id}
+        let plugin_dir = recycled_path
+            .parent() // .recycled/{plugin}/
+            .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
+        let plugin_name = plugin_dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let recycled_root = plugin_dir
+            .parent() // .recycled/
+            .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
+        let subagents_dir = recycled_root
+            .parent() // subagents/
+            .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
+
+        let dest_parent = subagents_dir.join(&plugin_name);
+        tokio::fs::create_dir_all(&dest_parent).await?;
+        let dest = dest_parent.join(session_id.as_str());
+
+        tokio::fs::rename(&recycled_path, &dest).await?;
 
         Ok(())
     }
@@ -609,6 +648,85 @@ impl EventStore for FileSystemSessionRepository {
 impl FileSystemSessionRepository {
     async fn session_roots(&self) -> Vec<PathBuf> {
         self.all_session_roots().await
+    }
+
+    /// 在所有项目的 subagents/.recycled/{plugin}/ 目录中搜索指定 session。
+    async fn find_recycled_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
+        for root in self.all_session_roots().await {
+            if let Some(found) = self.search_recycled_in_root(&root, id).await {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// 搜索 sessions_root 下所有 session 的 subagents/.recycled/{plugin}/{id}。
+    fn search_recycled_in_root<'a>(
+        &'a self,
+        sessions_root: &'a Path,
+        id: &'a SessionId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + 'a>> {
+        Box::pin(async move {
+            let Ok(mut entries) = tokio::fs::read_dir(sessions_root).await else {
+                return None;
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str == ".recycled"
+                    || name_str == "snapshots"
+                    || name_str == "compact-snapshots"
+                    || name_str == "tool-results"
+                {
+                    continue;
+                }
+                // Check subagents/.recycled/{plugin}/{id}
+                let recycled_dir = entry.path().join("subagents").join(".recycled");
+                if tokio::fs::metadata(&recycled_dir)
+                    .await
+                    .is_ok_and(|m| m.is_dir())
+                {
+                    if let Ok(mut plugin_entries) = tokio::fs::read_dir(&recycled_dir).await {
+                        while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
+                            let candidate = plugin_entry.path().join(id.as_str());
+                            if tokio::fs::metadata(&candidate)
+                                .await
+                                .is_ok_and(|m| m.is_dir())
+                            {
+                                return Some(candidate);
+                            }
+                        }
+                    }
+                }
+                // Recurse into subagents/{plugin}/ for nested sessions
+                let subagents = entry.path().join("subagents");
+                if tokio::fs::metadata(&subagents)
+                    .await
+                    .is_ok_and(|m| m.is_dir())
+                {
+                    let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                        continue;
+                    };
+                    while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
+                        let pname = plugin_entry.file_name();
+                        if pname.to_string_lossy() == ".recycled" {
+                            continue;
+                        }
+                        if plugin_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                            if let Some(found) =
+                                self.search_recycled_in_root(&plugin_entry.path(), id).await
+                            {
+                                return Some(found);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        })
     }
 
     /// 仅扫描磁盘上的会话目录名，不打开任何文件。

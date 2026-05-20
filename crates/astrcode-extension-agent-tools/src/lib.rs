@@ -12,9 +12,8 @@ use std::{
 
 use astrcode_core::{
     extension::{
-        ChildToolPolicy, EXTENSION_TOOL_OUTCOME_KEY, Extension, ExtensionError,
-        ExtensionToolOutcome, PromptBuildContext, PromptBuildHandler, PromptContributions,
-        Registrar, ToolHandler,
+        ChildToolPolicy, Extension, ExtensionError, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
@@ -134,66 +133,6 @@ const fn default_wait_for_result() -> bool {
     true
 }
 
-#[derive(Debug)]
-struct AgentRun {
-    outcome: ExtensionToolOutcome,
-    render: RenderSpec,
-}
-
-/// 解析 LLM 调用参数，匹配 Agent 配置，返回声明式 RunSession 结果和 UI 渲染。
-fn build_agent_run(
-    input: &serde_json::Value,
-    agents: &[agent::AgentConfig],
-) -> Result<AgentRun, String> {
-    let args: AgentArgs =
-        serde_json::from_value(input.clone()).map_err(|e| format!("invalid agent args: {e}"))?;
-
-    let matched = match args.subagent_type.as_deref() {
-        // 缺少 subagentType 是调用错误，告知 LLM 可用列表。
-        None => {
-            return Err(format!(
-                "subagentType is required.\n\n{}",
-                format_agents_for_model(agents)
-            ));
-        },
-        // 空字符串回退到第一个 agent（向后兼容旧调用模式）。
-        Some("") => agents.first().ok_or("no agents configured")?,
-        Some(name) => agents
-            .iter()
-            .find(|a| a.name == name || a.id == name)
-            .ok_or_else(|| {
-                format!(
-                    "agent '{name}' not found.\n\n{}",
-                    format_agents_for_model(agents)
-                )
-            })?,
-    };
-
-    Ok(AgentRun {
-        render: agent_run_render_spec(&args, matched),
-        outcome: ExtensionToolOutcome::RunSession {
-            name: matched.name.clone(),
-            system_prompt: matched.body.clone(),
-            user_prompt: args.prompt,
-            model_preference: matched.model.clone(),
-            wait_for_result: args.wait_for_result,
-            tool_policy: Some(ChildToolPolicy::Deny {
-                tools: vec!["agent".into()],
-            }),
-            ephemeral: true,
-            notify_parent_on_complete: if args.wait_for_result {
-                None
-            } else {
-                Some(
-                    "[A background agent task has completed. Review the tool result above and \
-                     present the findings to the user.]"
-                        .into(),
-                )
-            },
-        },
-    })
-}
-
 fn agent_run_render_spec(args: &AgentArgs, agent: &agent::AgentConfig) -> RenderSpec {
     let model = agent.model.as_deref().unwrap_or("inherit/default");
     let mode_label = if args.wait_for_result {
@@ -250,27 +189,143 @@ impl ToolHandler for AgentToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        _ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != "agent" {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
 
         let agents = self.shared.get_or_discover(Some(working_dir));
-        let run = build_agent_run(&arguments, &agents).map_err(ExtensionError::Internal)?;
-        let outcome_json = serde_json::to_value(&run.outcome)
-            .map_err(|e| ExtensionError::Internal(format!("serialize agent outcome: {e}")))?;
-        let render_json = serde_json::to_value(&run.render)
-            .map_err(|e| ExtensionError::Internal(format!("serialize agent render: {e}")))?;
+        let args: AgentArgs = serde_json::from_value(arguments.clone())
+            .map_err(|e| ExtensionError::Internal(format!("invalid agent args: {e}")))?;
 
-        Ok(ToolResult::text(
-            String::new(),
-            false,
-            tool_metadata([
-                (EXTENSION_TOOL_OUTCOME_KEY, outcome_json),
-                (UI_RENDER_METADATA_KEY, render_json),
-            ]),
-        ))
+        let matched = match args.subagent_type.as_deref() {
+            None => {
+                return Err(ExtensionError::Internal(format!(
+                    "subagentType is required.\n\n{}",
+                    format_agents_for_model(&agents)
+                )));
+            },
+            Some("") => agents
+                .first()
+                .ok_or_else(|| ExtensionError::Internal("no agents configured".into()))?,
+            Some(name) => agents
+                .iter()
+                .find(|a| a.name == name || a.id == name)
+                .ok_or_else(|| {
+                    ExtensionError::Internal(format!(
+                        "agent '{name}' not found.\n\n{}",
+                        format_agents_for_model(&agents)
+                    ))
+                })?,
+        };
+
+        // 构造 UI 渲染元数据
+        let render = agent_run_render_spec(&args, matched);
+        let render_json = serde_json::to_value(&render)
+            .map_err(|e| ExtensionError::Internal(format!("serialize render: {e}")))?;
+
+        // 获取 session_ops
+        let session_ops =
+            ctx.capabilities.session_ops.as_ref().ok_or_else(|| {
+                ExtensionError::Internal("session operations not available".into())
+            })?;
+
+        // 1. 创建子会话
+        use astrcode_core::tool::{CreateSessionRequest, SubmitTurnRequest};
+        let handle = session_ops
+            .create_session(
+                ctx.session_id.as_str(),
+                CreateSessionRequest {
+                    name: matched.name.clone(),
+                    working_dir: None,
+                    system_prompt: Some(matched.body.clone()),
+                    model_preference: matched.model.clone(),
+                    // TODO： A BETTER policy 设计
+                    tool_policy: Some(ChildToolPolicy::Deny {
+                        tools: vec!["agent".into()],
+                    }),
+                    source_plugin: Some("astrcode-agent-tools".into()),
+                    ephemeral: true,
+                },
+            )
+            .await
+            .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
+
+        // 2. 提交 turn
+        let result = session_ops
+            .submit_turn(
+                ctx.session_id.as_str(),
+                SubmitTurnRequest {
+                    target_session_id: handle.session_id.clone(),
+                    user_prompt: args.prompt,
+                    wait_for_result: args.wait_for_result,
+                    notify_parent_on_complete: if args.wait_for_result {
+                        None
+                    } else {
+                        Some(
+                            "[A background agent task has completed. Review the tool result above \
+                             and present the findings to the user.]"
+                                .into(),
+                        )
+                    },
+                    recycle_on_complete: !args.wait_for_result,
+                    tool_call_id: ctx.tool_call_id.clone(),
+                    event_tx: ctx.event_tx.clone(),
+                },
+            )
+            .await
+            .map_err(|e| ExtensionError::Internal(format!("submit_turn: {e}")))?;
+
+        // 3. 构造 ToolResult
+        let mut metadata = tool_metadata([
+            (UI_RENDER_METADATA_KEY, render_json),
+            ("child_session_id", serde_json::json!(handle.session_id)),
+        ]);
+
+        match result {
+            astrcode_core::tool::SubmitTurnResult::Completed { content } => {
+                // 同步路径：turn 完成后回收 ephemeral 子 session
+                if let Err(e) = session_ops
+                    .recycle_session(ctx.session_id.as_str(), &handle.session_id)
+                    .await
+                {
+                    tracing::warn!(
+                        child_session_id = %handle.session_id,
+                        error = %e,
+                        "failed to recycle ephemeral child session"
+                    );
+                }
+                Ok(ToolResult {
+                    call_id: String::new(),
+                    content,
+                    is_error: false,
+                    error: None,
+                    metadata,
+                    duration_ms: None,
+                })
+            },
+            astrcode_core::tool::SubmitTurnResult::Backgrounded {
+                task_id,
+                session_id,
+            } => {
+                // 异步路径：后台完成后由 notify_parent_on_complete 通知父 agent。
+                // 回收留给后续调用或自动清理。
+                metadata.insert("backgrounded".into(), serde_json::json!(true));
+                metadata.insert("task_id".into(), serde_json::json!(task_id));
+                Ok(ToolResult {
+                    call_id: String::new(),
+                    content: format!(
+                        "异步 agent 已启动。完成后结果将在下一轮对话中可用。\nsession: \
+                         {session_id}"
+                    ),
+                    is_error: false,
+                    error: None,
+                    metadata,
+                    duration_ms: None,
+                })
+            },
+        }
     }
 }
 
@@ -396,85 +451,5 @@ mod tests {
         let input = json!({ "description": "test" });
         let result = serde_json::from_value::<AgentArgs>(input);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn build_agent_run_matches_by_id_or_name() {
-        let agents = vec![agent::AgentConfig {
-            id: String::from("code-reviewer"),
-            name: String::from("Code Reviewer"),
-            description: String::from("review code"),
-            model: None,
-            body: String::from("Review."),
-        }];
-
-        let by_name =
-            json!({ "prompt": "review", "description": "test", "subagentType": "Code Reviewer" });
-        assert!(build_agent_run(&by_name, &agents).is_ok());
-
-        let by_id =
-            json!({ "prompt": "review", "description": "test", "subagentType": "code-reviewer" });
-        assert!(build_agent_run(&by_id, &agents).is_ok());
-
-        let by_unknown =
-            json!({ "prompt": "review", "description": "test", "subagentType": "unknown" });
-        assert!(build_agent_run(&by_unknown, &agents).is_err());
-    }
-
-    #[test]
-    fn build_agent_run_passes_wait_for_result() {
-        let agents = vec![agent::AgentConfig {
-            id: String::from("explore"),
-            name: String::from("explore"),
-            description: String::from("explore code"),
-            model: None,
-            body: String::from("Explore."),
-        }];
-
-        let sync_input = json!({
-            "prompt": "search", "description": "test", "subagentType": "explore", "waitForResult": true
-        });
-        let run = build_agent_run(&sync_input, &agents).unwrap();
-        match run.outcome {
-            ExtensionToolOutcome::RunSession {
-                wait_for_result, ..
-            } => {
-                assert!(wait_for_result);
-            },
-            _ => panic!("expected RunSession"),
-        }
-
-        let async_input = json!({
-            "prompt": "search", "description": "test", "subagentType": "explore", "waitForResult": false
-        });
-        let run = build_agent_run(&async_input, &agents).unwrap();
-        match run.outcome {
-            ExtensionToolOutcome::RunSession {
-                wait_for_result, ..
-            } => {
-                assert!(!wait_for_result);
-            },
-            _ => panic!("expected RunSession"),
-        }
-    }
-
-    #[test]
-    fn build_agent_run_rejects_missing_subagent_type() {
-        let agents = vec![agent::AgentConfig {
-            id: String::from("explore"),
-            name: String::from("explore"),
-            description: String::from("explore code"),
-            model: None,
-            body: String::from("Explore."),
-        }];
-
-        let input = json!({ "prompt": "search", "description": "test" });
-        let result = build_agent_run(&input, &agents);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("subagentType is required"),
-            "error should mention subagentType: {err}"
-        );
     }
 }

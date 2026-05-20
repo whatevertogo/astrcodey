@@ -9,7 +9,7 @@ pub mod handler;
 pub mod http;
 pub mod transport;
 
-pub(crate) mod config_manager;
+pub mod config_manager;
 pub mod server_event_bus;
 pub mod session_manager;
-pub(crate) mod session_spawner;
+pub mod session_operations;

@@ -68,8 +68,12 @@ mod tests {
         tracker.handle_delta("child tool completed: find: 3 files\n", &mut queue);
 
         assert_eq!(queue.len(), 2);
-        assert!(matches!(&queue[0], ScrollbackEntry::StreamText { text, .. } if text.contains("→ find")));
-        assert!(matches!(&queue[1], ScrollbackEntry::StreamText { text, .. } if text.contains("✓ find: 3 files")));
+        assert!(
+            matches!(&queue[0], ScrollbackEntry::StreamText { text, .. } if text.contains("→ find"))
+        );
+        assert!(
+            matches!(&queue[1], ScrollbackEntry::StreamText { text, .. } if text.contains("✓ find: 3 files"))
+        );
     }
 
     #[test]

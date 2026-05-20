@@ -17,7 +17,7 @@ use astrcode_core::{
 };
 use tokio::sync::RwLock;
 
-use crate::runtime::{SessionSpawner, SpawnRequest, SpawnResult};
+use crate::runtime::SessionOperations;
 
 /// 将生命周期事件分发到所有已注册的扩展。
 ///
@@ -32,8 +32,8 @@ pub struct ExtensionRunner {
     records: RwLock<Vec<ExtensionRecord>>,
     /// 预计算的 handler 索引，注册时重建，分发时直接查表
     index: parking_lot::RwLock<Arc<HandlerIndex>>,
-    /// 会话创建器（在 bind() 调用前为 None）
-    spawner: Arc<StdRwLock<Option<Arc<dyn SessionSpawner>>>>,
+    /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）
+    session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
     /// 钩子执行超时时间
     timeout: Duration,
 }
@@ -277,7 +277,7 @@ impl ExtensionRunner {
                 keybindings: Vec::new(),
                 status_items: Vec::new(),
             })),
-            spawner: Arc::new(StdRwLock::new(None)),
+            session_ops: Arc::new(StdRwLock::new(None)),
             timeout,
         }
     }
@@ -314,9 +314,14 @@ impl ExtensionRunner {
         }
     }
 
-    /// 绑定会话创建能力。
-    pub fn bind(&self, spawner: Arc<dyn SessionSpawner>) {
-        *self.spawner.write().unwrap_or_else(|e| e.into_inner()) = Some(spawner);
+    /// 绑定会话原子操作能力。
+    pub fn bind_session_ops(&self, ops: Arc<dyn SessionOperations>) {
+        *self.session_ops.write().unwrap_or_else(|e| e.into_inner()) = Some(ops);
+    }
+
+    /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
+    pub fn session_ops_ref(&self) -> Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>> {
+        Arc::clone(&self.session_ops)
     }
 
     pub async fn count(&self) -> usize {
@@ -623,18 +628,16 @@ impl ExtensionRunner {
     pub async fn collect_tool_adapters_typed(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
         let index = self.load_index();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        for (def, handler, ext_id) in &index.static_tools {
+        for (def, handler, _ext_id) in &index.static_tools {
             let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
             tools.push(Arc::new(HandlerTool {
                 definition: def.clone(),
                 handler: Arc::clone(handler),
                 prompt_metadata,
                 working_dir: working_dir.to_string(),
-                extension_id: ext_id.clone(),
-                spawner: Arc::clone(&self.spawner),
             }));
         }
-        for (ext_id, discovery) in &index.tool_discoveries {
+        for (_ext_id, discovery) in &index.tool_discoveries {
             match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                 Ok(discovered) => {
                     for discovered_tool in discovered {
@@ -643,8 +646,6 @@ impl ExtensionRunner {
                             handler: discovered_tool.handler,
                             prompt_metadata: discovered_tool.prompt_metadata,
                             working_dir: working_dir.to_string(),
-                            extension_id: ext_id.clone(),
-                            spawner: Arc::clone(&self.spawner),
                         }));
                     }
                 },
@@ -757,25 +758,6 @@ struct HandlerTool {
     handler: Arc<dyn ToolHandler>,
     prompt_metadata: Option<astrcode_core::tool::ToolPromptMetadata>,
     working_dir: String,
-    extension_id: String,
-    spawner: Arc<StdRwLock<Option<Arc<dyn SessionSpawner>>>>,
-}
-
-impl HandlerTool {
-    async fn spawn(
-        &self,
-        parent_session_id: &str,
-        request: SpawnRequest,
-    ) -> Result<SpawnResult, String> {
-        let spawner = {
-            let guard = self.spawner.read().unwrap_or_else(|e| e.into_inner());
-            match &*guard {
-                Some(s) => Arc::clone(s),
-                None => return Err("Session spawner not bound".into()),
-            }
-        };
-        spawner.spawn(parent_session_id, request).await
-    }
 }
 
 #[async_trait::async_trait]
@@ -817,54 +799,6 @@ impl Tool for HandlerTool {
             .remove(astrcode_core::extension::EXTENSION_TOOL_OUTCOME_KEY)
         {
             match serde_json::from_value::<ExtensionToolOutcome>(outcome_value) {
-                Ok(ExtensionToolOutcome::RunSession {
-                    name,
-                    system_prompt,
-                    user_prompt,
-                    model_preference,
-                    wait_for_result,
-                    tool_policy,
-                    ephemeral,
-                    notify_parent_on_complete,
-                }) => {
-                    let request = SpawnRequest {
-                        name,
-                        system_prompt,
-                        user_prompt,
-                        working_dir: _ctx.working_dir.clone(),
-                        model_preference,
-                        tool_call_id: _ctx.tool_call_id.clone(),
-                        event_tx: _ctx.event_tx.clone(),
-                        wait_for_result,
-                        tool_policy,
-                        source_plugin: (!self.extension_id.is_empty())
-                            .then(|| self.extension_id.clone()),
-                        ephemeral,
-                        notify_parent_on_complete,
-                    };
-
-                    match self.spawn(_ctx.session_id.as_str(), request).await {
-                        Ok(output) => {
-                            result.content = output.content;
-                            result
-                                .metadata
-                                .insert("child_session_id".into(), output.child_session_id.into());
-                            if let Some(task_id) = output.background_task_id {
-                                result
-                                    .metadata
-                                    .insert("backgrounded".into(), serde_json::json!(true));
-                                result
-                                    .metadata
-                                    .insert("task_id".into(), serde_json::json!(task_id));
-                            }
-                        },
-                        Err(e) => {
-                            result.content = format!("Failed to spawn child session: {e}");
-                            result.is_error = true;
-                            result.error = Some(e);
-                        },
-                    }
-                },
                 Ok(ExtensionToolOutcome::Text { content, is_error }) => {
                     result.content = content;
                     result.is_error = is_error;

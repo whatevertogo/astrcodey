@@ -290,7 +290,6 @@ pub const EXTENSION_TOOL_OUTCOME_KEY: &str = "extension_tool_outcome";
 ///
 /// 扩展返回这些变体而非直接调用宿主原语，由运行器解释每个变体：
 /// - `Text`：普通文本结果（当前默认行为）
-/// - `RunSession`：请求宿主创建子会话并运行一个轮次
 ///
 /// 通过 FFI 边界以 JSON 传递。工具回调返回码 `2` 表示
 /// `output_ptr/len` 携带的是序列化的 `ExtensionToolOutcome`。
@@ -299,46 +298,6 @@ pub const EXTENSION_TOOL_OUTCOME_KEY: &str = "extension_tool_outcome";
 pub enum ExtensionToolOutcome {
     /// 普通文本结果——标准的 ToolResult 路径。
     Text { content: String, is_error: bool },
-    /// 请求宿主创建子会话并运行一个轮次。
-    ///
-    /// - `parent_session_id` 来自当前的 `ToolExecutionContext`，而非插件提供——
-    ///   插件无法伪造父子关系。
-    /// - `system_prompt` 追加到全局系统提示词之后，而非替换。
-    /// - `model_preference` 在 v1 中仅为建议值。
-    RunSession {
-        /// 子会话的显示名称。
-        name: String,
-        /// 追加到全局系统提示词之后的指令。
-        system_prompt: String,
-        /// 发送给子会话的用户提示词。
-        user_prompt: String,
-        /// 建议使用的模型（v1 中仅为建议）。
-        #[serde(default)]
-        model_preference: Option<String>,
-        /// 是否同步阻塞等待子 agent 完成。
-        ///
-        /// `false`（默认）：异步执行，立即返回，子 agent 在后台运行，完成后
-        /// 结果通过 durable event 机制在下一轮对话中可见。
-        /// `true`：同步阻塞直到子 agent 完成并返回结果。
-        #[serde(default = "default_wait_for_result")]
-        wait_for_result: bool,
-        /// 子会话的工具集策略。`None` 表示继承父 session 的工具全集。
-        ///
-        /// 用于让插件声明子 agent 应当能用哪些工具。详见 [`ChildToolPolicy`]。
-        #[serde(default)]
-        tool_policy: Option<ChildToolPolicy>,
-        /// 一次性子 session，完成后自动回收。
-        #[serde(default)]
-        ephemeral: bool,
-        /// 异步模式完成后向父 session 注入的消息。
-        ///
-        /// 仅 `wait_for_result = false` 时生效。`Some(text)` 时 spawner 在子 agent
-        /// 完成后将 text 作为 `UserMessage` 写入父 session，父 agent 在下一个
-        /// step boundary（mid-turn inject）或下一轮 turn 中可见。
-        /// `None` 则不通知（fire-and-forget）。
-        #[serde(default)]
-        notify_parent_on_complete: Option<String>,
-    },
 }
 
 /// 子 session 的工具集策略。
@@ -360,10 +319,6 @@ pub enum ChildToolPolicy {
     Allow { tools: Vec<String> },
 }
 
-/// `wait_for_result` 的 serde 默认值——`false`（异步）。
-const fn default_wait_for_result() -> bool {
-    false
-}
 
 // ───  Typed Extension API ────────────────────────────────
 

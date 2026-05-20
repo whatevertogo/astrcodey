@@ -15,7 +15,7 @@ use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::config_store::FileConfigStore;
 
 pub use crate::config_manager::ConfigManager;
-use crate::{session_manager::SessionManager, session_spawner::ServerSessionSpawner};
+use crate::session_manager::SessionManager;
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -173,9 +173,12 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 扩展本身不能直接拿到 EventStore；当扩展工具返回 RunSession 声明式结果时，
     // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
     // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
-    extension_runner.bind(Arc::new(ServerSessionSpawner {
-        session_manager: Arc::clone(&session_manager),
-    }));
+    // 绑定新的会话原子操作 API。
+    extension_runner.bind_session_ops(Arc::new(
+        crate::session_operations::ServerSessionOperations {
+            session_manager: Arc::clone(&session_manager),
+        },
+    ));
 
     // 8. 返回运行时容器。
     //
