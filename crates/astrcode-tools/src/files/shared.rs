@@ -537,3 +537,46 @@ pub(super) fn stale_file_guard_result(
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
     }))
 }
+
+// ─── Diff helpers ──────────────────────────────────────────────────────────
+
+/// 计算两段文本之间的 unified diff 并返回统计信息。
+///
+/// 返回 `(diff_text, insertions, deletions)`。diff_text 使用 unified format，
+/// 限制最大行数避免 metadata 膨胀。
+pub(super) fn compute_unified_diff(
+    _path: &str,
+    old: &str,
+    new: &str,
+    max_diff_lines: usize,
+) -> (String, usize, usize) {
+    use similar::TextDiff;
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+
+    // 使用 unified_diff() 的 Display 输出完整 diff，然后按行截断统计。
+    let unified = diff
+        .unified_diff()
+        .context_radius(3)
+        .header("a", "b")
+        .to_string();
+
+    for (line_count, line) in unified.lines().enumerate() {
+        if line_count >= max_diff_lines {
+            output.push_str("... (truncated)\n");
+            break;
+        }
+        match line.chars().next() {
+            Some('+') if !line.starts_with("+++") => insertions += 1,
+            Some('-') if !line.starts_with("---") => deletions += 1,
+            _ => {},
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    (output, insertions, deletions)
+}

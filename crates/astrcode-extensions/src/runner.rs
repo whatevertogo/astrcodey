@@ -71,6 +71,8 @@ struct HandlerIndex {
     tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)>,
     static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)>,
     command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
+    keybindings: Vec<astrcode_core::extension::Keybinding>,
+    status_items: Vec<astrcode_core::extension::StatusItem>,
 }
 
 fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
@@ -86,6 +88,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)> = Vec::new();
     let mut static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = Vec::new();
     let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
+    let mut keybindings: Vec<astrcode_core::extension::Keybinding> = Vec::new();
+    let mut status_items: Vec<astrcode_core::extension::StatusItem> = Vec::new();
 
     for record in records {
         for (mode, pri, h) in record.reg.pre_tool_use() {
@@ -123,6 +127,12 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         for discovery in record.reg.command_discoveries().iter() {
             command_discoveries.push(Arc::clone(discovery));
         }
+        for kb in record.reg.keybindings() {
+            keybindings.push(kb.clone());
+        }
+        for item in record.reg.status_items() {
+            status_items.push(item.clone());
+        }
     }
 
     pre.sort_by_key(|b| std::cmp::Reverse(b.0));
@@ -146,6 +156,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         tool_discoveries,
         static_commands,
         command_discoveries,
+        keybindings,
+        status_items,
     }
 }
 
@@ -262,6 +274,8 @@ impl ExtensionRunner {
                 tool_discoveries: Vec::new(),
                 static_commands: Vec::new(),
                 command_discoveries: Vec::new(),
+                keybindings: Vec::new(),
+                status_items: Vec::new(),
             })),
             spawner: Arc::new(StdRwLock::new(None)),
             timeout,
@@ -647,6 +661,16 @@ impl ExtensionRunner {
         &self,
     ) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
         self.load_index().tool_metadata.clone()
+    }
+
+    /// 收集所有插件注册的快捷键绑定。
+    pub fn collect_keybindings(&self) -> Vec<astrcode_core::extension::Keybinding> {
+        self.load_index().keybindings.clone()
+    }
+
+    /// 收集所有插件注册的状态栏项。
+    pub fn collect_status_items(&self) -> Vec<astrcode_core::extension::StatusItem> {
+        self.load_index().status_items.clone()
     }
 
     /// 从 HandlerIndex 缓存收集斜杠命令。

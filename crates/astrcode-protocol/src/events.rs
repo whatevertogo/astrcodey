@@ -41,13 +41,29 @@ pub enum ClientNotification {
     Error { code: i32, message: String },
 
     /// 插件注册的斜杠命令列表（响应 `ListExtensionCommands`）。
-    ExtensionCommandList { commands: Vec<ExtensionCommandInfo> },
+    ExtensionCommandList {
+        commands: Vec<ExtensionCommandInfo>,
+        /// 插件注册的快捷键绑定。
+        #[serde(default)]
+        keybindings: Vec<KeybindingInfoDto>,
+        /// 插件注册的状态栏项（含初始值）。
+        #[serde(default)]
+        status_items: Vec<StatusItemInfoDto>,
+    },
 
     /// 插件斜杠命令执行结果。
     ExtensionCommandResult {
         command_name: String,
         content: String,
         is_error: bool,
+    },
+
+    /// 插件状态栏项更新。
+    StatusItemUpdate {
+        /// 状态栏项 ID。
+        id: String,
+        /// 新的显示文本。空字符串表示隐藏。
+        text: String,
     },
 }
 
@@ -75,6 +91,9 @@ pub struct SessionListItem {
     pub last_active_at: String,
     pub working_dir: String,
     pub parent_session_id: Option<String>,
+    /// 会话标题（首条用户消息摘要或工作目录名）。
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// 子 Agent 会话的运行状态。
@@ -126,4 +145,30 @@ pub struct ExtensionCommandInfo {
     pub needs_argument: bool,
     /// 命令来源：`builtin`、`plugin` 或 `skill`。
     pub source: String,
+}
+
+/// 快捷键绑定信息 DTO（通过 ExtensionCommandList 下发到客户端）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeybindingInfoDto {
+    /// 快捷键描述（如 "shift+tab"）。
+    pub key: String,
+    /// 触发的命令名（不含 `/`）。
+    pub command: String,
+    /// 命令参数。
+    #[serde(default)]
+    pub arguments: String,
+    /// 人类可读描述。
+    pub description: String,
+}
+
+/// 状态栏项信息 DTO（通过 ExtensionCommandList 下发到客户端）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusItemInfoDto {
+    /// 唯一标识。
+    pub id: String,
+    /// 初始显示文本。
+    pub text: String,
+    /// 排序优先级（越小越靠左）。
+    #[serde(default)]
+    pub priority: i32,
 }

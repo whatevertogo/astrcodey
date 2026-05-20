@@ -56,6 +56,14 @@ impl InProcessTransport {
 
             // 创建命令 actor，循环接收并处理客户端命令
             let event_bus = Arc::new(ServerEventBus::new(runtime.event_store.clone(), tx));
+            {
+                let event_bus = Arc::clone(&event_bus);
+                runtime
+                    .session_manager
+                    .set_attach_hook(Arc::new(move |session| {
+                        event_bus.attach(session);
+                    }));
+            }
             let handler = CommandHandler::spawn_actor(runtime, event_bus);
             let _ = ready_tx.send(BootstrapState::Ready);
             while let Some(cmd) = cmd_rx.recv().await {

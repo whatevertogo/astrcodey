@@ -24,9 +24,9 @@ use std::sync::Arc;
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler,
-        PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, ToolHandler,
+        CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
+        HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
+        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
     },
     llm::LlmMessage,
     tool::{ToolResult, tool_metadata},
@@ -85,6 +85,31 @@ impl Extension for ModeExtension {
             HookMode::Blocking,
             50,
             Arc::new(ModeProviderHandler),
+        );
+        // 注册快捷键：Shift+Tab 切换模式
+        reg.keybinding(astrcode_core::extension::Keybinding {
+            key: "shift+tab".into(),
+            command: "mode".into(),
+            arguments: String::new(),
+            description: "Toggle plan/code mode".into(),
+        });
+        // 注册状态栏项：显示当前模式
+        reg.status_item(astrcode_core::extension::StatusItem {
+            id: "mode".into(),
+            text: "code".into(),
+            priority: 0,
+            tooltip: Some("Current working mode (Shift+Tab to toggle)".into()),
+        });
+        // 注册 /mode 斜杠命令
+        reg.command(
+            SlashCommand {
+                name: "mode".into(),
+                description: "Toggle or set working mode (plan/code). Shift+Tab to toggle.".into(),
+                args_schema: None,
+            },
+            Arc::new(ModeSlashCommandHandler {
+                catalog: Arc::clone(&catalog),
+            }),
         );
     }
 }
@@ -157,6 +182,60 @@ impl PreToolUseHandler for ModePreToolUseHandler {
 }
 
 struct ModeProviderHandler;
+
+/// /mode 斜杠命令处理器：切换或设置当前模式。
+struct ModeSlashCommandHandler {
+    catalog: Arc<ModeCatalog>,
+}
+
+#[async_trait::async_trait]
+impl CommandHandler for ModeSlashCommandHandler {
+    async fn execute(
+        &self,
+        _command_name: &str,
+        arguments: &str,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        let mode_root = store::mode_store_root(&ctx.session_id, working_dir);
+        let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
+
+        let target_mode = match arguments.trim() {
+            "" => {
+                // 切换：code → plan, plan → code
+                if state.current_mode == "plan" {
+                    "code"
+                } else {
+                    "plan"
+                }
+            },
+            other => other,
+        };
+
+        let mode_id = ModeId::from_raw(target_mode);
+        if self.catalog.get(&mode_id).is_none() {
+            return Ok(ExtensionCommandResult::display(
+                format!("Unknown mode '{target_mode}'. Available: code, plan"),
+                true,
+            ));
+        }
+
+        if state.current_mode == target_mode {
+            return Ok(ExtensionCommandResult::display(
+                format!("Already in {target_mode} mode"),
+                false,
+            ));
+        }
+
+        state.current_mode = target_mode.to_string();
+        store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
+
+        Ok(ExtensionCommandResult::display(
+            format!("Switched to {target_mode} mode"),
+            false,
+        ))
+    }
+}
 
 #[async_trait::async_trait]
 impl ProviderHandler for ModeProviderHandler {

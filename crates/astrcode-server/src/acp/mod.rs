@@ -36,6 +36,14 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         runtime.event_store.clone(),
         event_tx,
     ));
+    {
+        let event_bus = Arc::clone(&event_bus);
+        runtime
+            .session_manager
+            .set_attach_hook(Arc::new(move |session| {
+                event_bus.attach(session);
+            }));
+    }
     let command_handle = CommandHandle::spawn(runtime, Arc::clone(&event_bus));
 
     Agent

@@ -187,6 +187,10 @@ impl ServerSessionSpawner {
         let child_turn_id = new_turn_id();
         let child_arc = Arc::new(child_session);
 
+        // 注册子会话 runtime 到 SessionManager 并 attach 到 event_bus，
+        // 确保后续 open(child_sid) 能拿到同一份 runtime，且子会话事件实时广播。
+        self.session_manager.register_child_session(&child_arc);
+
         // 追加 TurnStarted + UserMessage 到子 session（通过 child.emit_durable 写 store + fanout，
         // ChildProgressSink 在后续 submit 路径里负责转发到父 progress）。
         let user_prompt_for_submit = user_prompt.clone();

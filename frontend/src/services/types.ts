@@ -51,8 +51,23 @@ export interface SlashCommandInfo {
   source: 'builtin' | 'plugin' | 'skill' | string
 }
 
+export interface KeybindingInfo {
+  key: string
+  command: string
+  arguments: string
+  description: string
+}
+
+export interface StatusItemInfo {
+  id: string
+  text: string
+  priority: number
+}
+
 export interface SlashCommandListResponse {
   commands: SlashCommandInfo[]
+  keybindings: KeybindingInfo[]
+  statusItems: StatusItemInfo[]
 }
 
 // ── Session List ──

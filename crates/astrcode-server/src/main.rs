@@ -66,6 +66,14 @@ async fn main() {
         runtime.event_store.clone(),
         event_tx.clone(),
     ));
+    {
+        let event_bus = Arc::clone(&event_bus);
+        runtime
+            .session_manager
+            .set_attach_hook(Arc::new(move |session| {
+                event_bus.attach(session);
+            }));
+    }
     let handler = CommandHandler::spawn_actor(runtime, Arc::clone(&event_bus));
 
     // Background task: broadcast events → stdout

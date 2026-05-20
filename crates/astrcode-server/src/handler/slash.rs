@@ -124,6 +124,25 @@ impl CommandHandler {
         {
             // 显示结果到客户端
             Ok(ExtensionCommandResult::Display { content, is_error }) => {
+                // mode 命令成功时，同步推送状态栏更新。
+                if command.name == "mode" && !is_error {
+                    if let Some(mode) = content
+                        .strip_prefix("Switched to ")
+                        .and_then(|s| s.strip_suffix(" mode"))
+                        .or_else(|| {
+                            content
+                                .strip_prefix("Already in ")
+                                .and_then(|s| s.strip_suffix(" mode"))
+                        })
+                    {
+                        self.event_bus.send_notification(
+                            astrcode_protocol::events::ClientNotification::StatusItemUpdate {
+                                id: "mode".into(),
+                                text: mode.to_string(),
+                            },
+                        );
+                    }
+                }
                 self.event_bus.send_notification(
                     astrcode_protocol::events::ClientNotification::ExtensionCommandResult {
                         command_name: command.name,

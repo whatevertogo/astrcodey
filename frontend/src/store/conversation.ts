@@ -30,6 +30,7 @@ interface ConversationState {
   streamAbortController: AbortController | null
   modelRefreshKey: number
   agentSessions: AgentSessionLink[]
+  statusItems: Record<string, string>
 
   initServer: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -178,6 +179,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   streamAbortController: null,
   modelRefreshKey: 0,
   agentSessions: [],
+  statusItems: {},
 
   initServer: async () => {
     set({ connectionStatus: 'connecting', connectionError: null })

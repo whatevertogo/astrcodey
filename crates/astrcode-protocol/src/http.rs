@@ -75,6 +75,40 @@ pub struct CompactSessionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandListResponseDto {
     pub commands: Vec<SlashCommandInfoDto>,
+    /// 插件注册的快捷键绑定。
+    #[serde(default)]
+    pub keybindings: Vec<KeybindingDto>,
+    /// 插件注册的状态栏项（含初始值）。
+    #[serde(default)]
+    pub status_items: Vec<StatusItemDto>,
+}
+
+/// 快捷键绑定 DTO。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeybindingDto {
+    /// 快捷键描述（如 "shift+tab"）。
+    pub key: String,
+    /// 触发的命令名（不含 `/`）。
+    pub command: String,
+    /// 命令参数。
+    #[serde(default)]
+    pub arguments: String,
+    /// 人类可读描述。
+    pub description: String,
+}
+
+/// 状态栏项 DTO。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemDto {
+    /// 唯一标识。
+    pub id: String,
+    /// 显示文本。
+    pub text: String,
+    /// 排序优先级。
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// 可执行斜杠命令信息。

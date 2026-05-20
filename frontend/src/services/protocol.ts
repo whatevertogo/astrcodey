@@ -19,6 +19,8 @@ import type {
   PromptSubmitResponse,
   SlashCommandInfo,
   SlashCommandListResponse,
+  KeybindingInfo,
+  StatusItemInfo,
   SessionListItem,
   SessionListResponse,
   ToolOutputStream,
@@ -380,12 +382,37 @@ function decodeSlashCommandInfo(value: unknown): SlashCommandInfo {
   }
 }
 
+function decodeKeybindingInfo(value: unknown): KeybindingInfo {
+  const object = decodeObject(value, 'keybinding info')
+  return {
+    key: requiredString(object, 'key'),
+    command: requiredString(object, 'command'),
+    arguments: optionalString(object, 'arguments') ?? '',
+    description: requiredString(object, 'description'),
+  }
+}
+
+function decodeStatusItemInfo(value: unknown): StatusItemInfo {
+  const object = decodeObject(value, 'status item info')
+  return {
+    id: requiredString(object, 'id'),
+    text: requiredString(object, 'text'),
+    priority: optionalNumber(object, 'priority') ?? 0,
+  }
+}
+
 export function decodeSlashCommandListResponse(
   value: unknown
 ): SlashCommandListResponse {
   const object = decodeObject(value, 'slash command list response')
   return {
     commands: arrayField(object, 'commands').map(decodeSlashCommandInfo),
+    keybindings: ((object.keybindings as unknown[]) ?? []).map(
+      decodeKeybindingInfo
+    ),
+    statusItems: ((object.statusItems as unknown[]) ?? []).map(
+      decodeStatusItemInfo
+    ),
   }
 }
 

@@ -104,8 +104,9 @@ impl CommandHandler {
                         session_id: summary.session_id.into_string(),
                         created_at: summary.created_at,
                         last_active_at: summary.updated_at,
-                        working_dir: summary.working_dir,
+                        working_dir: summary.working_dir.clone(),
                         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
+                        title: summary.first_user_message.clone(),
                     })
                     .collect();
                 let _ = self
@@ -161,10 +162,36 @@ impl CommandHandler {
                     },
                 };
                 let infos = self.command_infos_for_working_dir(&working_dir).await;
-                let _ = self
-                    .event_bus
-                    .broadcast_sender()
-                    .send(ClientNotification::ExtensionCommandList { commands: infos });
+                let keybindings: Vec<astrcode_protocol::events::KeybindingInfoDto> = self
+                    .runtime
+                    .extension_runner
+                    .collect_keybindings()
+                    .into_iter()
+                    .map(|kb| astrcode_protocol::events::KeybindingInfoDto {
+                        key: kb.key,
+                        command: kb.command,
+                        arguments: kb.arguments,
+                        description: kb.description,
+                    })
+                    .collect();
+                let status_items: Vec<astrcode_protocol::events::StatusItemInfoDto> = self
+                    .runtime
+                    .extension_runner
+                    .collect_status_items()
+                    .into_iter()
+                    .map(|item| astrcode_protocol::events::StatusItemInfoDto {
+                        id: item.id,
+                        text: item.text,
+                        priority: item.priority,
+                    })
+                    .collect();
+                let _ = self.event_bus.broadcast_sender().send(
+                    ClientNotification::ExtensionCommandList {
+                        commands: infos,
+                        keybindings,
+                        status_items,
+                    },
+                );
             },
 
             ClientCommand::ExecuteExtensionCommand {

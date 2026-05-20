@@ -139,10 +139,38 @@ pub(in crate::http) async fn list_commands(
 ) -> Response {
     let session_id = SessionId::from(session_id);
     match state.handler.command_infos_for_session(session_id).await {
-        Ok(commands) => Json(SlashCommandListResponseDto {
-            commands: commands.into_iter().map(Into::into).collect(),
-        })
-        .into_response(),
+        Ok(commands) => {
+            use astrcode_protocol::http::{KeybindingDto, StatusItemDto};
+            let keybindings: Vec<KeybindingDto> = state
+                .runtime
+                .extension_runner
+                .collect_keybindings()
+                .into_iter()
+                .map(|kb| KeybindingDto {
+                    key: kb.key,
+                    command: kb.command,
+                    arguments: kb.arguments,
+                    description: kb.description,
+                })
+                .collect();
+            let status_items: Vec<StatusItemDto> = state
+                .runtime
+                .extension_runner
+                .collect_status_items()
+                .into_iter()
+                .map(|item| StatusItemDto {
+                    id: item.id,
+                    text: item.text,
+                    priority: item.priority,
+                })
+                .collect();
+            Json(SlashCommandListResponseDto {
+                commands: commands.into_iter().map(Into::into).collect(),
+                keybindings,
+                status_items,
+            })
+            .into_response()
+        },
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }
 }
