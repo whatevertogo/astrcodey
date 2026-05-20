@@ -106,12 +106,22 @@ fn to_session_update(payload: &EventPayload) -> Option<SessionUpdate> {
         ))),
 
         EventPayload::BackgroundTaskOutput {
-            task_id,
+            task_id: _,
+            call_id,
             stream,
             delta,
-        } => Some(text_chunk(format!(
-            "[background task {task_id} {}] {delta}",
-            stream_name(*stream)
+        } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new(call_id.as_str()),
+            ToolCallUpdateFields::new()
+                .status(Some(ToolCallStatus::InProgress))
+                .content(Some(vec![ToolCallContent::from(format!(
+                    "{}: {delta}",
+                    stream_name(*stream)
+                ))]))
+                .raw_output(Some(serde_json::json!({
+                    "stream": stream_name(*stream),
+                    "delta": delta,
+                }))),
         ))),
 
         EventPayload::BackgroundTaskCompleted {

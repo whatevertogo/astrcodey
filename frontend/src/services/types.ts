@@ -185,6 +185,7 @@ export type ConversationDelta =
   | { kind: 'patchArguments'; blockId: string; arguments: string }
   | { kind: 'toolCallBackgrounded'; callId: string; taskId: string }
   | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
+  | { kind: 'statusItemUpdate'; id: string; text: string }
 
 // ── App State ──
 

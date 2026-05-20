@@ -352,6 +352,11 @@ pub enum ConversationDeltaDto {
     AgentSessionUpdated {
         agent_session: HttpAgentSessionLinkDto,
     },
+    /// 插件状态栏项更新。
+    StatusItemUpdate {
+        id: String,
+        text: String,
+    },
 }
 
 /// HTTP 错误响应。

@@ -503,6 +503,19 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         })
         break
       }
+
+      case 'statusItemUpdate': {
+        set((current) => {
+          const next = { ...current.statusItems }
+          if (delta.text) {
+            next[delta.id] = delta.text
+          } else {
+            delete next[delta.id]
+          }
+          return { statusItems: next }
+        })
+        break
+      }
     }
   },
 }))

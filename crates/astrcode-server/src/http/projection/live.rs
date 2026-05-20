@@ -50,6 +50,18 @@ pub(in crate::http) fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDt
             delta: delta.clone(),
         }],
 
+        // BackgroundTaskOutput — same as ToolOutputDelta but from a backgrounded task
+        EventPayload::BackgroundTaskOutput {
+            call_id,
+            stream,
+            delta,
+            ..
+        } => vec![ConversationDeltaDto::ToolOutput {
+            call_id: call_id.to_string(),
+            stream: *stream,
+            delta: delta.clone(),
+        }],
+
         // Completed blocks — shared construction, different delta wrappers
         EventPayload::UserMessage { .. } | EventPayload::ErrorOccurred { .. } => {
             completed_block_from_payload(event)

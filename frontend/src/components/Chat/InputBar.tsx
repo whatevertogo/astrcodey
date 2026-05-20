@@ -27,6 +27,7 @@ export default function InputBar() {
   const modelRefreshKey = useAppStore((s) => s.modelRefreshKey)
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
   const compactSubmitting = useAppStore((s) => s.compactSubmitting)
+  const statusItems = useAppStore((s) => s.statusItems)
 
   const [value, setValue] = useState('')
   const [isComposing, setIsComposing] = useState(false)
@@ -115,6 +116,14 @@ export default function InputBar() {
         if (controller.signal.aborted) return
         setSlashOptions(res.commands)
         setSlashLoading(false)
+        // 初始化状态栏项到 store
+        if (res.statusItems.length > 0) {
+          const items: Record<string, string> = {}
+          for (const item of res.statusItems) {
+            items[item.id] = item.text
+          }
+          useAppStore.setState({ statusItems: items })
+        }
       })
       .catch((err) => {
         if (controller.signal.aborted) return
@@ -261,6 +270,14 @@ export default function InputBar() {
                         bumpModelRefreshKey()
                       }}
                     />
+                    {Object.entries(statusItems).filter(([, v]) => v).map(([id, text]) => (
+                      <span
+                        key={id}
+                        className="text-[11px] text-text-secondary"
+                      >
+                        {text}
+                      </span>
+                    ))}
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-2">
                     {isBusy ? (

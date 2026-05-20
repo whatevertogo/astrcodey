@@ -219,6 +219,15 @@ pub(in crate::http) async fn session_stream(
                         state.pending = items;
                         return Some((first, state));
                     },
+                    Ok(ClientNotification::StatusItemUpdate { id, text }) => {
+                        let cursor = state_cursor(&state.runtime, &state.session_id).await;
+                        let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
+                            session_id: state.session_id.to_string(),
+                            cursor: ConversationCursorDto { value: cursor },
+                            delta: ConversationDeltaDto::StatusItemUpdate { id, text },
+                        }));
+                        return Some((item, state));
+                    },
                     Ok(_) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let cursor = state_cursor(&state.runtime, &state.session_id).await;

@@ -320,6 +320,8 @@ pub enum EventPayload {
     BackgroundTaskOutput {
         /// 后台任务 ID。
         task_id: crate::types::BackgroundTaskId,
+        /// 原始工具调用 ID，用于客户端将输出关联到对应的 tool-call block。
+        call_id: ToolCallId,
         /// 输出流类型。
         stream: ToolOutputStream,
         /// 本次增量输出文本。
