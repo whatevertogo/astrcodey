@@ -94,6 +94,7 @@ fn setup_storage_isolation(config: &EvalConfig) -> Result<PathBuf, EvalError> {
         },
     };
     // 注入环境变量，server 启动时 hostpaths::resolve_home_dir() 会读取
+    // FIXME：是进程级副作用，多线程并发调用不安全（但当前 eval 是单进程入口，暂时可接受）
     std::env::set_var("ASTRCODE_TEST_HOME", &storage_path);
     tracing::info!(storage = %storage_path.display(), "eval storage isolated");
     Ok(storage_path)
