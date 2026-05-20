@@ -166,26 +166,34 @@ fn apply_event(app: &mut App, event: &Event) {
             app.status_text = format!("Thinking · {}", delta);
         },
         EventPayload::ToolCallStarted { call_id, tool_name } => {
-            app.status_text = format!("Running {}", human_action(tool_name));
-            // Push a placeholder message so ToolOutputDelta can find it by key.
+            // Codex style: only update status bar. Don't push to scrollback yet.
+            // We track the tool internally for later completion display.
+            app.status_text = format!("● {}", tool_call_summary(tool_name, None));
+            // Store a placeholder in messages so child-agent detection works.
             app.push_message(
-                crate::tui::store::transcript::MessageRole::Tool,
+                MessageRole::Tool,
                 human_action(tool_name).to_string(),
                 String::new(),
                 true,
                 Some(call_id.to_string()),
             );
+            // Remove the auto-pushed scrollback entry (we don't want streaming tools in
+            // scrollback).
+            app.scrollback_queue.retain(|e| {
+                !matches!(e, ScrollbackEntry::Message(m) if m.key.as_deref() == Some(call_id.as_str()))
+            });
             tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_open");
         },
         EventPayload::ToolCallRequested {
             call_id: _,
             tool_name,
-            arguments: _,
+            arguments,
         } => {
-            app.status_text = format!("Running {}", human_action(tool_name));
+            // Update status with argument summary.
+            app.status_text = format!("● {}", tool_call_summary(tool_name, Some(arguments)));
         },
         EventPayload::ToolOutputDelta { call_id, delta, .. } => {
-            // Check if this is an agent tool (child agent output).
+            // Child agent: update status with progress. Don't write to scrollback.
             let is_agent = app
                 .messages
                 .iter()
@@ -193,10 +201,17 @@ fn apply_event(app: &mut App, event: &Event) {
                 .find(|m| m.key.as_deref() == Some(call_id.as_str()))
                 .is_some_and(|m| m.label == "Task" || m.label.starts_with("Task("));
             if is_agent {
-                let tracker = app.child_agents.entry(call_id.to_string()).or_default();
-                tracker.handle_delta(delta, &mut app.scrollback_queue);
+                // Parse child progress for status display only.
+                for line in delta.lines() {
+                    let clean = line.strip_prefix("child ").unwrap_or(line).trim();
+                    if let Some(tool) = clean.strip_prefix("tool started: ") {
+                        app.status_text = format!("● Task → {tool}");
+                    } else if clean.starts_with("tool completed: ") {
+                        // Keep current status.
+                    }
+                }
             } else {
-                app.status_text = "Receiving output".into();
+                app.status_text = "● Receiving output".to_string();
             }
         },
         EventPayload::ToolCallCompleted {
@@ -204,90 +219,66 @@ fn apply_event(app: &mut App, event: &Event) {
             tool_name,
             result,
         } => {
-            let render_spec: Option<astrcode_core::render::RenderSpec> = result
-                .metadata
-                .get(UI_RENDER_METADATA_KEY)
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            // Codex style: show one compact line in scrollback for the completed tool.
+            // Format: "● Ran <command>" or "✗ <error>" or "● Task completed"
 
-            let display_body = if result.is_error {
+            // Remove the streaming placeholder from messages.
+            if let Some(idx) = app
+                .messages
+                .iter()
+                .rposition(|m| m.key.as_deref() == Some(call_id.as_str()))
+            {
+                app.messages.remove(idx);
+            }
+
+            if tool_name == "agent" {
+                // Sub-agent: just show a one-line summary.
+                app.child_agents.remove(call_id.as_str());
+                let summary = if result.is_error {
+                    format!("✗ Task failed: {}", truncate_line(&result.content, 80))
+                } else if result.content.trim().is_empty() {
+                    "● Task completed".into()
+                } else {
+                    format!("● Task completed — {}", truncate_line(&result.content, 60))
+                };
+                app.push_message(
+                    if result.is_error {
+                        MessageRole::Error
+                    } else {
+                        MessageRole::Tool
+                    },
+                    "Task".into(),
+                    summary,
+                    false,
+                    None,
+                );
+            } else if result.is_error {
+                // Error: always show.
                 let err = result
                     .error
                     .clone()
                     .filter(|e| !e.trim().is_empty())
                     .unwrap_or_else(|| result.content.clone());
-                format!("⎿ error: {err}")
-            } else if result.content.trim().is_empty() {
-                "⎿ done".into()
+                app.push_message(
+                    MessageRole::Error,
+                    human_action(tool_name).to_string(),
+                    format!("✗ {}", truncate_line(&err, 100)),
+                    false,
+                    None,
+                );
             } else {
-                format!("⎿ {} line(s)", result.content.lines().count())
-            };
-
-            let should_print = !matches!(tool_name.as_str(), "tool_search")
-                || result.is_error
-                || render_spec.is_some();
-
-            if should_print {
-                // Try to update the existing message from ToolCallStarted.
-                let existing_idx = app
-                    .messages
-                    .iter()
-                    .rposition(|m| m.key.as_deref() == Some(call_id.as_str()));
-
-                if let Some(idx) = existing_idx {
-                    let msg = &mut app.messages[idx];
-                    msg.is_streaming = false;
-                    if result.is_error {
-                        msg.role = MessageRole::Error;
-                    }
-                    if let Some(spec) = render_spec.clone() {
-                        msg.body.set_render(spec, result.content.clone());
-                    } else {
-                        msg.body.set_text(display_body.clone());
-                    }
-                    let completed = app.messages[idx].clone();
-                    app.scrollback_queue
-                        .push(ScrollbackEntry::Message(completed));
-                } else if let Some(spec) = render_spec {
-                    // No existing message — push new with RenderSpec.
-                    let mut body =
-                        crate::tui::store::transcript::MessageBody::text(result.content.clone());
-                    body.set_render(spec, result.content.clone());
-                    let msg = crate::tui::store::transcript::Message {
-                        role: if result.is_error {
-                            MessageRole::Error
-                        } else {
-                            MessageRole::Tool
-                        },
-                        label: human_action(tool_name).to_string(),
-                        body,
-                        is_streaming: false,
-                        key: Some(call_id.to_string()),
-                    };
-                    app.scrollback_queue
-                        .push(ScrollbackEntry::Message(msg.clone()));
-                    app.messages.push(msg);
-                } else if result.is_error || !display_body.is_empty() {
-                    app.push_message(
-                        if result.is_error {
-                            MessageRole::Error
-                        } else {
-                            MessageRole::Tool
-                        },
-                        human_action(tool_name).to_string(),
-                        display_body,
-                        false,
-                        Some(call_id.to_string()),
-                    );
-                }
+                // Normal tool: show compact one-line summary (codex style).
+                let summary = tool_completion_summary(tool_name, result);
+                app.push_message(
+                    MessageRole::Tool,
+                    human_action(tool_name).to_string(),
+                    summary,
+                    false,
+                    None,
+                );
             }
 
-            if tool_name == "agent" {
-                if let Some(mut tracker) = app.child_agents.remove(call_id.as_str()) {
-                    tracker.flush_on_completion(&mut app.scrollback_queue);
-                }
-            }
-
-            app.status_text = format!("{} completed", human_action(tool_name));
+            app.status_text = "Ready".into();
             tracing::debug!(call_id = %call_id, tool = %tool_name, is_error = result.is_error, "tool_close");
         },
         EventPayload::CompactionStarted => {
@@ -465,6 +456,93 @@ fn human_action(tool_name: &str) -> &str {
     }
 }
 
+/// Codex-style one-line tool call summary for the status bar.
+fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
+    let action = human_action(tool_name);
+    match tool_name {
+        "shell" => {
+            let cmd = arguments
+                .and_then(|a| a["command"].as_str())
+                .unwrap_or("...");
+            format!("Running  $ {}", truncate_line(cmd, 60))
+        },
+        "read" => {
+            let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
+            format!("Reading {path}")
+        },
+        "write" | "edit" => {
+            let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
+            format!("{action} {path}")
+        },
+        "find" => {
+            let pattern = arguments
+                .and_then(|a| a["pattern"].as_str())
+                .unwrap_or("...");
+            format!("Finding {pattern}")
+        },
+        "grep" => {
+            let query = arguments
+                .and_then(|a| a["pattern"].as_str().or(a["query"].as_str()))
+                .unwrap_or("...");
+            format!("Searching {query}")
+        },
+        "agent" => {
+            let desc = arguments
+                .and_then(|a| a["description"].as_str())
+                .unwrap_or("subtask");
+            format!("Task: {desc}")
+        },
+        _ => format!("{action}..."),
+    }
+}
+
+/// Codex-style one-line tool completion summary for scrollback.
+fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult) -> String {
+    let content = result.content.trim();
+    match tool_name {
+        "shell" => {
+            if content.is_empty() {
+                "● Ran (no output)".into()
+            } else {
+                let line_count = content.lines().count();
+                if line_count <= 1 {
+                    format!("● {}", truncate_line(content, 80))
+                } else {
+                    format!("● ({line_count} lines of output)")
+                }
+            }
+        },
+        "read" => format!("● Read {} line(s)", content.lines().count().max(1)),
+        "write" | "edit" | "patch" => "● Done".into(),
+        "find" => {
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("● Found {count} file(s)")
+        },
+        "grep" => {
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("● {count} match(es)")
+        },
+        _ => {
+            if content.is_empty() {
+                "● Done".into()
+            } else {
+                format!("● {}", truncate_line(content, 60))
+            }
+        },
+    }
+}
+
+fn truncate_line(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.chars().count() <= max_chars {
+        first_line.to_string()
+    } else {
+        let mut s: String = first_line.chars().take(max_chars).collect();
+        s.push('…');
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -514,98 +592,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn search_tool_results_enter_transcript_as_summary() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallStarted {
-                call_id: "call-1".into(),
-                tool_name: "grep".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallCompleted {
-                call_id: "call-1".into(),
-                tool_name: "grep".into(),
-                result: tool_result("large search output", false),
-            },
-        );
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].role, MessageRole::Tool);
-        assert_eq!(app.messages[0].label, "Search");
-        // New system: display_body is "⎿ N line(s)" for non-error tools
-        assert!(app.messages[0].body.plain_text().contains("⎿"));
-    }
-
-    #[test]
-    fn shell_tool_results_still_enter_transcript() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallStarted {
-                call_id: "call-1".into(),
-                tool_name: "shell".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallCompleted {
-                call_id: "call-1".into(),
-                tool_name: "shell".into(),
-                result: tool_result("command output", false),
-            },
-        );
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].role, MessageRole::Tool);
-        // New system: display_body is "⎿ N line(s)"
-        assert!(app.messages[0].body.plain_text().contains("⎿"));
-    }
-
-    #[test]
-    fn hidden_tool_errors_still_enter_transcript() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallCompleted {
-                call_id: "call-1".into(),
-                tool_name: "find".into(),
-                result: tool_result("find failed", true),
-            },
-        );
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].role, MessageRole::Error);
-        assert_eq!(app.messages[0].label, "Find");
-        assert!(app.messages[0].body.plain_text().contains("find failed"));
-    }
-
-    #[test]
-    fn hidden_tool_with_ui_render_enters_transcript() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallCompleted {
-                call_id: "call-1".into(),
-                tool_name: "grep".into(),
-                result: tool_result_with_render(
-                    "search complete",
-                    RenderSpec::KeyValue {
-                        entries: vec![RenderKeyValue {
-                            key: "matches".into(),
-                            value: "3".into(),
-                            tone: RenderTone::Success,
-                        }],
-                        tone: RenderTone::Default,
-                    },
-                ),
-            },
-        );
-        assert_eq!(app.messages.len(), 1);
-        assert_eq!(app.messages[0].role, MessageRole::Tool);
-        assert!(app.messages[0].body.render_spec().is_some());
-        assert_eq!(app.messages[0].body.plain_text(), "search complete");
-    }
 
     #[test]
     fn assistant_deltas_enter_scrollback_incrementally() {
@@ -745,148 +731,130 @@ mod tests {
         app.history_next();
         assert!(app.input_text().is_empty());
     }
+}
 
-    #[test]
-    fn child_agent_accumulates_text_and_shows_compact_tools() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallStarted {
-                call_id: "call-agent-1".into(),
-                tool_name: "agent".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallRequested {
-                call_id: "call-agent-1".into(),
-                tool_name: "agent".into(),
-                arguments: serde_json::json!({
-                    "description": "探索设计",
-                    "subagent_type": "explore",
-                    "prompt": "探索项目"
-                }),
-            },
-        );
-        app.scrollback_queue.clear();
+#[cfg(test)]
+mod codex_style_tests {
+    use std::collections::BTreeMap;
 
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child assistant started\n".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "我来系统地探索项目中的设计。\n".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child tool started: find\n".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child tool completed: find: 3 files\n".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child tool started: read\n".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-1".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child assistant completed: 找到了相关文件\n".into(),
-            },
-        );
+    use astrcode_core::{
+        event::{Event, EventPayload},
+        tool::ToolResult,
+    };
 
-        let stream_texts: Vec<&str> = app
-            .scrollback_queue
-            .iter()
-            .filter_map(|e| match e {
-                ScrollbackEntry::StreamText { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
+    use super::*;
+    use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
-        assert_eq!(stream_texts.len(), 3);
-        assert_eq!(stream_texts[0], "我来系统地探索项目中的设计。");
-        assert_eq!(stream_texts[1], "  · find");
-        assert_eq!(stream_texts[2], "  · read");
-        assert!(!stream_texts.iter().any(|t| t.contains("assistant")));
-        assert!(!stream_texts.iter().any(|t| t.contains("tool completed")));
+    fn make_app() -> App {
+        App::new()
+    }
+    fn apply_payload(app: &mut App, payload: EventPayload) {
+        let event = Event::new("session".into(), Some("turn".into()), payload);
+        apply_event(app, &event);
+    }
+    fn tool_result(content: &str, is_error: bool) -> ToolResult {
+        ToolResult {
+            call_id: "call-1".into(),
+            content: content.into(),
+            is_error,
+            error: None,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
     }
 
     #[test]
-    fn child_agent_tool_summary_on_completion() {
+    fn tool_completion_shows_compact_summary() {
         let mut app = make_app();
         apply_payload(
             &mut app,
             EventPayload::ToolCallStarted {
-                call_id: "call-agent-2".into(),
-                tool_name: "agent".into(),
-            },
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::ToolCallRequested {
-                call_id: "call-agent-2".into(),
-                tool_name: "agent".into(),
-                arguments: serde_json::json!({"description": "test"}),
-            },
-        );
-        app.scrollback_queue.clear();
-
-        apply_payload(
-            &mut app,
-            EventPayload::ToolOutputDelta {
-                call_id: "call-agent-2".into(),
-                stream: astrcode_core::event::ToolOutputStream::Stdout,
-                delta: "child tool started: find\nchild tool completed: find: ok\nchild tool \
-                        started: find\nchild tool completed: find: ok\nchild tool started: \
-                        grep\nchild tool completed: grep: 5 matches\n"
-                    .into(),
+                call_id: "call-1".into(),
+                tool_name: "grep".into(),
             },
         );
         apply_payload(
             &mut app,
             EventPayload::ToolCallCompleted {
-                call_id: "call-agent-2".into(),
-                tool_name: "agent".into(),
-                result: tool_result("探索完成", false),
+                call_id: "call-1".into(),
+                tool_name: "grep".into(),
+                result: tool_result("match1\nmatch2\nmatch3", false),
             },
         );
+        assert_eq!(app.messages.len(), 1);
+        assert!(app.messages[0].body.plain_text().contains("● 3 match"));
+    }
 
-        let summary = app.scrollback_queue.iter().find(
-            |e| matches!(e, ScrollbackEntry::StreamText { text, .. } if text.contains("tool(s):")),
+    #[test]
+    fn tool_error_shows_in_transcript() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallStarted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+            },
         );
-        assert!(summary.is_some(), "should have tool summary");
-        let text = match summary.unwrap() {
-            ScrollbackEntry::StreamText { text, .. } => text.as_str(),
-            _ => unreachable!(),
-        };
-        assert!(text.contains("3 tool(s)"));
-        assert!(text.contains("find(2)"));
-        assert!(text.contains("grep"));
-        assert!(!app.child_agents.contains_key("call-agent-2"));
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+                result: tool_result("permission denied", true),
+            },
+        );
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::Error);
+        assert!(app.messages[0].body.plain_text().contains("✗"));
+    }
+
+    #[test]
+    fn agent_tool_shows_compact_task_summary() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallStarted {
+                call_id: "call-agent".into(),
+                tool_name: "agent".into(),
+            },
+        );
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-agent".into(),
+                tool_name: "agent".into(),
+                result: tool_result("Found 3 relevant files", false),
+            },
+        );
+        assert_eq!(app.messages.len(), 1);
+        assert!(
+            app.messages[0]
+                .body
+                .plain_text()
+                .contains("● Task completed")
+        );
+    }
+
+    #[test]
+    fn tool_output_delta_only_updates_status() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallStarted {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+            },
+        );
+        app.scrollback_queue.clear();
+        apply_payload(
+            &mut app,
+            EventPayload::ToolOutputDelta {
+                call_id: "call-1".into(),
+                stream: astrcode_core::event::ToolOutputStream::Stdout,
+                delta: "lots of output\n".into(),
+            },
+        );
+        assert!(app.scrollback_queue.is_empty());
+        assert!(app.status_text.contains("Receiving"));
     }
 }
