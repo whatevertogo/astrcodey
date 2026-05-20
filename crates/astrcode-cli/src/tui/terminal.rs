@@ -12,7 +12,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, layout::Position, text::Line};
+use ratatui::{
+    backend::{Backend, CrosstermBackend},
+    layout::Position,
+    text::Line,
+};
 
 use crate::tui::{
     custom_terminal::Terminal as CustomTerminal, insert_history::insert_history_lines,

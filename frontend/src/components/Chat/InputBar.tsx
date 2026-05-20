@@ -270,14 +270,16 @@ export default function InputBar() {
                         bumpModelRefreshKey()
                       }}
                     />
-                    {Object.entries(statusItems).filter(([, v]) => v).map(([id, text]) => (
-                      <span
-                        key={id}
-                        className="text-[11px] text-text-secondary"
-                      >
-                        {text}
-                      </span>
-                    ))}
+                    {Object.entries(statusItems)
+                      .filter(([, v]) => v)
+                      .map(([id, text]) => (
+                        <span
+                          key={id}
+                          className="text-[11px] text-text-secondary"
+                        >
+                          {text}
+                        </span>
+                      ))}
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-2">
                     {isBusy ? (
