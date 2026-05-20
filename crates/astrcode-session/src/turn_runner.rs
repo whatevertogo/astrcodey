@@ -201,7 +201,7 @@ impl TurnRunner {
 
         loop {
             // === Step Boundary: drain mid-turn user messages ===
-            self.drain_mid_turn_messages(&mut state, &event_tx);
+            self.drain_mid_turn_messages(&mut state);
 
             // StepStart hook
             extension_runner
@@ -307,17 +307,12 @@ impl TurnRunner {
     fn drain_mid_turn_messages(
         &mut self,
         state: &mut TurnState,
-        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
     ) {
         loop {
             match self.event_rx.try_recv() {
                 Ok(event) => {
-                    if let EventPayload::UserMessage { message_id, text } = event.payload {
+                    if let EventPayload::UserMessage { text, .. } = event.payload {
                         state.messages.push(LlmMessage::user(&text));
-                        send_event(
-                            event_tx.as_ref(),
-                            EventPayload::UserMessage { message_id, text },
-                        );
                     }
                     // 非 UserMessage 事件忽略
                 },

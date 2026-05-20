@@ -131,14 +131,24 @@ fn apply_event(app: &mut App, event: &Event) {
             app.push_message(
                 MessageRole::Assistant,
                 "Astrcode".into(),
-                String::new(),
+                "Thinking...".into(),
                 true,
                 Some(message_id.to_string()),
             );
-            app.status_text = "Working".into();
+            app.status_text = "Thinking".into();
             tracing::debug!(message_id = %message_id, "stream_open");
         },
         EventPayload::AssistantTextDelta { message_id, delta } => {
+            // 第一次收到 text delta 时清除 "Thinking..." 占位
+            let is_first_delta = app
+                .find_message_mut(message_id.as_str())
+                .is_some_and(|msg| msg.body.plain_text() == "Thinking...");
+            if is_first_delta {
+                if let Some(msg) = app.find_message_mut(message_id.as_str()) {
+                    msg.body.set_text(String::new());
+                }
+                app.status_text = "Working".into();
+            }
             if let Some(msg) = app.find_message_mut(message_id.as_str()) {
                 msg.body.append_text(delta);
             }
