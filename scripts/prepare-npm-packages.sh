@@ -59,9 +59,9 @@ EOF
 done
 
 # Update main package version
+mkdir -p "${OUTPUT_DIR}/astrcode"
 jq --arg v "$VERSION" '.version = $v | .optionalDependencies |= with_entries(.value = $v)' \
   npm/astrcode/package.json > "${OUTPUT_DIR}/astrcode/package.json.tmp"
-mkdir -p "${OUTPUT_DIR}/astrcode"
 mv "${OUTPUT_DIR}/astrcode/package.json.tmp" "${OUTPUT_DIR}/astrcode/package.json"
 cp npm/astrcode/install.js "${OUTPUT_DIR}/astrcode/"
 mkdir -p "${OUTPUT_DIR}/astrcode/bin"
