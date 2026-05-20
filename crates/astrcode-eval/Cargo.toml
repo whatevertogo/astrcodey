@@ -8,11 +8,11 @@ astrcode-core = { path = "../astrcode-core" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
-reqwest = { version = "0.12", features = ["json"] }
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-thiserror = "2"
-async-trait = "0.1"
-tempfile = "3"
-walkdir = "2"
+toml = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }

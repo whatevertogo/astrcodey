@@ -8,5 +8,5 @@ description = "Logging for astrcode: file rotation, stderr output, env-filter su
 astrcode-support = { path = "../astrcode-support" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tracing-appender = "0.2"
+tracing-appender = { workspace = true }
 chrono = { workspace = true }
