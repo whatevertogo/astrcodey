@@ -410,7 +410,10 @@ fn apply_event(app: &mut App, event: &Event) {
             // 将自定义事件作为带 custom_type 的消息推入 scrollback。
             // 如果 MessageRendererRegistry 中有匹配的渲染器，渲染时会分发给它；
             // 否则降级为纯文本（名称 + JSON 预览）。
-            let fallback = format!("[{name}] {}", astrcode_support::text::compact_inline(&data.to_string(), 80));
+            let fallback = format!(
+                "[{name}] {}",
+                astrcode_support::text::compact_inline(&data.to_string(), 80)
+            );
             let body = MessageBody::with_custom(name.clone(), data.clone(), fallback);
             let msg = Message {
                 role: MessageRole::System,

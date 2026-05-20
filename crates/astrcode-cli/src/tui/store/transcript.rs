@@ -72,11 +72,7 @@ impl MessageBody {
     /// `custom_type` 对应已注册的 `MessageRenderer::custom_type()`。
     /// `payload` 是传给渲染器的 JSON 数据。
     /// `fallback` 是渲染器不可用时的纯文本降级内容。
-    pub fn with_custom(
-        custom_type: String,
-        payload: serde_json::Value,
-        fallback: String,
-    ) -> Self {
+    pub fn with_custom(custom_type: String, payload: serde_json::Value, fallback: String) -> Self {
         Self {
             plain: fallback,
             render: None,
