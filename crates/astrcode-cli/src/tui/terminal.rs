@@ -1,11 +1,13 @@
-//! Simple TUI terminal: uses alternate screen + full redraw each frame.
+//! Terminal session using DECSTBM scroll margin to pin the bottom panel.
 //!
-//! This is the simplest correct approach:
-//! - Enter alternate screen on start (preserves user's shell scrollback)
-//! - Each frame: clear screen, render all visible content (history tail + panel)
-//! - History is stored in memory; we show the last N lines that fit
-//! - Resize: just redraw (no DECSTBM, no scroll regions, no reflow needed)
-//! - On exit: leave alternate screen (user's original scrollback restored)
+//! Design:
+//! - NO alternate screen (user keeps native scrollback + scroll wheel)
+//! - Set scroll region to [0, rows - PANEL_HEIGHT) so history scrolls natively
+//! - Bottom panel is OUTSIDE the scroll region — never pushed into scrollback
+//! - History lines written inside scroll region → terminal scrolls them naturally
+//! - On resize: reset scroll region to new size, redraw panel
+//!
+//! This is how codex-cli and claude-code work: user can scroll up with mouse/keyboard.
 
 use std::io::{self, Stdout, Write};
 
@@ -14,10 +16,7 @@ use crossterm::{
     event::{DisableBracketedPaste, EnableBracketedPaste},
     execute, queue,
     style::{Print, SetAttribute, SetForegroundColor},
-    terminal::{
-        self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
-    },
+    terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     style::{Color, Modifier},
@@ -28,35 +27,46 @@ use crate::tui::{
     render::scrollback_entry_to_lines, store::transcript::ScrollbackEntry, theme::Theme,
 };
 
-/// Fixed height of the bottom panel (composer + status + footer + separator).
+/// Fixed height of the bottom panel.
 const PANEL_HEIGHT: u16 = 4;
 
 pub struct TerminalSession {
     stdout: Stdout,
-    /// All rendered history lines (kept in memory for redraw on resize).
-    history: Vec<Line<'static>>,
-    /// Scroll offset from the bottom (0 = show latest).
-    scroll_offset: usize,
+    size: (u16, u16),
 }
 
 impl TerminalSession {
     pub fn enter() -> io::Result<Self> {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
-        execute!(stdout, EnableBracketedPaste, EnterAlternateScreen, Hide)?;
-        Ok(Self {
-            stdout,
-            history: Vec::new(),
-            scroll_offset: 0,
-        })
+        execute!(stdout, EnableBracketedPaste)?;
+        let size = terminal::size()?;
+
+        // Set up: move to bottom, reserve panel space, set scroll region.
+        // First, scroll screen up to make room for the panel at bottom.
+        // Then set scroll region to exclude the panel rows.
+        Self::setup_scroll_region(&mut stdout, size)?;
+
+        Ok(Self { stdout, size })
+    }
+
+    fn setup_scroll_region(stdout: &mut Stdout, size: (u16, u16)) -> io::Result<()> {
+        let scroll_bottom = size.1.saturating_sub(PANEL_HEIGHT);
+        // DECSTBM: set scroll region to rows 1..scroll_bottom (1-indexed for VT100).
+        // This means rows [0, scroll_bottom) can scroll; rows [scroll_bottom, size.1) are fixed.
+        write!(stdout, "\x1b[1;{}r", scroll_bottom)?;
+        // Move cursor to the last row of the scroll region (where new history will be written).
+        execute!(stdout, MoveTo(0, scroll_bottom.saturating_sub(1)))?;
+        stdout.flush()?;
+        Ok(())
     }
 
     pub fn composer_width(&self) -> usize {
-        let (cols, _) = terminal::size().unwrap_or((80, 24));
-        cols.saturating_sub(4).max(1) as usize
+        self.size.0.saturating_sub(4).max(1) as usize
     }
 
-    /// Add scrollback entries to history buffer.
+    /// Write scrollback entries into the scroll region. The terminal will
+    /// naturally scroll old lines into native scrollback (accessible via scroll wheel).
     pub fn flush_scrollback(
         &mut self,
         entries: Vec<ScrollbackEntry>,
@@ -65,69 +75,51 @@ impl TerminalSession {
         if entries.is_empty() {
             return Ok(());
         }
-        let (cols, _) = terminal::size().unwrap_or((80, 24));
+        self.size = terminal::size()?;
+        let width = self.size.0;
+        let scroll_bottom = self.size.1.saturating_sub(PANEL_HEIGHT);
+
+        // Position cursor at the bottom of the scroll region.
+        queue!(self.stdout, MoveTo(0, scroll_bottom.saturating_sub(1)))?;
+
         for entry in entries {
-            let lines = scrollback_entry_to_lines(&entry, cols, theme);
-            self.history.extend(lines);
+            let lines = scrollback_entry_to_lines(&entry, width, theme);
+            for line in lines {
+                // Print newline first to scroll existing content up, then write the line.
+                queue!(self.stdout, Print("\n"))?;
+                queue!(self.stdout, MoveTo(0, scroll_bottom.saturating_sub(1)))?;
+                self.write_line(&line)?;
+            }
         }
-        // Auto-scroll to bottom when new content arrives.
-        self.scroll_offset = 0;
+        self.stdout.flush()?;
         Ok(())
     }
 
-    /// Full redraw: history area (top) + panel (bottom).
-    pub fn draw_frame(
+    /// Redraw the bottom panel (fixed area below scroll region).
+    pub fn draw_panel(
         &mut self,
         panel_lines: Vec<Line<'static>>,
         cursor_col: u16,
         cursor_row_offset: u16,
     ) -> io::Result<()> {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let history_rows = rows.saturating_sub(PANEL_HEIGHT) as usize;
-        let panel_top = rows.saturating_sub(PANEL_HEIGHT);
+        self.size = terminal::size()?;
+        let panel_top = self.size.1.saturating_sub(PANEL_HEIGHT);
 
-        // Start drawing — hide cursor to avoid flicker.
+        // Also re-establish scroll region in case terminal was resized.
+        write!(self.stdout, "\x1b[1;{}r", panel_top)?;
+
         queue!(self.stdout, Hide)?;
-        queue!(self.stdout, MoveTo(0, 0))?;
-        queue!(self.stdout, Clear(ClearType::All))?;
 
-        // Draw history (last N lines that fit).
-        let total_history = self.history.len();
-        let start = total_history.saturating_sub(history_rows + self.scroll_offset);
-        let end = total_history.saturating_sub(self.scroll_offset);
-        let visible_lines: Vec<_> = self.history[start..end].to_vec();
-
-        for (i, line) in visible_lines.iter().enumerate() {
-            if i >= history_rows {
-                break;
+        // Clear and draw each panel line.
+        for i in 0..PANEL_HEIGHT {
+            queue!(self.stdout, MoveTo(0, panel_top + i))?;
+            queue!(self.stdout, Clear(ClearType::CurrentLine))?;
+            if let Some(line) = panel_lines.get(i as usize) {
+                self.write_line(line)?;
             }
-            queue!(self.stdout, MoveTo(0, i as u16))?;
-            self.write_line(line)?;
         }
 
-        // Draw separator line.
-        queue!(self.stdout, MoveTo(0, panel_top.saturating_sub(1)))?;
-        queue!(
-            self.stdout,
-            SetForegroundColor(crossterm::style::Color::DarkGrey)
-        )?;
-        let sep: String = "─".repeat(cols as usize);
-        queue!(self.stdout, Print(&sep))?;
-        queue!(
-            self.stdout,
-            SetAttribute(crossterm::style::Attribute::Reset)
-        )?;
-
-        // Draw panel lines.
-        for (i, line) in panel_lines.iter().enumerate() {
-            if i as u16 >= PANEL_HEIGHT {
-                break;
-            }
-            queue!(self.stdout, MoveTo(0, panel_top + i as u16))?;
-            self.write_line(line)?;
-        }
-
-        // Show cursor at composer position.
+        // Position cursor in composer.
         let cursor_y = panel_top + cursor_row_offset;
         queue!(self.stdout, Show)?;
         execute!(self.stdout, MoveTo(cursor_col, cursor_y))?;
@@ -163,7 +155,14 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = execute!(self.stdout, Show, LeaveAlternateScreen);
+        // Reset scroll region to full screen.
+        let _ = write!(self.stdout, "\x1b[r");
+        let _ = execute!(self.stdout, Show);
+        // Move cursor below the panel area so shell prompt appears cleanly.
+        if let Ok(size) = terminal::size() {
+            let _ = execute!(self.stdout, MoveTo(0, size.1.saturating_sub(1)));
+        }
+        let _ = execute!(self.stdout, Print("\n"));
         let _ = execute!(self.stdout, DisableBracketedPaste);
         let _ = disable_raw_mode();
     }

@@ -552,17 +552,99 @@ pub fn scrollback_entry_to_lines(
 pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let content_width = width.max(1) as usize;
     let mut lines = Vec::new();
-    let (role_icon, role_style) = role_icon_and_style(&msg.role, theme);
-    lines.push(Line::from(vec![Span::styled(
-        format!("{} {}", role_icon, msg.label),
-        role_style,
-    )]));
-    push_message_body_lines(msg, content_width, theme, &mut lines);
+
+    match &msg.role {
+        MessageRole::User => {
+            // User messages: just show the text with a subtle prefix
+            lines.push(Line::from(vec![Span::styled(
+                format!("❯ {}", msg.label),
+                theme.user_label,
+            )]));
+            let text = msg.body.plain_text();
+            if !text.trim().is_empty() {
+                for line in visual_lines(text, content_width.saturating_sub(2)) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", theme.dim),
+                        Span::styled(line, theme.body),
+                    ]));
+                }
+            }
+        },
+        MessageRole::Assistant => {
+            // Assistant: codex-style with ⎿ tree prefix
+            if let Some(spec) = msg.body.render_spec() {
+                render_spec_inner(spec, &mut lines, content_width, theme, "  ");
+            } else {
+                let text = msg.body.plain_text();
+                if !text.trim().is_empty() {
+                    if !msg.is_streaming {
+                        let styles = MarkdownStyles::assistant(theme, body_style(&msg.role, theme));
+                        render_markdown_to_lines(text, &mut lines, content_width, "  ", styles);
+                    } else {
+                        for line in visual_lines(text, content_width.saturating_sub(2)) {
+                            lines.push(Line::from(vec![
+                                Span::styled("  ", theme.dim),
+                                Span::raw(line),
+                            ]));
+                        }
+                    }
+                }
+            }
+        },
+        MessageRole::Tool => {
+            // Tool: codex-style "⎿ Label: result"
+            lines.push(Line::from(vec![
+                Span::styled("  ⎿ ", theme.dim),
+                Span::styled(msg.label.clone(), theme.tool_label),
+            ]));
+            if let Some(spec) = msg.body.render_spec() {
+                render_spec_inner(spec, &mut lines, content_width, theme, "    ");
+            } else {
+                let text = msg.body.plain_text();
+                if !text.trim().is_empty() {
+                    for line in visual_lines(text, content_width.saturating_sub(4)) {
+                        lines.push(Line::from(vec![
+                            Span::styled("    ", theme.dim),
+                            Span::styled(line, theme.body),
+                        ]));
+                    }
+                }
+            }
+        },
+        MessageRole::System => {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {} {}", "─", msg.label),
+                theme.system_label,
+            )]));
+            let text = msg.body.plain_text();
+            if !text.trim().is_empty() {
+                for line in visual_lines(text, content_width.saturating_sub(4)) {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ", theme.dim),
+                        Span::styled(line, theme.dim),
+                    ]));
+                }
+            }
+        },
+        MessageRole::Error => {
+            lines.push(Line::from(vec![
+                Span::styled("  ✗ ", theme.error_label),
+                Span::styled(msg.label.clone(), theme.error_label),
+            ]));
+            let text = msg.body.plain_text();
+            if !text.trim().is_empty() {
+                for line in visual_lines(text, content_width.saturating_sub(4)) {
+                    lines.push(Line::from(vec![
+                        Span::styled("    ", theme.dim),
+                        Span::styled(line, theme.error_label),
+                    ]));
+                }
+            }
+        },
+    }
+
     if msg.is_streaming {
-        lines.push(Line::from(vec![
-            Span::styled("  ... ", theme.dim),
-            Span::styled("running...", theme.dim),
-        ]));
+        lines.push(Line::from(vec![Span::styled("  ⋯", theme.dim)]));
     }
     lines.push(Line::from(""));
     lines
@@ -595,12 +677,10 @@ fn push_message_body_lines(
     }
 }
 
-fn stream_header_to_lines(role: &MessageRole, label: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let (role_icon, role_style) = role_icon_and_style(role, theme);
-    vec![Line::from(vec![Span::styled(
-        format!("{} {}", role_icon, label),
-        role_style,
-    )])]
+fn stream_header_to_lines(_role: &MessageRole, _label: &str, _theme: &Theme) -> Vec<Line<'static>> {
+    // No separate header for streaming — just start writing lines.
+    // Codex style: assistant streaming content appears with indentation only.
+    vec![Line::from("")]
 }
 
 fn stream_text_to_lines(

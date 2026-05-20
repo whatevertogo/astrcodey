@@ -67,7 +67,7 @@ pub async fn run() -> io::Result<()> {
 
     // Initial draw
     let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
-    terminal.draw_frame(panel_lines, cursor_col, cursor_row_offset)?;
+    terminal.draw_panel(panel_lines, cursor_col, cursor_row_offset)?;
 
     // Query extension commands
     client
@@ -127,9 +127,9 @@ pub async fn run() -> io::Result<()> {
             // Flush scrollback entries into terminal history buffer.
             let entries = std::mem::take(&mut app.scrollback_queue);
             terminal.flush_scrollback(entries, &theme)?;
-            // Redraw the entire screen (history tail + bottom panel).
+            // Redraw the bottom panel.
             let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
-            terminal.draw_frame(panel_lines, cursor_col, cursor_row_offset)?;
+            terminal.draw_panel(panel_lines, cursor_col, cursor_row_offset)?;
         }
     }
 
@@ -419,19 +419,54 @@ async fn execute_slash_command(
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 /// Build the bottom panel lines + cursor position for the frame.
+/// Codex/Claude Code style: bordered input + status + footer.
 fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, u16, u16) {
     use ratatui::text::{Line, Span};
     use render::layout_visual_text;
 
-    let width = 80usize; // will be clamped by terminal anyway
+    let width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let composer_width = width.saturating_sub(4);
 
-    let vl = layout_visual_text(app.composer.text(), width, Some(app.composer.cursor()));
+    let vl = layout_visual_text(
+        app.composer.text(),
+        composer_width,
+        Some(app.composer.cursor()),
+    );
+    // Cursor position: account for the "│ " prefix (2 chars).
     let cursor_col = 2 + vl.cursor_column.unwrap_or(0) as u16;
-    let cursor_row_offset = vl.cursor_row.unwrap_or(0) as u16;
+    let cursor_row_offset = 1u16; // Row 1 of panel (after the top border)
 
     let mut panel_lines: Vec<Line<'static>> = Vec::new();
 
-    // Composer line(s).
+    // Slash palette (show above the composer if active).
+    if app.show_slash_palette {
+        let commands = command::slash::filtered(&app.slash_filter, &app.extension_commands);
+        let selected = app.slash_selected.min(commands.len().saturating_sub(1));
+        for (i, cmd) in commands.iter().take(6).enumerate() {
+            let marker = if i == selected { "▸ " } else { "  " };
+            let style = if i == selected {
+                theme.assistant_label
+            } else {
+                theme.dim
+            };
+            panel_lines.push(Line::from(Span::styled(
+                format!("{marker}{:<14} {}", cmd.usage, cmd.description),
+                style,
+            )));
+        }
+        // Replace cursor_row_offset to point past the slash lines.
+        let (panel_lines_out, _, _) =
+            build_panel_inner(app, theme, panel_lines, commands.len() as u16);
+        return (
+            panel_lines_out,
+            cursor_col,
+            commands.len().min(6) as u16 + 1,
+        );
+    }
+
+    // Composer line.
     if app.composer.text().is_empty() {
         panel_lines.push(Line::from(vec![
             Span::styled("> ", theme.assistant_label),
@@ -441,21 +476,11 @@ fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, 
             ),
         ]));
     } else {
-        for (idx, line) in vl.lines.into_iter().enumerate() {
-            let prefix = if idx == 0 { "> " } else { "  " };
-            panel_lines.push(Line::from(vec![
-                Span::styled(prefix, theme.assistant_label),
-                Span::styled(line, theme.composer),
-            ]));
-            if panel_lines.len() >= 2 {
-                break;
-            }
-        }
-    }
-
-    // Pad to 2 lines for composer area.
-    while panel_lines.len() < 2 {
-        panel_lines.push(Line::from(""));
+        let first_line = vl.lines.first().cloned().unwrap_or_default();
+        panel_lines.push(Line::from(vec![
+            Span::styled("> ", theme.assistant_label),
+            Span::styled(first_line, theme.composer),
+        ]));
     }
 
     // Status line.
@@ -464,7 +489,7 @@ fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, 
         theme.dim,
     )));
 
-    // Footer.
+    // Footer: model · cwd · session · hints.
     let session = app
         .active_session_id
         .as_deref()
@@ -483,14 +508,64 @@ fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, 
     let hints = if app.is_streaming {
         "Esc stop"
     } else {
-        "Enter send · Shift+Enter newline · /help"
+        "Enter send · /help"
     };
     panel_lines.push(Line::from(Span::styled(
-        format!("  {model} · {cwd} · session {session}   {hints}"),
+        format!("  {model} · {cwd} · {session}   {hints}"),
         theme.footer,
     )));
 
-    (panel_lines, cursor_col, cursor_row_offset)
+    // Pad to PANEL_HEIGHT.
+    while panel_lines.len() < 4 {
+        panel_lines.push(Line::from(""));
+    }
+
+    (panel_lines, cursor_col, cursor_row_offset.saturating_sub(1))
+}
+
+fn build_panel_inner(
+    app: &App,
+    theme: &Theme,
+    mut lines: Vec<ratatui::text::Line<'static>>,
+    _slash_count: u16,
+) -> (Vec<ratatui::text::Line<'static>>, u16, u16) {
+    use ratatui::text::{Line, Span};
+
+    // Composer line after slash items.
+    if app.composer.text().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("> ", theme.assistant_label),
+            Span::styled("...", theme.composer_placeholder),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("> ", theme.assistant_label),
+            Span::styled(app.composer.text().to_string(), theme.composer),
+        ]));
+    }
+
+    // Footer.
+    let session = app
+        .active_session_id
+        .as_deref()
+        .map(|id| id.get(..8).unwrap_or(id))
+        .unwrap_or("none");
+    let model = if app.model_name.is_empty() {
+        "model: pending"
+    } else {
+        &app.model_name
+    };
+    let hints = if app.is_streaming {
+        "Esc stop"
+    } else {
+        "Tab/Enter select · Esc close"
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  {model} · {session}   {hints}"),
+        theme.footer,
+    )));
+
+    (lines, 0, 0)
 }
 
 fn compact_path(path: &str) -> String {
