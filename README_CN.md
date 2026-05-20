@@ -1,13 +1,13 @@
 # AstrCode
 
+BE PI OR BETTER THAN PI
+
 <img width="1401" height="995" alt="image" src="https://github.com/user-attachments/assets/26e9b719-8911-4fdf-a989-065ce9b9ea7e" />
 
 
 用 Rust 从零构建的 AI 编程助手平台。
 
 AstrCode 是一个全栈 AI 编程助手，用约 5.5 万行 Rust 代码、21 个 crate 构建，外加 React + TypeScript 前端（约 4800 行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic、OpenAI、Google GenAI）、插件/钩子扩展系统（支持通过 FFI 加载原生扩展和 WASM 扩展）、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
-
-> **为什么做？** 我想理解一个 AI 编程助手在每个层面的运作方式——从 SSE 流解析到上下文窗口压缩——所以自己造了一个。架构参考了多个编程助手的工程实践，但所有代码均为原创。
 
 ## 快速开始
 
