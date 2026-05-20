@@ -480,7 +480,13 @@ fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult)
                 "done".into()
             }
         },
-        "read" => format!("{} line(s)", content.lines().count().max(1)),
+        "read" => {
+            if content.is_empty() {
+                "done".into()
+            } else {
+                format!("{} line(s)", content.lines().count())
+            }
+        },
         "write" | "edit" | "patch" => "done".into(),
         "find" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();

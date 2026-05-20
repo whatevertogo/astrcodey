@@ -28,7 +28,17 @@ impl EvalRunner {
     pub async fn start(config: &EvalConfig) -> Result<Self, EvalError> {
         let (server_addr, auth_token) = match (&config.server_addr, &config.auth_token) {
             (Some(addr), Some(token)) => (addr.clone(), token.clone()),
-            _ => {
+            (Some(_), None) => {
+                return Err(EvalError::Setup(
+                    "--server-addr requires --auth-token".into(),
+                ));
+            },
+            (None, Some(_)) => {
+                return Err(EvalError::Setup(
+                    "--auth-token requires --server-addr".into(),
+                ));
+            },
+            (None, None) => {
                 // 尝试从 ~/.astrcode/run.json 读取
                 let run_info = read_run_info()?;
                 (
@@ -72,6 +82,7 @@ impl EvalRunner {
     pub async fn run_all(&self, cases: Vec<EvalCase>) -> EvalReport {
         let semaphore = Arc::new(Semaphore::new(self.config.concurrency));
         let mut handles = Vec::with_capacity(cases.len());
+        let mut case_ids = Vec::with_capacity(cases.len());
 
         for case in cases {
             let permit = Arc::clone(&semaphore);
@@ -79,6 +90,7 @@ impl EvalRunner {
             let auth_token = self.auth_token.clone();
             let cases_dir = self.config.cases_dir.clone();
             let keep_workdir = self.config.keep_workdir;
+            let case_id = case.id.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = permit
@@ -87,15 +99,16 @@ impl EvalRunner {
                     .expect("semaphore should not be closed");
                 run_single_case(&case, &server_addr, &auth_token, &cases_dir, keep_workdir).await
             }));
+            case_ids.push(case_id);
         }
 
         let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
+        for (handle, case_id) in handles.into_iter().zip(case_ids) {
             match handle.await {
                 Ok(result) => results.push(result),
                 Err(e) => {
                     results.push(EvalResult {
-                        case_id: "unknown".into(),
+                        case_id,
                         session_id: String::new(),
                         passed: false,
                         verdicts: vec![Verdict::Fail {

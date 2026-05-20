@@ -149,6 +149,18 @@ fn evaluate_file_exists(work_dir: &Path, file_path: &str, should_exist: bool) ->
 /// - "no_tool <name>"
 /// - "tool_count <name> <= N"
 fn evaluate_event_log(condition: &str, metrics: &Metrics) -> Verdict {
+    // 当前 eval 通过 HTTP 操控 server，不直接访问 EventStore，
+    // 因此 metrics 可能为空。如果 metrics 未填充（全为默认值），
+    // 则跳过判定而非给出误导性结果。
+    if metrics.total_turns == 0 && metrics.errors == 0 && metrics.tool_calls.is_empty() {
+        return Verdict::Partial {
+            score: 0.0,
+            reason: format!(
+                "event_log judge skipped: metrics not populated (condition: {condition})"
+            ),
+        };
+    }
+
     let parts: Vec<&str> = condition.split_whitespace().collect();
 
     match parts.as_slice() {
