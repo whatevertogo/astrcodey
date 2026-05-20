@@ -555,17 +555,17 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
 
     match &msg.role {
         MessageRole::User => {
-            // User messages: just show the text with a subtle prefix
+            // User messages: label + text with subtle background
             lines.push(Line::from(vec![Span::styled(
                 format!("❯ {}", msg.label),
-                theme.user_label,
+                theme.user_label.patch(theme.user_bg),
             )]));
             let text = msg.body.plain_text();
             if !text.trim().is_empty() {
                 for line in visual_lines(text, content_width.saturating_sub(2)) {
                     lines.push(Line::from(vec![
-                        Span::styled("  ", theme.dim),
-                        Span::styled(line, theme.body),
+                        Span::styled("  ", theme.user_bg),
+                        Span::styled(line, theme.body.patch(theme.user_bg)),
                     ]));
                 }
             }

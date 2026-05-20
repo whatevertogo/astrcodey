@@ -36,10 +36,7 @@ impl ChildAgentTracker {
 
             if let Some(tool_name) = trimmed.strip_prefix("tool started: ") {
                 self.running_tools.push(tool_name.to_string());
-                scrollback_queue.push(ScrollbackEntry::StreamText {
-                    role: MessageRole::Tool,
-                    text: format!("  · {tool_name}"),
-                });
+                // 子 agent 工具调用期间不输出到 scrollback，完成后统一展示摘要
                 continue;
             }
 
@@ -138,12 +135,14 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(stream_texts.len(), 3);
+        // 子 agent 执行期间不显示单个工具调用，只显示 assistant 文本
+        assert_eq!(stream_texts.len(), 1);
         assert_eq!(stream_texts[0], "我来系统地探索项目中的设计。");
-        assert_eq!(stream_texts[1], "  · find");
-        assert_eq!(stream_texts[2], "  · read");
         assert!(!stream_texts.iter().any(|t| t.contains("assistant")));
         assert!(!stream_texts.iter().any(|t| t.contains("tool completed")));
+        // 工具在完成后 flush_on_completion 中统一展示
+        assert_eq!(tracker.completed_tools.len(), 1);
+        assert_eq!(tracker.running_tools.len(), 1);
     }
 
     #[test]

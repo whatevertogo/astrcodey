@@ -11,6 +11,8 @@ use ratatui::style::{Color, Modifier, Style};
 pub struct Theme {
     /// 用户消息标签样式
     pub user_label: Style,
+    /// 用户消息背景样式（整行带背景色）
+    pub user_bg: Style,
     /// 助手消息标签样式
     pub assistant_label: Style,
     /// 工具消息标签样式
@@ -66,6 +68,11 @@ impl Theme {
 
         Self {
             user_label: Style::default().fg(user).add_modifier(Modifier::BOLD),
+            user_bg: Style::default().bg(if dark {
+                Color::Rgb(38, 38, 42)
+            } else {
+                Color::Rgb(235, 235, 230)
+            }),
             assistant_label: Style::default().fg(accent).add_modifier(Modifier::BOLD),
             tool_label: Style::default().fg(tool).add_modifier(Modifier::BOLD),
             system_label: Style::default().fg(muted).add_modifier(Modifier::BOLD),

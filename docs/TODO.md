@@ -5,8 +5,6 @@
 
 ## 高优先级
 
-- [ ] BackgroundTaskOutput 只有 task_id 没有原始 call_id，当前以 agent message chunk 展示，协议上可见但不如 tool-call 原生关联完美。
-  ToolOutputDelta 在 ACP 里用 tool update 承载 delta，客户端如何累积展示取决于 ACP client 实现。
 
 ## 高优先级
 
@@ -14,11 +12,12 @@
 ## 中优先级
 
 - [ ] 会话 Fork/Branch 功能
+  - [x] 基础 Fork 实现（SessionManager::fork + HTTP 路由 + ACP/SSE 支持）
   - [ ] 会话树可视化
   - [ ] 分支点管理
   - [ ] 合并/变基支持
 
-- [ ] 性能优化
+- [x] 性能优化
   - [x] 启动时间优化
   - [x] 大文件处理优化
   - [x] 内存占用优化
@@ -75,3 +74,4 @@
 - [x] TUI 会话选择器
 - [x] TUI Ctrl+C 二次确认退出
 - [x] 复用稳定系统提示词前缀 KV 缓存
+- [x] BackgroundTaskOutput 增加 call_id 原生关联 tool-call block（ACP 使用 ToolCallUpdate，HTTP/SSE 使用 ToolOutput delta）
