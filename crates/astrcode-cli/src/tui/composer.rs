@@ -4,7 +4,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
-const PASTE_PLACEHOLDER_THRESHOLD: usize = 1200;
+const PASTE_PLACEHOLDER_THRESHOLD: usize = 600;
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
 /// Composer 可执行的编辑动作。

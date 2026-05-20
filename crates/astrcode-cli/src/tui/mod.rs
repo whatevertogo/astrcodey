@@ -620,22 +620,39 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
             "  Select session (↑↓ Enter Esc):",
             theme.dim,
         )));
+        // cwd 提示行：让用户清楚自己在看哪个目录的 session
+        if !picker.cwd.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    in {}", compact_path(&picker.cwd)),
+                theme.dim,
+            )));
+        }
         if window_start > 0 {
             lines.push(Line::from(Span::styled(
                 format!("    ↑ {} more", window_start),
                 theme.dim,
             )));
         }
+        let now = chrono::Utc::now();
         for i in window_start..window_end {
             let entry = &picker.items[i];
             let marker = if i == selected { "▸" } else { " " };
             let id_short = entry.session_id.get(..8).unwrap_or(&entry.session_id);
-            let display = format!("  {marker} {id_short}  {}", entry.title);
-            if i == selected {
-                lines.push(Line::from(Span::styled(display, theme.popup_selected)));
+            let rel = store::session_picker::format_relative_time(&entry.last_active_at, now);
+            // 时间列右对齐到 4 个字符宽，缺失时间用空格占位以保持对齐。
+            let time_col = format!("{:>4}", rel);
+            let prefix = format!("  {marker} {id_short}  ");
+            let suffix = format!("  {}", entry.title);
+            let style = if i == selected {
+                theme.popup_selected
             } else {
-                lines.push(Line::from(Span::styled(display, theme.body)));
-            }
+                theme.body
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(time_col, theme.dim),
+                Span::styled(suffix, style),
+            ]));
         }
         if window_end < total {
             lines.push(Line::from(Span::styled(

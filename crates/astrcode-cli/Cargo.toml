@@ -27,6 +27,7 @@ crossterm = { version = "0.29.0", features = ["event-stream"] }
 unicode-width = "0.2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = { workspace = true }
+chrono = { workspace = true }
 astrcode-log = { path = "../astrcode-log" }
 tracing = { workspace = true }
 libc = "0.2"

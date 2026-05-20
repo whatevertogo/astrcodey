@@ -75,6 +75,8 @@ pub struct SessionEntry {
 pub struct SessionPicker {
     pub items: Vec<SessionEntry>,
     pub selected: usize,
+    /// 用于过滤的规范化 cwd，同时作为 picker 顶部展示的目录提示。
+    pub cwd: String,
 }
 
 impl App {
@@ -278,19 +280,28 @@ impl App {
     /// 按最后活跃时间倒序排列，最多显示 10 个。
     pub fn open_session_picker(&mut self) {
         // 优先使用进程 cwd（尚无活跃 session 时 self.working_dir 为空）
-        let cwd = if self.working_dir.is_empty() {
+        let raw_cwd = if self.working_dir.is_empty() {
             std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default()
         } else {
             self.working_dir.clone()
         };
+        let cwd = crate::tui::store::session_picker::canonicalize_working_dir(&raw_cwd);
         let active = self.active_session_id.as_deref();
         let mut items: Vec<SessionEntry> = self
             .available_sessions
             .iter()
             .filter(|s| {
-                !s.is_child && s.working_dir == cwd && active.is_none_or(|a| s.session_id != a)
+                if s.is_child {
+                    return false;
+                }
+                if active.is_some_and(|a| s.session_id == a) {
+                    return false;
+                }
+                let s_cwd =
+                    crate::tui::store::session_picker::canonicalize_working_dir(&s.working_dir);
+                s_cwd == cwd
             })
             .cloned()
             .collect();
@@ -298,7 +309,11 @@ impl App {
         items.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
         // 限制为最近 10 个
         items.truncate(10);
-        self.session_picker = Some(SessionPicker { items, selected: 0 });
+        self.session_picker = Some(SessionPicker {
+            items,
+            selected: 0,
+            cwd,
+        });
     }
 
     pub fn close_session_picker(&mut self) {
