@@ -7,7 +7,7 @@ pub mod event_log;
 #[cfg(feature = "testing")]
 pub mod in_memory;
 pub mod lock;
-mod projection;
+pub mod projection;
 pub mod session_repo;
 pub mod snapshot;
 mod tool_artifacts;

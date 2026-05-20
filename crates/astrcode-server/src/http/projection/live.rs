@@ -173,6 +173,7 @@ pub(in crate::http) fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDt
         // Events the client doesn't need as visible deltas
         EventPayload::SystemPromptConfigured { .. }
         | EventPayload::SessionContinuedFromCompaction { .. }
+        | EventPayload::SessionForked { .. }
         | EventPayload::ToolCallArgumentsDelta { .. } => vec![],
         _ => vec![],
     }

@@ -94,6 +94,7 @@ pub fn router(
             post(sessions::compact_session),
         )
         .route("/api/sessions/{id}/abort", post(sessions::abort_session))
+        .route("/api/sessions/{id}/fork", post(sessions::fork_session))
         .route("/api/sessions/{id}", delete(sessions::delete_session))
         .route("/api/projects", delete(sessions::delete_project))
         .route("/api/config", get(config::get_config))

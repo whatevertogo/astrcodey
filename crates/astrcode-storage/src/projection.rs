@@ -13,7 +13,7 @@ use astrcode_core::{
 };
 
 /// 从事件序列重建会话读模型。
-pub(crate) fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
+pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
     let mut model = SessionReadModel::empty(session_id);
     for event in events {
         reduce(event, &mut model);
@@ -22,7 +22,7 @@ pub(crate) fn replay(session_id: SessionId, events: &[Event]) -> SessionReadMode
 }
 
 /// 将单个持久事件归约到读模型。
-pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
+pub fn reduce(event: &Event, model: &mut SessionReadModel) {
     // seq=None 的非持久/异常事件不推进 durable cursor。
     model.latest_seq = event.seq.or(model.latest_seq);
     model.updated_at = event.timestamp.to_rfc3339();
@@ -214,6 +214,15 @@ pub(crate) fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::Idle;
         },
         EventPayload::SessionContinuedFromCompaction {
+            context_messages,
+            retained_messages,
+            ..
+        } => {
+            model.context_messages = context_messages.clone();
+            model.messages = retained_messages.clone();
+            model.phase = Phase::Idle;
+        },
+        EventPayload::SessionForked {
             context_messages,
             retained_messages,
             ..

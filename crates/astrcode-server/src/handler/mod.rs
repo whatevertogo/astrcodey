@@ -226,6 +226,13 @@ impl CommandHandler {
                 }
             },
 
+            ClientCommand::ForkSession {
+                session_id,
+                at_cursor,
+            } => {
+                self.fork_session(session_id.into(), at_cursor).await?;
+            },
+
             _ => {
                 return Err(HandlerError::Other("Not implemented".into()));
             },
@@ -442,6 +449,62 @@ impl CommandHandler {
             code,
             message: message.into(),
         });
+    }
+
+    // ─── Fork ─────────────────────────────────────────────────────────
+
+    /// Fork 源会话，创建新 session 并切换到新 session。
+    ///
+    /// 新 session 继承源 session fork 点之前的完整消息前缀和 system prompt，
+    /// 保证 provider 侧 KV 缓存命中。
+    pub async fn fork_session(
+        &mut self,
+        source_id: SessionId,
+        at_cursor: Option<String>,
+    ) -> Result<SessionId, HandlerError> {
+        let forked = self
+            .runtime
+            .session_manager
+            .fork(&source_id, at_cursor.as_ref())
+            .await
+            .map_err(|e| HandlerError::Other(format!("fork session: {e}")))?;
+
+        let new_sid = forked.session.id().clone();
+        self.event_bus.attach(&forked.session);
+        self.active_session_id = Some(new_sid.clone());
+
+        // 初始化 runtime（工具表在新 session 上需要重建）
+        let working_dir = self
+            .runtime
+            .session_manager
+            .read_model(&new_sid)
+            .await
+            .map(|m| m.working_dir)
+            .unwrap_or_else(|_| ".".into());
+        if let Err(e) = forked.session.initialize_runtime(&working_dir).await {
+            tracing::warn!(session_id = %new_sid, error = %e, "fork: runtime init failed");
+        }
+
+        // 通知客户端
+        let state = self
+            .runtime
+            .session_manager
+            .read_model(&new_sid)
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        let snapshot = session_snapshot(&state);
+        self.event_bus
+            .send_notification(ClientNotification::SessionResumed {
+                session_id: new_sid.clone().into_string(),
+                snapshot,
+            });
+
+        tracing::info!(
+            source_session_id = %source_id,
+            new_session_id = %new_sid,
+            "session forked"
+        );
+        Ok(new_sid)
     }
 }
 

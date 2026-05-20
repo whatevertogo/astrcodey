@@ -239,6 +239,33 @@ pub(in crate::http) async fn delete_session(
     }
 }
 
+pub(in crate::http) async fn fork_session(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<astrcode_protocol::http::ForkSessionRequest>,
+) -> Response {
+    tracing::info!(session_id = %session_id, "POST fork session");
+    let source_id = SessionId::from(session_id);
+    let at_cursor = request
+        .storage_seq
+        .map(|seq| seq.to_string())
+        .or(request.turn_id);
+    match state.handler.fork_session(source_id, at_cursor).await {
+        Ok(new_session_id) => Json(CreateSessionResponseDto {
+            session_id: new_session_id.into_string(),
+        })
+        .into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "fork_session failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "fork_failed",
+                error.to_string(),
+            )
+        },
+    }
+}
+
 pub(in crate::http) async fn delete_project(
     State(state): State<HttpState>,
     Query(params): Query<DeleteProjectParams>,

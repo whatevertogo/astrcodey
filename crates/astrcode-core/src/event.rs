@@ -281,6 +281,22 @@ pub enum EventPayload {
         retained_messages: Vec<LlmMessage>,
     },
 
+    /// 从源会话 fork 而来。
+    ///
+    /// fork 点之前的消息原样保留，保证 provider KV 缓存前缀命中。
+    /// 与 `SessionContinuedFromCompaction` 区别：fork 不做摘要压缩，
+    /// 只是在 fork 点截断后复制原始消息前缀。
+    SessionForked {
+        /// 源会话 ID。
+        source_session_id: SessionId,
+        /// 源会话 fork 点 durable cursor。
+        source_cursor: Cursor,
+        /// 注入 provider 的隐藏上下文消息（通常为空，为未来兼容 compact+fork 保留）。
+        context_messages: Vec<LlmMessage>,
+        /// fork 点之前保留的可见 transcript 消息（原样复制，保证 KV 前缀一致）。
+        retained_messages: Vec<LlmMessage>,
+    },
+
     /// 发生错误。
     ErrorOccurred {
         /// 错误码。

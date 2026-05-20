@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::Event,
+    event::{Event, EventPayload},
     extension::ExtensionEvent,
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
@@ -17,6 +17,14 @@ pub type SessionAttachHook = Arc<dyn Fn(&Session) + Send + Sync>;
 pub(crate) struct CreatedSession {
     pub(crate) session: Session,
     pub(crate) start_event: Event,
+}
+
+pub(crate) struct ForkedSession {
+    pub(crate) session: Session,
+    #[allow(dead_code)]
+    pub(crate) start_event: Event,
+    #[allow(dead_code)]
+    pub(crate) fork_event: Event,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +229,118 @@ impl SessionManager {
                 .cleanup_session(session_id);
         }
         Ok(())
+    }
+
+    /// Fork 一个已有会话，创建新 session 并复制 fork 点之前的消息前缀。
+    ///
+    /// fork 保证新 session 发送给 LLM 的 system prompt + 消息前缀与源 session 完全一致，
+    /// 从而让 provider 侧的 KV 缓存（prompt cache）自动命中。
+    ///
+    /// - `source_id`: 源会话 ID
+    /// - `at_cursor`: 可选 fork 点 cursor（event seq 的十进制字符串），为 None 则从末尾 fork
+    ///
+    /// 返回新 session 及其初始事件。
+    pub(crate) async fn fork(
+        &self,
+        source_id: &SessionId,
+        at_cursor: Option<&Cursor>,
+    ) -> Result<ForkedSession, SessionManagerError> {
+        // 1. 读源 session 的 read model
+        let source_model = self.event_store.session_read_model(source_id).await?;
+
+        // 2. 确定 fork 点 cursor
+        let fork_cursor = match at_cursor {
+            Some(cursor) => cursor.clone(),
+            None => source_model.cursor(),
+        };
+
+        // 3. 计算 fork 点之前的 provider 消息 如果 at_cursor 为 None（从末尾 fork），直接用 read
+        //    model 的消息。 如果指定了 cursor，需要从事件日志重放到指定点来获取消息。
+        let (context_messages, retained_messages) = if at_cursor.is_some() {
+            // 重放到指定 cursor 获取消息快照
+            let events = self.event_store.replay_events(source_id).await?;
+            let truncated_seq: u64 = fork_cursor.parse().map_err(|_| {
+                SessionManagerError::Session(SessionError::Other(format!(
+                    "invalid cursor: {fork_cursor}"
+                )))
+            })?;
+            let truncated_events: Vec<_> = events
+                .into_iter()
+                .filter(|e| e.seq.unwrap_or(0) <= truncated_seq)
+                .collect();
+            let truncated_model =
+                astrcode_storage::projection::replay(source_id.clone(), &truncated_events);
+            (truncated_model.context_messages, truncated_model.messages)
+        } else {
+            (
+                source_model.context_messages.clone(),
+                source_model.messages.clone(),
+            )
+        };
+
+        // 4. 创建新 session
+        let model_id = self.config.read_effective().llm.model_id.clone();
+        let new_sid = astrcode_core::types::new_session_id();
+        let runtime = self.get_or_create_runtime(&new_sid);
+        let session = Session::create_with_id(
+            Arc::clone(&self.event_store),
+            new_sid.clone(),
+            &source_model.working_dir,
+            &model_id,
+            None,
+            None,
+            None,
+            runtime,
+            Arc::clone(&self.capabilities),
+        )
+        .await?;
+
+        // 5. 写入 SessionForked 事件
+        let fork_event = session
+            .append_event(Event::new(
+                new_sid.clone(),
+                None,
+                EventPayload::SessionForked {
+                    source_session_id: source_id.clone(),
+                    source_cursor: fork_cursor,
+                    context_messages,
+                    retained_messages,
+                },
+            ))
+            .await?;
+
+        // 6. 复制源 session 的 system prompt 配置到新 session（保证 KV 前缀一致）
+        if let (Some(text), Some(fingerprint)) = (
+            &source_model.system_prompt,
+            &source_model.system_prompt_fingerprint,
+        ) {
+            session
+                .append_event(Event::new(
+                    new_sid.clone(),
+                    None,
+                    EventPayload::SystemPromptConfigured {
+                        text: text.clone(),
+                        fingerprint: fingerprint.clone(),
+                        extra_system_prompt: source_model.extra_system_prompt.clone(),
+                    },
+                ))
+                .await?;
+        }
+
+        // 7. 读第一个事件作为 start_event 返回
+        let start_event = self
+            .event_store
+            .replay_events(&new_sid)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(SessionManagerError::MissingStartEvent)?;
+
+        Ok(ForkedSession {
+            session,
+            start_event,
+            fork_event,
+        })
     }
 }
 

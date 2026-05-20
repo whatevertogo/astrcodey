@@ -31,7 +31,7 @@ pub(in crate::http) fn event_to_replay_deltas(event: &Event) -> Vec<Conversation
 
     if matches!(
         &event.payload,
-        EventPayload::SessionContinuedFromCompaction { .. }
+        EventPayload::SessionContinuedFromCompaction { .. } | EventPayload::SessionForked { .. }
     ) {
         return vec![ConversationDeltaDto::RehydrateRequired];
     }

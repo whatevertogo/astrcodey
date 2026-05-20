@@ -128,6 +128,24 @@ impl CommandHandle {
         rx.await
             .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
     }
+
+    /// Fork 源会话，返回新 session ID。
+    pub async fn fork_session(
+        &self,
+        source_id: SessionId,
+        at_cursor: Option<String>,
+    ) -> Result<SessionId, HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::ForkSession {
+                source_id,
+                at_cursor,
+                reply,
+            })
+            .map_err(|_| HandlerError::Other("command actor is unavailable".into()))?;
+        rx.await
+            .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
+    }
 }
 
 /// Actor 内部消息类型，涵盖所有需要异步处理的操作。
@@ -181,6 +199,12 @@ pub(in crate::handler) enum CommandMessage {
     RepairStaleTurn {
         session_id: SessionId,
         reply: oneshot::Sender<Result<(), HandlerError>>,
+    },
+    /// Fork 源会话
+    ForkSession {
+        source_id: SessionId,
+        at_cursor: Option<String>,
+        reply: oneshot::Sender<Result<SessionId, HandlerError>>,
     },
 }
 
@@ -268,6 +292,13 @@ impl CommandHandler {
             },
             CommandMessage::RepairStaleTurn { session_id, reply } => {
                 let _ = reply.send(self.repair_stale_phase(&session_id).await);
+            },
+            CommandMessage::ForkSession {
+                source_id,
+                at_cursor,
+                reply,
+            } => {
+                let _ = reply.send(self.fork_session(source_id, at_cursor).await);
             },
         }
     }
