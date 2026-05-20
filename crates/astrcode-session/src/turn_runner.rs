@@ -31,21 +31,19 @@ use crate::{
     tool_pipeline::ToolPipeline,
     tool_types::ExecuteToolCalls,
     turn_context::{
-        AgentSignal, EventSink, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
+        AgentSignal, SharedTurnContext, TurnError, end_turn_with_error_typed, send_event,
     },
     turn_stages::{PreparedProviderRequest, TurnState},
 };
 
 /// 运行 agent 的一次 process_prompt，通过 select! + drain 实时处理事件。
 ///
-/// 每个事件先经 `Session::emit` 写 store + fanout 到 runtime 广播，再可选地
-/// 调用 `sink.on_event(&event)` 做副作用（lossless，例如子 agent 的进度桥）。
+/// 每个事件经 `Session::emit` 写 store + fanout 到 runtime 广播。
 /// 返回 `(output, emitted_error)`。
 pub async fn drive_agent(
     agent: &mut TurnRunner,
     user_text: &str,
     turn_id: &TurnId,
-    sink: Option<&dyn EventSink>,
 ) -> (Result<TurnOutput, TurnError>, bool) {
     let session = Arc::clone(&agent.session);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -64,7 +62,7 @@ pub async fn drive_agent(
                         if matches!(payload, EventPayload::ErrorOccurred { .. }) {
                             emitted_error = true;
                         }
-                        dispatch_agent_event(&session, turn_id, sink, payload).await;
+                        dispatch_agent_event(&session, turn_id, payload).await;
                     },
                     None => events_closed = true,
                 }
@@ -76,24 +74,14 @@ pub async fn drive_agent(
         if matches!(payload, EventPayload::ErrorOccurred { .. }) {
             emitted_error = true;
         }
-        dispatch_agent_event(&session, turn_id, sink, payload).await;
+        dispatch_agent_event(&session, turn_id, payload).await;
     }
 
     (output, emitted_error)
 }
 
-/// 把一个 turn 内事件写入 session（持久化 + fanout），并通知可选 sink。
-async fn dispatch_agent_event(
-    session: &Session,
-    turn_id: &TurnId,
-    sink: Option<&dyn EventSink>,
-    payload: EventPayload,
-) {
-    if let Some(sink) = sink {
-        // 给 sink 一份事件副本——它不关心 seq，只需 payload 用于翻译进度。
-        let preview = Event::new(session.id().clone(), Some(turn_id.clone()), payload.clone());
-        sink.on_event(&preview).await;
-    }
+/// 把一个 turn 内事件写入 session（持久化 + fanout）。
+async fn dispatch_agent_event(session: &Session, turn_id: &TurnId, payload: EventPayload) {
     if payload.is_durable() {
         session.emit_durable(Some(turn_id), payload).await.ok();
     } else {
@@ -636,15 +624,9 @@ pub struct RunTurnResult {
 
 /// 执行一轮完整的 agent turn。
 ///
-/// 封装 `drive_agent` 调用。所有事件通过 `Session::emit` 持久化 + fanout，
-/// 可选 `sink` 收到副本（lossless）。
-pub async fn run_turn(
-    agent: &mut TurnRunner,
-    user_text: &str,
-    turn_id: &TurnId,
-    sink: Option<&dyn EventSink>,
-) -> RunTurnResult {
-    let (output, emitted_error) = drive_agent(agent, user_text, turn_id, sink).await;
+/// 封装 `drive_agent` 调用。所有事件通过 `Session::emit` 持久化 + fanout。
+pub async fn run_turn(agent: &mut TurnRunner, user_text: &str, turn_id: &TurnId) -> RunTurnResult {
+    let (output, emitted_error) = drive_agent(agent, user_text, turn_id).await;
 
     RunTurnResult {
         output,

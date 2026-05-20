@@ -247,6 +247,7 @@ impl ToolHandler for AgentToolHandler {
                     }),
                     source_plugin: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
+                    tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
                 },
             )
             .await
@@ -271,7 +272,6 @@ impl ToolHandler for AgentToolHandler {
                     },
                     recycle_on_complete: !args.wait_for_result,
                     tool_call_id: ctx.tool_call_id.clone(),
-                    event_tx: ctx.event_tx.clone(),
                 },
             )
             .await

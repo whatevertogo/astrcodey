@@ -411,16 +411,14 @@ impl Session {
     /// 内部完成：刷新工具表（如未填充）、刷新 system prompt（如缺失）、
     /// 装配 `TurnRunner`、起后台任务监听后台工具结果，最后 spawn agent task。
     ///
-    /// `sink` 可选；典型用例是子 agent 的 progress 桥（lossless）。`None` 表示
-    /// 主 session 路径——事件只走 store + runtime 广播，订阅者通过
-    /// `Session::subscribe` 或 `ServerEventBus::attach` 接收。
+    /// 事件通过 store + runtime 广播分发；订阅者通过 `Session::subscribe` 或
+    /// `ServerEventBus::attach` 接收。
     ///
     /// 调用方负责持有 `TurnHandle` 直到完成或主动 abort；handle 析构会让 task 自然继续。
     pub async fn submit(
         &self,
         text: String,
         turn_id: TurnId,
-        sink: Option<Arc<dyn crate::turn_context::EventSink>>,
     ) -> Result<crate::turn_handle::TurnHandle, crate::turn_context::TurnError> {
         use crate::{
             background::{BackgroundTaskCompletion, spawn_background_forwarder},
@@ -468,17 +466,15 @@ impl Session {
         };
 
         // 后台工具结果泵：把 BackgroundTaskCompletion 翻译成事件写入 session
-        // （store + runtime 广播），可选 sink 同步收到副本。
+        // （store + runtime 广播）。
         // `spawn_background_forwarder` 内部已经 `tokio::spawn`，丢弃返回的 JoinHandle
         // 让其在 rx 关闭（所有 sender drop）时自然结束；panic 时 task 终止，下一次
         // background 完成会因 sender 端 mpsc 已关闭而走 None 分支退出，不会泄漏。
         let (background_result_tx, background_result_rx) =
             mpsc::unbounded_channel::<BackgroundTaskCompletion>();
         let bg_session = Arc::new(self.clone());
-        let bg_sink = sink.clone();
         // TODO: 更好的后台处理？
-        let _forwarder =
-            spawn_background_forwarder(background_result_rx, bg_session, bg_sink, None);
+        let _forwarder = spawn_background_forwarder(background_result_rx, bg_session, None);
 
         // refresh_prompt 写过事件时 projection 已变，需要 re-read；命中 fingerprint
         // 跳过的情况下 pre_state 仍然反映最新状态。
@@ -497,15 +493,8 @@ impl Session {
 
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let turn_id_for_task = turn_id.clone();
-        let sink_for_task = sink.clone();
         let join = tokio::spawn(async move {
-            let result = run_turn(
-                &mut agent,
-                &text,
-                &turn_id_for_task,
-                sink_for_task.as_deref(),
-            )
-            .await;
+            let result = run_turn(&mut agent, &text, &turn_id_for_task).await;
             let _ = completion_tx.send(result);
         });
 
@@ -531,6 +520,7 @@ impl Session {
         extra_system_prompt: Option<String>,
         tool_policy: Option<ChildToolPolicy>,
         source_plugin: Option<&str>,
+        tool_call_id: ToolCallId,
     ) -> Result<Session, SessionError> {
         let child_runtime = Arc::new(SessionRuntimeState::default());
         if extra_system_prompt.is_some() {
@@ -558,6 +548,7 @@ impl Session {
                 agent_name,
                 task,
                 tool_policy,
+                tool_call_id,
             },
         ))
         .await?;

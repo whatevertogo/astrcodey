@@ -14,6 +14,12 @@ use crate::config_manager::ConfigManager;
 /// 会话创建后的回调类型，用于在 session 注册到 manager 时自动执行副作用（如 attach 到 event_bus）。
 pub type SessionAttachHook = Arc<dyn Fn(&Session) + Send + Sync>;
 
+/// 子 agent 完成后向父 session 提交 prompt 的回调类型。
+///
+/// 由 actor 注入，调用方通过它把"通知文本"作为新 prompt 触发父 session 启动新 turn。
+/// 直接写 UserMessage 事件不会启动 turn，必须走 actor 的 SubmitInputForSession 路径。
+pub type PromptSubmitHook = Arc<dyn Fn(SessionId, String) + Send + Sync>;
+
 pub(crate) struct CreatedSession {
     pub(crate) session: Session,
     pub(crate) start_event: Event,
@@ -37,6 +43,8 @@ pub enum SessionManagerError {
     Extension(#[from] astrcode_core::extension::ExtensionError),
     #[error("session created but no events found")]
     MissingStartEvent,
+    #[error("prompt submit hook is not set")]
+    PromptHookUnset,
 }
 
 /// Server 侧的 session 生命周期门面。
@@ -54,6 +62,8 @@ pub struct SessionManager {
     capabilities: Arc<SessionRuntimeServices>,
     /// 可选的 attach 回调：子会话注册 runtime 后自动把 session 接入 event_bus 广播。
     attach_hook: Mutex<Option<SessionAttachHook>>,
+    /// 可选的 prompt 提交回调：异步子 agent 完成后用来给父 session 启动 turn。
+    prompt_submit_hook: Mutex<Option<PromptSubmitHook>>,
 }
 
 impl SessionManager {
@@ -70,6 +80,7 @@ impl SessionManager {
             runtime_states: Mutex::new(HashMap::new()),
             capabilities,
             attach_hook: Mutex::new(None),
+            prompt_submit_hook: Mutex::new(None),
         }
     }
 
@@ -88,6 +99,29 @@ impl SessionManager {
     /// 设置 attach 回调。event_bus 创建后由调用方注入，子会话注册 runtime 时自动触发。
     pub fn set_attach_hook(&self, hook: SessionAttachHook) {
         *self.attach_hook.lock() = Some(hook);
+    }
+
+    /// 设置 prompt 提交回调。actor 启动后注入，子 agent 完成后通过它给父 session 启动 turn。
+    pub fn set_prompt_submit_hook(&self, hook: PromptSubmitHook) {
+        *self.prompt_submit_hook.lock() = Some(hook);
+    }
+
+    /// 触发 prompt 提交回调（异步子 agent 完成后回调父 session）。
+    ///
+    /// hook 由 actor 启动时注入；调用方若在 hook 注入前调用，会得到
+    /// `Err(SessionManagerError::PromptHookUnset)`。
+    pub fn submit_prompt_to_session(
+        &self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<(), SessionManagerError> {
+        let hook = self
+            .prompt_submit_hook
+            .lock()
+            .clone()
+            .ok_or(SessionManagerError::PromptHookUnset)?;
+        hook(session_id, text);
+        Ok(())
     }
 
     /// 把子会话的 runtime 注册到 manager，并自动 attach 到 event_bus（如果 hook 已设置）。

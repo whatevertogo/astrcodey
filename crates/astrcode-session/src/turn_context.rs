@@ -1,30 +1,14 @@
-//! Turn 基础设施 — 事件发射 sink、信号类型、共享上下文、错误类型。
+//! Turn 基础设施 — 信号类型、共享上下文、错误类型。
 
 use astrcode_core::{
     config::ModelSelection,
-    event::{Event, EventPayload},
+    event::EventPayload,
     extension::{ExtensionEvent, LifecycleContext, ProviderContext},
     llm::LlmMessage,
     types::*,
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::sync::mpsc;
-
-// ─── EventSink ───────────────────────────────────────────────────────────
-
-/// 在 turn 内对每个事件做「副作用」的旁路 sink。
-///
-/// 与持久化 / 广播相互独立：持久化由 `Session::emit` 负责（写 store + fanout 到
-/// `runtime.event_tx`），广播由 `ServerEventBus::attach` 通过订阅 fanout 完成。
-/// `EventSink` 只用于「我还想在此处再做点别的」的需求——典型例子是子 agent
-/// 把事件翻译成父 session 的 progress（lossless mpsc，不能丢）。
-///
-/// 如果未来需要为某 turn 注入一个 lossless 监听器（比如测试中收集事件），实现这个
-/// trait 即可。普通路径传 `None` 不需要 sink。
-#[async_trait::async_trait]
-pub trait EventSink: Send + Sync {
-    async fn on_event(&self, event: &Event);
-}
 
 // ─── Signal ──────────────────────────────────────────────────────────────
 

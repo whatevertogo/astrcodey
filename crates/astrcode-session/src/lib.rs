@@ -31,6 +31,6 @@ pub use payload::{
 pub use session::{Session, SessionError};
 pub use session_runtime::SessionRuntimeState;
 pub use session_runtime_services::SessionRuntimeServices;
-pub use turn_context::{AgentSignal, EventSink, TurnError};
+pub use turn_context::{AgentSignal, TurnError};
 pub use turn_handle::TurnHandle;
 pub use turn_runner::{RunTurnResult, TurnOutput, TurnRunner, drive_agent, run_turn};

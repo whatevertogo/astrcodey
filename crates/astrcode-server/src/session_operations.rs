@@ -73,6 +73,7 @@ impl SessionOperations for ServerSessionOperations {
                 request.system_prompt,
                 request.tool_policy,
                 request.source_plugin.as_deref(),
+                request.tool_call_id.into(),
             )
             .await
             .map_err(|e| SessionApiError::Internal(format!("spawn child: {e}")))?;
@@ -143,7 +144,7 @@ impl SessionOperations for ServerSessionOperations {
 
         // 纯粹的 submit——Session::submit 内部会自己写 TurnStarted + UserMessage
         let handle = session
-            .submit(request.user_prompt.clone(), turn_id.clone(), None)
+            .submit(request.user_prompt.clone(), turn_id.clone())
             .await
             .map_err(|e| SessionApiError::Internal(format!("submit: {e}")))?;
 
@@ -218,18 +219,18 @@ impl SessionOperations for ServerSessionOperations {
                         },
                     }
 
-                    // 通知父 session
+                    // 通知父 session：通过 manager 的 prompt 提交回调启动新 turn。
+                    // 直接写 UserMessage 不会启动 turn，必须走 actor 的 SubmitInputForSession。
                     if let Some(notify_text) = notify_parent {
-                        let msg_id = new_message_id();
-                        let _ = parent_session
-                            .emit_durable(
-                                None,
-                                EventPayload::UserMessage {
-                                    message_id: msg_id,
-                                    text: notify_text,
-                                },
-                            )
-                            .await;
+                        if let Err(e) = session_manager
+                            .submit_prompt_to_session(watcher_caller_sid.clone(), notify_text)
+                        {
+                            tracing::warn!(
+                                parent_session_id = %watcher_caller_sid,
+                                error = %e,
+                                "child agent completion notification dropped",
+                            );
+                        }
                     }
                 }
 

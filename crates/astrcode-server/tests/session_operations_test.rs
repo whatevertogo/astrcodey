@@ -135,7 +135,6 @@ async fn submit_turn_sync_returns_llm_output() {
                 notify_parent_on_complete: None,
                 recycle_on_complete: false,
                 tool_call_id: None,
-                event_tx: None,
             },
         )
         .await
@@ -170,6 +169,27 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
 
     let ops = build_test_ops(Arc::clone(&store), "async result");
 
+    // 注入 prompt_submit_hook：测试里直接写 UserMessage（生产环境由 actor 启动 turn）。
+    {
+        let store_for_hook = Arc::clone(&store);
+        ops.session_manager
+            .set_prompt_submit_hook(std::sync::Arc::new(move |sid, text| {
+                let store = Arc::clone(&store_for_hook);
+                tokio::spawn(async move {
+                    let msg_id = astrcode_core::types::new_message_id();
+                    let event = astrcode_core::event::Event::new(
+                        sid,
+                        None,
+                        astrcode_core::event::EventPayload::UserMessage {
+                            message_id: msg_id,
+                            text,
+                        },
+                    );
+                    let _ = store.append_event(event).await;
+                });
+            }));
+    }
+
     let handle = ops
         .create_session(
             parent_id.as_str(),
@@ -192,7 +212,6 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
                 notify_parent_on_complete: Some("[done]".into()),
                 recycle_on_complete: false,
                 tool_call_id: None,
-                event_tx: None,
             },
         )
         .await

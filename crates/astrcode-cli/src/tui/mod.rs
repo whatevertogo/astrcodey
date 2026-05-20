@@ -13,7 +13,7 @@
 
 pub(crate) mod app;
 pub(crate) mod command;
-pub(crate) mod component;
+pub(crate) mod composer;
 pub(crate) mod custom_terminal;
 pub(crate) mod ext;
 pub(crate) mod frame;
@@ -425,14 +425,6 @@ async fn execute_slash_command(
                 app.status_text = "Resuming session".into();
             }
         },
-        SlashCommand::Sessions => {
-            // /sessions 等同于 /resume（打开 session picker）
-            client
-                .send_command(&ClientCommand::ListSessions)
-                .await
-                .map_err(io_error)?;
-            app.open_session_picker();
-        },
         SlashCommand::Compact => {
             client
                 .send_command(&ClientCommand::Compact)
@@ -453,8 +445,8 @@ async fn execute_slash_command(
         SlashCommand::Help => {
             let mut lines = vec![
                 "/new                 create a fresh session".into(),
-                "/sessions            list known sessions".into(),
-                "/resume <id>         resume a session".into(),
+                "/resume              resume a session (picker)".into(),
+                "/resume <id>         resume a session by id".into(),
                 "/help                show this help".into(),
                 "/quit                exit astrcode".into(),
             ];
@@ -611,7 +603,7 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         lines
     } else if let Some(picker) = &app.session_picker {
         // Session picker 渲染（滑动窗口）
-        let max_visible = 8usize;
+        let max_visible = 10usize;
         let total = picker.items.len();
         let selected = picker.selected.min(total.saturating_sub(1));
         let window_start = if total <= max_visible || selected < max_visible / 2 {

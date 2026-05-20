@@ -15,6 +15,7 @@ astrcode-client = { path = "../astrcode-client" }
 astrcode-core = { path = "../astrcode-core" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-support = { path = "../astrcode-support" }
+astrcode-eval = { path = "../astrcode-eval" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

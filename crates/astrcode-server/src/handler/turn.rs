@@ -410,8 +410,7 @@ async fn run_agent_turn_task(input: AgentTurnInput) {
     } = input;
     let sid = session.id().clone();
 
-    let event_bus_dyn: Option<std::sync::Arc<dyn astrcode_session::EventSink>> = None;
-    let handle = match session.submit(text, turn_id.clone(), event_bus_dyn).await {
+    let handle = match session.submit(text, turn_id.clone()).await {
         Ok(handle) => handle,
         Err(e) => {
             session

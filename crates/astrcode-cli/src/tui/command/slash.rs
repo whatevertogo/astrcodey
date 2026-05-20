@@ -23,8 +23,6 @@ pub enum SlashCommand {
     New,
     /// 恢复指定 ID 的会话
     Resume(String),
-    /// 列出所有已知会话
-    Sessions,
     /// 压缩当前会话上下文
     Compact,
     /// 生成当前对话摘要
@@ -48,14 +46,8 @@ pub fn builtin_commands() -> Vec<SlashCommandSpec> {
         },
         SlashCommandSpec {
             name: "resume".into(),
-            usage: "/resume <id>".into(),
-            description: "Resume a previous session".into(),
-            needs_argument: true,
-        },
-        SlashCommandSpec {
-            name: "sessions".into(),
-            usage: "/sessions".into(),
-            description: "List known sessions".into(),
+            usage: "/resume".into(),
+            description: "Resume a previous session (interactive picker)".into(),
             needs_argument: false,
         },
         SlashCommandSpec {
@@ -126,7 +118,6 @@ pub fn parse(input: &str, extension_command_names: &[String]) -> Option<SlashCom
     match cmd {
         "new" => Some(SlashCommand::New),
         "resume" | "r" => Some(SlashCommand::Resume(arg.to_string())),
-        "sessions" | "ls" => Some(SlashCommand::Sessions),
         "compact" => Some(SlashCommand::Compact),
         "recap" => Some(SlashCommand::Recap),
         "quit" | "q" | "exit" => Some(SlashCommand::Quit),
@@ -170,6 +161,5 @@ mod tests {
     #[test]
     fn parses_aliases() {
         assert_eq!(parse("/q", &[]), Some(SlashCommand::Quit));
-        assert_eq!(parse("/ls", &[]), Some(SlashCommand::Sessions));
     }
 }
