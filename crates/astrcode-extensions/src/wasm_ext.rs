@@ -176,6 +176,8 @@ impl WasmExtension {
             .ok();
 
         if let Ok(init_fn) = instance.get_typed_func::<(), ()>(&mut store, "extension_init") {
+            // 每次调用（包括 init）独立计费——set_fuel 重置到完整 budget。
+            // 这意味着 init 的 fuel 消耗不影响后续 call_guest 的可用额度。
             let fuel_budget = store.data().fuel_budget;
             store
                 .set_fuel(fuel_budget)

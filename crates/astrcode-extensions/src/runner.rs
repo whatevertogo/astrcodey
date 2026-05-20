@@ -816,52 +816,60 @@ impl Tool for HandlerTool {
             .metadata
             .remove(astrcode_core::extension::EXTENSION_TOOL_OUTCOME_KEY)
         {
-            if let Ok(ExtensionToolOutcome::RunSession {
-                name,
-                system_prompt,
-                user_prompt,
-                model_preference,
-                wait_for_result,
-                tool_policy,
-                ephemeral,
-            }) = serde_json::from_value(outcome_value)
-            {
-                let request = SpawnRequest {
+            match serde_json::from_value::<ExtensionToolOutcome>(outcome_value) {
+                Ok(ExtensionToolOutcome::RunSession {
                     name,
                     system_prompt,
                     user_prompt,
-                    working_dir: _ctx.working_dir.clone(),
                     model_preference,
-                    tool_call_id: _ctx.tool_call_id.clone(),
-                    event_tx: _ctx.event_tx.clone(),
                     wait_for_result,
                     tool_policy,
-                    source_plugin: (!self.extension_id.is_empty())
-                        .then(|| self.extension_id.clone()),
                     ephemeral,
-                };
+                }) => {
+                    let request = SpawnRequest {
+                        name,
+                        system_prompt,
+                        user_prompt,
+                        working_dir: _ctx.working_dir.clone(),
+                        model_preference,
+                        tool_call_id: _ctx.tool_call_id.clone(),
+                        event_tx: _ctx.event_tx.clone(),
+                        wait_for_result,
+                        tool_policy,
+                        source_plugin: (!self.extension_id.is_empty())
+                            .then(|| self.extension_id.clone()),
+                        ephemeral,
+                    };
 
-                match self.spawn(_ctx.session_id.as_str(), request).await {
-                    Ok(output) => {
-                        result.content = output.content;
-                        result
-                            .metadata
-                            .insert("child_session_id".into(), output.child_session_id.into());
-                        if let Some(task_id) = output.background_task_id {
+                    match self.spawn(_ctx.session_id.as_str(), request).await {
+                        Ok(output) => {
+                            result.content = output.content;
                             result
                                 .metadata
-                                .insert("backgrounded".into(), serde_json::json!(true));
-                            result
-                                .metadata
-                                .insert("task_id".into(), serde_json::json!(task_id));
-                        }
-                    },
-                    Err(e) => {
-                        result.content = format!("Failed to spawn child session: {e}");
-                        result.is_error = true;
-                        result.error = Some(e);
-                    },
-                }
+                                .insert("child_session_id".into(), output.child_session_id.into());
+                            if let Some(task_id) = output.background_task_id {
+                                result
+                                    .metadata
+                                    .insert("backgrounded".into(), serde_json::json!(true));
+                                result
+                                    .metadata
+                                    .insert("task_id".into(), serde_json::json!(task_id));
+                            }
+                        },
+                        Err(e) => {
+                            result.content = format!("Failed to spawn child session: {e}");
+                            result.is_error = true;
+                            result.error = Some(e);
+                        },
+                    }
+                },
+                Ok(ExtensionToolOutcome::Text { content, is_error }) => {
+                    result.content = content;
+                    result.is_error = is_error;
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse ExtensionToolOutcome, treating as plain result");
+                },
             }
         }
 

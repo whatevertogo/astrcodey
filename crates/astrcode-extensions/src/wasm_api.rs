@@ -167,23 +167,42 @@ impl Default for HostState {
 }
 
 impl ResourceLimiter for HostState {
+    // 只做总量上限限制：desired 是增长后的绝对大小，只要不超 limit 就放行。
+    // current（当前大小）和 maximum（wasm 模块自声明上限）不参与判断——
+    // 我们用自己的 memory_limit 作为唯一硬上限。
     fn memory_growing(
         &mut self,
-        current: usize,
+        _current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
-        Ok(desired <= self.memory_limit && desired >= current)
+        let allowed = desired <= self.memory_limit;
+        if !allowed {
+            tracing::warn!(
+                desired_bytes = desired,
+                limit_bytes = self.memory_limit,
+                "wasm extension exceeded memory limit"
+            );
+        }
+        Ok(allowed)
     }
 
     fn table_growing(
         &mut self,
-        current: usize,
+        _current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         const TABLE_ENTRY_LIMIT: usize = 1024;
-        Ok(desired <= TABLE_ENTRY_LIMIT && desired >= current)
+        let allowed = desired <= TABLE_ENTRY_LIMIT;
+        if !allowed {
+            tracing::warn!(
+                desired_entries = desired,
+                limit = TABLE_ENTRY_LIMIT,
+                "wasm extension exceeded table entry limit"
+            );
+        }
+        Ok(allowed)
     }
 }
 
@@ -194,12 +213,14 @@ fn read_memory_string(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) ->
         return String::new();
     }
     let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        tracing::warn!("wasm guest: memory export not found");
         return String::new();
     };
     let data = mem.data(caller);
     let start = ptr as usize;
     let end = start + len as usize;
     if end > data.len() {
+        tracing::warn!(ptr, len, mem_size = data.len(), "wasm guest: out-of-bounds memory read");
         return String::new();
     }
     String::from_utf8_lossy(&data[start..end]).into_owned()
