@@ -31,6 +31,8 @@ pub struct App {
     pub is_streaming: bool,
     pub should_quit: bool,
     pub extension_commands: Vec<SlashCommandSpec>,
+    // Mode — plan mode 或 code mode
+    pub mode: AppMode,
     // Composer
     pub composer: ComposerState,
     pub show_slash_palette: bool,
@@ -47,6 +49,15 @@ pub struct App {
     pub message_renderers: MessageRendererRegistry,
     // Theme
     pub theme: Theme,
+}
+
+/// 工作模式：决定 agent 的行为方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppMode {
+    /// Code 模式 — agent 直接执行代码修改（默认）。
+    Code,
+    /// Plan 模式 — agent 仅输出计划，不执行工具。
+    Plan,
 }
 
 impl App {
@@ -66,6 +77,7 @@ impl App {
             is_streaming: false,
             should_quit: false,
             extension_commands: Vec::new(),
+            mode: AppMode::Code,
             composer: ComposerState::default(),
             show_slash_palette: false,
             slash_filter: String::new(),
@@ -212,6 +224,45 @@ impl App {
             None,
         );
         self.status_text = "Error".into();
+    }
+
+    /// 切换工作模式（Code ↔ Plan）。
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            AppMode::Code => AppMode::Plan,
+            AppMode::Plan => AppMode::Code,
+        };
+        let label = match self.mode {
+            AppMode::Code => "code",
+            AppMode::Plan => "plan",
+        };
+        self.status_text = format!("Mode: {label}");
+        self.push_message(
+            MessageRole::System,
+            "Mode".into(),
+            format!("Switched to {label} mode"),
+            false,
+            None,
+        );
+    }
+
+    /// 设置工作模式。
+    pub fn set_mode(&mut self, mode: AppMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            let label = match self.mode {
+                AppMode::Code => "code",
+                AppMode::Plan => "plan",
+            };
+            self.status_text = format!("Mode: {label}");
+            self.push_message(
+                MessageRole::System,
+                "Mode".into(),
+                format!("Switched to {label} mode"),
+                false,
+                None,
+            );
+        }
     }
 
     pub fn resolve_session_id(&self, input: &str) -> String {

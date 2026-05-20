@@ -604,6 +604,7 @@ pub struct Registrar {
     tool_metadata: std::collections::HashMap<String, ToolPromptMetadata>,
     commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
     command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
+    keybindings: Vec<Keybinding>,
     pre_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PreToolUseHandler>)>,
     post_tool_use: Vec<(HookMode, i32, std::sync::Arc<dyn PostToolUseHandler>)>,
     provider: Vec<(
@@ -631,6 +632,7 @@ impl Registrar {
             tool_metadata: std::collections::HashMap::new(),
             commands: Vec::new(),
             command_discovery: Vec::new(),
+            keybindings: Vec::new(),
             pre_tool_use: Vec::new(),
             post_tool_use: Vec::new(),
             provider: Vec::new(),
@@ -659,6 +661,10 @@ impl Registrar {
 
     pub fn command_discovery(&mut self, handler: std::sync::Arc<dyn CommandDiscoveryHandler>) {
         self.command_discovery.push(handler);
+    }
+
+    pub fn keybinding(&mut self, binding: Keybinding) {
+        self.keybindings.push(binding);
     }
 
     pub fn on_pre_tool_use(
@@ -730,6 +736,7 @@ impl Registrar {
             && self.tool_metadata.is_empty()
             && self.commands.is_empty()
             && self.command_discovery.is_empty()
+            && self.keybindings.is_empty()
             && self.pre_tool_use.is_empty()
             && self.post_tool_use.is_empty()
             && self.provider.is_empty()
@@ -800,10 +807,32 @@ impl Registrar {
     )] {
         &self.lifecycle
     }
+
+    pub fn keybindings(&self) -> &[Keybinding] {
+        &self.keybindings
+    }
 }
 
 impl Default for Registrar {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ─── Keybinding ──────────────────────────────────────────────────────────
+
+/// 插件注册的快捷键绑定。
+///
+/// 当用户按下对应组合键时，TUI 将执行关联的斜杠命令（如同用户输入该命令）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Keybinding {
+    /// 快捷键描述（如 "shift+tab", "ctrl+p"）。
+    pub key: String,
+    /// 按下时执行的斜杠命令名（不含 `/`）。
+    pub command: String,
+    /// 可选的命令参数。
+    #[serde(default)]
+    pub arguments: String,
+    /// 人类可读描述（用于帮助/UI 展示）。
+    pub description: String,
 }

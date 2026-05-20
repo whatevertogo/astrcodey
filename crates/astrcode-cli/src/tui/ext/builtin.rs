@@ -228,10 +228,7 @@ impl ToolRenderer for ShellRenderer {
         let output_lines: Vec<&str> = content.lines().collect();
         if output_lines.is_empty() || (output_lines.len() == 1 && output_lines[0].trim().is_empty())
         {
-            return Some(RenderSpec::Text {
-                text: status,
-                tone,
-            });
+            return Some(RenderSpec::Text { text: status, tone });
         }
 
         let max_preview = 8;
@@ -252,10 +249,7 @@ impl ToolRenderer for ShellRenderer {
                 tone: RenderTone::Muted,
             });
         }
-        children.push(RenderSpec::Text {
-            text: status,
-            tone,
-        });
+        children.push(RenderSpec::Text { text: status, tone });
         Some(RenderSpec::Box {
             title: None,
             tone: RenderTone::Default,

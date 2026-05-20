@@ -101,8 +101,7 @@ impl Tool for EditFileTool {
         let mut metadata = metadata;
         // 注入 unified diff 供 TUI/前端结构化渲染。
         let display_path = path.display().to_string();
-        let (diff_text, ins, del) =
-            compute_unified_diff(&display_path, &original, &updated, 80);
+        let (diff_text, ins, del) = compute_unified_diff(&display_path, &original, &updated, 80);
         if !diff_text.is_empty() {
             metadata.insert("diff".into(), serde_json::json!(diff_text));
             metadata.insert("insertions".into(), serde_json::json!(ins));

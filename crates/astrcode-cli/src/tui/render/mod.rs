@@ -592,24 +592,15 @@ pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'s
             }
         },
         MessageRole::Tool => {
-            // Tool: codex-style "⎿ Label: result"
+            // Codex-style: single line "⎿ Label  result"
+            let text = msg.body.plain_text();
+            let first_line = text.lines().next().unwrap_or("").trim();
             lines.push(Line::from(vec![
                 Span::styled("  ⎿ ", theme.dim),
                 Span::styled(msg.label.clone(), theme.tool_label),
+                Span::styled("  ", theme.dim),
+                Span::styled(first_line.to_string(), theme.dim),
             ]));
-            if let Some(spec) = msg.body.render_spec() {
-                render_spec_inner(spec, &mut lines, content_width, theme, "    ");
-            } else {
-                let text = msg.body.plain_text();
-                if !text.trim().is_empty() {
-                    for line in visual_lines(text, content_width.saturating_sub(4)) {
-                        lines.push(Line::from(vec![
-                            Span::styled("    ", theme.dim),
-                            Span::styled(line, theme.body),
-                        ]));
-                    }
-                }
-            }
         },
         MessageRole::System => {
             lines.push(Line::from(vec![Span::styled(

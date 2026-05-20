@@ -27,6 +27,8 @@ pub enum SlashCommand {
     Sessions,
     /// 压缩当前会话上下文
     Compact,
+    /// 切换工作模式
+    Mode(Option<String>),
     /// 退出 astrcode
     Quit,
     /// 显示帮助信息
@@ -60,6 +62,12 @@ pub fn builtin_commands() -> Vec<SlashCommandSpec> {
             name: "compact".into(),
             usage: "/compact".into(),
             description: "Compact the current session context".into(),
+            needs_argument: false,
+        },
+        SlashCommandSpec {
+            name: "mode".into(),
+            usage: "/mode [plan|code]".into(),
+            description: "Toggle or set working mode (Shift+Tab)".into(),
             needs_argument: false,
         },
         SlashCommandSpec {
@@ -120,6 +128,14 @@ pub fn parse(input: &str, extension_command_names: &[String]) -> Option<SlashCom
         "resume" | "r" => Some(SlashCommand::Resume(arg.to_string())),
         "sessions" | "ls" => Some(SlashCommand::Sessions),
         "compact" => Some(SlashCommand::Compact),
+        "mode" => {
+            let target = if arg.is_empty() {
+                None
+            } else {
+                Some(arg.to_string())
+            };
+            Some(SlashCommand::Mode(target))
+        },
         "quit" | "q" | "exit" => Some(SlashCommand::Quit),
         "help" | "?" => Some(SlashCommand::Help),
         _ => {
