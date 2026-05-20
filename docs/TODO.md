@@ -2,7 +2,8 @@
 
 ## 当前进行中
 
-- [ ] Eval 框架
+
+
 
 ## 高优先级
 
@@ -49,6 +50,7 @@
 
 ## 已完成功能
 
+- [x] Eval 评测框架（HTTP 服务器控制、事件日志指标、结构化报告、7 个评测用例）
 - [x] Core agent loop 架构
 - [x] SSE 流式响应处理
 - [x] 基础工具集 (read/write/edit/patch/find/grep/shell/task)

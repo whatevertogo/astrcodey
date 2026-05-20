@@ -63,6 +63,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             agent_name,
             task,
             tool_policy: _,
+            tool_call_id: _,
         } => {
             model.agent_sessions.push(AgentSessionLinkView {
                 child_session_id: child_session_id.clone(),

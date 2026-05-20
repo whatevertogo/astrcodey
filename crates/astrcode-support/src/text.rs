@@ -19,3 +19,50 @@ pub fn compact_inline(text: &str, max_chars: usize) -> String {
     preview.push('…');
     preview
 }
+
+/// 取首行，超长按字符数截断并追加 `…`。
+///
+/// 与 [`compact_inline`] 不同：保留首行的内部空白，丢弃后续行；不折叠空白。
+/// 适合那些"已经是一行式但仍可能很长"的内容（错误信息、命令输出首行等）。
+pub fn truncate_first_line(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.chars().count() <= max_chars {
+        return first_line.to_string();
+    }
+    let mut s: String = first_line.chars().take(max_chars).collect();
+    s.push('…');
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_first_line_keeps_short_input_unchanged() {
+        assert_eq!(truncate_first_line("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_first_line_drops_subsequent_lines() {
+        assert_eq!(truncate_first_line("first\nsecond", 80), "first");
+    }
+
+    #[test]
+    fn truncate_first_line_appends_ellipsis_when_over_limit() {
+        let result = truncate_first_line("0123456789abcdef", 8);
+        assert_eq!(result, "01234567…");
+    }
+
+    #[test]
+    fn truncate_first_line_counts_characters_not_bytes() {
+        // 4 个 CJK 字符 + 4 个 ASCII = 8 字符；max_chars=8 应保留全部
+        let result = truncate_first_line("你好世界abcd", 8);
+        assert_eq!(result, "你好世界abcd");
+    }
+
+    #[test]
+    fn truncate_first_line_preserves_internal_whitespace() {
+        assert_eq!(truncate_first_line("hello   world", 80), "hello   world");
+    }
+}

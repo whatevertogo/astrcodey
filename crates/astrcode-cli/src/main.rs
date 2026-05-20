@@ -46,6 +46,37 @@ enum Commands {
     },
     /// 启动 ACP (Agent Client Protocol) stdio 服务器
     Acp,
+    /// 执行自动化评测（仅 dev-mode feature 启用时可用）
+    #[cfg(feature = "dev-mode")]
+    Eval {
+        /// eval case 目录路径
+        #[arg(long, default_value = "eval-tasks")]
+        cases: std::path::PathBuf,
+        /// 报告输出路径（默认 stdout）
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        /// 输出格式
+        #[arg(long, default_value = "json")]
+        format: String,
+        /// 最大并发 case 数
+        #[arg(long, default_value = "4")]
+        concurrency: usize,
+        /// 按标签过滤
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+        /// 保留临时工作目录
+        #[arg(long)]
+        keep_workdir: bool,
+        /// 存储根目录（eval 数据隔离，默认 tempdir）
+        #[arg(long)]
+        storage: Option<std::path::PathBuf>,
+        /// 服务器地址（若已有运行中的 server）
+        #[arg(long)]
+        server_addr: Option<String>,
+        /// Auth token
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
     /// 显示版本信息
     Version,
 }
@@ -109,6 +140,51 @@ async fn main() {
         Some(Commands::Version) => {
             println!("astrcode v{}", env!("CARGO_PKG_VERSION"));
             println!("protocol version: 1");
+        },
+        #[cfg(feature = "dev-mode")]
+        Some(Commands::Eval {
+            cases,
+            output,
+            format,
+            concurrency,
+            tags,
+            keep_workdir,
+            storage,
+            server_addr,
+            auth_token,
+        }) => {
+            let config = astrcode_eval::EvalConfig {
+                cases_dir: cases,
+                concurrency,
+                tags_filter: tags,
+                keep_workdir,
+                storage_root: storage,
+                server_addr,
+                auth_token,
+            };
+            match astrcode_eval::run_eval(config).await {
+                Ok(report) => {
+                    let text = match format.as_str() {
+                        "markdown" | "md" => report.to_markdown(),
+                        _ => report.to_json(),
+                    };
+                    if let Some(path) = output {
+                        if let Err(e) = std::fs::write(&path, &text) {
+                            eprintln!("Failed to write report: {e}");
+                            std::process::exit(1);
+                        }
+                    } else {
+                        println!("{text}");
+                    }
+                    if !report.all_passed() {
+                        std::process::exit(1);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Eval error: {e}");
+                    std::process::exit(1);
+                },
+            }
         },
     }
 }

@@ -532,6 +532,7 @@ fn format_duration(ms: u64) -> String {
 // ─── Registration ─────────────────────────────────────────────────────────
 
 /// Register all built-in renderers into the provided registries.
+/// TODO：使用 MessageRenderer 验证端到端渲染
 pub fn register_builtin(
     tool_reg: &mut ToolRendererRegistry,
     _msg_reg: &mut MessageRendererRegistry,

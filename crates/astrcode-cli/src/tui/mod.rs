@@ -13,7 +13,7 @@
 
 pub(crate) mod app;
 pub(crate) mod command;
-pub(crate) mod component;
+pub(crate) mod composer;
 pub(crate) mod custom_terminal;
 pub(crate) mod ext;
 pub(crate) mod frame;
@@ -55,7 +55,7 @@ pub async fn run() -> io::Result<()> {
 
     let mut terminal = TerminalSession::enter()?;
     let theme = Theme::detect();
-    let mut app = App::new();
+    let mut app = App::new(theme.clone());
 
     // Frame scheduling — draw_tx drives the event_stream's draw channel
     let (draw_tx, draw_rx) = tokio::sync::broadcast::channel::<()>(16);
@@ -133,7 +133,7 @@ pub async fn run() -> io::Result<()> {
         if dirty {
             // Flush scrollback entries into terminal native scrollback.
             let entries = std::mem::take(&mut app.scrollback_queue);
-            terminal.flush_scrollback(entries, &theme)?;
+            terminal.flush_scrollback(entries, &theme, &app.message_renderers)?;
             // Redraw the bottom panel (inline viewport).
             let panel = build_panel(&app, &theme);
             let panel_height = panel_total_height(&panel);
@@ -425,14 +425,6 @@ async fn execute_slash_command(
                 app.status_text = "Resuming session".into();
             }
         },
-        SlashCommand::Sessions => {
-            // /sessions 等同于 /resume（打开 session picker）
-            client
-                .send_command(&ClientCommand::ListSessions)
-                .await
-                .map_err(io_error)?;
-            app.open_session_picker();
-        },
         SlashCommand::Compact => {
             client
                 .send_command(&ClientCommand::Compact)
@@ -453,8 +445,8 @@ async fn execute_slash_command(
         SlashCommand::Help => {
             let mut lines = vec![
                 "/new                 create a fresh session".into(),
-                "/sessions            list known sessions".into(),
-                "/resume <id>         resume a session".into(),
+                "/resume              resume a session (picker)".into(),
+                "/resume <id>         resume a session by id".into(),
                 "/help                show this help".into(),
                 "/quit                exit astrcode".into(),
             ];
@@ -611,7 +603,7 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         lines
     } else if let Some(picker) = &app.session_picker {
         // Session picker 渲染（滑动窗口）
-        let max_visible = 8usize;
+        let max_visible = 10usize;
         let total = picker.items.len();
         let selected = picker.selected.min(total.saturating_sub(1));
         let window_start = if total <= max_visible || selected < max_visible / 2 {
@@ -628,22 +620,39 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
             "  Select session (↑↓ Enter Esc):",
             theme.dim,
         )));
+        // cwd 提示行：让用户清楚自己在看哪个目录的 session
+        if !picker.cwd.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    in {}", compact_path(&picker.cwd)),
+                theme.dim,
+            )));
+        }
         if window_start > 0 {
             lines.push(Line::from(Span::styled(
                 format!("    ↑ {} more", window_start),
                 theme.dim,
             )));
         }
+        let now = chrono::Utc::now();
         for i in window_start..window_end {
             let entry = &picker.items[i];
             let marker = if i == selected { "▸" } else { " " };
             let id_short = entry.session_id.get(..8).unwrap_or(&entry.session_id);
-            let display = format!("  {marker} {id_short}  {}", entry.title);
-            if i == selected {
-                lines.push(Line::from(Span::styled(display, theme.popup_selected)));
+            let rel = store::session_picker::format_relative_time(&entry.last_active_at, now);
+            // 时间列右对齐到 4 个字符宽，缺失时间用空格占位以保持对齐。
+            let time_col = format!("{:>4}", rel);
+            let prefix = format!("  {marker} {id_short}  ");
+            let suffix = format!("  {}", entry.title);
+            let style = if i == selected {
+                theme.popup_selected
             } else {
-                lines.push(Line::from(Span::styled(display, theme.body)));
-            }
+                theme.body
+            };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(time_col, theme.dim),
+                Span::styled(suffix, style),
+            ]));
         }
         if window_end < total {
             lines.push(Line::from(Span::styled(

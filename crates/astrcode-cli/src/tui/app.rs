@@ -10,7 +10,7 @@ use astrcode_protocol::events::ClientNotification;
 
 use crate::tui::{
     command::slash::{self, SlashCommandSpec},
-    component::composer::ComposerState,
+    composer::ComposerState,
     ext::{
         builtin::register_builtin, fallback::DefaultToolRenderer, message::MessageRendererRegistry,
         tool::ToolRendererRegistry,
@@ -50,6 +50,8 @@ pub struct App {
     // Streaming state
     pub stream_states: BTreeMap<String, crate::tui::streaming::controller::StreamController>,
     pub child_agents: BTreeMap<String, crate::tui::store::child_agent::ChildAgentTracker>,
+    /// child_session_id → tool_call_id 映射，用于将子 session 事件路由到对应的 tracker。
+    pub child_session_map: BTreeMap<String, String>,
     // Extension registries
     pub tool_renderers: ToolRendererRegistry,
     pub message_renderers: MessageRendererRegistry,
@@ -64,6 +66,8 @@ pub struct SessionEntry {
     pub title: String,
     pub working_dir: String,
     pub is_child: bool,
+    /// ISO 8601 格式的最后活跃时间，用于排序。
+    pub last_active_at: String,
 }
 
 /// Session picker 交互状态（/resume 触发）。
@@ -71,10 +75,12 @@ pub struct SessionEntry {
 pub struct SessionPicker {
     pub items: Vec<SessionEntry>,
     pub selected: usize,
+    /// 用于过滤的规范化 cwd，同时作为 picker 顶部展示的目录提示。
+    pub cwd: String,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(theme: Theme) -> Self {
         let fallback = std::sync::Arc::new(DefaultToolRenderer);
         let mut tool_renderers = ToolRendererRegistry::new(fallback);
         let mut message_renderers = MessageRendererRegistry::new();
@@ -102,9 +108,10 @@ impl App {
             scrollback_queue: Vec::new(),
             stream_states: BTreeMap::new(),
             child_agents: BTreeMap::new(),
+            child_session_map: BTreeMap::new(),
             tool_renderers,
             message_renderers,
-            theme: Theme::detect(),
+            theme,
         }
     }
 
@@ -269,19 +276,44 @@ impl App {
             .unwrap_or_else(|| needle.to_string())
     }
 
-    /// 打开 session picker：筛选当前项目的 session（排除子会话和当前活跃 session）。
+    /// 打开 session picker：筛选当前 cwd 的 session（排除子会话和当前活跃 session），
+    /// 按最后活跃时间倒序排列，最多显示 10 个。
     pub fn open_session_picker(&mut self) {
-        let cwd = &self.working_dir;
+        // 优先使用进程 cwd（尚无活跃 session 时 self.working_dir 为空）
+        let raw_cwd = if self.working_dir.is_empty() {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        } else {
+            self.working_dir.clone()
+        };
+        let cwd = crate::tui::store::session_picker::canonicalize_working_dir(&raw_cwd);
         let active = self.active_session_id.as_deref();
-        let items: Vec<SessionEntry> = self
+        let mut items: Vec<SessionEntry> = self
             .available_sessions
             .iter()
             .filter(|s| {
-                !s.is_child && s.working_dir == *cwd && active.is_none_or(|a| s.session_id != a)
+                if s.is_child {
+                    return false;
+                }
+                if active.is_some_and(|a| s.session_id == a) {
+                    return false;
+                }
+                let s_cwd =
+                    crate::tui::store::session_picker::canonicalize_working_dir(&s.working_dir);
+                s_cwd == cwd
             })
             .cloned()
             .collect();
-        self.session_picker = Some(SessionPicker { items, selected: 0 });
+        // 按 last_active_at 倒序（最近的在前）
+        items.sort_by(|a, b| b.last_active_at.cmp(&a.last_active_at));
+        // 限制为最近 10 个
+        items.truncate(10);
+        self.session_picker = Some(SessionPicker {
+            items,
+            selected: 0,
+            cwd,
+        });
     }
 
     pub fn close_session_picker(&mut self) {

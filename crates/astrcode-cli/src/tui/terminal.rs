@@ -19,8 +19,9 @@ use ratatui::{
 };
 
 use crate::tui::{
-    custom_terminal::Terminal as CustomTerminal, insert_history::insert_history_lines,
-    render::scrollback_entry_to_lines, store::transcript::ScrollbackEntry, theme::Theme,
+    custom_terminal::Terminal as CustomTerminal, ext::message::MessageRendererRegistry,
+    insert_history::insert_history_lines, render::scrollback_entry_to_lines,
+    store::transcript::ScrollbackEntry, theme::Theme,
 };
 
 const INLINE_VIEWPORT_HEIGHT: u16 = 4;
@@ -78,13 +79,14 @@ impl TerminalSession {
         &mut self,
         entries: Vec<ScrollbackEntry>,
         theme: &Theme,
+        message_renderers: &MessageRendererRegistry,
     ) -> io::Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
         let width = self.terminal.viewport_area.width;
         for entry in entries {
-            let lines = scrollback_entry_to_lines(&entry, width, theme);
+            let lines = scrollback_entry_to_lines(&entry, width, theme, message_renderers);
             // Store in memory for reflow.
             self.history_source.extend(lines.clone());
             // Insert into terminal scrollback.

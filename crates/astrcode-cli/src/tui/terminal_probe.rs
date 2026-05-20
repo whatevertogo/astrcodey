@@ -5,6 +5,10 @@
 //! This module sends the same kinds of optional terminal queries with a caller-provided deadline,
 //! prefers duplicated stdio handles, falls back to the controlling terminal path when stdio is
 //! unavailable, and reports `None` when a response is unavailable.
+//!
+//! TODO: 非阻塞读取在探测期间可能消费掉属于后续正常输入的数据。
+//! 目前时序上无影响（探测发生在 TUI 事件循环启动之前），但若探测时机改动
+//! 则可能丢失按键。未来可考虑将消费到的多余字节推回事件队列。
 
 #[cfg(unix)]
 #[cfg_attr(test, allow(dead_code))]

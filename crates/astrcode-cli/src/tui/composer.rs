@@ -4,10 +4,12 @@
 
 use unicode_width::UnicodeWidthChar;
 
-const PASTE_PLACEHOLDER_THRESHOLD: usize = 1200;
+const PASTE_PLACEHOLDER_THRESHOLD: usize = 600;
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
 /// Composer 可执行的编辑动作。
+// TODO: ComposerAction 暗示了 action-based undo 设计，但 undo 栈尚未接入。
+// 后续可将 apply() 返回的 action 记录到 undo 栈中以支持 Ctrl+Z 撤销。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerAction {
     InsertChar(char),

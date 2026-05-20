@@ -1,6 +1,6 @@
 # AstrCode 设计概述
 
-Rust 实现的 AI coding agent，~58k 行（Rust ~54k + TypeScript ~4.8k），19 crates，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~60k 行（Rust ~55k + TypeScript ~4.8k），21 crates，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -27,6 +27,7 @@ Rust 实现的 AI coding agent，~58k 行（Rust ~54k + TypeScript ~4.8k），19
 - `TurnRunner` 处理完一个回合即丢弃，不持有跨回合状态
 - 从 session projection 读取历史，组装本轮工具和扩展，写回新事件，然后消失
 - Agent 崩溃不影响会话——事件已持久化，重新投影即可继续
+- Agent 循环核心位于 `astrcode-session` crate（`turn_runner.rs` / `turn_stages.rs`），而非 `astrcode-server`
 
 ### 事件流路径
 
@@ -55,7 +56,7 @@ Compact是一个**严格的 XML contract**：
 - 输出有 token 上限（`COMPACT_OUTPUT_TOKEN_CAP`）
 - 解析器容忍外层 markdown fence、大小写不敏感的 XML tag，但不容忍结构缺失
 
-### 闭包式 LLM 调用
+### 闭环式 LLM 调用
 
 Compact 通过 `make_compact_request_fn` 从 `LlmProvider` 构造请求闭包：
 
@@ -197,7 +198,20 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ---
 
-## 7. 运行模式
+## 7. Eval 框架
+
+`astrcode-eval` 提供自动化评测能力，用于量化 Agent 在不同任务上的表现：
+
+- **测试用例**（`eval-tasks/cases/`）：TOML 格式定义，包含 prompt、setup fixture、judge 规则
+- **HTTP 服务器控制**：自动启动/停止 `astrcode-server`，隔离评测环境
+- **事件日志指标提取**：从 JSONL 事件流中提取 turn 数、工具调用次数、耗时等指标
+- **Judge 机制**：通过规则判定任务完成质量（文件存在性、内容匹配等）
+- **结构化报告**：汇总所有用例结果，输出通过率和指标统计
+- **CLI 集成**：通过 `cargo run --features dev-mode -- eval` 运行，`dev-mode` feature gate 控制
+
+---
+
+## 8. 运行模式
 
 ### Code 模式（默认）
 
@@ -217,20 +231,20 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ---
 
-## 8. 项目统计
+## 9. 项目统计
 
 | 指标 | 数值 |
 |------|------|
-| Rust 代码行数 | ~54k |
+| Rust 代码行数 | ~55k |
 | TypeScript/TSX 代码行数 | ~4.8k |
-| Crates 数量 | 19 |
-| Rust 源文件数量 | 192 |
+| Crates 数量 | 21（含 Tauri shell） |
+| Rust 源文件数量 | 203 |
 | 内置工具数量 | 8 |
 | 扩展 crate 数量 | 7 |
 
 ---
 
-## 9. 关键设计决策
+## 10. 关键设计决策
 
 ### Session-First 事件溯源
 
@@ -250,9 +264,23 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 
 ---
 
-## 10. CI/CD 与发行
+## 11. CI/CD 与发行
 
 - **CI**（`ci.yml`）：Rust fmt/clippy/test + 前端 lint/typecheck/format，跨平台检查（Linux/macOS/Windows）
 - **Release**（`release.yml`）：版本标签触发，构建 6 平台 CLI 二进制 + 4 平台桌面包，发布到 GitHub Release + NPM
 - **Weekly Release**（`weekly-release.yml`）：每周一自动计算版本号并推送标签
-- **NPM 分发**：`@anthropics/astrcode` 平台包自动发布
+- **NPM 分发**：跨平台 CLI 二进制自动发布
+
+---
+
+## 12. LLM Provider 支持
+
+`astrcode-ai` 支持三个 Provider：
+
+| Provider | 模块 | 协议 |
+|----------|------|------|
+| Anthropic | `providers/anthropic.rs` | Messages API (native) |
+| OpenAI | `providers/openai.rs` | Chat Completions + Responses API |
+| Google GenAI | `providers/google_genai.rs` | Gemini API |
+
+所有 Provider 共享 `Utf8StreamDecoder` 和 `SseLineReader` 基础设施，通过 `RetryPolicy` 统一处理错误重试。

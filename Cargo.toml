@@ -21,11 +21,12 @@ members = [
     "crates/astrcode-extension-skill",
     "crates/astrcode-extension-todo-tool",
     "crates/astrcode-extension-mode",
+    "crates/astrcode-eval",
     "src-tauri",
 ]
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "fs", "signal", "process", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -33,6 +34,8 @@ async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 dirs = "6"
 fs2 = "0.4"
 futures = "0.3"
@@ -42,9 +45,33 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde_yaml = "0.9"
 tempfile = "3"
 tokio-util = "0.7"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+regex = "1"
+walkdir = "2"
+toml = "0.8"
+glob = "0.3"
+globset = "0.4"
+ignore = "0.4"
+similar = "2"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+notify = "8"
+
+# --- Profiles ---
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+# Optimize dependencies in dev mode to speed up runtime without hurting
+# incremental compilation of workspace crates.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
+strip = "symbols"

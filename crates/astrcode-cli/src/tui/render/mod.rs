@@ -532,15 +532,19 @@ pub fn layout_visual_text(text: &str, width: usize, cursor: Option<usize>) -> Vi
 
 // ─── Scrollback entry rendering ───────────────────────────────────────────────
 
-use crate::tui::store::transcript::{Message, MessageRole, ScrollbackEntry};
+use crate::tui::{
+    ext::message::MessageRendererRegistry,
+    store::transcript::{Message, MessageRole, ScrollbackEntry},
+};
 
 pub fn scrollback_entry_to_lines(
     entry: &ScrollbackEntry,
     width: u16,
     theme: &Theme,
+    message_renderers: &MessageRendererRegistry,
 ) -> Vec<Line<'static>> {
     match entry {
-        ScrollbackEntry::Message(msg) => message_to_lines(msg, width, theme),
+        ScrollbackEntry::Message(msg) => message_to_lines(msg, width, theme, message_renderers),
         ScrollbackEntry::StreamHeader { role, label } => stream_header_to_lines(role, label, theme),
         ScrollbackEntry::StreamText { role, text } => {
             stream_text_to_lines(role, text, width, theme)
@@ -549,8 +553,32 @@ pub fn scrollback_entry_to_lines(
     }
 }
 
-pub fn message_to_lines(msg: &Message, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+pub fn message_to_lines(
+    msg: &Message,
+    width: u16,
+    theme: &Theme,
+    message_renderers: &MessageRendererRegistry,
+) -> Vec<Line<'static>> {
     let content_width = width.max(1) as usize;
+
+    // 尝试通过 MessageRendererRegistry 分发自定义消息类型。
+    if let Some(custom_type) = msg.body.custom_type.as_deref() {
+        if let Some(renderer) = message_renderers.get(custom_type) {
+            let payload = msg
+                .body
+                .payload
+                .as_ref()
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let opts = crate::tui::ext::message::MessageRenderOpts { expanded: false };
+            if let Some(spec) = renderer.render(&payload, &opts) {
+                let mut lines = Vec::new();
+                render_spec_inner(&spec, &mut lines, content_width, theme, "  ");
+                return lines;
+            }
+        }
+    }
+
     let mut lines = Vec::new();
 
     match &msg.role {

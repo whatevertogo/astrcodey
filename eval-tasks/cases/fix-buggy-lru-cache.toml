@@ -1,0 +1,20 @@
+id = "fix-buggy-lru-cache"
+description = "Fix bugs in a Rust LRU cache implementation to make all tests pass"
+timeout_secs = 120
+tags = ["bugfix", "rust", "medium"]
+prompts = [
+  "The LRU cache in src/lib.rs has bugs — some tests fail. Fix the implementation so all tests pass. Do not modify the tests.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/buggy-rust"
+
+[[judges]]
+type = "command"
+command = "cargo test"
+expect_exit_code = 0
+
+[[judges]]
+type = "event_log"
+condition = "errors == 0"

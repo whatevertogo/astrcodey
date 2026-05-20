@@ -9,11 +9,12 @@ use astrcode_core::{
 use astrcode_protocol::events::{
     ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot,
 };
+use astrcode_support::text::truncate_first_line;
 
 use super::App;
 use crate::tui::{
     command::slash::SlashCommandSpec,
-    store::transcript::{MessageRole, ScrollbackEntry},
+    store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     streaming::controller::StreamController,
 };
 
@@ -68,11 +69,19 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
 }
 
 fn apply_event(app: &mut App, event: &Event) {
-    // 只处理当前活跃 session 的事件；子 session 的事件通过 ToolOutputDelta 在父上呈现。
+    // 只处理当前活跃 session 的事件；子 session 的事件通过直接路由到 child_agent tracker。
     // SessionStarted 例外：它设置 active_session_id。
     if !matches!(&event.payload, EventPayload::SessionStarted { .. }) {
         if let Some(active) = &app.active_session_id {
             if event.session_id.as_str() != active.as_str() {
+                // 检查是否是已跟踪的子 session 事件
+                if let Some(call_id) = app
+                    .child_session_map
+                    .get(event.session_id.as_str())
+                    .cloned()
+                {
+                    apply_child_session_event(app, &call_id, event);
+                }
                 return;
             }
         }
@@ -212,7 +221,7 @@ fn apply_event(app: &mut App, event: &Event) {
             if tool_name == "agent" {
                 app.child_agents.insert(
                     call_id.to_string(),
-                    crate::tui::store::child_agent::ChildAgentTracker,
+                    crate::tui::store::child_agent::ChildAgentTracker::default(),
                 );
                 app.scrollback_queue.push(ScrollbackEntry::StreamHeader {
                     role: MessageRole::Tool,
@@ -229,20 +238,10 @@ fn apply_event(app: &mut App, event: &Event) {
             // Update status with argument summary.
             app.status_text = format!("● {}", tool_call_summary(tool_name, Some(arguments)));
         },
-        EventPayload::ToolOutputDelta { call_id, delta, .. } => {
-            // Child agent: feed to tracker for structured display.
-            if let Some(tracker) = app.child_agents.get_mut(call_id.as_str()) {
-                tracker.handle_delta(delta, &mut app.scrollback_queue);
-                // Also update status bar with current tool progress.
-                for line in delta.lines() {
-                    let clean = line.strip_prefix("child ").unwrap_or(line).trim();
-                    if let Some(tool) = clean.strip_prefix("tool started: ") {
-                        app.status_text = format!("●Task →{tool}");
-                    }
-                }
-            } else {
-                app.status_text = "● Receiving output".to_string();
-            }
+        EventPayload::ToolOutputDelta { .. } => {
+            // 父 session 的非 agent 工具输出——更新 status bar 即可。
+            // 子 agent 的工具进度由 apply_child_session_event 直接处理。
+            app.status_text = "● Receiving output".to_string();
         },
         EventPayload::ToolCallCompleted {
             call_id,
@@ -266,12 +265,20 @@ fn apply_event(app: &mut App, event: &Event) {
                 if let Some(mut tracker) = app.child_agents.remove(call_id.as_str()) {
                     tracker.flush_on_completion(&mut app.scrollback_queue);
                 }
+                // 清理 child_session_map 中引用该 call_id 的条目
+                app.child_session_map.retain(|_, v| v != call_id.as_str());
                 let summary = if result.is_error {
-                    format!("✗ Task failed: {}", truncate_line(&result.content, 80))
+                    format!(
+                        "✗ Task failed: {}",
+                        truncate_first_line(&result.content, 80)
+                    )
                 } else if result.content.trim().is_empty() {
                     "● Task completed".into()
                 } else {
-                    format!("● Task completed — {}", truncate_line(&result.content, 60))
+                    format!(
+                        "● Task completed — {}",
+                        truncate_first_line(&result.content, 60)
+                    )
                 };
                 app.push_message(
                     if result.is_error {
@@ -294,7 +301,7 @@ fn apply_event(app: &mut App, event: &Event) {
                 app.push_message(
                     MessageRole::Error,
                     human_action(tool_name).to_string(),
-                    format!("✗ {}", truncate_line(&err, 100)),
+                    format!("✗ {}", truncate_first_line(&err, 100)),
                     false,
                     None,
                 );
@@ -339,12 +346,13 @@ fn apply_event(app: &mut App, event: &Event) {
             app.model_name = model_id.clone();
         },
         EventPayload::AgentSessionSpawned {
-            child_session_id: _,
+            child_session_id,
             agent_name,
             task,
+            tool_call_id,
             ..
         } => {
-            let short_task = truncate_line(task, 60);
+            let short_task = truncate_first_line(task, 60);
             app.push_message(
                 MessageRole::System,
                 format!("Agent({agent_name})"),
@@ -353,13 +361,17 @@ fn apply_event(app: &mut App, event: &Event) {
                 None,
             );
             app.status_text = format!("● Agent: {agent_name}");
+
+            // 精确建立 child_session_id → call_id 映射。
+            app.child_session_map
+                .insert(child_session_id.to_string(), tool_call_id.to_string());
         },
         EventPayload::AgentSessionCompleted {
-            child_session_id: _,
+            child_session_id,
             summary,
             ..
         } => {
-            let short_summary = truncate_line(summary, 60);
+            let short_summary = truncate_first_line(summary, 60);
             app.push_message(
                 MessageRole::Tool,
                 "Agent".into(),
@@ -367,20 +379,22 @@ fn apply_event(app: &mut App, event: &Event) {
                 false,
                 None,
             );
+            app.child_session_map.remove(child_session_id.as_str());
             app.status_text = "Ready".into();
         },
         EventPayload::AgentSessionFailed {
-            child_session_id: _,
+            child_session_id,
             error,
             ..
         } => {
             app.push_message(
                 MessageRole::Error,
                 "Agent".into(),
-                format!("✗ {}", truncate_line(error, 80)),
+                format!("✗ {}", truncate_first_line(error, 80)),
                 false,
                 None,
             );
+            app.child_session_map.remove(child_session_id.as_str());
         },
         EventPayload::ToolCallBackgrounded {
             tool_name, task_id, ..
@@ -392,7 +406,103 @@ fn apply_event(app: &mut App, event: &Event) {
         } => {
             app.status_text = format!("{} background done ({})", tool_name, task_id);
         },
+        EventPayload::Custom { name, data } => {
+            // 将自定义事件作为带 custom_type 的消息推入 scrollback。
+            // 如果 MessageRendererRegistry 中有匹配的渲染器，渲染时会分发给它；
+            // 否则降级为纯文本（名称 + JSON 预览）。
+            let fallback = format!(
+                "[{name}] {}",
+                astrcode_support::text::compact_inline(&data.to_string(), 80)
+            );
+            let body = MessageBody::with_custom(name.clone(), data.clone(), fallback);
+            let msg = Message {
+                role: MessageRole::System,
+                label: name.clone(),
+                body,
+                is_streaming: false,
+                key: None,
+            };
+            app.scrollback_queue
+                .push(ScrollbackEntry::Message(msg.clone()));
+            app.messages.push(msg);
+        },
         _ => {},
+    }
+}
+
+/// 处理来自子 session 的事件，将工具调用进度路由到对应的 ChildAgentTracker。
+fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
+    match &event.payload {
+        EventPayload::ToolCallStarted { tool_name, .. } => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                tracker.on_tool_started(tool_name);
+                app.status_text = format!("●Task → {tool_name}");
+            }
+        },
+        EventPayload::ToolCallCompleted {
+            tool_name, result, ..
+        } => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                let summary = child_tool_summary(tool_name, result);
+                tracker.on_tool_completed(
+                    tool_name,
+                    &summary,
+                    result.is_error,
+                    &mut app.scrollback_queue,
+                );
+                app.status_text = format!("●Agent: {tool_name} done");
+            }
+        },
+        EventPayload::ErrorOccurred { message, .. } if app.child_agents.contains_key(call_id) => {
+            app.scrollback_queue.push(ScrollbackEntry::StreamText {
+                role: MessageRole::Tool,
+                text: format!("  ! {}", truncate_first_line(message, 80)),
+            });
+        },
+        _ => {},
+    }
+}
+
+/// 子 agent 工具完成的简短摘要。
+fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult) -> String {
+    let content = result.content.trim();
+    if result.is_error {
+        return truncate_first_line(result.error.as_deref().unwrap_or(content), 60);
+    }
+    match tool_name {
+        "shell" => {
+            let line_count = content.lines().count();
+            if line_count <= 1 && !content.is_empty() {
+                truncate_first_line(content, 50)
+            } else if line_count > 1 {
+                format!("{line_count} lines of output")
+            } else {
+                "done".into()
+            }
+        },
+        "read" => {
+            if content.is_empty() {
+                "done".into()
+            } else {
+                format!("{} line(s)", content.lines().count())
+            }
+        },
+        "write" | "edit" | "patch" => "done".into(),
+        "find" => {
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("{count} file(s)")
+        },
+        "grep" => {
+            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
+            format!("{count} match(es)")
+        },
+        _ => {
+            if content.is_empty() {
+                "done".into()
+            } else {
+                truncate_first_line(content, 50)
+            }
+        },
     }
 }
 
@@ -402,6 +512,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     app.messages.clear();
     app.stream_states.clear();
     app.child_agents.clear();
+    app.child_session_map.clear();
 
     for message in &snapshot.messages {
         let role = match message.role.as_str() {
@@ -439,6 +550,7 @@ fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
                 title,
                 working_dir: s.working_dir.clone(),
                 is_child: s.parent_session_id.is_some(),
+                last_active_at: s.last_active_at.clone(),
             }
         })
         .collect();
@@ -515,7 +627,7 @@ fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> 
             let cmd = arguments
                 .and_then(|a| a["command"].as_str())
                 .unwrap_or("...");
-            format!("Running  $ {}", truncate_line(cmd, 60))
+            format!("Running  $ {}", truncate_first_line(cmd, 60))
         },
         "read" => {
             let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
@@ -557,7 +669,7 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
             } else {
                 let line_count = content.lines().count();
                 if line_count <= 1 {
-                    format!("● {}", truncate_line(content, 80))
+                    format!("● {}", truncate_first_line(content, 80))
                 } else {
                     format!("● ({line_count} lines of output)")
                 }
@@ -577,20 +689,9 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
             if content.is_empty() {
                 "● Done".into()
             } else {
-                format!("● {}", truncate_line(content, 60))
+                format!("● {}", truncate_first_line(content, 60))
             }
         },
-    }
-}
-
-fn truncate_line(text: &str, max_chars: usize) -> String {
-    let first_line = text.lines().next().unwrap_or(text);
-    if first_line.chars().count() <= max_chars {
-        first_line.to_string()
-    } else {
-        let mut s: String = first_line.chars().take(max_chars).collect();
-        s.push('…');
-        s
     }
 }
 
@@ -608,7 +709,7 @@ mod tests {
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
     fn make_app() -> App {
-        App::new()
+        App::new(crate::tui::theme::Theme::detect())
     }
 
     fn apply_payload(app: &mut App, payload: EventPayload) {
@@ -797,7 +898,7 @@ mod codex_style_tests {
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
     fn make_app() -> App {
-        App::new()
+        App::new(crate::tui::theme::Theme::detect())
     }
     fn apply_payload(app: &mut App, payload: EventPayload) {
         let event = Event::new("session".into(), Some("turn".into()), payload);

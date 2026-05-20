@@ -1,0 +1,4 @@
+# Eval temporary data
+.tmp/
+results/
+*.json.out

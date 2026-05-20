@@ -1,0 +1,21 @@
+id = "investigate-and-fix-bug"
+description = "Investigate a test failure across multiple files, find the root cause, and fix it"
+timeout_secs = 120
+tags = ["debugging", "python", "multi-file", "medium"]
+prompts = [
+  "test_processor.py is failing. Investigate the code, find the bug, and fix it. The test expects that email addresses with '+' (like alice+work@gmail.com) are valid.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/investigate-bug"
+
+[[judges]]
+type = "command"
+command = "python3 test_processor.py"
+expect_exit_code = 0
+
+[[judges]]
+type = "file_contains"
+path = "src/utils.py"
+not_contains = "if '+' in local"

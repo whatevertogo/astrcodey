@@ -230,6 +230,25 @@ impl CommandHandler {
         event_bus: Arc<ServerEventBus>,
     ) -> CommandHandle {
         let (tx, rx) = mpsc::unbounded_channel();
+        // 注入 prompt 提交回调：子 agent 完成时通过它给父 session 启动 turn。
+        // SessionManager 把回调缓存起来，session_operations 的 watcher 在子 agent
+        // 完成时调用 submit_prompt_to_session 触发，避免 watcher 直接写 UserMessage
+        // 但不启动 turn 的 bug。
+        {
+            let actor_tx = tx.clone();
+            runtime.session_manager.set_prompt_submit_hook(Arc::new(
+                move |session_id, text| {
+                    let (reply, _rx) = oneshot::channel();
+                    if let Err(e) = actor_tx.send(CommandMessage::SubmitInputForSession {
+                        session_id: session_id.clone(),
+                        text,
+                        reply,
+                    }) {
+                        tracing::error!(%session_id, error = %e, "failed to enqueue child-agent prompt submission");
+                    }
+                },
+            ));
+        }
         let mut handler = Self::new(runtime, event_bus, tx.clone());
         let handle = tokio::spawn(async move {
             handler.run(rx).await;

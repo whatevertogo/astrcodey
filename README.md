@@ -10,16 +10,13 @@ web：
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~54k lines of Rust across 19 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based LLM provider layer, a plugin/hook extension system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~55k lines of Rust across 21 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), a plugin/hook extension system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
 
 > **Why?** I wanted to understand how an AI coding agent works at every layer — from SSE stream parsing to context window compaction — so I built one. The architecture draws on engineering practices from several coding agents, but all code is original.
 
 ## Quick Start
 
 ```bash
-# Nightly Rust required
-rustup toolchain install nightly
-
 # Build backend
 cargo build
 
@@ -37,36 +34,46 @@ cd frontend && npm install && npm run dev
 
 # Tauri desktop app (dev mode)
 cd frontend && npm install && npm run tauri:dev
+
+# Eval framework (requires dev-mode feature)
+cargo run --features dev-mode -- eval
 ```
 
 ## Architecture
 
 ```
-          ┌──────────┐  ┌──────────────────┐  ┌───────────┐
-          │   TUI    │  │ Web / Tauri Frontend│  │ ACP Client│
-          │ (ratatui)│  │ React + TypeScript │  │  (stdio)  │
-          └────┬─────┘  └────────┬──────────┘  └─────┬─────┘
-               │                  │ SSE / JSON-RPC     │ ACP JSON-RPC
-               │    stdio         │                    │ over stdio
-               └────────┬────────┘────────────────────┘
+          ┌──────────┐  ┌──────────────────────┐  ┌───────────┐
+          │   TUI    │  │ Web / Tauri Frontend  │  │ ACP Client│
+          │ (ratatui)│  │ React 19 + TypeScript │  │  (stdio)  │
+          └────┬─────┘  └────────┬─────────────┘  └─────┬─────┘
+               │                  │ SSE / JSON-RPC       │ ACP JSON-RPC
+               │    stdio         │                      │ over stdio
+               └────────┬────────┘──────────────────────┘
                    ┌─────┴──────┐
-                   │astrcode-cli │  TUI / exec / server launcher
+                   │astrcode-cli│  TUI / exec / server launcher
                    └─────┬──────┘
                          │
                    ┌─────┴──────┐
-                   │astrcode-   │  Agent loop, session manager, JSON-RPC + HTTP handler
+                   │astrcode-   │  Session management, JSON-RPC + HTTP handler
                    │server      │  ACP adapter, transport, concurrency control
                    └─────┬──────┘
+                         │
+                   ┌─────┴───────┐
+                   │astrcode-    │  Agent loop core: turn runner, tool pipeline
+                   │session      │  LLM stream, context compaction orchestration
+                   └─────┬───────┘
              ┌───────────┼───────────┐
              │           │           │
     ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
     │            │ │extensions │ │ tools        │
-    │ LLM provider│ │Hook system│ │File/shell/   │
-    │ SSE+retry  │ │Native FFI │ │task tools    │
-    └────────┬───┘ │WASM ext   │ └──────────────┘
-             │     └─────┬─────┘
-   ┌─────────┴──┐  ┌──────┴──────────┐
+    │ Anthropic  │ │Hook system│ │File/shell/   │
+    │ OpenAI     │ │Native FFI │ │task tools    │
+    │ Google     │ │WASM ext   │ │              │
+    │ SSE+retry  │ │           │ │              │
+    └────────┬───┘ └─────┬─────┘ └──────────────┘
+             │           │
+   ┌─────────┴──┐  ┌────┴────────────┐
    │astrcode-   │  │ Extension crates │
    │ context    │  │ ├ mcp            │
    │ Token budget│  │ ├ skill         │
@@ -77,7 +84,7 @@ cd frontend && npm install && npm run tauri:dev
         ┌─────────────────────────────┐
         │        Shared layer         │
         │ core · protocol · storage   │
-        │ support · log · session     │
+        │ support · log               │
         └─────────────────────────────┘
 ```
 
@@ -85,44 +92,45 @@ cd frontend && npm install && npm run tauri:dev
 
 | Crate | Lines | Description |
 |---|---|---|
-| `astrcode-server` | 9.3k | Agent loop, session management, JSON-RPC/HTTP/ACP handlers, transport, concurrency control |
-| `astrcode-cli` | 8.2k | Terminal UI (ratatui), headless exec, server launcher |
-| `astrcode-session` | 5.2k | Session runtime: session handle, turn execution, tool pipeline, event bus |
+| `astrcode-server` | 9.5k | Session management, JSON-RPC/HTTP/ACP handlers, transport, concurrency control |
+| `astrcode-cli` | 8.0k | Terminal UI (ratatui), headless exec, server launcher |
+| `astrcode-session` | 5.2k | Agent loop core: turn runner, tool pipeline, LLM stream consumption, compact orchestration |
+| `astrcode-core` | 4.9k | Shared types, traits, config system, error types, prompt composition, extension contracts |
 | `astrcode-tools` | 4.6k | Built-in tools: read, write, edit, patch, find, grep, shell, task |
-| `astrcode-core` | 4.7k | Shared types, traits, config system, error types, prompt composition, extension contracts |
-| `astrcode-ai` | 3.6k | OpenAI-compatible provider (Chat Completions + Responses API), SSE streaming, retry |
+| `astrcode-storage` | 3.7k | JSONL event log, session snapshots, config persistence, file locking |
+| `astrcode-ai` | 3.6k | Multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), SSE streaming, retry |
 | `astrcode-context` | 3.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| `astrcode-storage` | 3.5k | JSONL event log, session snapshots, config persistence, file locking |
-| `astrcode-extensions` | 2.9k | Extension lifecycle, hook dispatch, native extension loading (FFI), WASM extension runtime |
+| `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native extension loading (FFI), WASM extension runtime |
 | `astrcode-extension-mcp` | 1.9k | MCP protocol client via stdio, tool discovery |
 | `astrcode-protocol` | 1.2k | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
 | `astrcode-extension-mode` | 1.2k | Agent running mode switching (Code / Plan), plan artifact, exit gate, keybinding & status item registration |
+| `astrcode-eval` | 1.1k | Eval framework — HTTP server control, event log metrics, structured reporting |
 | `astrcode-extension-skill` | 949 | Slash-command skill discovery and dispatch |
 | `astrcode-extension-todo-tool` | 733 | Progress tracking todo list tool |
-| `astrcode-extension-agent-tools` | 720 | Sub-agent delegation (Agent tool) |
-| `astrcode-support` | 635 | Path resolution, shell detection, text processing |
+| `astrcode-extension-agent-tools` | 704 | Sub-agent delegation, agent discovery (Claude Code compatible format) |
+| `astrcode-support` | 682 | Path resolution, shell detection, text processing |
 | `astrcode-client` | 521 | Typed JSON-RPC client, transport, stream subscription |
 | `astrcode-log` | 353 | File rotation, stderr output, env-filter logging |
 | `astrcode-bundled-extensions` | 39 | Composition root for optional extension crates |
 
-**Total: ~54k lines across 19 Rust crates, 192 source files.**
+**Total: ~55k lines across 20 Rust crates + Tauri shell, 203 source files.**
 
 ### Frontend & Desktop App
 
 | Component | Lines | Description |
 |---|---|---|
 | `frontend/` (React + TS) | ~4.8k | Web frontend — chat view, sidebar, session management, SSE streaming |
-| `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, native dialogs, HTTP plugin |
+| `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
 
-The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite 8 single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri dev`).
+The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
 
-The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides native file dialogs via `tauri-plugin-dialog`.
+The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides single-instance coordination (file-lock + TCP activation) and native file dialogs via `tauri-plugin-dialog`.
 
 ## Key Design Decisions
 
 ### Agent Loop
 
-The agent loop (`astrcode-server/src/agent/`) follows a phased pipeline pattern:
+The agent loop (`astrcode-session`) follows a phased pipeline pattern:
 
 1. **Prepare context** — token budget check, auto-compact if needed
 2. **Build provider request** — hook dispatch, message assembly, MCP tool discovery
@@ -136,11 +144,10 @@ The `ToolPipeline` struct owns tool preprocessing, parallel scheduling, and resu
 
 ### LLM Provider Layer
 
-`astrcode-ai` supports both OpenAI Chat Completions and Responses API modes. Key components:
+`astrcode-ai` supports multiple providers — Anthropic (native Messages API), OpenAI-compatible (Chat Completions + Responses API), and Google GenAI. Key components:
 
 - **`Utf8StreamDecoder`** — handles multi-byte UTF-8 boundaries and bad-byte recovery across TCP chunks
-- **`SseLineReader`** — generic SSE line buffering (reusable for any future provider)
-- **`LlmAccumulator`** — OpenAI-specific event accumulation (tool call tracking, content delta merging)
+- **`SseLineReader`** — generic SSE line buffering (reusable across all providers)
 - **`RetryPolicy`** — exponential backoff with jitter for 429/5xx errors
 
 ### Context Window Management
@@ -188,9 +195,10 @@ The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Proto
 | Mode | Command | Description |
 |---|---|---|
 | **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands |
-| **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl` streaming output |
+| **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl`|
 | **Server** | `cargo run -- server [--addr 0.0.0.0:3847]` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
 | **ACP** | `cargo run -- acp` | ACP stdio adapter for IDE/editor integration |
+| **Eval** | `cargo run --features dev-mode -- eval` | Run evaluation benchmarks (requires `dev-mode` feature) |
 | **Web** | `cd frontend && npm run dev` | Browser-based chat interface connected to the server via SSE |
 | **Desktop** | `cd frontend && npm run tauri:dev` | Tauri desktop app (auto-launches server as sidecar) |
 
@@ -227,8 +235,6 @@ Plugin extensions can register additional slash commands and keybindings at runt
 
 Pre-built binaries are available for Linux, macOS, and Windows (x86_64 + aarch64) via GitHub Releases on every version tag. A weekly automated release pipeline publishes patch bumps every Monday.
 
-NPM packages (`@anthropics/astrcode`) are also published for all platforms.
-
 ## Acknowledgments
 
 This project drew inspiration and design patterns from several open-source projects:
@@ -236,7 +242,6 @@ This project drew inspiration and design patterns from several open-source proje
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — tool execution pipeline, system prompt design
 - **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) references OpenCode's architecture.
 - **[Codex CLI](https://github.com/openai/codex)** — TUI layout and terminal UI design borrow from Codex's approach to rendering agent interactions in the terminal.
-- **[pi-mono](https://github.com/anthropics/pi-mono)** — the plugin extension model and lifecycle hook design were influenced by pi-mono's composable, event-driven extension approach.
 
 ## License
 

@@ -15,6 +15,10 @@ pub enum MessageRole {
 pub struct MessageBody {
     plain: String,
     render: Option<RenderSpec>,
+    /// 扩展自定义消息类型标识，用于分发到 MessageRendererRegistry。
+    pub custom_type: Option<String>,
+    /// 扩展自定义消息 payload（JSON），供 MessageRenderer 消费。
+    pub payload: Option<serde_json::Value>,
 }
 
 impl MessageBody {
@@ -22,6 +26,8 @@ impl MessageBody {
         Self {
             plain: text,
             render: None,
+            custom_type: None,
+            payload: None,
         }
     }
 
@@ -44,6 +50,8 @@ impl MessageBody {
     pub fn set_text(&mut self, text: String) {
         self.plain = text;
         self.render = None;
+        self.custom_type = None;
+        self.payload = None;
     }
 
     pub fn append_text(&mut self, text: &str) {
@@ -57,6 +65,20 @@ impl MessageBody {
             fallback
         };
         self.render = Some(spec);
+    }
+
+    /// 创建携带自定义类型的消息体，供 `MessageRendererRegistry` 分发渲染。
+    ///
+    /// `custom_type` 对应已注册的 `MessageRenderer::custom_type()`。
+    /// `payload` 是传给渲染器的 JSON 数据。
+    /// `fallback` 是渲染器不可用时的纯文本降级内容。
+    pub fn with_custom(custom_type: String, payload: serde_json::Value, fallback: String) -> Self {
+        Self {
+            plain: fallback,
+            render: None,
+            custom_type: Some(custom_type),
+            payload: Some(payload),
+        }
     }
 }
 

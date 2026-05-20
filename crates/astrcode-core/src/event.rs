@@ -110,6 +110,8 @@ pub enum EventPayload {
         /// 持久化以便子 session resume 时重建相同的工具表。
         #[serde(default)]
         tool_policy: Option<ChildToolPolicy>,
+        /// 触发此子会话的工具调用 ID（用于 TUI 路由子 session 事件）。
+        tool_call_id: ToolCallId,
     },
 
     /// Agent 运行开始。
@@ -662,6 +664,7 @@ mod tests {
             agent_name: "reviewer".into(),
             task: "review current diff".into(),
             tool_policy: None,
+            tool_call_id: "call-42".into(),
         };
 
         assert!(payload.is_durable());
@@ -672,6 +675,7 @@ mod tests {
         assert_eq!(value["agent_name"], "reviewer");
         assert_eq!(value["task"], "review current diff");
         assert!(value["tool_policy"].is_null());
+        assert_eq!(value["tool_call_id"], "call-42");
 
         let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(round_trip, payload);

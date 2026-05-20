@@ -33,6 +33,7 @@ LAYERS: dict[str, int] = {
     "astrcode-support": 1,
     "astrcode-protocol": 1,
     "astrcode-ai": 1,
+    "astrcode-eval": 1,
     # L2 – Domain Services
     "astrcode-log": 2,
     "astrcode-storage": 2,

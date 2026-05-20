@@ -1,0 +1,36 @@
+id = "fix-security-vulns"
+description = "Identify and fix security vulnerabilities in a Python application"
+timeout_secs = 120
+tags = ["security", "python", "medium"]
+prompts = [
+  "Review app.py for security vulnerabilities and fix them. At minimum: 1) Fix SQL injection (use parameterized queries), 2) Replace MD5 with proper password hashing (hashlib.pbkdf2_hmac or similar), 3) Fix path traversal in read_user_file, 4) Remove hardcoded admin token, 5) Add input validation. Keep the same function signatures and overall structure.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/security-fix"
+
+[[judges]]
+type = "file_contains"
+path = "app.py"
+not_contains = "f\"INSERT INTO"
+
+[[judges]]
+type = "file_contains"
+path = "app.py"
+not_contains = "f\"SELECT"
+
+[[judges]]
+type = "file_contains"
+path = "app.py"
+not_contains = "hashlib.md5"
+
+[[judges]]
+type = "file_contains"
+path = "app.py"
+not_contains = "admin123"
+
+[[judges]]
+type = "file_contains"
+path = "app.py"
+contains = "os.path"
