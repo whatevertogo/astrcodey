@@ -220,7 +220,12 @@ fn read_memory_string(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) ->
     let start = ptr as usize;
     let end = start + len as usize;
     if end > data.len() {
-        tracing::warn!(ptr, len, mem_size = data.len(), "wasm guest: out-of-bounds memory read");
+        tracing::warn!(
+            ptr,
+            len,
+            mem_size = data.len(),
+            "wasm guest: out-of-bounds memory read"
+        );
         return String::new();
     }
     String::from_utf8_lossy(&data[start..end]).into_owned()

@@ -12,8 +12,6 @@ use astrcode_core::{
     event::{EventPayload, ToolOutputStream},
     tool::*,
 };
-
-use crate::files::tool_call_id;
 use astrcode_support::{
     hostpaths::resolve_path,
     shell::{ShellFamily, ShellInfo, resolve_shell},
@@ -23,6 +21,8 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
 };
+
+use crate::files::tool_call_id;
 
 /// Shell 命令执行工具，支持流式 stdout/stderr 捕获和超时控制。
 ///
