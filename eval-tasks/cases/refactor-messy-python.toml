@@ -1,0 +1,26 @@
+id = "refactor-messy-python"
+description = "Refactor a poorly-written Python calculator into clean, idiomatic code while preserving behavior"
+timeout_secs = 180
+tags = ["refactor", "python", "medium"]
+prompts = [
+  "Refactor calculator.py to be clean, idiomatic Python. Requirements: Replace the if/elif chain with a dispatch dict or match statement. Use context managers for file handling. Use enumerate instead of manual indexing. Add proper error handling (exceptions, not print+None). Keep the same CLI interface and output format (tests must still pass). Add type hints.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/messy-python"
+
+[[judges]]
+type = "command"
+command = "python3 test_calculator.py"
+expect_exit_code = 0
+
+[[judges]]
+type = "file_contains"
+path = "calculator.py"
+not_contains = "i = i + 1"
+
+[[judges]]
+type = "file_contains"
+path = "calculator.py"
+contains = "def calc"

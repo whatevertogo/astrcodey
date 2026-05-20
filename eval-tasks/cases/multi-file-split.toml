@@ -1,0 +1,33 @@
+id = "multi-file-split"
+description = "Split a monolithic Python script into proper module structure while keeping tests passing"
+timeout_secs = 180
+tags = ["refactor", "python", "architecture", "hard"]
+prompts = [
+  "The task manager in src/main.py is a single monolithic file. Split it into a proper package structure: src/storage.py (persistence), src/models.py (task data operations), src/display.py (formatting and printing), src/main.py (CLI entry point that imports from the above). All existing functionality must be preserved. test_integration.py must still pass. No external dependencies. Each module should have a clear single responsibility.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/multi-file-refactor"
+
+[[judges]]
+type = "command"
+command = "python3 test_integration.py"
+expect_exit_code = 0
+
+[[judges]]
+type = "file_exists"
+path = "src/storage.py"
+
+[[judges]]
+type = "file_exists"
+path = "src/models.py"
+
+[[judges]]
+type = "file_exists"
+path = "src/display.py"
+
+[[judges]]
+type = "file_contains"
+path = "src/main.py"
+contains = "import"

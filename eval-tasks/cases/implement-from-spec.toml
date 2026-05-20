@@ -1,0 +1,16 @@
+id = "implement-from-spec"
+description = "Implement a data structure from a specification (tests provided, no starter code)"
+timeout_secs = 180
+tags = ["implementation", "rust", "medium"]
+prompts = [
+  "Implement a Trie (prefix tree) in src/lib.rs that passes all the provided tests. The tests are already written. Implement the Trie struct with: new(), insert(&mut self, word: &str), search(&self, word: &str) -> bool, starts_with(&self, prefix: &str) -> bool, words_with_prefix(&self, prefix: &str) -> Vec<String>. Do not modify the tests.",
+]
+
+[setup]
+type = "template"
+path = "fixtures/implement-trie"
+
+[[judges]]
+type = "command"
+command = "cargo test"
+expect_exit_code = 0

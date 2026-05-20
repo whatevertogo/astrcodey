@@ -1,0 +1,19 @@
+id = "simple-file-create"
+description = "Create a simple file with specific content (smoke test for basic agent capability)"
+timeout_secs = 60
+tags = ["smoke", "fast"]
+prompts = [
+  "Create a file called hello.txt containing exactly the text 'Hello, World!' (no trailing newline, no quotes).",
+]
+
+[setup]
+type = "empty"
+
+[[judges]]
+type = "file_exists"
+path = "hello.txt"
+
+[[judges]]
+type = "command"
+command = "test \"$(cat hello.txt)\" = 'Hello, World!'"
+expect_exit_code = 0
