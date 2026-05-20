@@ -88,6 +88,8 @@ pub enum TuiEvent {
     Key(KeyEvent),
     Paste(String),
     Draw,
+    ScrollUp(u16),
+    ScrollDown(u16),
 }
 
 // ─── EventStream ─────────────────────────────────────────────────────────────

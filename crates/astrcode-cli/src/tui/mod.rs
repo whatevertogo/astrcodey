@@ -1,25 +1,28 @@
 //! TUI — interactive terminal mode.
 //!
-//! Pi-style architecture:
-//! - History messages written directly to stdout (terminal owns scrollback + reflow)
-//! - Bottom panel (composer + footer) redrawn each frame using ANSI escapes
-//! - Resize handled entirely by terminal emulator — no DECSTBM / scroll regions
+//! Inline viewport design (same as codex-rs):
+//! - History is written to terminal native scrollback via insert_history_lines
+//! - Bottom panel (composer + status + footer) lives in a fixed inline viewport
+//! - User can scroll up with mouse/keyboard to see history
+//! - Resize: pending_viewport_area heuristic adjusts viewport position
 //! - ToolRenderer / MessageRenderer registries (pi-mono design)
 //! - AdaptiveChunkingPolicy for streaming (codex design)
 
-// The Component/Container/OverlayStack infrastructure is intentionally built
-// ahead of the main loop wiring. Suppress dead_code for these public APIs.
+// Suppress dead_code for Component infrastructure (built ahead of wiring).
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod app;
 pub(crate) mod command;
 pub(crate) mod component;
+pub(crate) mod custom_terminal;
 pub(crate) mod ext;
 pub(crate) mod frame;
+pub(crate) mod insert_history;
 pub(crate) mod render;
 pub(crate) mod store;
 pub(crate) mod streaming;
 pub(crate) mod terminal;
+pub(crate) mod terminal_probe;
 pub(crate) mod theme;
 
 use std::{io, sync::Arc};
@@ -66,8 +69,10 @@ pub async fn run() -> io::Result<()> {
     let mut chunking_policy = AdaptiveChunkingPolicy::new();
 
     // Initial draw
-    let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
-    terminal.draw_panel(panel_lines, cursor_col, cursor_row_offset)?;
+    let panel = build_panel(&app, &theme);
+    terminal.draw_frame(|frame| {
+        render_panel(frame, &panel);
+    })?;
 
     // Query extension commands
     client
@@ -95,6 +100,7 @@ pub async fn run() -> io::Result<()> {
                         app.composer.insert_paste(&text);
                     },
                     TuiEvent::Draw => {},
+                    TuiEvent::ScrollUp(_) | TuiEvent::ScrollDown(_) => {},
                 }
                 dirty = true;
             },
@@ -124,12 +130,14 @@ pub async fn run() -> io::Result<()> {
             break;
         }
         if dirty {
-            // Flush scrollback entries into terminal history buffer.
+            // Flush scrollback entries into terminal native scrollback.
             let entries = std::mem::take(&mut app.scrollback_queue);
             terminal.flush_scrollback(entries, &theme)?;
-            // Redraw the bottom panel.
-            let (panel_lines, cursor_col, cursor_row_offset) = build_panel(&app, &theme);
-            terminal.draw_panel(panel_lines, cursor_col, cursor_row_offset)?;
+            // Redraw the bottom panel (inline viewport).
+            let panel = build_panel(&app, &theme);
+            terminal.draw_frame(|frame| {
+                render_panel(frame, &panel);
+            })?;
         }
     }
 
@@ -234,6 +242,12 @@ async fn handle_key(
                 },
                 _ => {},
             }
+        },
+        KeyCode::PageUp => {
+            // No-op in inline viewport mode (user scrolls with terminal native scroll).
+        },
+        KeyCode::PageDown => {
+            // No-op in inline viewport mode.
         },
         KeyCode::Char(ch) => {
             if key.modifiers.contains(KeyModifiers::ALT) {
@@ -418,78 +432,52 @@ async fn execute_slash_command(
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
-/// Build the bottom panel lines + cursor position for the frame.
-/// Codex/Claude Code style: bordered input + status + footer.
-fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, u16, u16) {
+/// Panel state built from App, then rendered into the Frame.
+struct Panel {
+    composer_lines: Vec<ratatui::text::Line<'static>>,
+    status_line: ratatui::text::Line<'static>,
+    footer_line: ratatui::text::Line<'static>,
+    cursor_col: u16,
+    cursor_row: u16,
+}
+
+fn build_panel(app: &App, theme: &Theme) -> Panel {
     use ratatui::text::{Line, Span};
     use render::layout_visual_text;
 
     let width = crossterm::terminal::size()
         .map(|(w, _)| w as usize)
-        .unwrap_or(80);
-    let composer_width = width.saturating_sub(4);
+        .unwrap_or(80)
+        .saturating_sub(4);
 
-    let vl = layout_visual_text(
-        app.composer.text(),
-        composer_width,
-        Some(app.composer.cursor()),
-    );
-    // Cursor position: account for the "│ " prefix (2 chars).
+    let vl = layout_visual_text(app.composer.text(), width, Some(app.composer.cursor()));
     let cursor_col = 2 + vl.cursor_column.unwrap_or(0) as u16;
-    let cursor_row_offset = 1u16; // Row 1 of panel (after the top border)
+    let cursor_row = vl.cursor_row.unwrap_or(0) as u16;
 
-    let mut panel_lines: Vec<Line<'static>> = Vec::new();
-
-    // Slash palette (show above the composer if active).
-    if app.show_slash_palette {
-        let commands = command::slash::filtered(&app.slash_filter, &app.extension_commands);
-        let selected = app.slash_selected.min(commands.len().saturating_sub(1));
-        for (i, cmd) in commands.iter().take(6).enumerate() {
-            let marker = if i == selected { "▸ " } else { "  " };
-            let style = if i == selected {
-                theme.assistant_label
-            } else {
-                theme.dim
-            };
-            panel_lines.push(Line::from(Span::styled(
-                format!("{marker}{:<14} {}", cmd.usage, cmd.description),
-                style,
-            )));
-        }
-        // Replace cursor_row_offset to point past the slash lines.
-        let (panel_lines_out, _, _) =
-            build_panel_inner(app, theme, panel_lines, commands.len() as u16);
-        return (
-            panel_lines_out,
-            cursor_col,
-            commands.len().min(6) as u16 + 1,
-        );
-    }
-
-    // Composer line.
-    if app.composer.text().is_empty() {
-        panel_lines.push(Line::from(vec![
+    let composer_lines: Vec<Line<'static>> = if app.composer.text().is_empty() {
+        vec![Line::from(vec![
             Span::styled("> ", theme.assistant_label),
             Span::styled(
                 "Ask astrcode to inspect, edit, or explain...",
                 theme.composer_placeholder,
             ),
-        ]));
+        ])]
     } else {
-        let first_line = vl.lines.first().cloned().unwrap_or_default();
-        panel_lines.push(Line::from(vec![
-            Span::styled("> ", theme.assistant_label),
-            Span::styled(first_line, theme.composer),
-        ]));
-    }
+        vl.lines
+            .into_iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                let prefix = if idx == 0 { "> " } else { "  " };
+                Line::from(vec![
+                    Span::styled(prefix, theme.assistant_label),
+                    Span::styled(line, theme.composer),
+                ])
+            })
+            .collect()
+    };
 
-    // Status line.
-    panel_lines.push(Line::from(Span::styled(
-        format!("  {}", app.status_text),
-        theme.dim,
-    )));
+    let status_line = Line::from(Span::styled(format!("  {}", app.status_text), theme.dim));
 
-    // Footer: model · cwd · session · hints.
     let session = app
         .active_session_id
         .as_deref()
@@ -510,62 +498,64 @@ fn build_panel(app: &App, theme: &Theme) -> (Vec<ratatui::text::Line<'static>>, 
     } else {
         "Enter send · /help"
     };
-    panel_lines.push(Line::from(Span::styled(
+    let footer_line = Line::from(Span::styled(
         format!("  {model} · {cwd} · {session}   {hints}"),
         theme.footer,
-    )));
+    ));
 
-    // Pad to PANEL_HEIGHT.
-    while panel_lines.len() < 4 {
-        panel_lines.push(Line::from(""));
+    Panel {
+        composer_lines,
+        status_line,
+        footer_line,
+        cursor_col,
+        cursor_row,
     }
-
-    (panel_lines, cursor_col, cursor_row_offset.saturating_sub(1))
 }
 
-fn build_panel_inner(
-    app: &App,
-    theme: &Theme,
-    mut lines: Vec<ratatui::text::Line<'static>>,
-    _slash_count: u16,
-) -> (Vec<ratatui::text::Line<'static>>, u16, u16) {
-    use ratatui::text::{Line, Span};
+fn render_panel(frame: &mut custom_terminal::Frame<'_>, panel: &Panel) {
+    use ratatui::{
+        layout::{Constraint, Direction, Layout},
+        text::{Line, Span, Text},
+        widgets::Paragraph,
+    };
 
-    // Composer line after slash items.
-    if app.composer.text().is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("> ", theme.assistant_label),
-            Span::styled("...", theme.composer_placeholder),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("> ", theme.assistant_label),
-            Span::styled(app.composer.text().to_string(), theme.composer),
-        ]));
+    let area = frame.area();
+    if area.height < 3 {
+        return;
     }
 
-    // Footer.
-    let session = app
-        .active_session_id
-        .as_deref()
-        .map(|id| id.get(..8).unwrap_or(id))
-        .unwrap_or("none");
-    let model = if app.model_name.is_empty() {
-        "model: pending"
-    } else {
-        &app.model_name
-    };
-    let hints = if app.is_streaming {
-        "Esc stop"
-    } else {
-        "Tab/Enter select · Esc close"
-    };
-    lines.push(Line::from(Span::styled(
-        format!("  {model} · {session}   {hints}"),
-        theme.footer,
-    )));
+    // Layout: [buffer(1), composer(N-2), status(1), footer(1)]
+    let footer_height = 1u16;
+    let status_height = 1u16;
+    let buffer_height = 1u16;
+    let composer_height = area
+        .height
+        .saturating_sub(footer_height + status_height + buffer_height);
 
-    (lines, 0, 0)
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(buffer_height),
+            Constraint::Length(composer_height),
+            Constraint::Length(status_height),
+            Constraint::Length(footer_height),
+        ])
+        .split(area);
+
+    // Composer
+    let text = Text::from(panel.composer_lines.clone());
+    frame.render_widget(Paragraph::new(text), layout[1]);
+
+    // Cursor position within the composer area.
+    let cx = layout[1].x + panel.cursor_col.min(layout[1].width.saturating_sub(1));
+    let cy = layout[1].y + panel.cursor_row.min(layout[1].height.saturating_sub(1));
+    frame.set_cursor_position((cx, cy));
+
+    // Status
+    frame.render_widget(Paragraph::new(panel.status_line.clone()), layout[2]);
+
+    // Footer
+    frame.render_widget(Paragraph::new(panel.footer_line.clone()), layout[3]);
 }
 
 fn compact_path(path: &str) -> String {
