@@ -5,7 +5,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::{event::{Event, EventPayload}, types::*};
+use astrcode_core::{
+    event::{Event, EventPayload},
+    types::*,
+};
 use astrcode_protocol::{
     commands::ClientCommand,
     events::{ClientNotification, SessionListItem},
@@ -290,7 +293,10 @@ impl CommandHandler {
     /// 提交用户输入，如有已有 Turn 运行则路由为中途消息注入。
     async fn submit_prompt(&mut self, text: String) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        match self.submit_input_for_session(sid.clone(), text.clone()).await {
+        match self
+            .submit_input_for_session(sid.clone(), text.clone())
+            .await
+        {
             Ok(_) => Ok(()),
             Err(HandlerError::TurnAlreadyRunning) => {
                 // 已有 active turn → 视为中途消息注入（兼容未升级到 InjectMessage 的客户端）

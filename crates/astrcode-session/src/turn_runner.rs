@@ -304,10 +304,7 @@ impl TurnRunner {
     /// 存在噪音遍历开销。若未来多 agent 并发导致事件量激增使 Lagged 频繁发生，
     /// 考虑改用专用 mpsc channel（TurnHandle 暴露 sender）或 Session 级
     /// `Arc<Mutex<VecDeque<MidTurnMessage>>>` 替代 broadcast 过滤方案。
-    fn drain_mid_turn_messages(
-        &mut self,
-        state: &mut TurnState,
-    ) {
+    fn drain_mid_turn_messages(&mut self, state: &mut TurnState) {
         loop {
             match self.event_rx.try_recv() {
                 Ok(event) => {
@@ -318,7 +315,10 @@ impl TurnRunner {
                 },
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "broadcast receiver lagged, skipping lost events");
+                    tracing::warn!(
+                        skipped = n,
+                        "broadcast receiver lagged, skipping lost events"
+                    );
                 },
                 Err(broadcast::error::TryRecvError::Closed) => break,
             }

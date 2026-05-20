@@ -124,14 +124,12 @@ fn apply_event(app: &mut App, event: &Event) {
             let width = 120; // TODO: get from terminal width
             app.stream_states
                 .insert(message_id.to_string(), StreamController::new(Some(width)));
-            app.scrollback_queue.push(ScrollbackEntry::StreamHeader {
-                role: MessageRole::Assistant,
-                label: "Astrcode".into(),
-            });
+            // 不立刻写 StreamHeader，延迟到第一个 AssistantTextDelta 时再写，
+            // 避免模型直接走 tool_call 时留下空块。
             app.push_message(
                 MessageRole::Assistant,
                 "Astrcode".into(),
-                "Thinking...".into(),
+                String::new(),
                 true,
                 Some(message_id.to_string()),
             );
@@ -139,14 +137,15 @@ fn apply_event(app: &mut App, event: &Event) {
             tracing::debug!(message_id = %message_id, "stream_open");
         },
         EventPayload::AssistantTextDelta { message_id, delta } => {
-            // 第一次收到 text delta 时清除 "Thinking..." 占位
+            // 第一次收到 text delta 时写入 StreamHeader
             let is_first_delta = app
                 .find_message_mut(message_id.as_str())
-                .is_some_and(|msg| msg.body.plain_text() == "Thinking...");
+                .is_some_and(|msg| msg.body.is_empty());
             if is_first_delta {
-                if let Some(msg) = app.find_message_mut(message_id.as_str()) {
-                    msg.body.set_text(String::new());
-                }
+                app.scrollback_queue.push(ScrollbackEntry::StreamHeader {
+                    role: MessageRole::Assistant,
+                    label: "Astrcode".into(),
+                });
                 app.status_text = "Working".into();
             }
             if let Some(msg) = app.find_message_mut(message_id.as_str()) {

@@ -477,7 +477,8 @@ impl Session {
         let bg_session = Arc::new(self.clone());
         let bg_sink = sink.clone();
         // TODO: 更好的后台处理？
-        let _forwarder = spawn_background_forwarder(background_result_rx, bg_session, bg_sink, None);
+        let _forwarder =
+            spawn_background_forwarder(background_result_rx, bg_session, bg_sink, None);
 
         // refresh_prompt 写过事件时 projection 已变，需要 re-read；命中 fingerprint
         // 跳过的情况下 pre_state 仍然反映最新状态。

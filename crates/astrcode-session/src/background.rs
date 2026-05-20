@@ -175,8 +175,7 @@ pub fn complete_background_task(
 }
 
 /// 后台任务完成时的回调类型。
-pub type OnBackgroundComplete =
-    Arc<dyn Fn(&SessionId, &str, &str) + Send + Sync>;
+pub type OnBackgroundComplete = Arc<dyn Fn(&SessionId, &str, &str) + Send + Sync>;
 
 /// 后台任务完成事件的统一转发器。
 ///
