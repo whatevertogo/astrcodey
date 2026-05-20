@@ -281,40 +281,55 @@ where
         self.viewport_area.width.saturating_sub(2).max(1) as usize
     }
 
-    /// Update inline viewport height, matching Codex's resize-reflow logic.
+    /// Update inline viewport height, following codex-rs resize-reflow best practice.
     ///
-    /// When the terminal shrinks, scrolls content above the viewport upward.
-    /// When the terminal grows and the viewport was bottom-aligned, moves the
-    /// viewport back to the bottom so new space appears as history area.
+    /// Key rules:
+    /// - When terminal shrinks: do NOT scroll (resize reflow rebuilds history from source)
+    /// - When terminal grows and viewport was bottom-aligned: re-anchor to bottom
+    /// - Only scroll when viewport height *increases* (e.g. opening slash popup) and the expanded
+    ///   viewport would go past screen bottom
+    /// - Clear from min(old_y, new_y) to avoid ghost content
+    ///
     /// Returns `true` when the caller must invalidate the diff buffer.
     pub fn update_inline_viewport(&mut self, height: u16) -> io::Result<bool> {
         let size = self.size()?;
+        let terminal_height_shrank = size.height < self.last_known_screen_size.height;
+        let terminal_height_grew = size.height > self.last_known_screen_size.height;
+        let viewport_was_bottom_aligned =
+            self.viewport_area.bottom() == self.last_known_screen_size.height;
+        let previous_area = self.viewport_area;
+
         let mut area = self.viewport_area;
         area.height = height.min(size.height);
         area.width = size.width;
 
         if area.bottom() > size.height {
             let scroll_by = area.bottom() - size.height;
-            self.backend_mut()
-                .scroll_region_up(0..area.top(), scroll_by)?;
+            // Only scroll when the viewport *itself* grew (e.g. slash popup opened),
+            // not when the terminal shrank (resize reflow handles that).
+            if !terminal_height_shrank {
+                self.backend_mut()
+                    .scroll_region_up(0..area.top(), scroll_by)?;
+            }
             area.y = size.height - area.height;
-        }
-
-        // Re-anchor to bottom when viewport shrinks (e.g. closing popup overlay)
-        if area.height < self.viewport_area.height {
+        } else if terminal_height_grew && viewport_was_bottom_aligned {
+            // Re-anchor to bottom when terminal grows and viewport was bottom-aligned.
             area.y = size.height.saturating_sub(area.height);
         }
 
+        let mut needs_full_repaint = false;
         if area != self.viewport_area {
-            self.clear()?;
+            // Clear from the topmost changed row to avoid ghost content.
+            let clear_y = previous_area.y.min(area.y);
             self.set_viewport_area(area);
+            self.backend_mut()
+                .set_cursor_position(ratatui::layout::Position::new(0, clear_y))?;
+            self.backend_mut().clear_region(ClearType::AfterCursor)?;
+            self.previous_buffer_mut().reset();
+            needs_full_repaint = true;
         }
 
-        // NOTE: Do NOT update last_known_screen_size here.
-        // That is handled by autoresize() inside draw(), which is called
-        // after update_inline_viewport. Updating it here would cause
-        // pending_viewport_area to miss the resize on the next frame.
-        Ok(false)
+        Ok(needs_full_repaint)
     }
 }
 
