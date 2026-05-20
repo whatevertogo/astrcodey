@@ -157,6 +157,8 @@ pub async fn run_http_server(
 }
 
 /// 将运行时端口写入 `~/.astrcode/run.json`，供前端 dev server 发现后端地址。
+///
+/// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
 pub fn write_run_info(port: u16, auth_token: &str) {
     let dir = astrcode_support::hostpaths::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -171,6 +173,16 @@ pub fn write_run_info(port: u16, auth_token: &str) {
     .to_string();
     if let Err(e) = std::fs::write(&path, &content) {
         tracing::warn!(path = %path.display(), error = %e, "failed to write run.json");
+        return;
+    }
+    // 防止同机用户通过 `~/.astrcode/run.json` 读取到该进程的 auth token
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&path, perms) {
+            tracing::warn!(path = %path.display(), error = %e, "failed to chmod 600 run.json");
+        }
     }
 }
 

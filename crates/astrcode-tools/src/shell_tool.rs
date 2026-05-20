@@ -12,6 +12,8 @@ use astrcode_core::{
     event::{EventPayload, ToolOutputStream},
     tool::*,
 };
+
+use crate::files::tool_call_id;
 use astrcode_support::{
     hostpaths::resolve_path,
     shell::{ShellFamily, ShellInfo, resolve_shell},
@@ -368,10 +370,6 @@ fn render_shell_output(stdout: &str, stderr: &str) -> String {
         (true, false) => format!("STDERR:\n{stderr}"),
         (false, false) => format!("{stdout}\nSTDERR:\n{stderr}"),
     }
-}
-
-fn tool_call_id(ctx: &ToolExecutionContext) -> String {
-    ctx.tool_call_id.clone().unwrap_or_default()
 }
 
 // TODO: sandbox support — execute commands in isolated environment

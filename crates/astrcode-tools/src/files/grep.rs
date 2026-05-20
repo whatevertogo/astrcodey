@@ -274,7 +274,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Number of matches to skip for pagination."
+                    "description": "Number of items to skip for pagination. Unit depends on outputMode: matching lines (content), matched files (files_with_matches/count)."
                 },
                 "glob": {
                     "type": "string",

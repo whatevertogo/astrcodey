@@ -37,6 +37,54 @@ use super::{
 };
 use crate::bootstrap::ServerRuntime;
 
+/// SSE live stream 的内部状态。
+///
+/// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
+struct LiveStreamState {
+    rx: broadcast::Receiver<ClientNotification>,
+    runtime: Arc<ServerRuntime>,
+    session_id: SessionId,
+    /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
+    replay_max_seq: Option<u64>,
+    /// Lagged 后设为 true，下一次 poll 返回 None 关闭流。
+    closing: bool,
+    /// 单个事件产出多条 delta 时，剩余待发送的缓冲。
+    pending:
+        std::collections::VecDeque<Result<axum::response::sse::Event, std::convert::Infallible>>,
+    /// 缓存 PatchArguments 的累积参数，FinalizeBlock 时注入。
+    ///
+    /// TODO: 如果事件模型改为在 FinalizeBlock 时直接携带完整 arguments，
+    /// 则此缓存可移除。当前是补事件流增量模型的设计缺口。
+    tool_args: HashMap<String, String>,
+}
+
+impl LiveStreamState {
+    /// 追踪 PatchArguments 增量并在 FinalizeBlock 时注入完整参数。
+    fn patch_tool_args(&mut self, deltas: &mut [ConversationDeltaDto]) {
+        for delta in deltas.iter() {
+            if let ConversationDeltaDto::PatchArguments {
+                block_id,
+                arguments,
+            } = delta
+            {
+                self.tool_args.insert(block_id.clone(), arguments.clone());
+            }
+        }
+        for delta in deltas.iter_mut() {
+            if let ConversationDeltaDto::FinalizeBlock {
+                block: ConversationBlockDto::ToolCall { id, arguments, .. },
+            } = delta
+            {
+                if arguments.is_empty() {
+                    if let Some(args) = self.tool_args.remove(id) {
+                        *arguments = args;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct StreamQuery {
     cursor: Option<String>,
@@ -117,41 +165,31 @@ pub(in crate::http) async fn session_stream(
 
     let live_runtime = Arc::clone(&http_state.runtime);
     let live_stream = stream::unfold(
-        (
+        LiveStreamState {
             rx,
-            live_runtime,
+            runtime: live_runtime,
             session_id,
             replay_max_seq,
-            false,
-            std::collections::VecDeque::<
-                Result<axum::response::sse::Event, std::convert::Infallible>,
-            >::new(),
-            HashMap::<String, String>::new(),
-        ),
-        |(mut rx, runtime, session_id, replay_max_seq, closing, mut pending, mut tool_args)| async move {
-            if closing {
+            closing: false,
+            pending: std::collections::VecDeque::new(),
+            tool_args: HashMap::new(),
+        },
+        |mut state| async move {
+            if state.closing {
                 return None;
             }
 
-            if let Some(item) = pending.pop_front() {
-                return Some((
-                    item,
-                    (
-                        rx,
-                        runtime,
-                        session_id,
-                        replay_max_seq,
-                        false,
-                        pending,
-                        tool_args,
-                    ),
-                ));
+            if let Some(item) = state.pending.pop_front() {
+                return Some((item, state));
             }
 
             loop {
-                match rx.recv().await {
-                    Ok(ClientNotification::Event(event)) if event.session_id == session_id => {
-                        if replay_max_seq
+                match state.rx.recv().await {
+                    Ok(ClientNotification::Event(event))
+                        if event.session_id == state.session_id =>
+                    {
+                        if state
+                            .replay_max_seq
                             .zip(event.seq)
                             .is_some_and(|(max_seq, event_seq)| event_seq <= max_seq)
                         {
@@ -161,35 +199,13 @@ pub(in crate::http) async fn session_stream(
                         if deltas.is_empty() {
                             continue;
                         }
-                        // Track arguments from PatchArguments deltas.
-                        for delta in &deltas {
-                            if let ConversationDeltaDto::PatchArguments {
-                                block_id,
-                                arguments,
-                            } = delta
-                            {
-                                tool_args.insert(block_id.clone(), arguments.clone());
-                            }
-                        }
-                        // Fill in arguments for FinalizeBlock tool calls.
-                        for delta in &mut deltas {
-                            if let ConversationDeltaDto::FinalizeBlock {
-                                block: ConversationBlockDto::ToolCall { id, arguments, .. },
-                            } = delta
-                            {
-                                if arguments.is_empty() {
-                                    if let Some(args) = tool_args.remove(id) {
-                                        *arguments = args;
-                                    }
-                                }
-                            }
-                        }
-                        let cursor = event_cursor(&runtime, &event).await;
-                        let items: std::collections::VecDeque<_> = deltas
+                        state.patch_tool_args(&mut deltas);
+                        let cursor = event_cursor(&state.runtime, &event).await;
+                        let mut items: std::collections::VecDeque<_> = deltas
                             .into_iter()
                             .map(|delta| {
                                 Ok(sse_event(&ConversationStreamEnvelopeDto {
-                                    session_id: session_id.to_string(),
+                                    session_id: state.session_id.to_string(),
                                     cursor: ConversationCursorDto {
                                         value: cursor.clone(),
                                     },
@@ -197,43 +213,22 @@ pub(in crate::http) async fn session_stream(
                                 }))
                             })
                             .collect();
-                        let mut items = items;
                         let Some(first) = items.pop_front() else {
                             continue;
                         };
-                        return Some((
-                            first,
-                            (
-                                rx,
-                                runtime,
-                                session_id,
-                                replay_max_seq,
-                                false,
-                                items,
-                                tool_args,
-                            ),
-                        ));
+                        state.pending = items;
+                        return Some((first, state));
                     },
                     Ok(_) => {},
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let cursor = state_cursor(&runtime, &session_id).await;
+                        let cursor = state_cursor(&state.runtime, &state.session_id).await;
                         let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
-                            session_id: session_id.to_string(),
+                            session_id: state.session_id.to_string(),
                             cursor: ConversationCursorDto { value: cursor },
                             delta: ConversationDeltaDto::RehydrateRequired,
                         }));
-                        return Some((
-                            item,
-                            (
-                                rx,
-                                runtime,
-                                session_id,
-                                replay_max_seq,
-                                true,
-                                pending,
-                                tool_args,
-                            ),
-                        ));
+                        state.closing = true;
+                        return Some((item, state));
                     },
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }

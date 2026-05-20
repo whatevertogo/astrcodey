@@ -31,7 +31,7 @@ struct FindFilesArgs {
     /// 搜索的根目录（默认为工作目录）
     #[serde(default)]
     root: Option<PathBuf>,
-    /// 返回结果的最大数量（默认 500）
+    /// 返回结果的最大数量（默认 100）
     #[serde(default)]
     max_results: Option<usize>,
     /// 跳过的结果数量（用于分页）

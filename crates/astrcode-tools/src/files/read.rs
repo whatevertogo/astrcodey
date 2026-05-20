@@ -128,6 +128,9 @@ impl Tool for ReadFileTool {
             "truncated".into(),
             serde_json::json!(rendered.has_more || line_truncated),
         );
+        // 明确标记截断来源，方便客户端决定用 nextOffset 还是 nextCharOffset 续读
+        meta.insert("lineTruncated".into(), serde_json::json!(line_truncated));
+        meta.insert("charTruncated".into(), serde_json::json!(rendered.has_more));
         if line_truncated {
             meta.insert(
                 "nextOffset".into(),

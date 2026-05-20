@@ -300,7 +300,7 @@ pub(super) fn resolve_sandboxed_path(
     Ok(path)
 }
 
-pub(super) fn tool_call_id(ctx: &ToolExecutionContext) -> String {
+pub(crate) fn tool_call_id(ctx: &ToolExecutionContext) -> String {
     ctx.tool_call_id.clone().unwrap_or_default()
 }
 

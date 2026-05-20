@@ -13,6 +13,7 @@ pub use find::FindFilesTool;
 pub use grep::GrepTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadFileTool;
+pub(crate) use shared::tool_call_id;
 pub use write::WriteFileTool;
 
 #[cfg(test)]
