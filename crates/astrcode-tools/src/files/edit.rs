@@ -4,8 +4,8 @@ use astrcode_core::tool::*;
 use serde::Deserialize;
 
 use super::shared::{
-    clean_quotes, find_unique_occurrence, remember_file_observation, resolve_sandboxed_path,
-    stale_file_guard_result, tool_call_id,
+    clean_quotes, compute_unified_diff, find_unique_occurrence, remember_file_observation,
+    resolve_sandboxed_path, stale_file_guard_result, tool_call_id,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
 
@@ -98,6 +98,16 @@ impl Tool for EditFileTool {
             ("oldBytes".into(), serde_json::json!(original.len())),
             ("newBytes".into(), serde_json::json!(updated.len())),
         ]);
+        let mut metadata = metadata;
+        // 注入 unified diff 供 TUI/前端结构化渲染。
+        let display_path = path.display().to_string();
+        let (diff_text, ins, del) =
+            compute_unified_diff(&display_path, &original, &updated, 80);
+        if !diff_text.is_empty() {
+            metadata.insert("diff".into(), serde_json::json!(diff_text));
+            metadata.insert("insertions".into(), serde_json::json!(ins));
+            metadata.insert("deletions".into(), serde_json::json!(del));
+        }
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
             content: format!("Edited {}", path.display()),

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock, time::Instant};
 use astrcode_core::tool::*;
 use serde::Deserialize;
 
-use super::shared::{resolve_sandboxed_path, tool_call_id};
+use super::shared::{compute_unified_diff, resolve_sandboxed_path, tool_call_id};
 // ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
@@ -81,6 +81,17 @@ impl Tool for WriteFileTool {
         metadata.insert("created".into(), serde_json::json!(old_bytes.is_none()));
         if let Some(old_bytes) = old_bytes {
             metadata.insert("oldBytes".into(), serde_json::json!(old_bytes));
+        }
+        // 注入 unified diff 供 TUI/前端结构化渲染。
+        if let Some(ref old_text) = old {
+            let display_path = path.display().to_string();
+            let (diff_text, ins, del) =
+                compute_unified_diff(&display_path, old_text, &args.content, 80);
+            if !diff_text.is_empty() {
+                metadata.insert("diff".into(), serde_json::json!(diff_text));
+                metadata.insert("insertions".into(), serde_json::json!(ins));
+                metadata.insert("deletions".into(), serde_json::json!(del));
+            }
         }
         Ok(ToolResult {
             call_id: tool_call_id(ctx),
