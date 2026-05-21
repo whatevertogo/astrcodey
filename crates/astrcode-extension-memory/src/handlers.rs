@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::MemoryStore;
+use crate::store::MemoryStorePool;
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
@@ -77,7 +77,7 @@ fn ok_text(content: String) -> ToolResult {
 // ─── Save Handler ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySaveHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
 }
 
 #[derive(Deserialize)]
@@ -97,12 +97,13 @@ impl ToolHandler for MemorySaveHandler {
         &self,
         _tool_name: &str,
         arguments: serde_json::Value,
-        _working_dir: &str,
+        working_dir: &str,
         _ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let store = self.store.clone();
+        let store = self.store_pool.get(working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = args.content;
         let category = args.category;
         tokio::task::spawn_blocking(move || store.append(&category, &content))
@@ -116,7 +117,7 @@ impl ToolHandler for MemorySaveHandler {
 // ─── Delete Handler ──────────────────────────────────────────────────
 
 pub(crate) struct MemoryDeleteHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
 }
 
 #[derive(Deserialize)]
@@ -131,7 +132,7 @@ impl ToolHandler for MemoryDeleteHandler {
         &self,
         _tool_name: &str,
         arguments: serde_json::Value,
-        _working_dir: &str,
+        working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: DeleteArgs = serde_json::from_value(arguments)
@@ -139,7 +140,8 @@ impl ToolHandler for MemoryDeleteHandler {
         if args.match_pattern.trim().is_empty() {
             return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()));
         }
-        let store = self.store.clone();
+        let store = self.store_pool.get(working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
         let removed = tokio::task::spawn_blocking(move || store.delete_by_content(&pattern))
@@ -172,16 +174,17 @@ impl ToolHandler for MemoryDeleteHandler {
 // ─── Recall Handler (PromptBuild) ────────────────────────────────────
 
 pub(crate) struct MemoryRecallHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
 }
 
 #[async_trait::async_trait]
 impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(
         &self,
-        _ctx: PromptBuildContext,
+        ctx: PromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
-        let store = self.store.clone();
+        let store = self.store_pool.get(&ctx.working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = match tokio::task::spawn_blocking(move || store.read_memory()).await {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
@@ -241,7 +244,7 @@ pub(crate) struct TurnExtractState {
 }
 
 pub(crate) struct MemoryTurnEndHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
     pub small_llm: Arc<dyn LlmProvider>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub(crate) extract_state: Mutex<TurnExtractState>,
@@ -279,7 +282,8 @@ impl LifecycleHandler for MemoryTurnEndHandler {
             state.last_extract = Some(now);
         }
 
-        let store = self.store.clone();
+        let store = self.store_pool.get(&ctx.working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let small_llm = self.small_llm.clone();
         let session_id = ctx.session_id.clone();
         let assistant_message = exchange.assistant_message.clone();
@@ -371,7 +375,7 @@ impl MemoryPipelineCoordinator {
 }
 
 pub(crate) struct MemorySessionStartHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
     pub session_read: Arc<dyn SessionReadSource>,
     pub small_llm: Arc<dyn LlmProvider>,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
@@ -391,7 +395,8 @@ impl LifecycleHandler for MemorySessionStartHandler {
             return Ok(HookResult::Allow);
         }
 
-        let store = self.store.clone();
+        let store = self.store_pool.get(&ctx.working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let session_read = self.session_read.clone();
         let small_llm = self.small_llm.clone();
         let Some(mut current_session_id) = self.pipeline.request_run(ctx.session_id.to_string())
@@ -443,7 +448,7 @@ impl LifecycleHandler for MemorySessionStartHandler {
 // ─── Command Handler (/memory) ───────────────────────────────────────
 
 pub(crate) struct MemoryCommandHandler {
-    pub store: Arc<MemoryStore>,
+    pub store_pool: Arc<MemoryStorePool>,
 }
 
 #[async_trait::async_trait]
@@ -452,10 +457,11 @@ impl astrcode_core::extension::CommandHandler for MemoryCommandHandler {
         &self,
         _command_name: &str,
         args: &str,
-        _working_dir: &str,
+        working_dir: &str,
         _ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let store = self.store.clone();
+        let store = self.store_pool.get(working_dir)
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let args = args.trim().to_string();
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {

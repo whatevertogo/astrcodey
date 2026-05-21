@@ -26,7 +26,7 @@ use handlers::{
     MemorySessionStartHandler, MemoryTurnEndHandler,
 };
 use parking_lot::Mutex;
-use store::MemoryStore;
+use store::MemoryStorePool;
 
 /// 返回记忆扩展。
 ///
@@ -44,10 +44,9 @@ pub fn extension(
         )
     })?;
 
-    let store = MemoryStore::new().map_err(|e| ExtensionError::Internal(e.to_string()))?;
-    let store = Arc::new(store);
+    let store_pool = Arc::new(MemoryStorePool::new());
     Ok(Arc::new(MemoryExtension {
-        store,
+        store_pool,
         small_llm,
         session_read,
         pipeline: Arc::new(handlers::MemoryPipelineCoordinator::default()),
@@ -56,7 +55,7 @@ pub fn extension(
 }
 
 struct MemoryExtension {
-    store: Arc<MemoryStore>,
+    store_pool: Arc<MemoryStorePool>,
     small_llm: Arc<dyn LlmProvider>,
     session_read: Arc<dyn SessionReadSource>,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
@@ -88,19 +87,19 @@ impl Extension for MemoryExtension {
         reg.tool(
             handlers::memory_save_definition(),
             Arc::new(MemorySaveHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
             }),
         );
         reg.tool(
             handlers::memory_delete_definition(),
             Arc::new(MemoryDeleteHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
             }),
         );
         reg.on_prompt_build(
             0,
             Arc::new(MemoryRecallHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
             }),
         );
         reg.on_event(
@@ -108,7 +107,7 @@ impl Extension for MemoryExtension {
             HookMode::NonBlocking,
             0,
             Arc::new(MemorySessionStartHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
                 session_read: self.session_read.clone(),
                 small_llm: self.small_llm.clone(),
                 pipeline: self.pipeline.clone(),
@@ -120,7 +119,7 @@ impl Extension for MemoryExtension {
             HookMode::NonBlocking,
             0,
             Arc::new(MemoryTurnEndHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
                 small_llm: self.small_llm.clone(),
                 tasks: self.tasks.clone(),
                 extract_state: Default::default(),
@@ -129,7 +128,7 @@ impl Extension for MemoryExtension {
         reg.command(
             handlers::memory_command_definition(),
             Arc::new(MemoryCommandHandler {
-                store: self.store.clone(),
+                store_pool: self.store_pool.clone(),
             }),
         );
     }

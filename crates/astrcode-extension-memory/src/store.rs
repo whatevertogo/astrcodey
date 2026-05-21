@@ -6,6 +6,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
+    sync::Arc,
 };
 
 use astrcode_support::{
@@ -177,8 +178,20 @@ pub(crate) struct MemoryStore {
 }
 
 impl MemoryStore {
-    pub(crate) fn new() -> std::io::Result<Self> {
-        let dir = hostpaths::extensions_data_dir("astrcode.memory");
+    pub(crate) fn new(project_path: Option<&str>) -> std::io::Result<Self> {
+        let dir = if let Some(proj_path) = project_path {
+            // 基于项目路径创建唯一的存储目录
+            let project_key = astrcode_core::types::project_key_from_path(std::path::Path::new(proj_path));
+            hostpaths::astrcode_dir()
+                .join("projects")
+                .join(project_key)
+                .join("extension_data")
+                .join("astrcode.memory")
+        } else {
+            // 全局存储（向后兼容）
+            hostpaths::extensions_data_dir("astrcode.memory")
+        };
+
         ensure_dir(&dir)?;
         let store = Self {
             dir,
@@ -530,6 +543,45 @@ fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+// ─── MemoryStorePool ───────────────────────────────────────────────────
+
+/// 管理多个项目级 MemoryStore 的池。
+///
+/// 每个项目有独立的存储目录，通过 working_dir 获取对应的 store。
+#[derive(Clone)]
+pub(crate) struct MemoryStorePool {
+    stores: Arc<Mutex<BTreeMap<String, Arc<MemoryStore>>>>,
+}
+
+impl MemoryStorePool {
+    pub(crate) fn new() -> Self {
+        Self {
+            stores: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// 根据 working_dir 获取对应的 MemoryStore。
+    ///
+    /// 如果该 working_dir 的 store 不存在，则自动创建。
+    pub(crate) fn get(&self, working_dir: &str) -> std::io::Result<Arc<MemoryStore>> {
+        let mut stores = self.stores.lock();
+
+        if let Some(store) = stores.get(working_dir) {
+            return Ok(store.clone());
+        }
+
+        let store = Arc::new(MemoryStore::new(Some(working_dir))?);
+        stores.insert(working_dir.to_string(), store.clone());
+        Ok(store)
+    }
+}
+
+impl Default for MemoryStorePool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
