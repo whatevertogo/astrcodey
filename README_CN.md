@@ -1,6 +1,7 @@
 # AstrCode
 
 **BE PI OR BETTER THAN PI**
+Inspired by Claude Code, Codex, OpenCode, and Pi — but built as a Rust-native
 
 <img width="1401" height="995" alt="image" src="https://github.com/user-attachments/assets/26e9b719-8911-4fdf-a989-065ce9b9ea7e" />
 
