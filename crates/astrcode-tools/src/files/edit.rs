@@ -246,7 +246,8 @@ fn apply_one_edit(
     if replace_all {
         if !content.contains(old_str) {
             return Err(ToolError::Execution(format!(
-                "oldStr not found in {}",
+                "oldStr not found in {}. Re-`read` the file and copy oldStr verbatim from the \
+                 output — whitespace and line endings must match exactly.",
                 path.display()
             )));
         }
@@ -257,7 +258,8 @@ fn apply_one_edit(
 
     let Some(pos) = find_unique_occurrence(content, old_str)? else {
         return Err(ToolError::Execution(format!(
-            "oldStr not found in {}",
+            "oldStr not found in {}. Re-`read` the file and copy oldStr verbatim from the output \
+             — whitespace and line endings must match exactly.",
             path.display()
         )));
     };

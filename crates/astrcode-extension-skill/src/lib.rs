@@ -214,10 +214,14 @@ fn skill_tool_metadata()
     map.insert(
         SKILL_TOOL_NAME.to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
-            "Call the Skill tool with the exact skill name before continuing when a task matches \
-             one of the listed skills.",
+            "Call `Skill` with the exact skill name from [Skills] before continuing when a task \
+             matches one of the listed skills.",
         )
-        .caveat("Users may also refer to skills as slash commands, such as /commit.")
+        .caveat("Users may also refer to skills as slash commands, e.g. `/commit`.")
+        .caveat(
+            "If the response says the skill was not found, the available skill names are listed \
+             with it. Pick from that list — do not retry with a guessed name.",
+        )
         .prompt_tag(astrcode_core::tool::ToolPromptTag::Discovery),
     );
     map
@@ -295,8 +299,9 @@ struct SkillToolArgs {
 fn skill_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SKILL_TOOL_NAME.into(),
-        description: "Execute a named skill by loading its instructions into the main \
-                      conversation."
+        description: "Load a named skill's instructions into the conversation. Call this when the \
+                      current task matches a skill listed in [Skills], or when the user invokes \
+                      it via slash command (e.g. `/commit`)."
             .into(),
         parameters: json!({
             "type": "object",
@@ -304,11 +309,11 @@ fn skill_tool_definition() -> ToolDefinition {
             "properties": {
                 "skill": {
                     "type": "string",
-                    "description": "The skill name, for example \"commit\", \"review\", or \"/commit\"."
+                    "description": "Skill name, e.g. \"commit\" or \"/commit\". Must match an entry from [Skills]."
                 },
                 "args": {
                     "type": "string",
-                    "description": "Optional free-form arguments for the skill."
+                    "description": "Optional free-form arguments forwarded to the skill."
                 }
             },
             "required": ["skill"]
@@ -330,7 +335,8 @@ fn handle_skill_tool(
             let msg = format!("invalid Skill input: {error}");
             return ToolResult {
                 call_id: String::new(),
-                content: String::new(),
+                // content 必须非空,LLM 只读 content,不读 error 字段。
+                content: msg.clone(),
                 is_error: true,
                 error: Some(msg),
                 metadata: BTreeMap::new(),

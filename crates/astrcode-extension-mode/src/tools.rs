@@ -23,10 +23,9 @@ pub const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
 pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
-        description: "\
-Switch the agent running mode. Available modes: \"code\" (default execution with full tools) and \
-                      \"plan\" (read-only planning mode). In plan mode, the first switch back to \
-                      code triggers an exit review gate; call again after review to complete the \
+        description: "Switch agent mode. `code` (default) allows full execution; `plan` is \
+                      read-only for planning. The first switch from `plan` back to `code` \
+                      triggers an exit-review checklist; call again after review to complete the \
                       transition."
             .into(),
         parameters: json!({
@@ -36,7 +35,7 @@ Switch the agent running mode. Available modes: \"code\" (default execution with
                 "mode": {
                     "type": "string",
                     "enum": ["code", "plan"],
-                    "description": "The target mode to switch to."
+                    "description": "Target mode."
                 }
             },
             "required": ["mode"]
@@ -49,11 +48,9 @@ Switch the agent running mode. Available modes: \"code\" (default execution with
 pub fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
-        description: "\
-Create or update the session plan artifact. The plan must contain all required headings: Context, \
-                      Goal, Scope, Non-Goals, Existing Code to Reuse, Implementation Steps, \
-                      Verification, Dependencies and Risks, Assumptions (defaults and open \
-                      questions). Only available in plan mode."
+        description: "Create or update the session plan (plan mode only). Must include all \
+                      headings: Context, Goal, Scope, Non-Goals, Existing Code to Reuse, \
+                      Implementation Steps, Verification, Dependencies and Risks, Assumptions."
             .into(),
         parameters: json!({
             "type": "object",
@@ -61,7 +58,7 @@ Create or update the session plan artifact. The plan must contain all required h
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The full plan content in markdown. Must include all required headings."
+                    "description": "Full plan markdown including all required headings."
                 }
             },
             "required": ["content"]

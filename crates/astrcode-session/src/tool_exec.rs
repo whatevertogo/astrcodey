@@ -70,27 +70,32 @@ fn error_tool_result(
         ),
         ToolError::InvalidArguments(detail) => (
             format!("Invalid arguments for `{tool_name}`: {detail}"),
-            "Check the parameter schema and try again with corrected arguments.".to_string(),
+            "Re-read the parameter schema and retry with corrected arguments. Do not retry with \
+             the same arguments."
+                .to_string(),
         ),
         ToolError::Execution(detail) => (
             format!("`{tool_name}` failed: {detail}"),
-            "Review the error above. Try different arguments, or use a different approach to \
-             accomplish the same goal."
+            "Inspect the error above. Adjust arguments or pick a different approach. Do not retry \
+             the identical call."
                 .to_string(),
         ),
         ToolError::Blocked(reason) => (
             format!("`{tool_name}` was blocked: {reason}"),
-            "A hook policy prevented this operation. Check the reason above and adjust your \
-             approach."
+            "A hook policy prevented this. Read the reason and adjust your approach instead of \
+             retrying."
                 .to_string(),
         ),
         ToolError::Timeout(ms) => (
             format!("`{tool_name}` timed out after {ms}ms."),
-            "The operation is still running in the background. Use `task` to check on it, or try \
-             again with a smaller scope."
+            "The process may still be running in the background. Use `task` to inspect or cancel \
+             it, or retry with a smaller scope."
                 .to_string(),
         ),
     };
+
+    // suggestion 拼接进 content,LLM 才能看到——单独放进 metadata 不会进 prompt。
+    let llm_visible = format!("{message}\nSuggestion: {suggestion}");
 
     let mut metadata = tool_metadata([
         ("toolName", serde_json::json!(tool_name)),
@@ -102,9 +107,9 @@ fn error_tool_result(
 
     ToolResult {
         call_id,
-        content: message.clone(),
+        content: llm_visible.clone(),
         is_error: true,
-        error: Some(message),
+        error: Some(llm_visible),
         metadata,
         duration_ms: Some(duration.as_millis() as u64),
     }

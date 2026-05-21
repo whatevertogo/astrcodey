@@ -94,16 +94,14 @@ impl AgentShared {
 // 定义 → 参数 → 构建逻辑 → 渲染 → Handler，自上而下阅读即可理解完整流程。
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific \
-     capabilities and tools available to it.\n\nWhen NOT to use this tool:\n- If you want to read \
-     a specific file, use the Read tool directly\n- If you are searching for a specific symbol or \
-     class definition, use grep directly\n- If you are searching within a specific file or a set \
-     of 2-3 files, use Read or grep directly\n- If you can accomplish the task with 2-3 direct \
-     tool calls, do it yourself\n\nMultiple agents can be launched in a single response to handle \
-     independent tasks concurrently.\n\nSee the [Agents] section in the system prompt for \
-     available agent types.";
+    "Delegate a complex, multi-step task to a specialized subagent. Each subagent type has its \
+     own tool set listed in [Agents].\n\nWhen NOT to use:\n- Reading 1-3 known files → use \
+     `read`\n- Searching for a symbol or pattern → use `grep`/`find` directly\n- Anything \
+     achievable in 2-6 direct tool calls → do it yourself\n\nMultiple agents can run in parallel \
+     for independent subtasks. Set `waitForResult=false` to background a subagent and continue \
+     reasoning; you will be notified when it completes.";
 
-const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"Short 3-5 word description of the task"},"prompt":{"type":"string","description":"Task for the subagent"},"subagentType":{"type":"string","description":"Agent name from agents/ directory"},"waitForResult":{"type":"boolean","default":true,"description":"If true (default), block until the agent completes and return the result. If false, run in the background and return immediately."}},"required":["prompt","description"]}"#;
+const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
 fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -353,17 +351,18 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
-            "Use the agent tool with specialized agents when the task genuinely requires \
-             multi-step exploration or isolated execution context. For broader codebase \
-             exploration, use the agent with subagentType=explore — but only when a simple, \
-             directed search with find/grep proves insufficient or when the task clearly requires \
-             more than 3 queries.",
+            "Delegate to a subagent only when the task needs multi-step exploration or isolated \
+             context. For directed searches (a known symbol, file, or pattern) use `find`/`grep` \
+             directly. Prefer `subagentType=explore` for broad exploration that would otherwise \
+             take more than 3 manual queries.",
         )
         .caveat(
-            "Subagents are valuable for parallelizing independent queries or protecting the main \
-             context window from excessive results, but they should not be used excessively when \
-             not needed. Avoid duplicating work that subagents are already doing — if you \
-             delegate research to a subagent, do not also perform the same searches yourself.",
+            "Don't duplicate work the subagent is doing — if you delegate, stop running the same \
+             searches yourself.",
+        )
+        .caveat(
+            "If the response says the requested `subagentType` was not found, the available \
+             agents are listed below it. Pick from that list and retry; do not invent agent names.",
         )
         .prompt_tag(astrcode_core::tool::ToolPromptTag::Collaboration),
     );

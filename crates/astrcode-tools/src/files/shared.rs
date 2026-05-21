@@ -367,7 +367,9 @@ pub(super) fn find_unique_occurrence(
         let absolute_pos = offset + relative_pos;
         if first_match.replace(absolute_pos).is_some() {
             return Err(ToolError::Execution(
-                "oldStr appears multiple times, must be unique to edit safely".into(),
+                "oldStr matches multiple locations. Add surrounding lines to oldStr until it is \
+                 unique, or set replaceAll=true if every match should change."
+                    .into(),
             ));
         }
 

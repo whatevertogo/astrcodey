@@ -17,8 +17,11 @@ use serde_json::{Value, json};
 pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 
 const TODO_WRITE_DESCRIPTION: &str = "\
-Persist the current progress snapshot for this session. Always send the full current snapshot, not \
-                                      a patch.";
+Persist the progress snapshot for this session. Always send the full current list, not a patch. \
+                                      Use it for multi-step work that benefits from tracking; \
+                                      skip it for trivial one-step tasks, pure Q&A, or anything \
+                                      achievable in roughly three actions. Keep exactly one item \
+                                      `in_progress` at a time.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;

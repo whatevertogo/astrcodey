@@ -771,7 +771,8 @@ fn build_patch_metadata(
 fn patch_error(ctx: &ToolExecutionContext, started_at: Instant, error: &str) -> ToolResult {
     ToolResult {
         call_id: tool_call_id(ctx),
-        content: String::new(),
+        // content 必须非空,否则 LLM 看不到错误细节(LLM 只读 content)。
+        content: format!("patch failed: {error}"),
         is_error: true,
         error: Some(error.into()),
         metadata: BTreeMap::from([

@@ -817,7 +817,7 @@ impl Tool for HandlerTool {
 fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionError) -> ToolResult {
     use astrcode_core::tool::tool_metadata;
 
-    let (content, suggestion) = match &err {
+    let (message, suggestion) = match &err {
         ExtensionError::NotFound(_) => (
             format!("Tool `{tool_name}` is not available."),
             "This tool may have been unregistered. Try `tool_search_tool` to discover available \
@@ -830,15 +830,17 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
         ),
         ExtensionError::Blocked { reason } => (
             format!("Tool `{tool_name}` was blocked: {reason}"),
-            "A hook policy prevented this operation. Check the reason above and adjust your \
-             approach.",
+            "A hook policy prevented this. Read the reason and adjust your approach.",
         ),
         ExtensionError::Internal(message) => (
             format!("Tool `{tool_name}` failed: {message}"),
-            "The extension encountered an internal error. Try again with different arguments, or \
-             use a builtin tool as an alternative.",
+            "Try different arguments or use a builtin tool as an alternative. Do not retry the \
+             identical call.",
         ),
     };
+
+    // suggestion 拼进 content 让 LLM 看到——metadata 不会进 LLM prompt。
+    let content = format!("{message}\nSuggestion: {suggestion}");
 
     let mut metadata = tool_metadata([
         ("extensionId", serde_json::json!(extension_id)),

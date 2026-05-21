@@ -287,12 +287,16 @@ fn mcp_tool_metadata() -> std::collections::HashMap<String, astrcode_core::tool:
 
 fn tool_search_metadata() -> ToolPromptMetadata {
     ToolPromptMetadata::new(
-        "Builtin tools do not need discovery. Use `tool_search_tool` only when builtin tools are \
-         not enough and you need the schema of an external MCP tool.",
+        "Builtin tools do not need discovery. Call `tool_search_tool` only when builtin tools are \
+         insufficient and you need an external MCP tool's schema.",
     )
     .caveat(
-        "After `tool_search_tool` returns candidate tools and schemas, call the matching concrete \
-         `mcp__...` tool directly.",
+        "After `tool_search_tool` returns, call the concrete `mcp__...` tool directly with the \
+         shown schema. Do not call `tool_search_tool` again with the same query.",
+    )
+    .caveat(
+        "If the result reports zero matches, broaden the query or accept that no MCP tool fits — \
+         do not retry the same query.",
     )
     .prompt_tag(ToolPromptTag::Discovery)
     .deferred_discovery_gate(MCP_DEFERRED_GROUP)
@@ -392,8 +396,11 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
 fn tool_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL_SEARCH_TOOL_NAME.into(),
-        description: "Search configured MCP tools by exact name or keywords and return matching \
-                      tool schemas."
+        description: "Find an external MCP tool by name or keyword and return its schema. Call \
+                      this only when builtin tools \
+                      (`read`/`grep`/`find`/`edit`/`patch`/`write`/`shell`) cannot accomplish the \
+                      task. After it returns, call the matching `mcp__...` tool directly using \
+                      the schema shown."
             .into(),
         parameters: json!({
             "type": "object",
@@ -401,14 +408,14 @@ fn tool_search_tool_definition() -> ToolDefinition {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "MCP tool search query. Use \"select:mcp__server__tool\" for exact selection, keywords for search, or +term to require a term."
+                    "description": "Keyword(s), partial tool name, or `select:mcp__server__tool` for exact pick. Prefix `+term` to require a term."
                 },
                 "max_results": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 50,
                     "default": 5,
-                    "description": "Maximum number of matching MCP tools to return."
+                    "description": "Max matches to return."
                 }
             },
             "required": ["query"]
