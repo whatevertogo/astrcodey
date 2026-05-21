@@ -291,7 +291,7 @@ pub struct CompactBoundaryView {
 
 /// 插件事件索引条目——不存 payload，按需从 event log 取。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct extensionEventEntry {
+pub struct ExtensionEventEntry {
     /// 事件在 event log 中的 seq。
     pub seq: u64,
     /// 插件 ID。
@@ -307,12 +307,12 @@ pub struct extensionEventEntry {
 /// 不理解插件语义，只提供按 `extension_id` + `event_type` 的结构化查询。
 /// payload 需要时通过 seq 从 event log 读取。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct extensionEventIndex {
-    entries: Vec<extensionEventEntry>,
+pub struct ExtensionEventIndex {
+    entries: Vec<ExtensionEventEntry>,
     by_extension: HashMap<String, Vec<usize>>,
 }
 
-impl extensionEventIndex {
+impl ExtensionEventIndex {
     /// 追加一条索引。
     pub fn push(&mut self, seq: u64, extension_id: String, event_type: String, schema_version: u32) {
         let idx = self.entries.len();
@@ -320,7 +320,7 @@ impl extensionEventIndex {
             .entry(extension_id.clone())
             .or_default()
             .push(idx);
-        self.entries.push(extensionEventEntry {
+        self.entries.push(ExtensionEventEntry {
             seq,
             extension_id,
             event_type,
@@ -329,7 +329,7 @@ impl extensionEventIndex {
     }
 
     /// 查询某个插件的全部事件（按 seq 排序）。
-    pub fn events_for(&self, extension_id: &str) -> Vec<&extensionEventEntry> {
+    pub fn events_for(&self, extension_id: &str) -> Vec<&ExtensionEventEntry> {
         self.by_extension
             .get(extension_id)
             .map(|indices| indices.iter().map(|&i| &self.entries[i]).collect())
@@ -341,7 +341,7 @@ impl extensionEventIndex {
         &'a self,
         extension_id: &str,
         event_type: &str,
-    ) -> Vec<&'a extensionEventEntry> {
+    ) -> Vec<&'a ExtensionEventEntry> {
         self.events_for(extension_id)
             .into_iter()
             .filter(|e| e.event_type == event_type)
@@ -349,7 +349,7 @@ impl extensionEventIndex {
     }
 
     /// 某个插件的最后一条匹配事件。
-    pub fn last_event(&self, extension_id: &str, event_type: &str) -> Option<&extensionEventEntry> {
+    pub fn last_event(&self, extension_id: &str, event_type: &str) -> Option<&ExtensionEventEntry> {
         self.events_for(extension_id)
             .into_iter()
             .rev()
@@ -418,7 +418,7 @@ pub struct SessionReadModel {
     pub latest_seq: Option<u64>,
     /// 插件事件索引，不存 payload，按需从 event log 取。
     #[serde(default)]
-    pub extension_events: extensionEventIndex,
+    pub extension_events: ExtensionEventIndex,
 }
 
 impl SessionReadModel {
@@ -444,7 +444,7 @@ impl SessionReadModel {
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),
             latest_seq: None,
-            extension_events: extensionEventIndex::default(),
+            extension_events: ExtensionEventIndex::default(),
         }
     }
 

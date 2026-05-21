@@ -51,7 +51,7 @@ pub struct RegisteredSlashCommand {
     pub command: astrcode_core::extension::SlashCommand,
 }
 
-// ─── BoundextensionEventSink ──────────────────────────────────────────────
+// ─── BoundExtensionEventSink ──────────────────────────────────────────────
 
 /// 绑定了 extension_id 和声明校验的事件发射器。
 ///
@@ -60,14 +60,14 @@ pub struct RegisteredSlashCommand {
 ///
 /// TODO: 补单元测试覆盖校验逻辑——未声明的 event_type、schema_version 超限、
 /// payload 超过 max_payload_bytes、正常发射路径。
-struct BoundextensionEventSink {
+struct BoundExtensionEventSink {
     extension_id: String,
-    declarations: HashMap<String, extensionEventDecl>,
+    declarations: HashMap<String, ExtensionEventDecl>,
     event_tx: mpsc::UnboundedSender<EventPayload>,
 }
 
 #[async_trait::async_trait]
-impl extensionEventSink for BoundextensionEventSink {
+impl ExtensionEventSink for BoundExtensionEventSink {
     async fn emit(
         &self,
         event_type: &str,
@@ -95,7 +95,7 @@ impl extensionEventSink for BoundextensionEventSink {
         }
 
         self.event_tx
-            .send(EventPayload::extensionEvent {
+            .send(EventPayload::ExtensionEvent {
                 extension_id: self.extension_id.clone(),
                 event_type: event_type.to_owned(),
                 schema_version,
@@ -128,7 +128,7 @@ struct HandlerIndex {
     command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
     keybindings: Vec<astrcode_core::extension::Keybinding>,
     status_items: Vec<astrcode_core::extension::StatusItem>,
-    extension_event_decls: HashMap<String, Vec<extensionEventDecl>>,
+    extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
     extension_data_dir_extensions: std::collections::HashSet<String>,
 }
 
@@ -147,7 +147,7 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
     let mut keybindings: Vec<astrcode_core::extension::Keybinding> = Vec::new();
     let mut status_items: Vec<astrcode_core::extension::StatusItem> = Vec::new();
-    let mut extension_event_decls: HashMap<String, Vec<extensionEventDecl>> = HashMap::new();
+    let mut extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>> = HashMap::new();
     let mut extension_data_dir_extensions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -764,14 +764,14 @@ impl ExtensionRunner {
         &self,
         extension_id: &str,
         event_tx: mpsc::UnboundedSender<EventPayload>,
-    ) -> Option<Arc<dyn extensionEventSink>> {
+    ) -> Option<Arc<dyn ExtensionEventSink>> {
         let index = self.load_index();
         let decls = index.extension_event_decls.get(extension_id)?;
-        let decl_map: HashMap<String, extensionEventDecl> = decls
+        let decl_map: HashMap<String, ExtensionEventDecl> = decls
             .iter()
             .map(|d| (d.event_type.clone(), d.clone()))
             .collect();
-        Some(Arc::new(BoundextensionEventSink {
+        Some(Arc::new(BoundExtensionEventSink {
             extension_id: extension_id.to_owned(),
             declarations: decl_map,
             event_tx,

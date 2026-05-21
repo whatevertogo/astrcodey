@@ -370,9 +370,9 @@ pub enum EventPayload {
 
     /// 插件命名空间事件。
     ///
-    /// 由 [`crate::extension::extensionEventSink`] 发出，`extension_id` 由 runtime
+    /// 由 [`crate::extension::ExtensionEventSink`] 发出，`extension_id` 由 runtime
     /// 在构造 sink 时注入，插件无法伪造。`event_type` 必须在 Registrar 中声明。
-    extensionEvent {
+    ExtensionEvent {
         /// 插件 ID，充当事件命名空间。
         extension_id: String,
         /// 插件声明的事件类型名（如 `"memory.accepted"`）。

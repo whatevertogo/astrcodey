@@ -249,7 +249,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::BackgroundTaskCompleted { .. } => {},
         EventPayload::Custom { .. } => {},
         EventPayload::RecapGenerated { .. } => {},
-        EventPayload::extensionEvent {
+        EventPayload::ExtensionEvent {
             extension_id,
             event_type,
             schema_version,

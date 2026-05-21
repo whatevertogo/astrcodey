@@ -128,9 +128,9 @@ pub struct ExtensionManifest {
 /// 插件在 [`Registrar`] 中声明的事件类型。
 ///
 /// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
-/// `extension_id` 不在声明中——它由 runtime 在构造 [`extensionEventSink`] 时注入。
+/// `extension_id` 不在声明中——它由 runtime 在构造 [`ExtensionEventSink`] 时注入。
 #[derive(Debug, Clone)]
-pub struct extensionEventDecl {
+pub struct ExtensionEventDecl {
     pub event_type: String,
     pub schema_version: u32,
     pub durable: bool,
@@ -138,7 +138,7 @@ pub struct extensionEventDecl {
 }
 
 /// [`Registrar::extension_event`] 返回的构建器。
-pub struct extensionEventDeclBuilder<'a> {
+pub struct ExtensionEventDeclBuilder<'a> {
     registrar: &'a mut Registrar,
     event_type: String,
     schema_version: u32,
@@ -146,7 +146,7 @@ pub struct extensionEventDeclBuilder<'a> {
     max_payload_bytes: usize,
 }
 
-impl<'a> extensionEventDeclBuilder<'a> {
+impl<'a> ExtensionEventDeclBuilder<'a> {
     pub fn schema_version(mut self, v: u32) -> Self {
         self.schema_version = v;
         self
@@ -160,7 +160,7 @@ impl<'a> extensionEventDeclBuilder<'a> {
         self
     }
     pub fn register(self) {
-        self.registrar.extension_event_decls.push(extensionEventDecl {
+        self.registrar.extension_event_decls.push(ExtensionEventDecl {
             event_type: self.event_type,
             schema_version: self.schema_version,
             durable: self.durable,
@@ -171,7 +171,7 @@ impl<'a> extensionEventDeclBuilder<'a> {
 
 /// 插件事件发射器。`extension_id` 在构造时由 runtime 绑定，调用方无法伪造身份。
 #[async_trait::async_trait]
-pub trait extensionEventSink: Send + Sync {
+pub trait ExtensionEventSink: Send + Sync {
     async fn emit(
         &self,
         event_type: &str,
@@ -472,7 +472,7 @@ pub struct PreToolUseContext {
     pub tool_input: serde_json::Value,
     pub available_tools: Vec<ToolDefinition>,
     /// 插件事件发射器（仅插件钩子会有值）。
-    pub extension_event_sink: Option<std::sync::Arc<dyn extensionEventSink>>,
+    pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
 }
 
 impl std::fmt::Debug for PreToolUseContext {
@@ -499,7 +499,7 @@ pub struct PostToolUseContext {
     pub tool_result: ToolResult,
     pub is_error: bool,
     /// 插件事件发射器（仅插件钩子会有值）。
-    pub extension_event_sink: Option<std::sync::Arc<dyn extensionEventSink>>,
+    pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
 }
 
 impl std::fmt::Debug for PostToolUseContext {
@@ -554,7 +554,7 @@ pub struct LifecycleContext {
     pub working_dir: String,
     pub model: ModelSelection,
     /// 插件事件发射器（仅插件钩子会有值）。
-    pub extension_event_sink: Option<std::sync::Arc<dyn extensionEventSink>>,
+    pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
 }
 
 impl std::fmt::Debug for LifecycleContext {
@@ -705,7 +705,7 @@ pub struct Registrar {
         i32,
         std::sync::Arc<dyn LifecycleHandler>,
     )>,
-    extension_event_decls: Vec<extensionEventDecl>,
+    extension_event_decls: Vec<ExtensionEventDecl>,
     needs_extension_data_dir: bool,
 }
 
@@ -849,8 +849,8 @@ impl Registrar {
     }
 
     /// 声明插件可发出的事件类型，返回构建器。
-    pub fn extension_event(&mut self, event_type: &str) -> extensionEventDeclBuilder<'_> {
-        extensionEventDeclBuilder {
+    pub fn extension_event(&mut self, event_type: &str) -> ExtensionEventDeclBuilder<'_> {
+        ExtensionEventDeclBuilder {
             registrar: self,
             event_type: event_type.to_owned(),
             schema_version: 1,
@@ -929,7 +929,7 @@ impl Registrar {
         &self.status_items
     }
 
-    pub fn extension_event_decls(&self) -> &[extensionEventDecl] {
+    pub fn extension_event_decls(&self) -> &[ExtensionEventDecl] {
         &self.extension_event_decls
     }
 

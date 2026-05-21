@@ -424,7 +424,7 @@ pub struct ToolCapabilities {
     /// 会话原子操作能力（仅子 agent 工具需要）。
     pub session_ops: Option<Arc<dyn SessionOperations>>,
     /// 插件事件发射器（仅插件注册的工具会有值）。
-    pub extension_event_sink: Option<Arc<dyn crate::extension::extensionEventSink>>,
+    pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
 }
 
 /// 每次工具调用时传递的上下文。
