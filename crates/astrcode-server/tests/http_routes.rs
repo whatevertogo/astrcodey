@@ -164,7 +164,7 @@ async fn http_routes_require_bearer_token() {
 }
 
 #[tokio::test]
-async fn concurrent_prompt_accepts_one_and_conflicts_one() {
+async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm));
     let (event_tx, _) = broadcast::channel(64);
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
@@ -177,8 +177,30 @@ async fn concurrent_prompt_accepts_one_and_conflicts_one() {
     let (first, second) = tokio::join!(first, second);
     let statuses = [first.status(), second.status()];
 
+    // input queuing: one Accepted, one Handled (queued for next turn)
     assert!(statuses.contains(&StatusCode::OK));
-    assert!(statuses.contains(&StatusCode::CONFLICT));
+    assert!(statuses.iter().all(|&s| s == StatusCode::OK));
+
+    let first_body = to_bytes(first.into_body(), 4096).await.unwrap();
+    let second_body = to_bytes(second.into_body(), 4096).await.unwrap();
+    let bodies = [first_body, second_body];
+
+    let kinds: Vec<&str> = bodies
+        .iter()
+        .map(|b| {
+            let s = String::from_utf8_lossy(b);
+            if s.contains("\"accepted\"") {
+                "accepted"
+            } else if s.contains("\"handled\"") {
+                "handled"
+            } else {
+                "other"
+            }
+        })
+        .collect();
+
+    assert!(kinds.contains(&"accepted"), "expected one Accepted: {kinds:?}");
+    assert!(kinds.contains(&"handled"), "expected one Handled (queued): {kinds:?}");
 }
 
 #[tokio::test]
