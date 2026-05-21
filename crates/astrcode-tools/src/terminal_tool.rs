@@ -496,7 +496,9 @@ async fn action_close(
     Ok(("closed".into(), metadata, false))
 }
 
-fn action_list(session_id: &str) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
+fn action_list(
+    session_id: &str,
+) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
     let registry = TerminalRegistry::global();
     registry.gc();
     let ids = registry.list_for_session(session_id);
