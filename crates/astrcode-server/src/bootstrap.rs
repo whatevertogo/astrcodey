@@ -6,11 +6,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{
-    config::ConfigStore,
-    extension::ExtensionHostServices,
-    storage::EventStore,
-};
+use astrcode_core::{config::ConfigStore, extension::ExtensionHostServices, storage::EventStore};
 use astrcode_extensions::{
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
@@ -195,13 +191,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&event_store),
         Some(capabilities.small_llm()),
     ));
-    let load_errors = load_extensions_into_runner(
-        &extension_runner,
-        &capabilities,
-        &cwd,
-        Some(host_services),
-    )
-    .await;
+    let load_errors =
+        load_extensions_into_runner(&extension_runner, &capabilities, &cwd, Some(host_services))
+            .await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
     }

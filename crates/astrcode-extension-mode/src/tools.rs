@@ -23,10 +23,10 @@ pub const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
 pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
-        description: "Switch agent mode. `code` (default) allows full execution; `plan` is \
-                      read-only for planning. The first switch from `plan` back to `code` \
-                      triggers an exit-review checklist; call again after review to complete the \
-                      transition."
+        description: "Switch the agent running mode. Available modes: \"code\" (default execution \
+                      with full tools) and \"plan\" (read-only planning mode,use when user wants \
+                      to plan). In plan mode, the first switch back to code triggers an exit \
+                      review gate; call again after review to complete the transition."
             .into(),
         parameters: json!({
             "type": "object",

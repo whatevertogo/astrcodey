@@ -210,10 +210,7 @@ pub struct ExtensionHostServices {
 }
 
 impl ExtensionHostServices {
-    pub fn new(
-        event_store: Arc<dyn EventStore>,
-        small_llm: Option<Arc<dyn LlmProvider>>,
-    ) -> Self {
+    pub fn new(event_store: Arc<dyn EventStore>, small_llm: Option<Arc<dyn LlmProvider>>) -> Self {
         Self {
             session_read: session_read_from_event_store(event_store),
             small_llm,
@@ -249,9 +246,7 @@ impl SessionReadSource for dyn EventStore {
 ///
 /// Rust stable 不支持 `Arc<dyn EventStore> → Arc<dyn SessionReadSource>` 的
 /// trait upcasting，因此需要一个薄的 newtype wrapper。
-fn session_read_from_event_store(
-    event_store: Arc<dyn EventStore>,
-) -> Arc<dyn SessionReadSource> {
+fn session_read_from_event_store(event_store: Arc<dyn EventStore>) -> Arc<dyn SessionReadSource> {
     struct Wrapper(Arc<dyn EventStore>);
 
     #[async_trait::async_trait]
