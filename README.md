@@ -15,6 +15,108 @@ A Rust-built AI coding agent platform.
 
 AstrCode is a full-stack AI coding assistant built from scratch in ~55k lines of Rust across 21 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), a extension/hook extension system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
 
+## Configuration (Recommended Before First Run)
+
+AstrCode 需要配置 LLM 提供商和 API Key 才能正常使用。首次运行前建议先完成以下配置。
+
+### 配置文件位置
+
+| 文件 | 路径 | 用途 |
+|---|---|---|
+| 主配置 | `~/.astrcode/config.json` | LLM 提供商、模型、运行时参数 |
+| 项目配置 | `<workspace>/.astrcode/config.json` | 项目级覆盖（可选） |
+| 全局 MCP | `~/.astrcode/mcp.json` | MCP 服务器配置 |
+| 项目 MCP | `<workspace>/.astrcode/mcp.json` | 项目级 MCP 配置（可选） |
+
+### LLM 提供商配置
+
+`~/.astrcode/config.json` 示例：
+
+```json
+{
+  "version": "1",
+  "activeProfile": "anthropic",
+  "activeModel": "claude-sonnet-4-6",
+  "activeSmallProfile": "anthropic",
+  "activeSmallModel": "claude-haiku-4-5-20251001",
+  "profiles": [
+    {
+      "name": "anthropic",
+      "providerKind": "anthropic",
+      "apiKey": "env:ANTHROPIC_API_KEY",
+      "models": [
+        { "id": "claude-sonnet-4-6", "maxTokens": 16384, "contextLimit": 200000 }
+      ]
+    },
+    {
+      "name": "openai",
+      "providerKind": "openai",
+      "apiKey": "env:OPENAI_API_KEY",
+      "apiMode": "chatCompletions",
+      "models": [
+        { "id": "gpt-4.1", "maxTokens": 16384, "contextLimit": 128000 }
+      ]
+    },
+    {
+      "name": "deepseek",
+      "providerKind": "openai",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKey": "env:DEEPSEEK_API_KEY",
+      "apiMode": "chatCompletions",
+      "models": [
+        { "id": "deepseek-chat", "maxTokens": 16384, "contextLimit": 128000 }
+      ]
+    }
+  ]
+}
+```
+
+**API Key 说明**：推荐使用 `"apiKey": "env:VARIABLE_NAME"` 引用环境变量，避免在配置文件中直接写入密钥。
+
+对应的环境变量需提前设置：
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+export OPENAI_API_KEY="sk-..."
+export DEEPSEEK_API_KEY="sk-..."
+```
+
+### MCP 服务器配置
+
+`~/.astrcode/mcp.json` 用于注册外部 MCP 工具服务器：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
+      "env": {}
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..." }
+    }
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `command` | 是 | 启动 MCP 服务器的命令 |
+| `args` | 否 | 命令行参数数组 |
+| `env` | 否 | 传递给进程的环境变量 |
+| `cwd` | 否 | 工作目录（项目级配置中会校验是否在工作区内） |
+
+项目级 MCP 配置（`<workspace>/.astrcode/mcp.json`）会覆盖全局配置，但需要设置环境变量启用：
+
+```bash
+export ASTRCODE_ENABLE_PROJECT_MCP=1
+```
+
 ## Quick Start
 
 ```bash

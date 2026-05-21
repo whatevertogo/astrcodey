@@ -6,6 +6,16 @@ use std::{
 use astrcode_support::hostpaths;
 use serde::Deserialize;
 
+/// 全局 MCP 配置文件：`~/.astrcode/mcp.json`。
+fn global_config_path() -> PathBuf {
+    hostpaths::astrcode_dir().join("mcp.json")
+}
+
+/// 项目级 MCP 配置文件：`<workspace>/.astrcode/mcp.json`。
+fn project_config_path(workspace: &str) -> PathBuf {
+    PathBuf::from(workspace).join(".astrcode").join("mcp.json")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpConfig {
     pub(crate) servers: Vec<McpServerConfig>,
@@ -40,8 +50,8 @@ struct RawMcpServerConfig {
 
 pub(crate) fn load_config(working_dir: &str) -> McpConfig {
     load_config_from_paths(
-        &hostpaths::mcp_config_path(),
-        &hostpaths::project_mcp_config_path(working_dir),
+        &global_config_path(),
+        &project_config_path(working_dir),
         working_dir,
         project_mcp_enabled(),
     )
