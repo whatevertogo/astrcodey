@@ -3,16 +3,90 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── 版本号计算与 bump ─────────────────────────────────────────────
+
+  prepare:
+    name: Prepare version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # Tag push: 直接用 tag
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            # workflow_dispatch: 从 Cargo.toml 读取当前版本并 bump
+            CURRENT=$(grep -m1 '^version' crates/astrcode-cli/Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            case "${{ inputs.bump }}" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION} (tag: ${TAG})"
+
+      - name: Bump crate versions and tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # 更新所有 crate 的 version（仅匹配 [package] 下的 version 行）
+          for toml in $(find crates -name "Cargo.toml") src-tauri/Cargo.toml; do
+            sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${VERSION}\"/}" "$toml"
+          done
+
+          # 更新 tauri.conf.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json
+
+          # 提交并打 tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: bump version to ${VERSION}" || echo "No changes to commit"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "${TAG}"
+
   # ── CLI binary builds ─────────────────────────────────────────────
 
   build-cli:
     name: CLI (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    needs: [prepare]
     permissions:
       contents: write
     strategy:
@@ -51,6 +125,8 @@ jobs:
             archive: zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -84,6 +160,7 @@ jobs:
   build-desktop:
     name: Desktop (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    needs: [prepare]
     permissions:
       contents: write
     strategy:
@@ -100,6 +177,8 @@ jobs:
             runner: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -123,8 +202,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tauriScript: node frontend/node_modules/@tauri-apps/cli/tauri.js
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: ${{ needs.prepare.outputs.tag }}
           releaseBody: "__INSTALLERS__"
           releaseDraft: true
           includeUpdaterJson: false
@@ -134,11 +213,13 @@ jobs:
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: [build-cli]
+    needs: [prepare, build-cli]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -146,12 +227,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Extract version from tag
-        id: version
-        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Prepare npm packages
         run: |
-          VERSION=${{ steps.version.outputs.value }} \
+          VERSION=${{ needs.prepare.outputs.version }} \
             bash scripts/prepare-npm-packages.sh artifacts npm-dist
       - name: Publish platform packages
         env:
@@ -177,13 +255,14 @@ jobs:
   release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-cli, build-desktop]
+    needs: [prepare, build-cli, build-desktop]
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.tag }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -195,11 +274,10 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          PREVIOUS=$(git tag --sort=-creatordate | grep -v "^${VERSION}$" | grep '^v' | head -1)
+          TAG="${{ needs.prepare.outputs.tag }}"
+          PREVIOUS=$(git tag --sort=-creatordate | grep -v "^${TAG}$" | grep '^v' | head -1)
           {
-            echo "## ${VERSION}"
+            echo "## ${TAG}"
             echo ""
             echo "Released: $(date -u +%Y-%m-%d)"
             echo ""
@@ -210,7 +288,6 @@ jobs:
               RANGE="HEAD"
             fi
 
-            # Features
             FEATURES=$(git log "$RANGE" --pretty=format:"%s (%h)" --no-merges 2>/dev/null | grep -iE '^feat' || true)
             if [ -n "$FEATURES" ]; then
               echo "### ✨ Features"
@@ -219,7 +296,6 @@ jobs:
               echo ""
             fi
 
-            # Fixes
             FIXES=$(git log "$RANGE" --pretty=format:"%s (%h)" --no-merges 2>/dev/null | grep -iE '^fix' || true)
             if [ -n "$FIXES" ]; then
               echo "### 🐛 Bug Fixes"
@@ -228,7 +304,6 @@ jobs:
               echo ""
             fi
 
-            # Refactors
             REFACTORS=$(git log "$RANGE" --pretty=format:"%s (%h)" --no-merges 2>/dev/null | grep -iE '^refactor' || true)
             if [ -n "$REFACTORS" ]; then
               echo "### 🔧 Refactors"
@@ -237,24 +312,16 @@ jobs:
               echo ""
             fi
 
-            # Other changes
-            OTHER=$(git log "$RANGE" --pretty=format:"%s (%h)" --no-merges 2>/dev/null | grep -viE '^(feat|fix|refactor|chore|docs|ci|test|style|build)' || true)
-            if [ -n "$OTHER" ]; then
-              echo "### 📝 Other Changes"
-              echo ""
-              echo "$OTHER" | sed 's/^/- /'
-              echo ""
-            fi
-
             echo "---"
             echo ""
-            echo "**Install:** \`npm install -g astrcode@${VERSION#v}\`"
+            echo "**Install:** \`npm install -g astrcode@${{ needs.prepare.outputs.version }}\`"
           } > release-notes.md
           cat release-notes.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.changelog.outputs.version }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
           body_path: release-notes.md
           draft: false
           files: release-assets/*
