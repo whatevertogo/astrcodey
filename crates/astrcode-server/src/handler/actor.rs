@@ -263,9 +263,62 @@ impl CommandHandler {
     }
 
     /// Actor 主循环：接收并处理消息直到通道关闭。
+    ///
+    /// 内置空闲 recap 机制：turn 完成后若 3 分钟内无新 prompt 提交，
+    /// 自动生成 recap 摘要推送给所有客户端。
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<CommandMessage>) {
-        while let Some(message) = rx.recv().await {
+        use std::time::Duration;
+        use tokio::time::{Instant, sleep_until};
+
+        const IDLE_RECAP_DELAY: Duration = Duration::from_secs(300); // 5 分钟
+
+        // None = 无计时；Some(deadline) = 等待中
+        let mut recap_deadline: Option<Instant> = None;
+
+        loop {
+            let maybe_msg = if let Some(deadline) = recap_deadline {
+                tokio::select! {
+                    msg = rx.recv() => msg,
+                    _ = sleep_until(deadline) => {
+                        // 空闲超时，触发自动 recap
+                        recap_deadline = None;
+                        if self.active_session_id.is_some()
+                            && self.active_turns.is_empty()
+                        {
+                            if let Err(e) = self.recap_session().await {
+                                tracing::debug!(error = %e, "auto-recap skipped");
+                            }
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                rx.recv().await
+            };
+
+            let Some(message) = maybe_msg else { break };
+
+            // 用户提交 prompt → 取消 recap 计时
+            let resets_timer = matches!(
+                &message,
+                CommandMessage::ClientCommand {
+                    command: ClientCommand::SubmitPrompt { .. },
+                    ..
+                } | CommandMessage::SubmitInputForSession { .. }
+                  | CommandMessage::SubmitInputWithCompletion { .. }
+            );
+            if resets_timer {
+                recap_deadline = None;
+            }
+
+            // Turn 完成 → 启动/重置 recap 计时
+            let starts_timer = matches!(&message, CommandMessage::AgentTurnCleanup { .. });
+
             self.handle_message(message).await;
+
+            if starts_timer && self.active_turns.is_empty() {
+                recap_deadline = Some(Instant::now() + IDLE_RECAP_DELAY);
+            }
         }
     }
 
