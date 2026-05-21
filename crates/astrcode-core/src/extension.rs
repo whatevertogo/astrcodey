@@ -8,11 +8,22 @@
 //! - [`Registrar`]：扩展注册能力的构建器
 //! - 类型化的处理器 trait 和上下文结构体
 
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::ModelSelection,
+    llm::LlmProvider,
+    storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
+    types::SessionId,
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
@@ -28,6 +39,236 @@ pub trait Extension: Send + Sync {
 
     /// 一次性调用。扩展通过 registrar 注册工具、命令和事件处理器。
     fn register(&self, _reg: &mut Registrar) {}
+
+    /// 扩展进入运行态。默认 no-op。
+    async fn start(&self, _ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+
+    /// 扩展退出运行态。默认 no-op。
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+
+/// 插件运行态上下文。
+#[derive(Clone)]
+pub struct ExtensionCtx {
+    tasks: ExtensionTasks,
+}
+
+impl ExtensionCtx {
+    pub fn new(tasks: ExtensionTasks) -> Self {
+        Self { tasks }
+    }
+
+    pub fn tasks(&self) -> &ExtensionTasks {
+        &self.tasks
+    }
+
+    pub fn shutdown(&self) -> CancellationToken {
+        self.tasks.shutdown()
+    }
+}
+
+/// 插件退出原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// 同一个扩展 id 被重新加载的新实例替换。
+    Reload,
+    /// 配置关闭或 source 不再提供该扩展。
+    Disabled,
+    /// 宿主进程关闭。
+    Shutdown,
+}
+
+/// 宿主管理的插件后台任务集合。
+#[derive(Clone)]
+pub struct ExtensionTasks {
+    extension_id: Arc<str>,
+    shutdown: CancellationToken,
+    handles: Arc<Mutex<Vec<ExtensionTask>>>,
+}
+
+struct ExtensionTask {
+    name: String,
+    handle: JoinHandle<()>,
+}
+
+impl ExtensionTasks {
+    pub fn new(extension_id: impl Into<String>) -> Self {
+        Self {
+            extension_id: Arc::from(extension_id.into()),
+            shutdown: CancellationToken::new(),
+            handles: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn shutdown(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    pub fn spawn<F>(&self, name: impl Into<String>, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self.shutdown.is_cancelled() {
+            tracing::debug!(
+                extension_id = %self.extension_id,
+                "skip spawning extension task after shutdown"
+            );
+            return;
+        }
+
+        let name = name.into();
+        let handle = tokio::spawn(fut);
+        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+        handles.push(ExtensionTask { name, handle });
+    }
+
+    pub fn cancel(&self) {
+        self.shutdown.cancel();
+    }
+
+    pub async fn wait(&self, timeout: Duration) {
+        let tasks = {
+            let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *handles)
+        };
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        for task in tasks {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                self.abort_one(task).await;
+            } else {
+                self.wait_one(task, deadline - now).await;
+            }
+        }
+    }
+
+    async fn wait_one(&self, task: ExtensionTask, timeout: Duration) {
+        let ExtensionTask { name, mut handle } = task;
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(Ok(())) => {},
+            Ok(Err(join_err)) if join_err.is_cancelled() => {
+                tracing::debug!(
+                    extension_id = %self.extension_id,
+                    task = %name,
+                    "extension task cancelled"
+                );
+            },
+            Ok(Err(join_err)) if join_err.is_panic() => {
+                tracing::error!(
+                    extension_id = %self.extension_id,
+                    task = %name,
+                    "extension task panicked"
+                );
+            },
+            Ok(Err(join_err)) => {
+                tracing::warn!(
+                    extension_id = %self.extension_id,
+                    task = %name,
+                    error = %join_err,
+                    "extension task failed"
+                );
+            },
+            Err(_) => {
+                tracing::warn!(
+                    extension_id = %self.extension_id,
+                    task = %name,
+                    "extension task did not stop before timeout; aborting"
+                );
+                handle.abort();
+                let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+            },
+        }
+    }
+
+    async fn abort_one(&self, task: ExtensionTask) {
+        let ExtensionTask { name, handle } = task;
+        tracing::warn!(
+            extension_id = %self.extension_id,
+            task = %name,
+            "extension task did not stop before shared timeout; aborting"
+        );
+        handle.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
+}
+
+// ─── Host Services ──────────────────────────────────────────────────────
+
+/// 扩展运行时可用的宿主服务。
+///
+/// 只注入给 trusted bundled extension，不暴露给 untrusted source（disk/wasm）。
+pub struct ExtensionHostServices {
+    /// 可信内置扩展可用的只读会话投影数据源。
+    pub session_read: Arc<dyn SessionReadSource>,
+    /// 小模型 provider，用于记忆提取。
+    pub small_llm: Option<Arc<dyn LlmProvider>>,
+}
+
+impl ExtensionHostServices {
+    pub fn new(
+        event_store: Arc<dyn EventStore>,
+        small_llm: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
+        Self {
+            session_read: session_read_from_event_store(event_store),
+            small_llm,
+        }
+    }
+}
+
+/// 供 trusted extension 使用的最小会话读取能力。
+#[async_trait::async_trait]
+pub trait SessionReadSource: Send + Sync {
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
+    async fn read_session_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReadModel, StorageError>;
+}
+
+#[async_trait::async_trait]
+impl SessionReadSource for dyn EventStore {
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        EventStore::list_session_summaries(self).await
+    }
+
+    async fn read_session_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReadModel, StorageError> {
+        EventStore::session_read_model(self, session_id).await
+    }
+}
+
+/// 将 `Arc<dyn EventStore>` 包装为 `Arc<dyn SessionReadSource>`。
+///
+/// Rust stable 不支持 `Arc<dyn EventStore> → Arc<dyn SessionReadSource>` 的
+/// trait upcasting，因此需要一个薄的 newtype wrapper。
+fn session_read_from_event_store(
+    event_store: Arc<dyn EventStore>,
+) -> Arc<dyn SessionReadSource> {
+    struct Wrapper(Arc<dyn EventStore>);
+
+    #[async_trait::async_trait]
+    impl SessionReadSource for Wrapper {
+        async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+            self.0.list_session_summaries().await
+        }
+
+        async fn read_session_model(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<SessionReadModel, StorageError> {
+            self.0.session_read_model(session_id).await
+        }
+    }
+
+    Arc::new(Wrapper(event_store))
 }
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────

@@ -708,7 +708,8 @@ async fn client_create_session_reports_start_hook_failure() {
     runtime
         .extension_runner
         .register(Arc::new(FailSessionStartExtension))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -979,7 +980,8 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
         .register(Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1010,7 +1012,8 @@ async fn stream_error_still_dispatches_turn_end() {
         .register(Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1322,7 +1325,8 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
     runtime
         .extension_runner
         .register(astrcode_extension_skill::extension())
-        .await;
+        .await
+        .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1395,14 +1399,16 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
     runtime
         .extension_runner
         .register(astrcode_extension_skill::extension())
-        .await;
+        .await
+        .unwrap();
     runtime
         .extension_runner
         .register(Arc::new(StaticCommandExtension {
             id: "test-extension",
             command_name: "reviewnow",
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));

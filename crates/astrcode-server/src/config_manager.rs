@@ -52,21 +52,11 @@ fn build_provider_from_settings(settings: &LlmSettings) -> Arc<dyn LlmProvider> 
     )
 }
 
-fn build_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
-    build_provider_from_settings(&effective.llm)
-}
-
-fn build_small_provider_from_effective(effective: &EffectiveConfig) -> Arc<dyn LlmProvider> {
-    build_provider_from_settings(&effective.small_llm)
-}
-
 impl ConfigManager {
     /// 从已解析的配置组装 `ConfigManager` 与共享的 `SessionRuntimeServices`。
     ///
-    /// `extension_runner` 与 `context_assembler` 由 `bootstrap` 提前构造，因为
-    /// 它们和配置无关。返回的 `(ConfigManager, Capabilities)` 共享同一份
-    /// `effective` / `llm_provider` 存储；后续配置写入由 `ConfigManager` 触发，
-    /// session 通过 `Capabilities` 读取。
+    /// providers 从 `effective` 内部构建，不需要调用方传入。
+    /// `extension_runner` 在调用时可以为空——后续由 bootstrap 加载扩展后填充。
     pub(crate) fn from_loaded_config(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
@@ -74,11 +64,9 @@ impl ConfigManager {
         extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
         context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
     ) -> (Self, Arc<SessionRuntimeServices>) {
-        let llm_provider = build_provider_from_effective(&effective);
-        let small_llm_provider = build_small_provider_from_effective(&effective);
         let capabilities = Arc::new(SessionRuntimeServices::new(
-            llm_provider,
-            small_llm_provider,
+            build_provider_from_settings(&effective.llm),
+            build_provider_from_settings(&effective.small_llm),
             extension_runner,
             context_assembler,
             effective,
@@ -135,15 +123,15 @@ impl ConfigManager {
     }
 
     pub fn rebuild_provider_from_effective(&self) -> Result<(), String> {
-        let (new_provider, new_small_provider) = {
+        let (new_llm, new_small) = {
             let effective = self.read_effective();
             (
-                build_provider_from_effective(&effective),
-                build_small_provider_from_effective(&effective),
+                build_provider_from_settings(&effective.llm),
+                build_provider_from_settings(&effective.small_llm),
             )
         };
-        self.capabilities.swap_llm(new_provider);
-        self.capabilities.swap_small_llm(new_small_provider);
+        self.capabilities.swap_llm(new_llm);
+        self.capabilities.swap_small_llm(new_small);
         Ok(())
     }
 

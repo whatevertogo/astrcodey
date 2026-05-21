@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::extension::Extension;
+use astrcode_core::extension::{Extension, StopReason};
 use astrcode_support::hostpaths;
 
 use crate::runner::ExtensionRunner;
@@ -90,13 +90,20 @@ impl ExtensionRuntime {
 
         // 先卸载同名扩展，再按 source 顺序注册，保证替换与优先级语义稳定。
         for id in current_ids.iter().filter(|id| desired_ids.contains(*id)) {
-            runner.unregister(id).await;
+            if let Err(e) = runner.unregister(id, StopReason::Reload).await {
+                load_errors.push(format!("failed to reload extension {id}: {e}"));
+            }
         }
         for ext in desired_extensions {
-            runner.register(ext).await;
+            let id = ext.id().to_string();
+            if let Err(e) = runner.register(ext).await {
+                load_errors.push(format!("failed to start extension {id}: {e}"));
+            }
         }
         for id in current_ids.iter().filter(|id| !desired_ids.contains(*id)) {
-            runner.unregister(id).await;
+            if let Err(e) = runner.unregister(id, StopReason::Disabled).await {
+                load_errors.push(format!("failed to stop extension {id}: {e}"));
+            }
         }
 
         load_errors

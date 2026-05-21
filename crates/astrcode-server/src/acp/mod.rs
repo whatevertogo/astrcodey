@@ -44,9 +44,9 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
                 event_bus.attach(session);
             }));
     }
-    let command_handle = CommandHandle::spawn(runtime, Arc::clone(&event_bus));
+    let command_handle = CommandHandle::spawn(Arc::clone(&runtime), Arc::clone(&event_bus));
 
-    Agent
+    let result = Agent
         .builder()
         .name("astrcode")
         .on_receive_request(
@@ -127,7 +127,9 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
             tokio::io::stdout().compat_write(),
             tokio::io::stdin().compat(),
         ))
-        .await
+        .await;
+    runtime.shutdown_extensions().await;
+    result
 }
 
 async fn handle_prompt(

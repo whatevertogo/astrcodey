@@ -2,43 +2,74 @@
 //!
 //! 提供跨会话的持久化记忆，借鉴 Codex 的设计：
 //! - Markdown 文件存储，人类可读可编辑
-//! - PromptBuild 注入相关记忆
+//! - PromptBuild 注入 memory_summary.md（精简摘要）
 //! - LLM 可主动 save/search
-//! - small_model 异步观察对话提取记忆
+//! - SessionStart 时后台运行两阶段管线： Phase1 从历史会话提取记忆，Phase2 整合去重到 MEMORY.md
 
 mod handlers;
+mod pipeline;
+mod pipeline_prompts;
 mod store;
 
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::{Extension, ExtensionEvent, HookMode, Registrar},
+    extension::{
+        Extension, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionTasks, HookMode,
+        Registrar, SessionReadSource, StopReason,
+    },
     llm::LlmProvider,
 };
 use handlers::{
-    MemoryCommandHandler, MemoryObserveHandler, MemoryRecallHandler, MemorySaveHandler,
-    MemorySearchHandler,
+    MemoryCommandHandler, MemoryRecallHandler, MemorySaveHandler, MemorySearchHandler,
+    MemorySessionStartHandler,
 };
+use parking_lot::Mutex;
 use store::MemoryStore;
 
 /// 返回记忆扩展。
 ///
-/// `small_llm` 为 None 时，TurnEnd 自动观察功能降级（不调用小模型提取），
-/// 其余功能正常。
-pub fn extension(small_llm: Option<Arc<dyn LlmProvider>>) -> Arc<dyn Extension> {
-    let store = Arc::new(MemoryStore::new());
-    Arc::new(MemoryExtension { store, small_llm })
+/// `small_llm` 为 None 时 Phase1 自动提取跳过，Phase2 简单合并。
+/// `session_read` 用于查询历史会话。
+pub fn extension(
+    small_llm: Option<Arc<dyn LlmProvider>>,
+    session_read: Arc<dyn SessionReadSource>,
+) -> Result<Arc<dyn Extension>, ExtensionError> {
+    let store = MemoryStore::new().map_err(|e| ExtensionError::Internal(e.to_string()))?;
+    let store = Arc::new(store);
+    Ok(Arc::new(MemoryExtension {
+        store,
+        small_llm,
+        session_read,
+        pipeline: Arc::new(handlers::MemoryPipelineCoordinator::default()),
+        tasks: Arc::new(Mutex::new(None)),
+    }))
 }
 
 struct MemoryExtension {
     store: Arc<MemoryStore>,
     small_llm: Option<Arc<dyn LlmProvider>>,
+    session_read: Arc<dyn SessionReadSource>,
+    /// 进程级管线调度器：串行执行，忙时合并触发，避免丢 SessionStart。
+    pipeline: Arc<handlers::MemoryPipelineCoordinator>,
+    tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
 
 #[async_trait::async_trait]
 impl Extension for MemoryExtension {
     fn id(&self) -> &str {
         "astrcode.memory"
+    }
+
+    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+        *self.tasks.lock() = Some(ctx.tasks().clone());
+        Ok(())
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        *self.tasks.lock() = None;
+        self.pipeline.reset();
+        Ok(())
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -65,12 +96,15 @@ impl Extension for MemoryExtension {
             }),
         );
         reg.on_event(
-            ExtensionEvent::TurnEnd,
+            ExtensionEvent::SessionStart,
             HookMode::NonBlocking,
             0,
-            Arc::new(MemoryObserveHandler {
+            Arc::new(MemorySessionStartHandler {
                 store: self.store.clone(),
+                session_read: self.session_read.clone(),
                 small_llm: self.small_llm.clone(),
+                pipeline: self.pipeline.clone(),
+                tasks: self.tasks.clone(),
             }),
         );
         reg.command(

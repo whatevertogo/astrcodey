@@ -1,16 +1,17 @@
-//! Memory handlers — Recall, Save, Search, Observe, Command。
+//! Memory handlers — Recall, Save, Search, SessionStart, Command。
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_core::{
     extension::{
-        CommandContext, ExchangeSummary, ExtensionCommandResult, ExtensionError, HookResult,
-        LifecycleContext, PromptBuildContext, PromptBuildHandler, PromptContributions,
-        SlashCommand, ToolHandler,
+        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionTasks, HookResult,
+        LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, SessionReadSource, SlashCommand, ToolHandler,
     },
-    llm::{LlmEvent, LlmMessage, LlmRole},
+    llm::LlmProvider,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -21,7 +22,7 @@ use crate::store::MemoryStore;
 const MEMORY_SAVE_TOOL: &str = "memory_save";
 const MEMORY_SEARCH_TOOL: &str = "memory_search";
 const MEMORY_CMD: &str = "memory";
-const MAX_MEMORY_CHARS: usize = 8_000;
+const MAX_RECALL_FALLBACK_CHARS: usize = 1_200;
 const MAX_SEARCH_RESULTS: usize = 20;
 const MAX_LIST_ENTRIES: usize = 50;
 
@@ -67,7 +68,7 @@ pub(crate) fn memory_search_definition() -> ToolDefinition {
 pub(crate) fn memory_command_definition() -> SlashCommand {
     SlashCommand {
         name: MEMORY_CMD.to_string(),
-        description: "Manage long-term memory (list, search)".to_string(),
+        description: "Manage long-term memory (list, search, consolidate)".to_string(),
         args_schema: None,
     }
 }
@@ -173,10 +174,20 @@ impl PromptBuildHandler for MemoryRecallHandler {
         _ctx: PromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         let store = self.store.clone();
-        let content = match tokio::task::spawn_blocking(move || store.read_memory()).await {
+        let content = match tokio::task::spawn_blocking(move || {
+            let summary = store.read_summary()?;
+            if !summary.trim().is_empty() {
+                return Ok(summary);
+            }
+            store
+                .read_memory()
+                .map(|content| truncate_to_chars(&content, MAX_RECALL_FALLBACK_CHARS))
+        })
+        .await
+        {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "memory recall: failed to read MEMORY.md");
+                tracing::warn!(error = %e, "memory recall: failed to read");
                 return Ok(PromptContributions::default());
             },
             Err(e) => {
@@ -189,138 +200,131 @@ impl PromptBuildHandler for MemoryRecallHandler {
             return Ok(PromptContributions::default());
         }
 
-        let truncated = if content.len() > MAX_MEMORY_CHARS {
-            let mut end = MAX_MEMORY_CHARS;
-            while !content.is_char_boundary(end) {
-                end -= 1;
-            }
-            &content[..end]
-        } else {
-            &content
-        };
-
         Ok(PromptContributions {
             additional_instructions: vec![format!(
                 "<memory>\nYou have a persistent memory system. Use `{MEMORY_SAVE_TOOL}` to store \
                  important information and `{MEMORY_SEARCH_TOOL}` to recall past \
-                 memories.\n\n{truncated}\n</memory>"
+                 memories.\n\n{content}\n</memory>"
             )],
             ..Default::default()
         })
     }
 }
 
-// ─── Observe Handler (Lifecycle TurnEnd, NonBlocking) ────────────────
+// ─── SessionStart Handler (Lifecycle, NonBlocking) ───────────────────
 
-pub(crate) struct MemoryObserveHandler {
-    pub store: Arc<MemoryStore>,
-    pub small_llm: Option<Arc<dyn astrcode_core::llm::LlmProvider>>,
+#[derive(Default)]
+pub(crate) struct MemoryPipelineCoordinator {
+    state: Mutex<PipelineState>,
 }
 
-#[derive(Deserialize)]
-struct ExtractionResult {
-    should_save: bool,
-    #[serde(default)]
-    memories: Vec<ExtractedMemory>,
+#[derive(Default)]
+struct PipelineState {
+    running: bool,
+    pending: bool,
+    latest_session_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct ExtractedMemory {
-    content: String,
-    #[serde(default = "default_category")]
-    category: String,
-}
-
-impl MemoryObserveHandler {
-    async fn extract_memories(
-        &self,
-        exchange: &ExchangeSummary,
-    ) -> Result<Option<ExtractionResult>, ExtensionError> {
-        let small_llm = match &self.small_llm {
-            Some(llm) => llm,
-            None => return Ok(None),
-        };
-
-        let prompt = format!(
-            "Analyze this conversation exchange. Determine if any information is worth saving to \
-             long-term memory.\nFocus on: user preferences, project decisions, coding patterns, \
-             important facts.\nIgnore: greetings, simple Q&A, tool usage details.\n\nUser: \
-             {}\nAssistant: {}\n\nRespond with JSON only: {{ \"should_save\": bool, \"memories\": \
-             [{{ \"content\": \"...\", \"category\": \"user_pref|project_ctx|decision|general\" \
-             }}] }}",
-            exchange.user_message, exchange.assistant_message
-        );
-
-        let messages = vec![LlmMessage {
-            role: LlmRole::User,
-            content: vec![astrcode_core::llm::LlmContent::Text { text: prompt }],
-            name: None,
-            reasoning_content: None,
-        }];
-
-        let rx = small_llm
-            .generate(messages, vec![])
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-
-        let text = collect_stream_text(rx).await;
-        let text = text.trim();
-
-        let json_str = text
-            .strip_prefix("```json")
-            .and_then(|s| s.strip_suffix("```"))
-            .map(|s| s.trim())
-            .unwrap_or(text);
-
-        serde_json::from_str(json_str)
-            .map(Some)
-            .map_err(|e| ExtensionError::Internal(format!("parse extraction: {e}")))
-    }
-}
-
-async fn collect_stream_text(mut rx: tokio::sync::mpsc::UnboundedReceiver<LlmEvent>) -> String {
-    let mut text = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            LlmEvent::ContentDelta { delta } => text.push_str(&delta),
-            LlmEvent::Done { .. } => break,
-            _ => {},
+impl MemoryPipelineCoordinator {
+    fn request_run(&self, session_id: String) -> Option<String> {
+        let mut state = self.state.lock();
+        state.latest_session_id = Some(session_id);
+        if state.running {
+            state.pending = true;
+            None
+        } else {
+            state.running = true;
+            state.latest_session_id.clone()
         }
     }
-    text
+
+    fn complete_run(&self) -> Option<String> {
+        let mut state = self.state.lock();
+        if state.pending {
+            state.pending = false;
+            state.latest_session_id.clone()
+        } else {
+            state.running = false;
+            None
+        }
+    }
+
+    pub(crate) fn reset(&self) {
+        *self.state.lock() = PipelineState::default();
+    }
+}
+
+pub(crate) struct MemorySessionStartHandler {
+    pub store: Arc<MemoryStore>,
+    pub session_read: Arc<dyn SessionReadSource>,
+    pub small_llm: Option<Arc<dyn LlmProvider>>,
+    pub pipeline: Arc<MemoryPipelineCoordinator>,
+    pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for MemoryObserveHandler {
+impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let exchange = match &ctx.last_exchange {
-            Some(e) => e,
-            None => return Ok(HookResult::Allow),
+        let Some(tasks) = self.tasks.lock().clone() else {
+            tracing::debug!(session_id = %ctx.session_id, "memory extension not started");
+            return Ok(HookResult::Allow);
         };
-
-        if exchange.user_message.len() < 10 && exchange.assistant_message.len() < 20 {
+        let shutdown = tasks.shutdown();
+        if shutdown.is_cancelled() {
+            tracing::debug!(session_id = %ctx.session_id, "memory extension is stopping");
             return Ok(HookResult::Allow);
         }
 
-        let extraction = match self.extract_memories(exchange).await? {
-            Some(r) if r.should_save => r,
-            _ => return Ok(HookResult::Allow),
-        };
-
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || {
-            for m in &extraction.memories {
-                if let Err(e) = store.append(&m.category, &m.content) {
-                    tracing::warn!(error = %e, "failed to save extracted memory");
+        let session_read = self.session_read.clone();
+        let small_llm = self.small_llm.clone();
+        let Some(mut current_session_id) = self.pipeline.request_run(ctx.session_id.to_string())
+        else {
+            tracing::debug!(session_id = %ctx.session_id, "memory pipeline queued");
+            return Ok(HookResult::Allow);
+        };
+        let pipeline = self.pipeline.clone();
+
+        tasks.spawn("memory-pipeline", async move {
+            loop {
+                let run = crate::pipeline::run(
+                    &store,
+                    session_read.as_ref(),
+                    small_llm.as_deref(),
+                    &current_session_id,
+                );
+
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        tracing::debug!("memory pipeline stopped");
+                        break;
+                    },
+                    result = run => {
+                        if let Err(e) = result {
+                            tracing::warn!(error = %e, session_id = %current_session_id, "memory pipeline failed");
+                        }
+                    },
                 }
+
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                let Some(next_session_id) = pipeline.complete_run() else {
+                    break;
+                };
+                tracing::debug!(
+                    session_id = %next_session_id,
+                    "memory pipeline replaying queued session start trigger"
+                );
+                current_session_id = next_session_id;
             }
-        })
-        .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        });
 
         Ok(HookResult::Allow)
     }
 }
+
+use crate::pipeline::truncate_to_chars;
 
 // ─── Command Handler (/memory) ───────────────────────────────────────
 
@@ -370,5 +374,28 @@ impl astrcode_core::extension::CommandHandler for MemoryCommandHandler {
             content: result,
             is_error: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryPipelineCoordinator;
+
+    #[test]
+    fn pipeline_coordinator_coalesces_pending_runs() {
+        let coordinator = MemoryPipelineCoordinator::default();
+
+        assert_eq!(
+            coordinator.request_run("session-a".to_string()),
+            Some("session-a".to_string())
+        );
+        assert_eq!(coordinator.request_run("session-b".to_string()), None);
+        assert_eq!(coordinator.request_run("session-c".to_string()), None);
+        assert_eq!(coordinator.complete_run(), Some("session-c".to_string()));
+        assert_eq!(coordinator.complete_run(), None);
+        assert_eq!(
+            coordinator.request_run("session-d".to_string()),
+            Some("session-d".to_string())
+        );
     }
 }

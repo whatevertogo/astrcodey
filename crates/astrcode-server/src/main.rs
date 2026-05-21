@@ -74,7 +74,7 @@ async fn main() {
                 event_bus.attach(session);
             }));
     }
-    let handler = CommandHandler::spawn_actor(runtime, Arc::clone(&event_bus));
+    let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_bus));
 
     // Background task: broadcast events → stdout
     let mut event_rx = event_tx.subscribe();
@@ -107,4 +107,5 @@ async fn main() {
         }
     }
     tracing::info!("Server shutting down");
+    runtime.shutdown_extensions().await;
 }

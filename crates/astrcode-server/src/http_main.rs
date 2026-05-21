@@ -32,6 +32,7 @@ async fn main() {
     // TODO: 更好的capacity？
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let shutdown_token = runtime.shutdown_token.clone();
+    let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) =
         astrcode_server::http::router(runtime, event_tx).unwrap_or_else(|error| {
             tracing::error!("Failed to initialize HTTP router: {error}");
@@ -61,6 +62,7 @@ async fn main() {
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
+            runtime_for_shutdown.shutdown_extensions().await;
         })
         .await
     {

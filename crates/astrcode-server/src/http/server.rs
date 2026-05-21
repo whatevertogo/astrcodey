@@ -145,6 +145,7 @@ pub async fn run_http_server(
 ) -> Result<(), HttpServerError> {
     let (event_tx, _) = broadcast::channel(256);
     let shutdown_token = runtime.shutdown_token.clone();
+    let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!(
         "Auth token: {}...{}",
@@ -161,6 +162,7 @@ pub async fn run_http_server(
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
+            runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
     remove_run_info();
