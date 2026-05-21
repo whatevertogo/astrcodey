@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-protocol"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Wire protocol: JSON-RPC 2.0 types, commands, events, UI sub-protocol"
 
