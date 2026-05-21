@@ -386,10 +386,11 @@ impl EventStore for FileSystemSessionRepository {
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-        let sessions = self.sessions.read().await;
+        let session_ids = self.list_session_dirs().await?;
+        let sessions = self.sessions.read().await.clone();
         let mut summaries = Vec::new();
 
-        for session_id in self.list_session_dirs().await? {
+        for session_id in session_ids {
             if let Some(meta) = sessions.get(&session_id) {
                 // 已打开的会话直接使用内存中的投影
                 let model = meta.projection.read().await.clone();
