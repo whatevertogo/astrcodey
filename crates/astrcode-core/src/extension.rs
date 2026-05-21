@@ -123,6 +123,63 @@ pub struct ExtensionManifest {
     pub library: String,
 }
 
+// ─── Plugin Event System ────────────────────────────────────────────────
+
+/// 插件在 [`Registrar`] 中声明的事件类型。
+///
+/// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
+/// `plugin_id` 不在声明中——它由 runtime 在构造 [`PluginEventSink`] 时注入。
+#[derive(Debug, Clone)]
+pub struct PluginEventDecl {
+    pub event_type: String,
+    pub schema_version: u32,
+    pub durable: bool,
+    pub max_payload_bytes: usize,
+}
+
+/// [`Registrar::plugin_event`] 返回的构建器。
+pub struct PluginEventDeclBuilder<'a> {
+    registrar: &'a mut Registrar,
+    event_type: String,
+    schema_version: u32,
+    durable: bool,
+    max_payload_bytes: usize,
+}
+
+impl<'a> PluginEventDeclBuilder<'a> {
+    pub fn schema_version(mut self, v: u32) -> Self {
+        self.schema_version = v;
+        self
+    }
+    pub fn durable(mut self, d: bool) -> Self {
+        self.durable = d;
+        self
+    }
+    pub fn max_payload_bytes(mut self, n: usize) -> Self {
+        self.max_payload_bytes = n;
+        self
+    }
+    pub fn register(self) {
+        self.registrar.plugin_event_decls.push(PluginEventDecl {
+            event_type: self.event_type,
+            schema_version: self.schema_version,
+            durable: self.durable,
+            max_payload_bytes: self.max_payload_bytes,
+        });
+    }
+}
+
+/// 插件事件发射器。`plugin_id` 在构造时由 runtime 绑定，调用方无法伪造身份。
+#[async_trait::async_trait]
+pub trait PluginEventSink: Send + Sync {
+    async fn emit(
+        &self,
+        event_type: &str,
+        schema_version: u32,
+        payload: serde_json::Value,
+    ) -> Result<(), ExtensionError>;
+}
+
 // ─── Compact Trigger ─────────────────────────────────────────────────────
 
 /// 触发 compact 的来源。
@@ -406,7 +463,7 @@ pub struct PostToolUseFailureContext {
 }
 
 /// PreToolUse 钩子上下文。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreToolUseContext {
     pub session_id: String,
     pub working_dir: String,
@@ -414,10 +471,25 @@ pub struct PreToolUseContext {
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub available_tools: Vec<ToolDefinition>,
+    /// 插件事件发射器（仅插件钩子会有值）。
+    pub plugin_event_sink: Option<std::sync::Arc<dyn PluginEventSink>>,
+}
+
+impl std::fmt::Debug for PreToolUseContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreToolUseContext")
+            .field("session_id", &self.session_id)
+            .field("tool_name", &self.tool_name)
+            .field(
+                "plugin_event_sink",
+                &self.plugin_event_sink.as_ref().map(|_| "<sink>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// PostToolUse 钩子上下文。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PostToolUseContext {
     pub session_id: String,
     pub working_dir: String,
@@ -426,6 +498,22 @@ pub struct PostToolUseContext {
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,
     pub is_error: bool,
+    /// 插件事件发射器（仅插件钩子会有值）。
+    pub plugin_event_sink: Option<std::sync::Arc<dyn PluginEventSink>>,
+}
+
+impl std::fmt::Debug for PostToolUseContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostToolUseContext")
+            .field("session_id", &self.session_id)
+            .field("tool_name", &self.tool_name)
+            .field("is_error", &self.is_error)
+            .field(
+                "plugin_event_sink",
+                &self.plugin_event_sink.as_ref().map(|_| "<sink>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// Provider 钩子上下文。
@@ -460,11 +548,25 @@ pub struct CompactContext {
 }
 
 /// 通用生命周期钩子上下文。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LifecycleContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
+    /// 插件事件发射器（仅插件钩子会有值）。
+    pub plugin_event_sink: Option<std::sync::Arc<dyn PluginEventSink>>,
+}
+
+impl std::fmt::Debug for LifecycleContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LifecycleContext")
+            .field("session_id", &self.session_id)
+            .field(
+                "plugin_event_sink",
+                &self.plugin_event_sink.as_ref().map(|_| "<sink>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 /// 命令执行上下文。
@@ -603,6 +705,8 @@ pub struct Registrar {
         i32,
         std::sync::Arc<dyn LifecycleHandler>,
     )>,
+    plugin_event_decls: Vec<PluginEventDecl>,
+    needs_plugin_data_dir: bool,
 }
 
 impl Registrar {
@@ -622,6 +726,8 @@ impl Registrar {
             compact: Vec::new(),
             post_tool_use_failure: Vec::new(),
             lifecycle: Vec::new(),
+            plugin_event_decls: Vec::new(),
+            needs_plugin_data_dir: false,
         }
     }
 
@@ -731,6 +837,26 @@ impl Registrar {
             && self.compact.is_empty()
             && self.post_tool_use_failure.is_empty()
             && self.lifecycle.is_empty()
+            && self.plugin_event_decls.is_empty()
+            && !self.needs_plugin_data_dir
+    }
+
+    /// 声明插件需要专属数据目录（`~/.astrcode/plugin_data/<plugin_id>/`）。
+    ///
+    /// 注册后由 runtime 自动创建目录。插件通过 `hostpaths::plugin_data_dir()` 获取路径。
+    pub fn plugin_data_dir(&mut self) {
+        self.needs_plugin_data_dir = true;
+    }
+
+    /// 声明插件可发出的事件类型，返回构建器。
+    pub fn plugin_event(&mut self, event_type: &str) -> PluginEventDeclBuilder<'_> {
+        PluginEventDeclBuilder {
+            registrar: self,
+            event_type: event_type.to_owned(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes: 64 * 1024,
+        }
     }
 
     pub fn tools(&self) -> &[(ToolDefinition, std::sync::Arc<dyn ToolHandler>)] {
@@ -801,6 +927,14 @@ impl Registrar {
 
     pub fn status_items(&self) -> &[StatusItem] {
         &self.status_items
+    }
+
+    pub fn plugin_event_decls(&self) -> &[PluginEventDecl] {
+        &self.plugin_event_decls
+    }
+
+    pub fn needs_plugin_data_dir(&self) -> bool {
+        self.needs_plugin_data_dir
     }
 }
 

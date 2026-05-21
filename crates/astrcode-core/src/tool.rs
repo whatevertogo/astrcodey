@@ -423,6 +423,8 @@ pub struct ToolCapabilities {
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
     /// 会话原子操作能力（仅子 agent 工具需要）。
     pub session_ops: Option<Arc<dyn SessionOperations>>,
+    /// 插件事件发射器（仅插件注册的工具会有值）。
+    pub plugin_event_sink: Option<Arc<dyn crate::extension::PluginEventSink>>,
 }
 
 /// 每次工具调用时传递的上下文。

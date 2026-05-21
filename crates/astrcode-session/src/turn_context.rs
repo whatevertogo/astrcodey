@@ -61,6 +61,7 @@ impl SharedTurnContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
+            plugin_event_sink: None,
         }
     }
 

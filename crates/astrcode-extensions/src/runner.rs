@@ -12,10 +12,11 @@ use std::{
 };
 
 use astrcode_core::{
+    event::EventPayload,
     extension::*,
     tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::runtime::SessionOperations;
 
@@ -50,6 +51,60 @@ pub struct RegisteredSlashCommand {
     pub command: astrcode_core::extension::SlashCommand,
 }
 
+// ─── BoundPluginEventSink ──────────────────────────────────────────────
+
+/// 绑定了 plugin_id 和声明校验的事件发射器。
+///
+/// 由 `ExtensionRunner::make_plugin_event_sink` 构造，传给扩展钩子上下文。
+/// `plugin_id` 在构造时注入，调用方无法伪造身份。
+///
+/// TODO: 补单元测试覆盖校验逻辑——未声明的 event_type、schema_version 超限、
+/// payload 超过 max_payload_bytes、正常发射路径。
+struct BoundPluginEventSink {
+    plugin_id: String,
+    declarations: HashMap<String, PluginEventDecl>,
+    event_tx: mpsc::UnboundedSender<EventPayload>,
+}
+
+#[async_trait::async_trait]
+impl PluginEventSink for BoundPluginEventSink {
+    async fn emit(
+        &self,
+        event_type: &str,
+        schema_version: u32,
+        payload: serde_json::Value,
+    ) -> Result<(), ExtensionError> {
+        let decl = self.declarations.get(event_type).ok_or_else(|| {
+            ExtensionError::Internal(format!("undeclared plugin event type: {event_type}"))
+        })?;
+
+        if schema_version > decl.schema_version {
+            return Err(ExtensionError::Internal(format!(
+                "schema_version {schema_version} exceeds declared {} for {event_type}",
+                decl.schema_version
+            )));
+        }
+
+        let serialized =
+            serde_json::to_string(&payload).map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        if serialized.len() > decl.max_payload_bytes {
+            return Err(ExtensionError::Internal(format!(
+                "payload exceeds {} bytes for {event_type}",
+                decl.max_payload_bytes
+            )));
+        }
+
+        self.event_tx
+            .send(EventPayload::PluginEvent {
+                plugin_id: self.plugin_id.clone(),
+                event_type: event_type.to_owned(),
+                schema_version,
+                payload,
+            })
+            .map_err(|_| ExtensionError::Internal("event channel closed".into()))
+    }
+}
+
 // ─── Handler Index ──────────────────────────────────────────────────────
 
 /// 预排序的 handler 索引。
@@ -73,6 +128,8 @@ struct HandlerIndex {
     command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
     keybindings: Vec<astrcode_core::extension::Keybinding>,
     status_items: Vec<astrcode_core::extension::StatusItem>,
+    plugin_event_decls: HashMap<String, Vec<PluginEventDecl>>,
+    plugin_data_dir_plugins: std::collections::HashSet<String>,
 }
 
 fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
@@ -90,6 +147,9 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
     let mut keybindings: Vec<astrcode_core::extension::Keybinding> = Vec::new();
     let mut status_items: Vec<astrcode_core::extension::StatusItem> = Vec::new();
+    let mut plugin_event_decls: HashMap<String, Vec<PluginEventDecl>> = HashMap::new();
+    let mut plugin_data_dir_plugins: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for record in records {
         for (mode, pri, h) in record.reg.pre_tool_use() {
@@ -133,6 +193,12 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         for item in record.reg.status_items() {
             status_items.push(item.clone());
         }
+        if !record.reg.plugin_event_decls().is_empty() {
+            plugin_event_decls.insert(record.id.clone(), record.reg.plugin_event_decls().to_vec());
+        }
+        if record.reg.needs_plugin_data_dir() {
+            plugin_data_dir_plugins.insert(record.id.clone());
+        }
     }
 
     pre.sort_by_key(|b| std::cmp::Reverse(b.0));
@@ -158,6 +224,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         command_discoveries,
         keybindings,
         status_items,
+        plugin_event_decls,
+        plugin_data_dir_plugins,
     }
 }
 
@@ -276,6 +344,8 @@ impl ExtensionRunner {
                 command_discoveries: Vec::new(),
                 keybindings: Vec::new(),
                 status_items: Vec::new(),
+                plugin_event_decls: HashMap::new(),
+                plugin_data_dir_plugins: std::collections::HashSet::new(),
             })),
             session_ops: Arc::new(StdRwLock::new(None)),
             timeout,
@@ -307,10 +377,23 @@ impl ExtensionRunner {
         // register 是 startup 一次性路径，多持几毫秒锁不影响性能。
         if !reg.is_empty() {
             let mut records = self.records.write().await;
-            records.push(ExtensionRecord { id, reg });
+            records.push(ExtensionRecord {
+                id: id.clone(),
+                reg,
+            });
             log_handler_dispatch_order(&records);
             let new_index = Arc::new(build_handler_index(&records));
+            self.ensure_plugin_data_dirs(&new_index);
             *self.index.write() = new_index;
+        }
+    }
+
+    fn ensure_plugin_data_dirs(&self, index: &HandlerIndex) {
+        for plugin_id in &index.plugin_data_dir_plugins {
+            let dir = astrcode_support::hostpaths::plugin_data_dir(plugin_id);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::warn!(plugin_id = %plugin_id, error = %e, "failed to create plugin data dir");
+            }
         }
     }
 
@@ -672,6 +755,27 @@ impl ExtensionRunner {
     /// 收集所有插件注册的状态栏项。
     pub fn collect_status_items(&self) -> Vec<astrcode_core::extension::StatusItem> {
         self.load_index().status_items.clone()
+    }
+
+    /// 为指定插件构造绑定身份的事件发射器。
+    ///
+    /// 返回 `None` 表示该插件未声明任何 plugin event type。
+    pub fn make_plugin_event_sink(
+        &self,
+        plugin_id: &str,
+        event_tx: mpsc::UnboundedSender<EventPayload>,
+    ) -> Option<Arc<dyn PluginEventSink>> {
+        let index = self.load_index();
+        let decls = index.plugin_event_decls.get(plugin_id)?;
+        let decl_map: HashMap<String, PluginEventDecl> = decls
+            .iter()
+            .map(|d| (d.event_type.clone(), d.clone()))
+            .collect();
+        Some(Arc::new(BoundPluginEventSink {
+            plugin_id: plugin_id.to_owned(),
+            declarations: decl_map,
+            event_tx,
+        }))
     }
 
     /// 从 HandlerIndex 缓存收集斜杠命令。

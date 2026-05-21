@@ -111,6 +111,11 @@ pub fn project_mcp_config_path(workspace: &str) -> PathBuf {
     PathBuf::from(workspace).join(".astrcode").join("mcp.json")
 }
 
+/// 获取插件专属数据目录：`~/.astrcode/plugin_data/<plugin_id>/`。
+pub fn plugin_data_dir(plugin_id: &str) -> PathBuf {
+    astrcode_dir().join("plugin_data").join(plugin_id)
+}
+
 /// 确保目录存在，如不存在则递归创建（包含父目录）。
 pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)

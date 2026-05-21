@@ -201,6 +201,7 @@ impl CommandHandler {
                 session_id: active_turn.session_id.to_string(),
                 working_dir: session_state.working_dir,
                 model: astrcode_core::config::ModelSelection::simple(session_state.model_id),
+                plugin_event_sink: None,
             };
             if let Err(e) = self
                 .runtime

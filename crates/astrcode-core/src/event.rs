@@ -367,6 +367,22 @@ pub enum EventPayload {
         /// 工具执行的最终结果。
         result: ToolResult,
     },
+
+    /// 插件命名空间事件。
+    ///
+    /// 由 [`crate::extension::PluginEventSink`] 发出，`plugin_id` 由 runtime
+    /// 在构造 sink 时注入，插件无法伪造。`event_type` 必须在 Registrar 中声明。
+    PluginEvent {
+        /// 插件 ID，充当事件命名空间。
+        plugin_id: String,
+        /// 插件声明的事件类型名（如 `"memory.accepted"`）。
+        event_type: String,
+        /// payload schema 版本，用于向前兼容。
+        #[serde(default)]
+        schema_version: u32,
+        /// 不透明事件载荷。
+        payload: serde_json::Value,
+    },
 }
 
 impl EventPayload {

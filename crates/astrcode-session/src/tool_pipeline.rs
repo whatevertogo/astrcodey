@@ -130,6 +130,7 @@ impl ToolPipeline {
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
+                plugin_event_sink: None,
             };
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
@@ -412,6 +413,7 @@ impl ToolPipeline {
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
                     is_error: result.is_error,
+                    plugin_event_sink: None,
                 };
 
                 match self.extension_runner.emit_post_tool_use(post_ctx).await? {

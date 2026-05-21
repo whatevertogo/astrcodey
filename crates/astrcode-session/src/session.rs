@@ -180,6 +180,7 @@ impl Session {
                     session_id: session_id.to_string(),
                     working_dir: model.working_dir.clone(),
                     model: ModelSelection::simple(model.model_id.clone()),
+                    plugin_event_sink: None,
                 },
             )
             .await?;

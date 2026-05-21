@@ -249,5 +249,18 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::BackgroundTaskCompleted { .. } => {},
         EventPayload::Custom { .. } => {},
         EventPayload::RecapGenerated { .. } => {},
+        EventPayload::PluginEvent {
+            plugin_id,
+            event_type,
+            schema_version,
+            ..
+        } => {
+            model.plugin_events.push(
+                event.seq.unwrap_or_default(),
+                plugin_id.clone(),
+                event_type.clone(),
+                *schema_version,
+            );
+        },
     }
 }

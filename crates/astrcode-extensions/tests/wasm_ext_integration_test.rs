@@ -363,6 +363,7 @@ fn pre_tool_use_ctx() -> PreToolUseContext {
         tool_name: "shell".into(),
         tool_input: serde_json::json!({}),
         available_tools: vec![],
+        plugin_event_sink: None,
     }
 }
 

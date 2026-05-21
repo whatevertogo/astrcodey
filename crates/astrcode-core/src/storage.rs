@@ -287,6 +287,81 @@ pub struct CompactBoundaryView {
     pub seq: u64,
 }
 
+// ─── Plugin Event Index ────────────────────────────────────────────────
+
+/// 插件事件索引条目——不存 payload，按需从 event log 取。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginEventEntry {
+    /// 事件在 event log 中的 seq。
+    pub seq: u64,
+    /// 插件 ID。
+    pub plugin_id: String,
+    /// 事件类型名。
+    pub event_type: String,
+    /// payload schema 版本。
+    pub schema_version: u32,
+}
+
+/// 插件事件索引，由核心 reducer 在遇到 PluginEvent 时自动填充。
+///
+/// 不理解插件语义，只提供按 `plugin_id` + `event_type` 的结构化查询。
+/// payload 需要时通过 seq 从 event log 读取。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PluginEventIndex {
+    entries: Vec<PluginEventEntry>,
+    by_plugin: HashMap<String, Vec<usize>>,
+}
+
+impl PluginEventIndex {
+    /// 追加一条索引。
+    pub fn push(&mut self, seq: u64, plugin_id: String, event_type: String, schema_version: u32) {
+        let idx = self.entries.len();
+        self.by_plugin
+            .entry(plugin_id.clone())
+            .or_default()
+            .push(idx);
+        self.entries.push(PluginEventEntry {
+            seq,
+            plugin_id,
+            event_type,
+            schema_version,
+        });
+    }
+
+    /// 查询某个插件的全部事件（按 seq 排序）。
+    pub fn events_for(&self, plugin_id: &str) -> Vec<&PluginEventEntry> {
+        self.by_plugin
+            .get(plugin_id)
+            .map(|indices| indices.iter().map(|&i| &self.entries[i]).collect())
+            .unwrap_or_default()
+    }
+
+    /// 按插件 ID + 事件类型过滤。
+    pub fn events_of_type<'a>(
+        &'a self,
+        plugin_id: &str,
+        event_type: &str,
+    ) -> Vec<&'a PluginEventEntry> {
+        self.events_for(plugin_id)
+            .into_iter()
+            .filter(|e| e.event_type == event_type)
+            .collect()
+    }
+
+    /// 某个插件的最后一条匹配事件。
+    pub fn last_event(&self, plugin_id: &str, event_type: &str) -> Option<&PluginEventEntry> {
+        self.events_for(plugin_id)
+            .into_iter()
+            .rev()
+            .find(|e| e.event_type == event_type)
+    }
+
+    /// 某个插件的全部事件数量。
+    pub fn count_for(&self, plugin_id: &str) -> usize {
+        self.by_plugin.get(plugin_id).map_or(0, |v| v.len())
+    }
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -341,6 +416,9 @@ pub struct SessionReadModel {
     pub compact_boundaries: Vec<CompactBoundaryView>,
     /// 最新 durable 事件 seq。
     pub latest_seq: Option<u64>,
+    /// 插件事件索引，不存 payload，按需从 event log 取。
+    #[serde(default)]
+    pub plugin_events: PluginEventIndex,
 }
 
 impl SessionReadModel {
@@ -366,6 +444,7 @@ impl SessionReadModel {
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),
             latest_seq: None,
+            plugin_events: PluginEventIndex::default(),
         }
     }
 
