@@ -1006,7 +1006,7 @@ mod tests {
         assert!(prompt.contains("- `read`"));
         assert!(prompt.contains("External MCP Tools"));
         assert!(prompt.contains("- `mcp__demo__search`"));
-        assert!(prompt.contains("extension Tools"));
+        assert!(prompt.contains("Extension Tools"));
         assert!(prompt.contains("- `extension_lookup`"));
         assert!(prompt.contains("[SystemPromptInstruction]\n  extra hint"));
         assert!(prompt.contains("[Skills]\n  skill a"));
@@ -1100,7 +1100,7 @@ mod tests {
 
         let prompt = build_system_prompt(&input);
 
-        assert!(prompt.contains("extension Tools"));
+        assert!(prompt.contains("Extension Tools"));
         assert!(prompt.contains("- `extension_lookup`"));
         assert!(prompt.contains("not extension-tool discovery"));
         assert!(!prompt.contains("External MCP Tools"));
