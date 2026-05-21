@@ -383,6 +383,10 @@ pub struct ConfigViewResponseDto {
     pub config_path: String,
     pub active_profile: String,
     pub active_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_model: Option<String>,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
 }
@@ -413,6 +417,10 @@ pub struct ModelDto {
 pub struct UpdateActiveSelectionRequest {
     pub active_profile: String,
     pub active_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_model: Option<String>,
 }
 
 /// POST /api/config/active-selection 响应。
@@ -429,6 +437,10 @@ pub struct UpdateActiveSelectionResponseDto {
 pub struct ConfigReloadResponseDto {
     pub active_profile: String,
     pub active_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_small_model: Option<String>,
 }
 
 /// GET /api/models/current 响应。

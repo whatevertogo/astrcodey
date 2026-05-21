@@ -22,6 +22,12 @@ pub struct Config {
     /// 当前激活的模型标识。
     #[serde(default = "super::defaults::default_active_model")]
     pub active_model: String,
+    /// 小模型的配置文件名称（可选，未设置时回退到主模型）。
+    #[serde(default)]
+    pub active_small_profile: Option<String>,
+    /// 小模型的模型标识（可选，未设置时回退到主模型）。
+    #[serde(default)]
+    pub active_small_model: Option<String>,
     /// 运行时配置段（超时、重试等）。
     #[serde(default)]
     pub runtime: RuntimeSection,
@@ -36,6 +42,8 @@ impl Default for Config {
             version: super::defaults::default_version(),
             active_profile: super::defaults::default_active_profile(),
             active_model: super::defaults::default_active_model(),
+            active_small_profile: None,
+            active_small_model: None,
             runtime: RuntimeSection::default(),
             profiles: super::defaults::default_profiles(),
         }
@@ -164,6 +172,10 @@ pub struct ConfigOverlay {
     pub active_profile: Option<String>,
     /// 覆盖激活的模型标识。
     pub active_model: Option<String>,
+    /// 覆盖小模型的配置文件名。
+    pub active_small_profile: Option<String>,
+    /// 覆盖小模型的模型标识。
+    pub active_small_model: Option<String>,
     /// 覆盖配置文件列表。
     pub profiles: Option<Vec<Profile>>,
 }

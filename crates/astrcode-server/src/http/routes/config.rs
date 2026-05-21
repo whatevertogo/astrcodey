@@ -45,6 +45,8 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         config_path,
         active_profile: raw.active_profile.clone(),
         active_model: raw.active_model.clone(),
+        active_small_profile: raw.active_small_profile.clone(),
+        active_small_model: raw.active_small_model.clone(),
         profiles,
         warning: None,
     })
@@ -64,6 +66,8 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     };
     let active_profile = config.active_profile.clone();
     let active_model = config.active_model.clone();
+    let active_small_profile = config.active_small_profile.clone();
+    let active_small_model = config.active_small_model.clone();
 
     if let Err(error) = state
         .runtime
@@ -80,6 +84,8 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     Json(ConfigReloadResponseDto {
         active_profile,
         active_model,
+        active_small_profile,
+        active_small_model,
     })
     .into_response()
 }
@@ -91,6 +97,11 @@ pub(in crate::http) async fn update_active_selection(
     let mut candidate = state.runtime.config_manager.read_raw_config().clone();
     candidate.active_profile = request.active_profile;
     candidate.active_model = request.active_model;
+
+    if let (Some(p), Some(m)) = (request.active_small_profile, request.active_small_model) {
+        candidate.active_small_profile = Some(p);
+        candidate.active_small_model = Some(m);
+    }
 
     // Validate before persisting.
     if let Err(error) = candidate.clone().into_effective() {

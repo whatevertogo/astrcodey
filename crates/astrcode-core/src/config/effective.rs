@@ -7,6 +7,8 @@
 pub struct EffectiveConfig {
     /// LLM 提供者设置——已完整接入 OpenAiProvider 和 Agent。
     pub llm: LlmSettings,
+    /// 小模型设置。未配置时回退到主模型的 LlmSettings。
+    pub small_llm: LlmSettings,
     /// 上下文窗口 / compact 设置。
     pub context: ContextSettings,
     /// Agent 行为限制（嵌套深度、并行工具调用数等）。

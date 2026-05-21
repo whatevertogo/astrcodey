@@ -16,6 +16,8 @@ use astrcode_extensions::runner::ExtensionRunner;
 
 pub struct SessionRuntimeServices {
     llm: ArcSwap<ProviderSlot>,
+    /// 小模型 provider slot。未配置小模型时与主模型相同。
+    small_llm: ArcSwap<ProviderSlot>,
     extension_runner: Arc<ExtensionRunner>,
     context_assembler: Arc<LlmContextAssembler>,
     effective_config: ArcSwap<EffectiveConfig>,
@@ -28,12 +30,16 @@ struct ProviderSlot {
 impl SessionRuntimeServices {
     pub fn new(
         llm: Arc<dyn LlmProvider>,
+        small_llm: Arc<dyn LlmProvider>,
         extension_runner: Arc<ExtensionRunner>,
         context_assembler: Arc<LlmContextAssembler>,
         effective_config: EffectiveConfig,
     ) -> Self {
         Self {
             llm: ArcSwap::from_pointee(ProviderSlot { provider: llm }),
+            small_llm: ArcSwap::from_pointee(ProviderSlot {
+                provider: small_llm,
+            }),
             extension_runner,
             context_assembler,
             effective_config: ArcSwap::from_pointee(effective_config),
@@ -46,6 +52,19 @@ impl SessionRuntimeServices {
 
     pub fn swap_llm(&self, new: Arc<dyn LlmProvider>) {
         self.llm.store(Arc::new(ProviderSlot { provider: new }));
+    }
+
+    /// 返回小模型 provider。
+    ///
+    /// 未配置小模型时返回的与主模型相同。
+    pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.small_llm.load_full().provider)
+    }
+
+    /// 热替换小模型 provider。
+    pub fn swap_small_llm(&self, new: Arc<dyn LlmProvider>) {
+        self.small_llm
+            .store(Arc::new(ProviderSlot { provider: new }));
     }
 
     pub fn extension_runner(&self) -> &Arc<ExtensionRunner> {

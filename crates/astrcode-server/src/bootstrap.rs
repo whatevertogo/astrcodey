@@ -86,7 +86,43 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         FileConfigStore::default_path()
     };
     let config = config_store.load().await?;
-    let effective = config.clone().into_effective()?;
+    let effective = match config.clone().into_effective() {
+        Ok(e) => {
+            if let Err(err) = config_store.save_last_known_good(&config).await {
+                tracing::warn!("Failed to save last-known-good config snapshot: {err}");
+            }
+            e
+        },
+        Err(error) => {
+            tracing::warn!("Config resolution failed: {error}");
+            match config_store.load_last_known_good().await {
+                Ok(Some(snapshot)) => match snapshot.clone().into_effective() {
+                    Ok(e) => {
+                        tracing::warn!(
+                            "Loaded last-known-good config snapshot as fallback. Fix your config \
+                             via Settings or POST /api/config/active-selection."
+                        );
+                        e
+                    },
+                    Err(snapshot_err) => {
+                        tracing::warn!("Last-known-good snapshot also invalid: {snapshot_err}");
+                        fallback_default_effective()
+                    },
+                },
+                Ok(None) => {
+                    tracing::warn!(
+                        "No last-known-good snapshot found. Using built-in defaults. Fix your \
+                         config via Settings or POST /api/config/active-selection."
+                    );
+                    fallback_default_effective()
+                },
+                Err(err) => {
+                    tracing::warn!("Failed to load last-known-good snapshot: {err}");
+                    fallback_default_effective()
+                },
+            }
+        },
+    };
 
     // 2. 构建配置管理器与共享的运行时能力。
     //
@@ -201,6 +237,42 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 pub enum BootstrapError {
     #[error("Config: {0}")]
     Config(#[from] astrcode_core::config::ConfigStoreError),
-    #[error("Resolve: {0}")]
-    Resolve(#[from] astrcode_core::config::ResolveError),
+}
+
+/// 构造一个兜底的 `EffectiveConfig`，用于所有配置来源均失败时。
+///
+/// 返回的 LLM 配置使用空连接信息，LLM 功能不可用，但 HTTP API 仍然正常工作。
+fn fallback_default_effective() -> astrcode_core::config::EffectiveConfig {
+    use astrcode_core::config::{AgentSettings, ContextSettings, EffectiveConfig, WasmSettings};
+
+    EffectiveConfig {
+        llm: dummy_llm_settings(),
+        small_llm: dummy_llm_settings(),
+        context: ContextSettings::default(),
+        agent: AgentSettings::default(),
+        wasm: WasmSettings::default(),
+    }
+}
+
+fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
+    use astrcode_core::config::{LlmSettings, raw::OpenAiApiMode};
+
+    LlmSettings {
+        provider_kind: "openai".into(),
+        base_url: String::new(),
+        api_key: String::new(),
+        api_mode: OpenAiApiMode::ChatCompletions,
+        model_id: "fallback".into(),
+        max_tokens: 1024,
+        context_limit: 4096,
+        connect_timeout_secs: 10,
+        read_timeout_secs: 90,
+        max_retries: 0,
+        retry_base_delay_ms: 250,
+        temperature: None,
+        supports_prompt_cache_key: false,
+        prompt_cache_retention: None,
+        reasoning: false,
+        reasoning_split: false,
+    }
 }

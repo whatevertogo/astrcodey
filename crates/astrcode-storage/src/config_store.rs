@@ -25,6 +25,41 @@ impl FileConfigStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
+
+    fn last_known_good_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(|dir| dir.join(".last-known-good.json"))
+            .unwrap_or_else(|| self.path.with_file_name(".last-known-good.json"))
+    }
+
+    pub async fn save_last_known_good(&self, config: &Config) -> Result<(), ConfigStoreError> {
+        let path = self.last_known_good_path();
+        let json = serde_json::to_string_pretty(config)?;
+        tokio::task::spawn_blocking(move || {
+            let tmp_path = path.with_extension("json.tmp");
+            std::fs::write(&tmp_path, &json)?;
+            std::fs::rename(&tmp_path, &path)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
+    }
+
+    pub async fn load_last_known_good(&self) -> Result<Option<Config>, ConfigStoreError> {
+        let path = self.last_known_good_path();
+        tokio::task::spawn_blocking(move || {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let data = std::fs::read_to_string(&path)?;
+            let config: Config =
+                serde_json::from_str(&data).map_err(|e| friendly_deser_error(&e, &path))?;
+            Ok(Some(config))
+        })
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
+    }
 }
 
 #[async_trait::async_trait]

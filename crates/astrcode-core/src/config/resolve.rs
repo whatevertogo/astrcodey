@@ -24,6 +24,65 @@ pub enum ResolveError {
     MissingEnvVar(String),
 }
 
+/// 解析单个 profile + model 对为 [`LlmSettings`]。
+fn resolve_llm_settings(
+    profiles: &[Profile],
+    profile_name: &str,
+    model_name: &str,
+    runtime: &RuntimeSection,
+) -> Result<LlmSettings, ResolveError> {
+    let profile = profiles
+        .iter()
+        .find(|p| p.name == profile_name)
+        .ok_or_else(|| ResolveError::ProfileNotFound(profile_name.into()))?;
+
+    let model = profile
+        .models
+        .iter()
+        .find(|m| m.id == model_name)
+        .ok_or_else(|| ResolveError::ModelNotFound {
+            profile: profile.name.clone(),
+            model: model_name.into(),
+        })?;
+
+    let api_key = match profile.api_key.as_deref() {
+        Some(s) if !s.is_empty() => resolve_api_key(s)?,
+        _ => return Err(ResolveError::MissingField("api_key".into())),
+    };
+
+    let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
+    let openai_capabilities = profile.openai_capabilities.as_ref();
+
+    Ok(LlmSettings {
+        provider_kind: profile.provider_kind.clone(),
+        base_url: profile.base_url.clone(),
+        api_key,
+        api_mode,
+        model_id: model_name.into(),
+        max_tokens: model.max_tokens.unwrap_or(8192),
+        context_limit: model.context_limit.unwrap_or(65536),
+        connect_timeout_secs: runtime
+            .llm_connect_timeout_secs
+            .unwrap_or(super::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
+        read_timeout_secs: runtime
+            .llm_read_timeout_secs
+            .unwrap_or(super::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS),
+        max_retries: runtime
+            .llm_max_retries
+            .unwrap_or(super::defaults::DEFAULT_LLM_MAX_RETRIES),
+        retry_base_delay_ms: runtime
+            .llm_retry_base_delay_ms
+            .unwrap_or(super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
+        temperature: runtime.llm_temperature,
+        supports_prompt_cache_key: openai_capabilities
+            .and_then(|c| c.supports_prompt_cache_key)
+            .unwrap_or(false),
+        prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
+        reasoning: model.reasoning.unwrap_or(false),
+        reasoning_split: model.reasoning_split.unwrap_or(false),
+    })
+}
+
 impl Config {
     /// 将原始配置解析为 [`EffectiveConfig`]，填充所有默认值。
     ///
@@ -33,70 +92,23 @@ impl Config {
     /// 3. 解析 API 密钥（支持 `env:` 前缀和环境变量名）
     /// 4. 合并运行时配置段的超时/重试参数与默认值
     pub fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
-        // 查找激活的配置文件
-        let profile = self
-            .profiles
-            .iter()
-            .find(|p| p.name == self.active_profile)
-            .ok_or_else(|| ResolveError::ProfileNotFound(self.active_profile.clone()))?;
+        let llm = resolve_llm_settings(
+            &self.profiles,
+            &self.active_profile,
+            &self.active_model,
+            &self.runtime,
+        )?;
 
-        // 查找激活的模型
-        let model = profile
-            .models
-            .iter()
-            .find(|m| m.id == self.active_model)
-            .ok_or_else(|| ResolveError::ModelNotFound {
-                profile: profile.name.clone(),
-                model: self.active_model.clone(),
-            })?;
-
-        // 解析 API 密钥
-        let api_key = match profile.api_key.as_deref() {
-            Some(s) if !s.is_empty() => resolve_api_key(s)?,
-            _ => return Err(ResolveError::MissingField("api_key".into())),
-        };
-
-        // 默认使用 ChatCompletions 模式
-        let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
-        let openai_capabilities = profile.openai_capabilities.as_ref();
-
-        let llm = LlmSettings {
-            provider_kind: profile.provider_kind.clone(),
-            base_url: profile.base_url.clone(),
-            api_key,
-            api_mode,
-            model_id: self.active_model.clone(),
-            // 模型参数使用配置值或默认值
-            max_tokens: model.max_tokens.unwrap_or(8192),
-            context_limit: model.context_limit.unwrap_or(65536),
-            // 运行时参数优先使用配置值，否则使用全局默认值
-            connect_timeout_secs: self
-                .runtime
-                .llm_connect_timeout_secs
-                .unwrap_or(super::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
-            read_timeout_secs: self
-                .runtime
-                .llm_read_timeout_secs
-                .unwrap_or(super::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS),
-            max_retries: self
-                .runtime
-                .llm_max_retries
-                .unwrap_or(super::defaults::DEFAULT_LLM_MAX_RETRIES),
-            retry_base_delay_ms: self
-                .runtime
-                .llm_retry_base_delay_ms
-                .unwrap_or(super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
-            temperature: self.runtime.llm_temperature,
-            supports_prompt_cache_key: openai_capabilities
-                .and_then(|c| c.supports_prompt_cache_key)
-                .unwrap_or(false),
-            prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
-            reasoning: model.reasoning.unwrap_or(false),
-            reasoning_split: model.reasoning_split.unwrap_or(false),
+        let small_llm = match (&self.active_small_profile, &self.active_small_model) {
+            (Some(profile), Some(model)) => {
+                resolve_llm_settings(&self.profiles, profile, model, &self.runtime)?
+            },
+            _ => llm.clone(),
         };
 
         Ok(EffectiveConfig {
             llm,
+            small_llm,
             context: ContextSettings {
                 auto_compact_enabled: self
                     .runtime
@@ -199,6 +211,12 @@ pub fn merge_overlay(mut base: Config, overlay: ConfigOverlay) -> Config {
     if let Some(m) = overlay.active_model {
         base.active_model = m;
     }
+    if let Some(p) = overlay.active_small_profile {
+        base.active_small_profile = Some(p);
+    }
+    if let Some(m) = overlay.active_small_model {
+        base.active_small_model = Some(m);
+    }
     if let Some(profiles) = overlay.profiles {
         base.profiles = profiles;
     }
@@ -287,6 +305,8 @@ mod tests {
         };
         let effective = config.into_effective().unwrap();
         assert_eq!(effective.llm.model_id, "deepseek-chat");
+        // 未配置小模型时回退到主模型
+        assert_eq!(effective.small_llm.model_id, "deepseek-chat");
     }
 
     #[test]
@@ -342,5 +362,53 @@ mod tests {
 
         assert!(effective.llm.supports_prompt_cache_key);
         assert_eq!(effective.llm.prompt_cache_retention, None);
+    }
+
+    #[test]
+    fn test_small_model_resolves_from_different_profile() {
+        let config = Config {
+            profiles: vec![
+                Profile {
+                    name: "deepseek".into(),
+                    provider_kind: "openai".into(),
+                    base_url: "https://api.deepseek.com".into(),
+                    api_key: Some("sk-deep".into()),
+                    api_mode: Some(OpenAiApiMode::ChatCompletions),
+                    openai_capabilities: None,
+                    models: vec![ModelConfig {
+                        id: "deepseek-chat".into(),
+                        max_tokens: Some(8192),
+                        context_limit: Some(65536),
+                        reasoning: None,
+                        reasoning_split: None,
+                    }],
+                },
+                Profile {
+                    name: "anthropic".into(),
+                    provider_kind: "anthropic".into(),
+                    base_url: "https://api.anthropic.com/v1".into(),
+                    api_key: Some("sk-ant".into()),
+                    api_mode: None,
+                    openai_capabilities: None,
+                    models: vec![ModelConfig {
+                        id: "claude-haiku-4-5-20251001".into(),
+                        max_tokens: Some(8192),
+                        context_limit: Some(200000),
+                        reasoning: None,
+                        reasoning_split: None,
+                    }],
+                },
+            ],
+            active_profile: "deepseek".into(),
+            active_model: "deepseek-chat".into(),
+            active_small_profile: Some("anthropic".into()),
+            active_small_model: Some("claude-haiku-4-5-20251001".into()),
+            ..Config::default()
+        };
+
+        let effective = config.into_effective().unwrap();
+        assert_eq!(effective.llm.model_id, "deepseek-chat");
+        assert_eq!(effective.small_llm.model_id, "claude-haiku-4-5-20251001");
+        assert_eq!(effective.small_llm.provider_kind, "anthropic");
     }
 }

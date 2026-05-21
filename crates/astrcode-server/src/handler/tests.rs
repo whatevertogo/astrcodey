@@ -426,6 +426,24 @@ fn test_runtime_with_settings(
             reasoning: false,
             reasoning_split: false,
         },
+        small_llm: LlmSettings {
+            provider_kind: "mock".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            api_mode: OpenAiApiMode::ChatCompletions,
+            model_id: "mock-model".into(),
+            max_tokens: 1024,
+            context_limit: 1024,
+            connect_timeout_secs: 1,
+            read_timeout_secs: 1,
+            max_retries: 0,
+            retry_base_delay_ms: 0,
+            temperature: None,
+            supports_prompt_cache_key: false,
+            prompt_cache_retention: None,
+            reasoning: false,
+            reasoning_split: false,
+        },
         context: ContextSettings {
             auto_compact_enabled: context_settings.auto_compact_enabled,
             compact_threshold_percent: context_settings.compact_threshold_percent,
@@ -444,6 +462,7 @@ fn test_runtime_with_settings(
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
+        llm_provider.clone(),
         llm_provider,
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),

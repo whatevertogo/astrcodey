@@ -106,6 +106,11 @@ pub fn router(
         .route("/api/models/current", get(models::get_current_model))
         .route("/api/models", get(models::list_models))
         .route("/api/models/test", post(models::test_model))
+        .route(
+            "/api/models/small/current",
+            get(models::get_small_current_model),
+        )
+        .route("/api/models/small/test", post(models::test_small_model))
         .route("/api/shutdown", post(lifecycle::shutdown))
         .layer(middleware::from_fn_with_state(
             expected_bearer,
