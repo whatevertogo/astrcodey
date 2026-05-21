@@ -104,18 +104,7 @@ impl Tool for WriteFileTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `write` for file creation, regeneration, or full rewrites. Prefer `edit` or \
-                 `patch` for narrow edits to existing files.",
-            )
-            .caveat(
-                "This replaces the entire file. For partial changes, use `edit` or `patch` \
-                 instead.",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -123,9 +112,8 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "write".into(),
-        description: "Create a UTF-8 text file or fully replace an existing file when the \
-                      complete final content is known. Prefer edit for narrow edits to existing \
-                      files."
+        description: "Create a UTF-8 file or fully replace one when the complete final content \
+                      is known. Use `edit` or `patch` for partial changes."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -134,15 +122,15 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Absolute or relative target path."
+                    "description": "Target path."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Complete UTF-8 content to write. This replaces the whole file."
+                    "description": "Complete UTF-8 content. Replaces the whole file."
                 },
                 "createDirs": {
                     "type": "boolean",
-                    "description": "Create missing parent directories when true."
+                    "description": "Create missing parent dirs."
                 }
             },
             "required": ["path", "content"],

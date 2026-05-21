@@ -268,6 +268,7 @@ impl CommandHandler {
     /// 自动生成 recap 摘要推送给所有客户端。
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<CommandMessage>) {
         use std::time::Duration;
+
         use tokio::time::{Instant, sleep_until};
 
         const IDLE_RECAP_DELAY: Duration = Duration::from_secs(300); // 5 分钟
@@ -305,7 +306,7 @@ impl CommandHandler {
                     command: ClientCommand::SubmitPrompt { .. },
                     ..
                 } | CommandMessage::SubmitInputForSession { .. }
-                  | CommandMessage::SubmitInputWithCompletion { .. }
+                    | CommandMessage::SubmitInputWithCompletion { .. }
             );
             if resets_timer {
                 recap_deadline = None;

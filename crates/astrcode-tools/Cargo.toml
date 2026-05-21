@@ -21,3 +21,6 @@ similar = { workspace = true }
 tracing = { workspace = true }
 grep-searcher = "0.1"
 grep-regex = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -177,17 +177,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `patch` for multi-file changes, distant hunks, file creation, or deletion. \
-                 Use `edit` for a single exact replacement.",
-            )
-            .caveat(
-                "If some hunks fail to apply, already-applied changes are kept (partial commit).",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -195,8 +185,9 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "patch".into(),
-        description: "Apply a unified diff patch for coordinated multi-file changes, distant \
-                      hunks, file creation, or deletion. Use edit for a single exact replacement."
+        description: "Apply a unified diff for multi-file changes, distant hunks, file create, \
+                      or delete. If some hunks fail, applied changes are kept (partial commit). \
+                      Use `edit` for a single replacement."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -205,7 +196,7 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "Unified diff patch text containing one or more file changes."
+                    "description": "Unified diff text covering one or more files."
                 }
             },
             "required": ["patch"],

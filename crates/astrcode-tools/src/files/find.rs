@@ -135,14 +135,7 @@ impl Tool for FindFilesTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `find` for path discovery, `grep` for content search, and `read` to inspect \
-                 a known file.",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -150,9 +143,8 @@ fn find_files_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "find".into(),
-        description: "Find candidate file paths by glob pattern. This searches file paths only, \
-                      not file contents. Use grep for content search and read to inspect a known \
-                      result."
+        description: "Find file paths only by glob (`*.rs`, `**/*.ts`). For content, use \
+                      `grep`."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
@@ -161,29 +153,29 @@ fn find_files_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern for paths, e.g. '*.rs', '**/*.ts', '*.{json,toml}'. Does not search file contents."
+                    "description": "Glob, e.g. '*.rs', '**/*.ts', '*.{json,toml}'."
                 },
                 "root": {
                     "type": "string",
-                    "description": "Directory to search from. Defaults to the working directory."
+                    "description": "Search root. Defaults to working directory."
                 },
                 "maxResults": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum number of paths to return (default 100)."
+                    "description": "Default 100. Paginate with offset+nextOffset."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Number of sorted paths to skip for pagination."
+                    "description": "Paths to skip (pagination)."
                 },
                 "respectGitignore": {
                     "type": "boolean",
-                    "description": "Respect .gitignore-style exclusions (default true)."
+                    "description": "Honor .gitignore (default true)."
                 },
                 "includeHidden": {
                     "type": "boolean",
-                    "description": "Include hidden files and directories (default true)."
+                    "description": "Include hidden files (default true)."
                 }
             },
             "required": ["pattern"],

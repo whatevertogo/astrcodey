@@ -221,14 +221,7 @@ impl Tool for GrepTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `grep` for content search. Use `find` for path glob search. Switch to \
-                 `outputMode=content` only when matching lines are needed.",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -236,9 +229,9 @@ fn grep_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "grep".into(),
-        description: "Search file contents with regex or literal text. Defaults to \
-                      outputMode=files_with_matches; use outputMode=content when matching lines \
-                      are needed. Use find for path glob search."
+        description: "Search file contents (regex or literal). Default `outputMode=\
+                      files_with_matches` returns paths only — switch to `content` for matching \
+                      lines or `count` for per-file tallies. Use `find` for path globs."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
@@ -247,57 +240,57 @@ fn grep_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Pattern to search inside file contents. Regex unless literal is true."
+                    "description": "Regex pattern (or literal text when literal=true)."
                 },
                 "literal": {
                     "type": "boolean",
-                    "description": "Treat pattern as exact text. Use for punctuation-heavy code."
+                    "description": "Treat pattern as exact text."
                 },
                 "path": {
                     "type": "string",
-                    "description": "File or directory to search. Defaults to the working directory."
+                    "description": "File or directory. Defaults to working directory."
                 },
                 "recursive": {
                     "type": "boolean",
-                    "description": "Search subdirectories. Defaults to true for directories."
+                    "description": "Recurse into subdirs (default true for directories)."
                 },
                 "caseInsensitive": { "type": "boolean" },
                 "multiline": {
                     "type": "boolean",
-                    "description": "Enable ripgrep multiline search. Allows matches to span line breaks and makes '.' match newlines."
+                    "description": "Allow matches across lines; '.' matches newline."
                 },
                 "maxMatches": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Maximum matches or matched files to return (default 250)."
+                    "description": "Default 250. Paginate with offset+nextOffset."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Number of items to skip for pagination. Unit depends on outputMode: matching lines (content), matched files (files_with_matches/count)."
+                    "description": "Items to skip. Unit follows outputMode (lines for content, files otherwise)."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional path filter inside path, e.g. '*.rs'. Does not replace path."
+                    "description": "Path filter, e.g. '*.rs'."
                 },
                 "fileType": {
                     "type": "string",
-                    "description": "Optional file type filter, e.g. rust, typescript, markdown."
+                    "description": "Type filter, e.g. rust, typescript, markdown."
                 },
                 "beforeContext": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Lines of context before each content match."
+                    "description": "Context lines before match (content mode)."
                 },
                 "afterContext": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Lines of context after each content match."
+                    "description": "Context lines after match (content mode)."
                 },
                 "outputMode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
-                    "description": "Output mode (default files_with_matches). Use content for matching lines."
+                    "description": "Default files_with_matches."
                 }
             },
             "required": ["pattern"],

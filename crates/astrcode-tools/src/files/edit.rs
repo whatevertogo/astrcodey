@@ -118,22 +118,7 @@ impl Tool for EditFileTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `edit` for small edits when you know the exact old text. Prefer `patch` for \
-                 multi-file changes, distant hunks, or create/delete work.",
-            )
-            .caveat(
-                "You MUST `read` the file first before editing. Always copy oldStr from the read \
-                 output — never write from memory or guess.",
-            )
-            .caveat(
-                "`oldStr` must match exactly once — including whitespace, newlines, trailing \
-                 spaces, tabs, and line endings. If rejected, `read` the region again.",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -141,12 +126,11 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
-        description: "Apply one or more narrow exact string replacements inside an existing \
-                      file. You MUST read the file first (using the read tool) to get the exact \
-                      current content, then copy the text you want to change as oldStr. Never \
-                      write oldStr from memory — always paste it from the read result. oldStr \
-                      must match exactly once unless replaceAll is true. Use edits for atomic \
-                      multiEdit-style changes."
+        description: "Apply a narrow exact string replacement in an existing file. `read` first \
+                      and copy `oldStr` verbatim from the output — whitespace and indentation \
+                      must match. Must match exactly once unless `replaceAll=true`. Use `edits` \
+                      for atomic multi-replacement; use `patch` for multi-file or distant \
+                      changes."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -159,7 +143,7 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "oldStr": {
                     "type": "string",
-                    "description": "Exact text to replace. Copy this from the read tool output — never guess or reconstruct from memory."
+                    "description": "Exact text to replace, copied verbatim from the read output."
                 },
                 "newStr": {
                     "type": "string",
@@ -167,26 +151,17 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "replaceAll": {
                     "type": "boolean",
-                    "description": "Replace every occurrence. Use only when every match should change."
+                    "description": "Replace every occurrence."
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Atomic multiEdit operations applied in order. Do not combine with top-level oldStr/newStr.",
+                    "description": "Atomic ordered replacements. Do not combine with top-level oldStr/newStr.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "oldStr": {
-                                "type": "string",
-                                "description": "Exact text to replace."
-                            },
-                            "newStr": {
-                                "type": "string",
-                                "description": "Replacement text."
-                            },
-                            "replaceAll": {
-                                "type": "boolean",
-                                "description": "Replace every occurrence for this operation."
-                            }
+                            "oldStr": { "type": "string" },
+                            "newStr": { "type": "string" },
+                            "replaceAll": { "type": "boolean" }
                         },
                         "required": ["oldStr", "newStr"],
                         "additionalProperties": false

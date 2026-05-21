@@ -149,19 +149,7 @@ impl Tool for ReadFileTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "`read` reads files, not directories. Use it after `find`, `grep`, or \
-                 user-provided paths identify a file. Use `offset` + `limit` for normal source \
-                 files and `charOffset` + `maxChars` for persisted large tool results.",
-            )
-            .caveat(
-                "If output is truncated, continue from the next range or chunk instead of \
-                 rereading the whole file.",
-            )
-            .prompt_tag("filesystem")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("filesystem"))
     }
 }
 
@@ -169,9 +157,9 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
             name: "read".into(),
-            description: "Read a known file's contents. When a previous tool result says it was \
-                          persisted, pass the saved path here to read it. This is not a directory \
-                          listing or content search tool."
+            description: "Read a known file. Use `offset`+`limit` for source files, \
+                          `charOffset`+`maxChars` for persisted tool results. \
+                          Not for directories — use `find`."
                 .into(),
             origin: ToolOrigin::Builtin,
             execution_mode: ExecutionMode::Parallel,
@@ -180,27 +168,27 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to a known file, including a persisted tool-result path shown by an earlier tool result."
+                        "description": "File path, or a persisted tool-result path from a prior result."
                     },
                     "maxChars": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum characters to return (default 20000; persisted tool results are capped at 60000)."
+                        "description": "Default 20000 (60000 for persisted results)."
                     },
                     "charOffset": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Character offset for continuing a truncated read."
+                        "description": "Continue a truncated read."
                     },
                     "offset": {
                         "type": "integer",
                         "minimum": 0,
-                        "description": "Starting line offset, 0-based."
+                        "description": "Start line (0-based)."
                     },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Maximum number of lines to return from offset."
+                        "description": "Max lines from offset."
                     }
                 },
                 "required": ["path"],

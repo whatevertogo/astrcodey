@@ -50,6 +50,12 @@ struct ShellArgs {
     /// 本次执行的超时时间（秒，最大 600）
     #[serde(default)]
     timeout: Option<u64>,
+    /// 通过 stdin 传入命令的输入数据。
+    ///
+    /// 适用于需要 pipe 数据的场景（如 `jq .`、`python -c "..."` 读取 stdin、
+    /// `wc -l` 统计行数等），避免在 command 中做复杂的 shell 转义。
+    #[serde(default)]
+    stdin: Option<String>,
     /// 是否立即在后台执行，不阻塞 agent loop。
     ///
     /// 设为 true 时，命令立刻转入后台运行，agent 收到占位结果后可继续推理。
@@ -81,18 +87,7 @@ impl Tool for ShellTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `shell` for commands that need the OS or project toolchain: package \
-                 managers, build tools, git, docker, etc.",
-            )
-            .caveat(
-                "Default timeout varies by config. Prefer the timeout parameter for long-running \
-                 commands.",
-            )
-            .prompt_tag("system")
-            .always_include(true),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("system"))
     }
 
     /// 执行 shell 命令：解析参数 → 构建子进程 → 并发读取 stdout/stderr → 等待完成或超时。
@@ -126,13 +121,29 @@ impl Tool for ShellTool {
             .args(&command_args)
             .current_dir(&cwd)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null());
+            .stderr(Stdio::piped());
         hide_command_window(&mut command);
+        setup_process_group(&mut command);
+
+        // stdin 处理：有数据则 pipe，否则 null
+        if args.stdin.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
+        }
 
         let mut child = command
             .spawn()
             .map_err(|e| ToolError::Execution(format!("spawn: {e}")))?;
+
+        // 写入 stdin 数据后关闭
+        if let Some(input) = &args.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(input.as_bytes()).await;
+                drop(stdin);
+            }
+        }
 
         let stdout = child
             .stdout
@@ -233,10 +244,10 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
     let definition = ToolDefinition {
         name: "shell".into(),
         description: format!(
-            "Execute a shell command with the default shell ({}). Returns stdout, stderr, and \
-             exit code. Prefer file tools for reading, searching, and editing files; use shell \
-             for commands that need the OS or project toolchain. Default timeout: {}s (max 600s, \
-             prefer override with the timeout parameter).",
+            "Run a command via {} ({}s default timeout, max 600). Returns stdout, stderr, \
+             exit code. Set `runInBackground=true` for long-running tasks (dev servers, \
+             watchers); track or cancel them with `task`. Prefer `read`/`grep`/`find`/`edit` \
+             for file ops.",
             shell.name, timeout_secs,
         ),
         origin: ToolOrigin::Builtin,
@@ -247,22 +258,26 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "command": { "type": "string" },
                 "intent": {
                     "type": "string",
-                    "description": "Short active-voice reason for running this command, useful for audit and progress display."
+                    "description": "Short active-voice reason, shown in audit/UI."
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Working directory for this command. Prefer this over shell-level cd."
+                    "description": "Working directory. Prefer over shell-level cd."
                 },
                 "timeout": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 600,
-                    "description": "Timeout in seconds (default from config, max 600)."
+                    "description": "Seconds. Override default for long commands."
+                },
+                "stdin": {
+                    "type": "string",
+                    "description": "Pipe data into stdin (jq, wc, python, etc.)."
                 },
                 "runInBackground": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command in the background immediately. Use for long-running tasks like dev servers, file watchers, or builds. When true, the agent receives a placeholder result and can continue reasoning."
+                    "description": "Run in background. Use for dev servers, watchers, builds."
                 }
             },
             "required": ["command"],
@@ -307,6 +322,24 @@ fn hide_command_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_command_window(_: &mut Command) {}
 
+/// 在 Unix 上设置子进程为独立进程组（pgid == pid），
+/// 以便超时时可以通过 `kill(-pgid, SIGTERM)` 杀掉整棵子进程树。
+#[cfg(unix)]
+fn setup_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid() 是 async-signal-safe 的 POSIX 调用。
+    // 在 fork 后 exec 前执行，让子进程成为新 session leader。
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn setup_process_group(_command: &mut Command) {}
+
 #[cfg(windows)]
 async fn terminate_child_tree(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else {
@@ -324,8 +357,37 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-#[cfg(not(windows))]
-#[allow(clippy::unused_async)]
+/// 杀掉子进程及其整个进程组。
+///
+/// 先发 SIGTERM 给进程组（graceful），等 2 秒后若仍存活则 SIGKILL。
+#[cfg(unix)]
+async fn terminate_child_tree(child: &mut tokio::process::Child) {
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        return;
+    };
+    let pgid = pid as i32;
+
+    // 先 SIGTERM 整个进程组
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+
+    // 等待 2 秒让进程优雅退出
+    match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+        Ok(_) => return,
+        Err(_) => {},
+    }
+
+    // 仍未退出，SIGKILL 进程组
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+    let _ = child.start_kill();
+}
+
+/// 非 Unix、非 Windows 平台的 fallback。
+#[cfg(all(not(unix), not(windows)))]
 async fn terminate_child_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
@@ -412,6 +474,15 @@ mod tests {
                 .into(),
             ShellFamily::Cmd => "echo before & ping -n 11 127.0.0.1 > nul & echo after".into(),
             ShellFamily::Posix | ShellFamily::Wsl => "echo before; sleep 10; echo after".into(),
+        }
+    }
+
+    /// 读取 stdin 并原样输出，用于测试 stdin 参数。
+    fn command_echoing_stdin() -> String {
+        match resolve_shell().family {
+            ShellFamily::PowerShell => "[Console]::In.ReadToEnd()".into(),
+            ShellFamily::Cmd => "findstr \"^\"".into(),
+            ShellFamily::Posix | ShellFamily::Wsl => "cat".into(),
         }
     }
 
@@ -519,5 +590,31 @@ mod tests {
         assert!(!result.content.contains("after"));
         assert_eq!(result.metadata["timedOut"], serde_json::json!(true));
         assert_eq!(result.metadata["streamed"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn shell_stdin_pipes_data_to_command() {
+        let tool = ShellTool {
+            working_dir: std::env::current_dir().expect("cwd should exist"),
+            timeout_secs: 30,
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": command_echoing_stdin(),
+                    "stdin": "hello from stdin\n"
+                }),
+                &empty_ctx(),
+            )
+            .await
+            .expect("shell with stdin should execute");
+
+        assert!(!result.is_error, "unexpected error: {result:?}");
+        assert!(
+            result.content.contains("hello from stdin"),
+            "stdout should contain stdin data, got: {}",
+            result.content
+        );
     }
 }

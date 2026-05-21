@@ -83,12 +83,7 @@ impl Tool for TaskTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `task` to check on long-running shell commands or cancel them.",
-            )
-            .prompt_tag("system"),
-        )
+        Some(ToolPromptMetadata::new("").prompt_tag("system"))
     }
 }
 
@@ -96,8 +91,9 @@ fn task_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "task".into(),
-        description: "Manage background tasks. Use 'list' to see running tasks, 'cancel' to stop \
-                      one."
+        description: "Manage background shell tasks for this session. action=list shows running \
+                      tasks; action=cancel stops one by id. Use after launching a long-running \
+                      shell command to confirm it is alive."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
@@ -107,11 +103,11 @@ fn task_tool_definition() -> &'static ToolDefinition {
                 "action": {
                     "type": "string",
                     "enum": ["list", "cancel"],
-                    "description": "Action to perform: 'list' shows all background tasks, 'cancel' stops a specific task."
+                    "description": "list: show all tasks. cancel: stop one."
                 },
                 "taskId": {
                     "type": "string",
-                    "description": "Task ID to cancel (required for 'cancel' action)."
+                    "description": "Required for cancel."
                 }
             },
             "required": ["action"],
