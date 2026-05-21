@@ -194,7 +194,10 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
             status_items.push(item.clone());
         }
         if !record.reg.extension_event_decls().is_empty() {
-            extension_event_decls.insert(record.id.clone(), record.reg.extension_event_decls().to_vec());
+            extension_event_decls.insert(
+                record.id.clone(),
+                record.reg.extension_event_decls().to_vec(),
+            );
         }
         if record.reg.needs_extension_data_dir() {
             extension_data_dir_extensions.insert(record.id.clone());
@@ -386,6 +389,36 @@ impl ExtensionRunner {
             self.ensure_extensions_data_dir_dirs(&new_index);
             *self.index.write() = new_index;
         }
+    }
+
+    /// 注销一个扩展，并重建分发表。
+    ///
+    /// 返回是否真的移除了该扩展。
+    pub async fn unregister(&self, extension_id: &str) -> bool {
+        let mut exts = self.extensions.write().await;
+        let original_len = exts.len();
+        exts.retain(|ext| ext.id() != extension_id);
+        if exts.len() == original_len {
+            return false;
+        }
+
+        let mut records = self.records.write().await;
+        records.retain(|record| record.id != extension_id);
+        log_handler_dispatch_order(&records);
+        let new_index = Arc::new(build_handler_index(&records));
+        self.ensure_extensions_data_dir_dirs(&new_index);
+        *self.index.write() = new_index;
+        true
+    }
+
+    /// 返回当前已注册扩展的 id 列表。
+    pub async fn registered_extension_ids(&self) -> Vec<String> {
+        self.extensions
+            .read()
+            .await
+            .iter()
+            .map(|ext| ext.id().to_string())
+            .collect()
     }
 
     fn ensure_extensions_data_dir_dirs(&self, index: &HandlerIndex) {

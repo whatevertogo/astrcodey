@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
@@ -83,6 +83,7 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
         context: ContextSettings::default(),
         agent: astrcode_core::config::AgentSettings::default(),
         wasm: astrcode_core::config::WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     Arc::new(SessionRuntimeServices::new(
         llm.clone(),

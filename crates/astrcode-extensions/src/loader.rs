@@ -5,6 +5,7 @@
 //! 两个位置发现并加载原生扩展。
 
 use std::{
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -56,30 +57,75 @@ impl ExtensionRuntime {
         sources: &[&dyn ExtensionSource],
     ) -> Self {
         let runner = Arc::new(ExtensionRunner::new(timeout));
-        let mut load_errors = Vec::new();
-
-        for source in sources {
-            let load_result = source.load(&ctx).await;
-            for ext in load_result.extensions {
-                runner.register(ext).await;
-            }
-            load_errors.extend(load_result.errors);
-        }
+        let load_errors = Self::sync_sources(&runner, &ctx, sources).await;
 
         Self {
             runner,
             load_errors,
         }
     }
+
+    /// 将 sources 的当前加载结果同步到现有 runner：新增的注册，消失的卸载。
+    ///
+    /// 适用于“source-managed” runner，例如 server 启动和配置热更新路径。
+    pub async fn sync_sources(
+        runner: &Arc<ExtensionRunner>,
+        ctx: &ExtensionLoadContext,
+        sources: &[&dyn ExtensionSource],
+    ) -> Vec<String> {
+        let mut desired_extensions = Vec::new();
+        let mut load_errors = Vec::new();
+
+        for source in sources {
+            let load_result = source.load(ctx).await;
+            desired_extensions.extend(load_result.extensions);
+            load_errors.extend(load_result.errors);
+        }
+
+        let desired_ids: HashSet<String> = desired_extensions
+            .iter()
+            .map(|ext| ext.id().to_string())
+            .collect();
+        let current_ids = runner.registered_extension_ids().await;
+
+        // 先卸载同名扩展，再按 source 顺序注册，保证替换与优先级语义稳定。
+        for id in current_ids.iter().filter(|id| desired_ids.contains(*id)) {
+            runner.unregister(id).await;
+        }
+        for ext in desired_extensions {
+            runner.register(ext).await;
+        }
+        for id in current_ids.iter().filter(|id| !desired_ids.contains(*id)) {
+            runner.unregister(id).await;
+        }
+
+        load_errors
+    }
 }
 
 /// Disk-backed extension source for global and project WASM extensions.
-pub struct DiskExtensionSource;
+pub struct DiskExtensionSource {
+    extension_states: BTreeMap<String, bool>,
+}
+
+impl DiskExtensionSource {
+    pub fn new(extension_states: BTreeMap<String, bool>) -> Self {
+        Self { extension_states }
+    }
+}
 
 #[async_trait::async_trait]
 impl ExtensionSource for DiskExtensionSource {
     async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
-        ExtensionLoader::load_all(ctx.working_dir.as_deref(), &ctx.wasm_limits).await
+        let mut result =
+            ExtensionLoader::load_all(ctx.working_dir.as_deref(), &ctx.wasm_limits).await;
+        result.extensions.retain(|extension| {
+            self.extension_states
+                .get(extension.id())
+                .copied()
+                .unwrap_or(true)
+        });
+        result
     }
 }
 

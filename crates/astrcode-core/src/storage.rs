@@ -314,7 +314,13 @@ pub struct ExtensionEventIndex {
 
 impl ExtensionEventIndex {
     /// 追加一条索引。
-    pub fn push(&mut self, seq: u64, extension_id: String, event_type: String, schema_version: u32) {
+    pub fn push(
+        &mut self,
+        seq: u64,
+        extension_id: String,
+        event_type: String,
+        schema_version: u32,
+    ) {
         let idx = self.entries.len();
         self.by_extension
             .entry(extension_id.clone())

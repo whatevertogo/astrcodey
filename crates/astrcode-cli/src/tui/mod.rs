@@ -127,6 +127,16 @@ pub async fn run() -> io::Result<()> {
             },
         }
 
+        if app.needs_extension_refresh {
+            app.needs_extension_refresh = false;
+            if app.active_session_id.is_some() {
+                client
+                    .send_command(&ClientCommand::ListExtensionCommands)
+                    .await
+                    .map_err(io_error)?;
+            }
+        }
+
         if app.should_quit {
             break;
         }

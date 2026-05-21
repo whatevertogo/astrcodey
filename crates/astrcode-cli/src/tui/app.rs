@@ -37,6 +37,8 @@ pub struct App {
     pub status_items: BTreeMap<String, String>,
     /// 插件注册的快捷键绑定（启动时从服务端获取）。
     pub keybindings: Vec<crate::tui::keybinding::RegisteredKeybinding>,
+    /// 服务端扩展注册表变化后，主循环应重新拉取扩展命令快照。
+    pub needs_extension_refresh: bool,
     // Session picker（/resume 触发的选择模式）
     pub session_picker: Option<SessionPicker>,
     // Composer
@@ -99,6 +101,7 @@ impl App {
             extension_commands: Vec::new(),
             status_items: BTreeMap::new(),
             keybindings: Vec::new(),
+            needs_extension_refresh: false,
             session_picker: None,
             composer: ComposerState::default(),
             show_slash_palette: false,

@@ -1,13 +1,12 @@
 //! Memory handlers — Recall, Save, Search, Observe, Command。
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_core::{
     extension::{
-        CommandContext, ExchangeSummary, ExtensionCommandResult, ExtensionError,
-        HookResult, LifecycleContext, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, SlashCommand, ToolHandler,
+        CommandContext, ExchangeSummary, ExtensionCommandResult, ExtensionError, HookResult,
+        LifecycleContext, PromptBuildContext, PromptBuildHandler, PromptContributions,
+        SlashCommand, ToolHandler,
     },
     llm::{LlmEvent, LlmMessage, LlmRole},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
@@ -31,7 +30,10 @@ const MAX_LIST_ENTRIES: usize = 50;
 pub(crate) fn memory_save_definition() -> ToolDefinition {
     ToolDefinition {
         name: MEMORY_SAVE_TOOL.to_string(),
-        description: "Save a piece of information to long-term memory. Use this to remember user preferences, project decisions, coding patterns, or any fact worth recalling in future sessions.".to_string(),
+        description: "Save a piece of information to long-term memory. Use this to remember user \
+                      preferences, project decisions, coding patterns, or any fact worth \
+                      recalling in future sessions."
+            .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
@@ -199,7 +201,9 @@ impl PromptBuildHandler for MemoryRecallHandler {
 
         Ok(PromptContributions {
             additional_instructions: vec![format!(
-                "<memory>\nYou have a persistent memory system. Use `{MEMORY_SAVE_TOOL}` to store important information and `{MEMORY_SEARCH_TOOL}` to recall past memories.\n\n{truncated}\n</memory>"
+                "<memory>\nYou have a persistent memory system. Use `{MEMORY_SAVE_TOOL}` to store \
+                 important information and `{MEMORY_SEARCH_TOOL}` to recall past \
+                 memories.\n\n{truncated}\n</memory>"
             )],
             ..Default::default()
         })
@@ -238,14 +242,13 @@ impl MemoryObserveHandler {
         };
 
         let prompt = format!(
-            "Analyze this conversation exchange. Determine if any information is worth saving to long-term memory.\n\
-             Focus on: user preferences, project decisions, coding patterns, important facts.\n\
-             Ignore: greetings, simple Q&A, tool usage details.\n\n\
-             User: {}\n\
-             Assistant: {}\n\n\
-             Respond with JSON only: {{ \"should_save\": bool, \"memories\": [{{ \"content\": \"...\", \"category\": \"user_pref|project_ctx|decision|general\" }}] }}",
-            exchange.user_message,
-            exchange.assistant_message
+            "Analyze this conversation exchange. Determine if any information is worth saving to \
+             long-term memory.\nFocus on: user preferences, project decisions, coding patterns, \
+             important facts.\nIgnore: greetings, simple Q&A, tool usage details.\n\nUser: \
+             {}\nAssistant: {}\n\nRespond with JSON only: {{ \"should_save\": bool, \"memories\": \
+             [{{ \"content\": \"...\", \"category\": \"user_pref|project_ctx|decision|general\" \
+             }}] }}",
+            exchange.user_message, exchange.assistant_message
         );
 
         let messages = vec![LlmMessage {

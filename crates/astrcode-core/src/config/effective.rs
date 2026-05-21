@@ -2,6 +2,8 @@
 //!
 //! 仅包含已实际接入实现的字段。新功能在接入时将其配置添加到此处。
 
+use std::collections::BTreeMap;
+
 /// 顶层已解析配置。
 #[derive(Debug, Clone)]
 pub struct EffectiveConfig {
@@ -15,6 +17,8 @@ pub struct EffectiveConfig {
     pub agent: AgentSettings,
     /// WASM 扩展资源限制（fuel、内存上限等）。
     pub wasm: WasmSettings,
+    /// 扩展加载设置。
+    pub extensions: ExtensionSettings,
 }
 
 // ─── LLM Settings ────────────────────────────────────────────────────────
@@ -136,4 +140,13 @@ impl Default for WasmSettings {
             memory_bytes: super::defaults::DEFAULT_WASM_MEMORY_MB * 1024 * 1024,
         }
     }
+}
+
+// ─── Extension Settings ────────────────────────────────────────────────
+
+/// 已解析的扩展加载配置。
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionSettings {
+    /// 扩展启停覆盖。key 为扩展 id，value=false 表示禁用。
+    pub extension_states: BTreeMap<String, bool>,
 }

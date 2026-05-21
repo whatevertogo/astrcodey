@@ -10,7 +10,7 @@ use std::{
 
 use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},
     extension::{
         CommandContext, Extension, ExtensionCommandResult, ExtensionError, ExtensionEvent,
@@ -455,6 +455,7 @@ fn test_runtime_with_settings(
         },
         agent: astrcode_core::config::AgentSettings::default(),
         wasm: astrcode_core::config::WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
@@ -487,6 +488,7 @@ fn test_runtime_with_settings(
         session_manager,
         extension_runner,
         capabilities,
+        startup_working_dir: std::env::temp_dir(),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }

@@ -3,6 +3,8 @@
 //! 这些类型直接对应配置文件的 JSON 结构，使用 `serde` 进行序列化/反序列化。
 //! 字段使用 `camelCase` 命名约定以匹配 JSON 约定。
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::llm::PromptCacheRetention;
@@ -157,6 +159,15 @@ pub struct RuntimeSection {
     pub wasm_fuel: Option<u64>,
     /// WASM 扩展线性内存上限（MB）。
     pub wasm_memory_mb: Option<usize>,
+    // ── Bundled Extensions ───────────────────────────────────────────
+    /// 内置扩展启停覆盖。key 为扩展 id，value=false 表示禁用；未配置则保持默认启用。
+    ///
+    /// 例：`{ "astrcode.memory": false }`
+    pub builtin_extensions: Option<BTreeMap<String, bool>>,
+    /// 通用扩展启停覆盖。适用于内置扩展和磁盘扩展。
+    ///
+    /// 例：`{ "astrcode.memory": false, "my.wasm.extension": false }`
+    pub extension_states: Option<BTreeMap<String, bool>>,
 }
 
 // ─── Config Overlay ──────────────────────────────────────────────────────

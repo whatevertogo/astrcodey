@@ -165,8 +165,25 @@ impl Config {
                     * 1024
                     * 1024,
             },
+            extensions: ExtensionSettings {
+                extension_states: merge_extension_states(
+                    self.runtime.builtin_extensions,
+                    self.runtime.extension_states,
+                ),
+            },
         })
     }
+}
+
+fn merge_extension_states(
+    builtin_extensions: Option<std::collections::BTreeMap<String, bool>>,
+    extension_states: Option<std::collections::BTreeMap<String, bool>>,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut merged = builtin_extensions.unwrap_or_default();
+    if let Some(extension_states) = extension_states {
+        merged.extend(extension_states);
+    }
+    merged
 }
 
 /// 解析 API 密钥：支持 `env:VAR` 前缀和环境变量名。

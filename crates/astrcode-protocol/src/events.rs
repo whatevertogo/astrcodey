@@ -65,6 +65,9 @@ pub enum ClientNotification {
         /// 新的显示文本。空字符串表示隐藏。
         text: String,
     },
+
+    /// 扩展注册表发生变化，客户端应清空并重新拉取命令/快捷键/状态栏快照。
+    ExtensionRegistryChanged,
 }
 
 /// UI 交互请求的类型。

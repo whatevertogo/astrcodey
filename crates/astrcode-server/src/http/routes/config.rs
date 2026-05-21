@@ -47,6 +47,13 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         active_model: raw.active_model.clone(),
         active_small_profile: raw.active_small_profile.clone(),
         active_small_model: raw.active_small_model.clone(),
+        extension_states: state
+            .runtime
+            .config_manager
+            .read_effective()
+            .extensions
+            .extension_states
+            .clone(),
         profiles,
         warning: None,
     })
@@ -79,6 +86,13 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
             "invalid_config",
             format!("Reloaded config is invalid: {error}"),
         );
+    }
+    let reload_errors = state.runtime.reload_extensions().await;
+    state
+        .event_bus
+        .send_notification(astrcode_protocol::events::ClientNotification::ExtensionRegistryChanged);
+    for error in reload_errors {
+        tracing::warn!("extension reload error: {error}");
     }
 
     Json(ConfigReloadResponseDto {

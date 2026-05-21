@@ -1,8 +1,6 @@
 //! MemoryStore — MEMORY.md 文件读写与搜索。
 
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{io::Write, path::PathBuf, sync::Mutex};
 
 use astrcode_support::hostpaths::{self, ensure_dir};
 
@@ -170,10 +168,7 @@ const VALID_CATEGORIES: &[&str] = &["user_pref", "project_ctx", "decision", "gen
 fn parse_category_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
-        let inner = trimmed
-            .strip_prefix("<!--")?
-            .strip_suffix("-->")?
-            .trim();
+        let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
         if !inner.is_empty() {
             return Some(inner.to_string());
         }

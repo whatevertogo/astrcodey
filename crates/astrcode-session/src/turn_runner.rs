@@ -525,10 +525,9 @@ impl TurnRunner {
     ) -> Result<TurnOutput, TurnError> {
         self.dispatch_after_provider_response(extension_runner)
             .await?;
-        let end_ctx = self.shared.lifecycle_ctx_with_exchange(
-            user_text,
-            state.final_text.clone(),
-        );
+        let end_ctx = self
+            .shared
+            .lifecycle_ctx_with_exchange(user_text, state.final_text.clone());
         extension_runner
             .emit_lifecycle(ExtensionEvent::TurnEnd, end_ctx)
             .await?;

@@ -502,8 +502,13 @@ impl EventStore for FileSystemSessionRepository {
 
         if let (Some(extension_dir), Some(subagents_dir)) = (extension_dir, subagents_dir) {
             if subagents_dir.file_name().is_some_and(|n| n == "subagents") {
-                let extension_name = extension_dir.file_name().unwrap_or_default().to_string_lossy();
-                let recycled = subagents_dir.join(".recycled").join(extension_name.as_ref());
+                let extension_name = extension_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let recycled = subagents_dir
+                    .join(".recycled")
+                    .join(extension_name.as_ref());
                 tokio::fs::create_dir_all(&recycled).await?;
                 let dest = recycled.join(dir.file_name().unwrap_or_default());
                 tokio::fs::rename(&dir, &dest).await?;
@@ -717,8 +722,9 @@ impl FileSystemSessionRepository {
                             continue;
                         }
                         if extension_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                            if let Some(found) =
-                                self.search_recycled_in_root(&extension_entry.path(), id).await
+                            if let Some(found) = self
+                                .search_recycled_in_root(&extension_entry.path(), id)
+                                .await
                             {
                                 return Some(found);
                             }
@@ -811,21 +817,22 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
 
-        let (working_dir, model_id, parent_session_id, source_extension) = match &first_event.payload {
-            EventPayload::SessionStarted {
-                working_dir,
-                model_id,
-                parent_session_id,
-                tool_policy: _,
-                source_extension,
-            } => (
-                working_dir.clone(),
-                model_id.clone(),
-                parent_session_id.clone(),
-                source_extension.clone(),
-            ),
-            _ => return Ok(None),
-        };
+        let (working_dir, model_id, parent_session_id, source_extension) =
+            match &first_event.payload {
+                EventPayload::SessionStarted {
+                    working_dir,
+                    model_id,
+                    parent_session_id,
+                    tool_policy: _,
+                    source_extension,
+                } => (
+                    working_dir.clone(),
+                    model_id.clone(),
+                    parent_session_id.clone(),
+                    source_extension.clone(),
+                ),
+                _ => return Ok(None),
+            };
 
         let updated_at = last_event
             .as_ref()
@@ -1265,7 +1272,10 @@ mod tests {
             child.parent_session_id.as_ref(),
             Some(&SessionId::from("parent"))
         );
-        assert_eq!(child.source_extension.as_deref(), Some("owner/extension.alpha"));
+        assert_eq!(
+            child.source_extension.as_deref(),
+            Some("owner/extension.alpha")
+        );
     }
 
     #[tokio::test]

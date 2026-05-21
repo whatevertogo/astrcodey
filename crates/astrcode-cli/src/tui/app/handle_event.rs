@@ -65,6 +65,13 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
                 app.status_items.insert(id.clone(), text.clone());
             }
         },
+        ClientNotification::ExtensionRegistryChanged => {
+            app.extension_commands.clear();
+            app.keybindings.clear();
+            app.status_items.clear();
+            app.needs_extension_refresh = true;
+            app.status_text = "Extension registry changed".into();
+        },
     }
 }
 

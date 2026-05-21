@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{EffectiveConfig, LlmSettings, OpenAiApiMode, WasmSettings},
+    config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{AgentSessionStatus, EventStore},
     tool::{
@@ -97,6 +97,7 @@ fn build_test_ops(
         context: Default::default(),
         agent: Default::default(),
         wasm: WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     let capabilities = Arc::new(SessionRuntimeServices::new(
         llm_provider.clone(),

@@ -15,7 +15,6 @@ use astrcode_core::{
     extension::{Extension, ExtensionEvent, HookMode, Registrar},
     llm::LlmProvider,
 };
-
 use handlers::{
     MemoryCommandHandler, MemoryObserveHandler, MemoryRecallHandler, MemorySaveHandler,
     MemorySearchHandler,

@@ -3,10 +3,13 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{config::ConfigStore, storage::EventStore};
+use astrcode_core::{
+    config::{ConfigStore, EffectiveConfig},
+    storage::EventStore,
+};
 use astrcode_extensions::{
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
@@ -40,6 +43,8 @@ pub struct ServerRuntime {
     /// provider 与生效配置。`ConfigManager` 是配置写入入口，但 `effective` 与
     /// `llm_provider` 的存储位置只在这里，二者共享同一个 `Arc`。
     pub capabilities: Arc<SessionRuntimeServices>,
+    /// 启动时使用的工作目录，用于项目级扩展发现与后续重载。
+    pub startup_working_dir: PathBuf,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -166,21 +171,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     //
     // 扩展工具不会在这里写入全局工具表；这里只保存扩展列表。
     // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource;
-    let disk_source = DiskExtensionSource;
-    let extension_runtime = ExtensionRuntime::load(
-        ExtensionLoadContext {
-            working_dir: Some(cwd_str),
-            wasm_limits: WasmLimits {
-                fuel: effective.wasm.fuel,
-                memory_bytes: effective.wasm.memory_bytes,
-            },
-        },
-        Duration::from_secs(30),
-        &[&bundled_source, &disk_source],
-    )
-    .await;
+    let extension_runtime = load_extension_runtime(&effective, &cwd).await;
     for err in &extension_runtime.load_errors {
         tracing::warn!("Extension load error: {err}");
     }
@@ -228,6 +219,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager,
         extension_runner,
         capabilities,
+        startup_working_dir: cwd,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
@@ -243,7 +235,9 @@ pub enum BootstrapError {
 ///
 /// 返回的 LLM 配置使用空连接信息，LLM 功能不可用，但 HTTP API 仍然正常工作。
 fn fallback_default_effective() -> astrcode_core::config::EffectiveConfig {
-    use astrcode_core::config::{AgentSettings, ContextSettings, EffectiveConfig, WasmSettings};
+    use astrcode_core::config::{
+        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, WasmSettings,
+    };
 
     EffectiveConfig {
         llm: dummy_llm_settings(),
@@ -251,6 +245,7 @@ fn fallback_default_effective() -> astrcode_core::config::EffectiveConfig {
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
         wasm: WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     }
 }
 
@@ -275,4 +270,51 @@ fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
         reasoning: false,
         reasoning_split: false,
     }
+}
+
+impl ServerRuntime {
+    /// 按当前配置重载扩展集合，并让已打开 session 的工具快照在下一次 turn 重建。
+    pub async fn reload_extensions(&self) -> Vec<String> {
+        let effective = self.config_manager.read_effective();
+        let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
+            effective.extensions.extension_states.clone(),
+        );
+        let disk_source = DiskExtensionSource::new(effective.extensions.extension_states.clone());
+        let load_errors = ExtensionRuntime::sync_sources(
+            &self.extension_runner,
+            &ExtensionLoadContext {
+                working_dir: Some(self.startup_working_dir.to_string_lossy().to_string()),
+                wasm_limits: WasmLimits {
+                    fuel: effective.wasm.fuel,
+                    memory_bytes: effective.wasm.memory_bytes,
+                },
+            },
+            &[&bundled_source, &disk_source],
+        )
+        .await;
+        self.session_manager.invalidate_tool_registries();
+        load_errors
+    }
+}
+
+async fn load_extension_runtime(
+    effective: &EffectiveConfig,
+    cwd: &std::path::Path,
+) -> ExtensionRuntime {
+    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
+        effective.extensions.extension_states.clone(),
+    );
+    let disk_source = DiskExtensionSource::new(effective.extensions.extension_states.clone());
+    ExtensionRuntime::load(
+        ExtensionLoadContext {
+            working_dir: Some(cwd.to_string_lossy().to_string()),
+            wasm_limits: WasmLimits {
+                fuel: effective.wasm.fuel,
+                memory_bytes: effective.wasm.memory_bytes,
+            },
+        },
+        Duration::from_secs(30),
+        &[&bundled_source, &disk_source],
+    )
+    .await
 }

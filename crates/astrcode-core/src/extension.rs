@@ -160,12 +160,14 @@ impl<'a> ExtensionEventDeclBuilder<'a> {
         self
     }
     pub fn register(self) {
-        self.registrar.extension_event_decls.push(ExtensionEventDecl {
-            event_type: self.event_type,
-            schema_version: self.schema_version,
-            durable: self.durable,
-            max_payload_bytes: self.max_payload_bytes,
-        });
+        self.registrar
+            .extension_event_decls
+            .push(ExtensionEventDecl {
+                event_type: self.event_type,
+                schema_version: self.schema_version,
+                durable: self.durable,
+                max_payload_bytes: self.max_payload_bytes,
+            });
     }
 }
 

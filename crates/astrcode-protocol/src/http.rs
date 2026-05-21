@@ -357,6 +357,8 @@ pub enum ConversationDeltaDto {
         id: String,
         text: String,
     },
+    /// 扩展注册表发生变化，客户端应重新拉取命令/快捷键/状态栏快照。
+    ExtensionRegistryChanged,
 }
 
 /// HTTP 错误响应。
@@ -387,8 +389,53 @@ pub struct ConfigViewResponseDto {
     pub active_small_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
+    #[serde(default)]
+    pub extension_states: std::collections::BTreeMap<String, bool>,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
+}
+
+/// GET /api/extensions 响应中的单个扩展状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionStateDto {
+    pub extension_id: String,
+    pub enabled: bool,
+    pub loaded: bool,
+    /// `builtin` / `disk` / `unknown`
+    pub source: String,
+}
+
+/// GET /api/extensions 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionListResponseDto {
+    pub extensions: Vec<ExtensionStateDto>,
+}
+
+/// POST /api/extensions/reload 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionReloadResponseDto {
+    #[serde(default)]
+    pub reload_errors: Vec<String>,
+}
+
+/// POST /api/extensions/set-enabled 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExtensionEnabledRequest {
+    pub extension_id: String,
+    pub enabled: bool,
+}
+
+/// POST /api/extensions/set-enabled 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetExtensionEnabledResponseDto {
+    pub success: bool,
+    #[serde(default)]
+    pub reload_errors: Vec<String>,
 }
 
 /// 配置文件中的 Profile 信息。
