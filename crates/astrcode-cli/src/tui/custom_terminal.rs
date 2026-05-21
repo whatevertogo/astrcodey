@@ -300,7 +300,9 @@ where
             area.y = size.height - area.height;
         }
 
-        // Re-anchor to bottom when viewport shrinks (e.g. closing popup overlay)
+        // Re-anchor to bottom when viewport shrinks (e.g. closing popup overlay).
+        // The history above was scrolled up when the panel grew; now that it
+        // shrinks we must re-insert the correct history lines to fill the gap.
         if area.height < self.viewport_area.height {
             area.y = size.height.saturating_sub(area.height);
         }

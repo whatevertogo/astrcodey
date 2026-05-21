@@ -21,6 +21,7 @@ members = [
     "crates/astrcode-extension-skill",
     "crates/astrcode-extension-todo-tool",
     "crates/astrcode-extension-mode",
+    "crates/astrcode-extension-memory",
     "crates/astrcode-eval",
     "src-tauri",
 ]

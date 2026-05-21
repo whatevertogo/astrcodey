@@ -7,6 +7,7 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session::{Session, SessionError, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 
 use crate::config_manager::ConfigManager;
@@ -134,6 +135,13 @@ impl SessionManager {
         self.runtime_states.lock().insert(sid, runtime);
         if let Some(hook) = self.attach_hook.lock().as_ref() {
             hook(session);
+        }
+    }
+
+    /// 让所有已打开 session 的工具快照失效；下一次 turn 会按当前扩展集重建。
+    pub(crate) fn invalidate_tool_registries(&self) {
+        for runtime in self.runtime_states.lock().values() {
+            runtime.set_tool_registry(Arc::new(ToolRegistry::new()));
         }
     }
 
@@ -480,14 +488,16 @@ mod tests {
                 tool_name: "shell",
                 description: "first extension shell",
             }))
-            .await;
+            .await
+            .unwrap();
         runner
             .register(Arc::new(StaticToolExtension {
                 id: "second",
                 tool_name: "shell",
                 description: "second extension shell",
             }))
-            .await;
+            .await
+            .unwrap();
 
         let registry = build_tool_registry_snapshot(&runner, ".", 1, None).await;
         let shell = registry.find_definition("shell").unwrap();

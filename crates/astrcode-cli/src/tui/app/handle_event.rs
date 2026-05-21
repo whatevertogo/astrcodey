@@ -7,13 +7,14 @@ use astrcode_core::{
     render::UI_RENDER_METADATA_KEY,
 };
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot,
+    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
 };
 use astrcode_support::text::truncate_first_line;
 
 use super::App;
 use crate::tui::{
     command::slash::SlashCommandSpec,
+    ext::tool::ToolRenderCtx,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     streaming::controller::StreamController,
 };
@@ -28,9 +29,13 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             apply_session_resumed(app, session_id, snapshot);
         },
         ClientNotification::SessionList { sessions } => apply_session_list(app, sessions),
-        ClientNotification::UiRequest { message, .. } => {
-            app.status_text = message.clone();
-        },
+        ClientNotification::UiRequest {
+            request_id,
+            kind,
+            message,
+            options,
+            ..
+        } => apply_ui_request(app, request_id, kind, message, options.as_deref()),
         ClientNotification::Error { message, .. } => {
             app.show_error(message);
         },
@@ -64,6 +69,13 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             } else {
                 app.status_items.insert(id.clone(), text.clone());
             }
+        },
+        ClientNotification::ExtensionRegistryChanged => {
+            app.extension_commands.clear();
+            app.keybindings.clear();
+            app.status_items.clear();
+            app.needs_extension_refresh = true;
+            app.status_text = "Extension registry changed".into();
         },
     }
 }
@@ -306,7 +318,36 @@ fn apply_event(app: &mut App, event: &Event) {
                     None,
                 );
             } else {
-                // Normal tool: show compact one-line summary (codex style).
+                // Try custom tool renderer for rich display.
+                if let Some(renderer) = app.tool_renderers.get(tool_name) {
+                    let mut state: Box<dyn std::any::Any + Send> = Box::new(());
+                    let mut ctx = ToolRenderCtx {
+                        call_id: call_id.as_str(),
+                        tool_name,
+                        args: None,
+                        args_complete: true,
+                        execution_started: true,
+                        is_partial: false,
+                        is_error: false,
+                        expanded: false,
+                        state: &mut state,
+                    };
+                    if let Some(spec) = renderer.render_result(result, &mut ctx) {
+                        let fallback = tool_completion_summary(tool_name, result);
+                        app.push_rendered_message(
+                            MessageRole::Tool,
+                            human_action(tool_name).to_string(),
+                            spec,
+                            fallback,
+                            false,
+                            None,
+                        );
+                        app.status_text = "Ready".into();
+                        tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_rendered");
+                        return;
+                    }
+                }
+                // Fallback: compact one-line summary (codex style).
                 let summary = tool_completion_summary(tool_name, result);
                 app.push_message(
                     MessageRole::Tool,
@@ -510,6 +551,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     app.active_session_id = Some(session_id.to_string());
     app.working_dir = snapshot.working_dir.clone();
     app.messages.clear();
+    app.needs_terminal_reset = true;
     app.stream_states.clear();
     app.child_agents.clear();
     app.child_session_map.clear();
@@ -559,6 +601,27 @@ fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
     // 如果 session_picker 处于打开状态，刷新 picker 内容（仅当前项目的 session）
     if app.session_picker.is_some() {
         app.open_session_picker();
+    }
+}
+
+fn apply_ui_request(
+    app: &mut App,
+    request_id: &str,
+    kind: &UiRequestKind,
+    message: &str,
+    options: Option<&[String]>,
+) {
+    match (kind, options) {
+        (UiRequestKind::Select, Some(options)) if !options.is_empty() => {
+            app.open_ui_picker(
+                request_id.to_string(),
+                message.to_string(),
+                options.to_vec(),
+            );
+        },
+        _ => {
+            app.status_text = message.to_string();
+        },
     }
 }
 

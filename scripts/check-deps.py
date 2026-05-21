@@ -47,6 +47,8 @@ LAYERS: dict[str, int] = {
     "astrcode-extension-skill": 3,
     "astrcode-extension-todo-tool": 3,
     "astrcode-extension-mode": 3,
+    "astrcode-extension-memory": 3,
+    "astrcode-extension-model": 3,
     "astrcode-bundled-extensions": 3,
     # L4 – Session
     "astrcode-session": 4,
@@ -74,6 +76,8 @@ ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
         "astrcode-extension-skill",
         "astrcode-extension-todo-tool",
         "astrcode-extension-mode",
+        "astrcode-extension-memory",
+        "astrcode-extension-model",
     )
     for dep in ("astrcode-bundled-extensions",)
 }

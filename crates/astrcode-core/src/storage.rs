@@ -27,7 +27,7 @@ pub trait EventStore: Send + Sync {
     /// - `model_id`：使用的模型标识
     /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
     /// - `tool_policy`：子会话工具集策略，根会话为 `None`
-    /// - `source_plugin`：创建该子 session 的扩展 ID，根会话为 `None`
+    /// - `source_extension`：创建该子 session 的扩展 ID，根会话为 `None`
     async fn create_session(
         &self,
         session_id: &SessionId,
@@ -35,7 +35,7 @@ pub trait EventStore: Send + Sync {
         model_id: &str,
         parent_session_id: Option<&SessionId>,
         tool_policy: Option<&crate::extension::ChildToolPolicy>,
-        source_plugin: Option<&str>,
+        source_extension: Option<&str>,
     ) -> Result<Event, StorageError>;
 
     /// 向会话的事件日志追加一个事件。
@@ -287,51 +287,57 @@ pub struct CompactBoundaryView {
     pub seq: u64,
 }
 
-// ─── Plugin Event Index ────────────────────────────────────────────────
+// ─── extension Event Index ────────────────────────────────────────────────
 
 /// 插件事件索引条目——不存 payload，按需从 event log 取。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PluginEventEntry {
+pub struct ExtensionEventEntry {
     /// 事件在 event log 中的 seq。
     pub seq: u64,
     /// 插件 ID。
-    pub plugin_id: String,
+    pub extension_id: String,
     /// 事件类型名。
     pub event_type: String,
     /// payload schema 版本。
     pub schema_version: u32,
 }
 
-/// 插件事件索引，由核心 reducer 在遇到 PluginEvent 时自动填充。
+/// 插件事件索引，由核心 reducer 在遇到 extensionEvent 时自动填充。
 ///
-/// 不理解插件语义，只提供按 `plugin_id` + `event_type` 的结构化查询。
+/// 不理解插件语义，只提供按 `extension_id` + `event_type` 的结构化查询。
 /// payload 需要时通过 seq 从 event log 读取。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct PluginEventIndex {
-    entries: Vec<PluginEventEntry>,
-    by_plugin: HashMap<String, Vec<usize>>,
+pub struct ExtensionEventIndex {
+    entries: Vec<ExtensionEventEntry>,
+    by_extension: HashMap<String, Vec<usize>>,
 }
 
-impl PluginEventIndex {
+impl ExtensionEventIndex {
     /// 追加一条索引。
-    pub fn push(&mut self, seq: u64, plugin_id: String, event_type: String, schema_version: u32) {
+    pub fn push(
+        &mut self,
+        seq: u64,
+        extension_id: String,
+        event_type: String,
+        schema_version: u32,
+    ) {
         let idx = self.entries.len();
-        self.by_plugin
-            .entry(plugin_id.clone())
+        self.by_extension
+            .entry(extension_id.clone())
             .or_default()
             .push(idx);
-        self.entries.push(PluginEventEntry {
+        self.entries.push(ExtensionEventEntry {
             seq,
-            plugin_id,
+            extension_id,
             event_type,
             schema_version,
         });
     }
 
     /// 查询某个插件的全部事件（按 seq 排序）。
-    pub fn events_for(&self, plugin_id: &str) -> Vec<&PluginEventEntry> {
-        self.by_plugin
-            .get(plugin_id)
+    pub fn events_for(&self, extension_id: &str) -> Vec<&ExtensionEventEntry> {
+        self.by_extension
+            .get(extension_id)
             .map(|indices| indices.iter().map(|&i| &self.entries[i]).collect())
             .unwrap_or_default()
     }
@@ -339,26 +345,26 @@ impl PluginEventIndex {
     /// 按插件 ID + 事件类型过滤。
     pub fn events_of_type<'a>(
         &'a self,
-        plugin_id: &str,
+        extension_id: &str,
         event_type: &str,
-    ) -> Vec<&'a PluginEventEntry> {
-        self.events_for(plugin_id)
+    ) -> Vec<&'a ExtensionEventEntry> {
+        self.events_for(extension_id)
             .into_iter()
             .filter(|e| e.event_type == event_type)
             .collect()
     }
 
     /// 某个插件的最后一条匹配事件。
-    pub fn last_event(&self, plugin_id: &str, event_type: &str) -> Option<&PluginEventEntry> {
-        self.events_for(plugin_id)
+    pub fn last_event(&self, extension_id: &str, event_type: &str) -> Option<&ExtensionEventEntry> {
+        self.events_for(extension_id)
             .into_iter()
             .rev()
             .find(|e| e.event_type == event_type)
     }
 
     /// 某个插件的全部事件数量。
-    pub fn count_for(&self, plugin_id: &str) -> usize {
-        self.by_plugin.get(plugin_id).map_or(0, |v| v.len())
+    pub fn count_for(&self, extension_id: &str) -> usize {
+        self.by_extension.get(extension_id).map_or(0, |v| v.len())
     }
 }
 
@@ -407,7 +413,7 @@ pub struct SessionReadModel {
     pub tool_policy: Option<crate::extension::ChildToolPolicy>,
     /// 创建该子 session 的扩展 ID。
     #[serde(default)]
-    pub source_plugin: Option<String>,
+    pub source_extension: Option<String>,
     /// 父会话派生的子 Agent 会话列表。
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkView>,
@@ -418,7 +424,7 @@ pub struct SessionReadModel {
     pub latest_seq: Option<u64>,
     /// 插件事件索引，不存 payload，按需从 event log 取。
     #[serde(default)]
-    pub plugin_events: PluginEventIndex,
+    pub extension_events: ExtensionEventIndex,
 }
 
 impl SessionReadModel {
@@ -440,11 +446,11 @@ impl SessionReadModel {
             updated_at: String::new(),
             parent_session_id: None,
             tool_policy: None,
-            source_plugin: None,
+            source_extension: None,
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),
             latest_seq: None,
-            plugin_events: PluginEventIndex::default(),
+            extension_events: ExtensionEventIndex::default(),
         }
     }
 
@@ -514,7 +520,7 @@ pub struct SessionSummary {
     /// 首条用户消息内容，无消息时为 None。
     pub first_user_message: Option<String>,
     /// 创建该子 session 的扩展 ID。
-    pub source_plugin: Option<String>,
+    pub source_extension: Option<String>,
 }
 
 impl From<SessionReadModel> for SessionSummary {
@@ -531,7 +537,7 @@ impl From<SessionReadModel> for SessionSummary {
             phase: model.phase,
             latest_cursor,
             first_user_message,
-            source_plugin: model.source_plugin,
+            source_extension: model.source_extension,
         }
     }
 }

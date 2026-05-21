@@ -342,7 +342,7 @@ pub struct CreateSessionRequest {
     /// 子会话工具集策略。
     pub tool_policy: Option<crate::extension::ChildToolPolicy>,
     /// 创建该子 session 的扩展 ID。
-    pub source_plugin: Option<String>,
+    pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。
     pub ephemeral: bool,
     /// 触发创建子 session 的工具调用 ID，写入 AgentSessionSpawned 供 TUI 路由。
@@ -424,7 +424,7 @@ pub struct ToolCapabilities {
     /// 会话原子操作能力（仅子 agent 工具需要）。
     pub session_ops: Option<Arc<dyn SessionOperations>>,
     /// 插件事件发射器（仅插件注册的工具会有值）。
-    pub plugin_event_sink: Option<Arc<dyn crate::extension::PluginEventSink>>,
+    pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
 }
 
 /// 每次工具调用时传递的上下文。

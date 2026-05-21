@@ -529,6 +529,43 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
+// ─── UpsertSessionPlan ────────────────────────────────────────────────────
+
+pub struct UpsertSessionPlanRenderer;
+
+impl ToolRenderer for UpsertSessionPlanRenderer {
+    fn tool_name(&self) -> &str {
+        "upsertSessionPlan"
+    }
+
+    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
+        DefaultToolRenderer.render_call(ctx)
+    }
+
+    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+        if result.is_error {
+            return None;
+        }
+        let plan = result
+            .metadata
+            .get("planContent")
+            .and_then(|v| v.as_str())?;
+        let operation = result
+            .metadata
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("updated");
+        Some(RenderSpec::Box {
+            title: Some(format!("Plan {operation}")),
+            tone: RenderTone::Success,
+            children: vec![RenderSpec::Markdown {
+                text: plan.to_string(),
+                tone: RenderTone::Default,
+            }],
+        })
+    }
+}
+
 // ─── Registration ─────────────────────────────────────────────────────────
 
 /// Register all built-in renderers into the provided registries.
@@ -545,4 +582,5 @@ pub fn register_builtin(
     tool_reg.register(Arc::new(ShellRenderer));
     tool_reg.register(Arc::new(PatchRenderer));
     tool_reg.register(Arc::new(AgentRenderer));
+    tool_reg.register(Arc::new(UpsertSessionPlanRenderer));
 }

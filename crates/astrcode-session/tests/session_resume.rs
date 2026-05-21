@@ -1,14 +1,10 @@
 //! Session 跨实例恢复时 extra_system_prompt 不丢失。
-//!
-//! 复现并防回归 GPT 报告的 Medium bug：子会话被持久化后，handler 走
-//! `refresh_prompt(None, ...)` 路径不应该把 projection 中的 extra_system_prompt
-//! 抹成空。
 
 use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
@@ -83,6 +79,7 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
         context: ContextSettings::default(),
         agent: astrcode_core::config::AgentSettings::default(),
         wasm: astrcode_core::config::WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     Arc::new(SessionRuntimeServices::new(
         llm.clone(),

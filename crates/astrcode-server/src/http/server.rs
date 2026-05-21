@@ -16,7 +16,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use super::{
     HttpState,
     auth::{auth_middleware, collect_allowed_origins, configured_auth_token},
-    routes::{config, lifecycle, models, sessions},
+    routes::{config, extensions, lifecycle, models, sessions},
     stream,
 };
 use crate::{bootstrap::ServerRuntime, handler::CommandHandler};
@@ -103,6 +103,12 @@ pub fn router(
             "/api/config/active-selection",
             post(config::update_active_selection),
         )
+        .route("/api/extensions", get(extensions::list_extensions))
+        .route(
+            "/api/extensions/reload",
+            post(extensions::reload_extensions),
+        )
+        .route("/api/extensions/set-enabled", post(extensions::set_enabled))
         .route("/api/models/current", get(models::get_current_model))
         .route("/api/models", get(models::list_models))
         .route("/api/models/test", post(models::test_model))
@@ -139,6 +145,7 @@ pub async fn run_http_server(
 ) -> Result<(), HttpServerError> {
     let (event_tx, _) = broadcast::channel(256);
     let shutdown_token = runtime.shutdown_token.clone();
+    let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!(
         "Auth token: {}...{}",
@@ -155,6 +162,7 @@ pub async fn run_http_server(
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
+            runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
     remove_run_info();

@@ -6,6 +6,7 @@ pub mod handle_event;
 
 use std::collections::BTreeMap;
 
+use astrcode_core::render::RenderSpec;
 use astrcode_protocol::events::ClientNotification;
 
 use crate::tui::{
@@ -37,6 +38,12 @@ pub struct App {
     pub status_items: BTreeMap<String, String>,
     /// 插件注册的快捷键绑定（启动时从服务端获取）。
     pub keybindings: Vec<crate::tui::keybinding::RegisteredKeybinding>,
+    /// 服务端扩展注册表变化后，主循环应重新拉取扩展命令快照。
+    pub needs_extension_refresh: bool,
+    /// Resume / 切换会话后需要清屏重置终端。
+    pub needs_terminal_reset: bool,
+    /// 服务端 UI 选择请求。
+    pub ui_picker: Option<UiPicker>,
     // Session picker（/resume 触发的选择模式）
     pub session_picker: Option<SessionPicker>,
     // Composer
@@ -79,6 +86,15 @@ pub struct SessionPicker {
     pub cwd: String,
 }
 
+/// 服务端发起的通用选择器。
+#[derive(Debug, Clone)]
+pub struct UiPicker {
+    pub request_id: String,
+    pub message: String,
+    pub items: Vec<String>,
+    pub selected: usize,
+}
+
 impl App {
     pub fn new(theme: Theme) -> Self {
         let fallback = std::sync::Arc::new(DefaultToolRenderer);
@@ -99,6 +115,9 @@ impl App {
             extension_commands: Vec::new(),
             status_items: BTreeMap::new(),
             keybindings: Vec::new(),
+            needs_extension_refresh: false,
+            needs_terminal_reset: false,
+            ui_picker: None,
             session_picker: None,
             composer: ComposerState::default(),
             show_slash_palette: false,
@@ -215,6 +234,31 @@ impl App {
             role,
             label,
             body: MessageBody::text(content),
+            is_streaming,
+            key,
+        };
+        if !is_streaming {
+            self.scrollback_queue
+                .push(ScrollbackEntry::Message(msg.clone()));
+        }
+        self.messages.push(msg);
+    }
+
+    pub fn push_rendered_message(
+        &mut self,
+        role: MessageRole,
+        label: String,
+        spec: RenderSpec,
+        fallback_text: String,
+        is_streaming: bool,
+        key: Option<String>,
+    ) {
+        let mut body = MessageBody::text(String::new());
+        body.set_render(spec, fallback_text);
+        let msg = Message {
+            role,
+            label,
+            body,
             is_streaming,
             key,
         };
@@ -342,5 +386,43 @@ impl App {
             .items
             .get(picker.selected)
             .map(|s| s.session_id.clone())
+    }
+
+    pub fn open_ui_picker(&mut self, request_id: String, message: String, items: Vec<String>) {
+        self.status_text = message.clone();
+        self.ui_picker = Some(UiPicker {
+            request_id,
+            message,
+            items,
+            selected: 0,
+        });
+    }
+
+    pub fn close_ui_picker(&mut self) {
+        self.ui_picker = None;
+    }
+
+    pub fn ui_picker_up(&mut self) {
+        if let Some(picker) = &mut self.ui_picker {
+            if picker.selected > 0 {
+                picker.selected -= 1;
+            }
+        }
+    }
+
+    pub fn ui_picker_down(&mut self) {
+        if let Some(picker) = &mut self.ui_picker {
+            if picker.selected + 1 < picker.items.len() {
+                picker.selected += 1;
+            }
+        }
+    }
+
+    pub fn ui_picker_accept(&mut self) -> Option<(String, String)> {
+        let picker = self.ui_picker.take()?;
+        picker
+            .items
+            .get(picker.selected)
+            .map(|selected| (picker.request_id, selected.clone()))
     }
 }

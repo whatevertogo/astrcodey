@@ -13,7 +13,7 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_protocol::{
-    commands::ClientCommand,
+    commands::{ClientCommand, UiResponseValue},
     events::{ClientNotification, SessionListItem},
 };
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ use crate::{
 
 mod actor;
 mod compact;
+mod model_selection;
 mod recap;
 pub(crate) mod slash;
 pub(crate) mod snapshot;
@@ -33,6 +34,7 @@ pub(in crate::handler) mod turn;
 pub use actor::CommandHandle;
 use actor::CommandMessage;
 pub use compact::ManualCompactOutcome;
+use model_selection::ModelSelectionController;
 #[cfg(test)]
 use snapshot::message_to_dto;
 use snapshot::session_snapshot;
@@ -85,6 +87,8 @@ pub struct CommandHandler {
     queued_inputs: HashMap<SessionId, VecDeque<String>>,
     /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
     actor_tx: mpsc::UnboundedSender<CommandMessage>,
+    /// 模型选择流程。
+    model_selection: ModelSelectionController,
 }
 
 impl CommandHandler {
@@ -241,6 +245,14 @@ impl CommandHandler {
                 at_cursor,
             } => {
                 self.fork_session(session_id.into(), at_cursor).await?;
+            },
+
+            ClientCommand::SetModel { model_id } => {
+                self.set_model(model_id).await?;
+            },
+
+            ClientCommand::UiResponse { request_id, value } => {
+                self.handle_ui_response(request_id, value).await?;
             },
 
             _ => {
@@ -524,6 +536,49 @@ impl CommandHandler {
             "session forked"
         );
         Ok(new_sid)
+    }
+
+    // ─── 模型选择 ───────────────────────────────────────────────────────
+
+    /// 设置当前会话使用的主模型，格式为 `profile/model`。
+    async fn set_model(&mut self, model_id: String) -> Result<(), HandlerError> {
+        let notification = match self.model_selection.set_main_model(&model_id).await {
+            Ok(notification) => notification,
+            Err(HandlerError::Other(message))
+                if message.starts_with("Invalid model selection:") =>
+            {
+                self.send_error(
+                    -32603,
+                    "Invalid format. Use `profile/model` or `/model` for interactive selection.",
+                );
+                return Ok(());
+            },
+            Err(error) => return Err(error),
+        };
+        self.event_bus.send_notification(notification);
+
+        Ok(())
+    }
+
+    /// 启动交互式模型选择流程。
+    pub(in crate::handler) async fn start_model_selection(&mut self) -> Result<(), HandlerError> {
+        let notification = self.model_selection.start();
+        self.event_bus.send_notification(notification);
+        Ok(())
+    }
+
+    /// 处理 UI 响应，推进模型选择流程。
+    async fn handle_ui_response(
+        &mut self,
+        request_id: String,
+        value: UiResponseValue,
+    ) -> Result<(), HandlerError> {
+        let notification = self
+            .model_selection
+            .handle_response(request_id, value)
+            .await?;
+        self.event_bus.send_notification(notification);
+        Ok(())
     }
 }
 

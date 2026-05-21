@@ -243,7 +243,7 @@ impl ToolHandler for AgentToolHandler {
                     tool_policy: Some(ChildToolPolicy::Deny {
                         tools: vec!["agent".into()],
                     }),
-                    source_plugin: Some("astrcode-agent-tools".into()),
+                    source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
                     tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
                 },

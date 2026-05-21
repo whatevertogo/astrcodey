@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{EffectiveConfig, LlmSettings, OpenAiApiMode, WasmSettings},
+    config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{AgentSessionStatus, EventStore},
     tool::{
@@ -97,6 +97,7 @@ fn build_test_ops(
         context: Default::default(),
         agent: Default::default(),
         wasm: WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     let capabilities = Arc::new(SessionRuntimeServices::new(
         llm_provider.clone(),
@@ -137,7 +138,7 @@ async fn submit_turn_sync_returns_llm_output() {
             CreateSessionRequest {
                 name: "test-child".into(),
                 system_prompt: Some("be helpful".into()),
-                source_plugin: Some("test".into()),
+                source_extension: Some("test".into()),
                 ..Default::default()
             },
         )
@@ -214,7 +215,7 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
             parent_id.as_str(),
             CreateSessionRequest {
                 name: "async-child".into(),
-                source_plugin: Some("test".into()),
+                source_extension: Some("test".into()),
                 ..Default::default()
             },
         )

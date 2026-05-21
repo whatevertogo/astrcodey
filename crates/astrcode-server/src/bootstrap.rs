@@ -3,10 +3,10 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{config::ConfigStore, storage::EventStore};
+use astrcode_core::{config::ConfigStore, extension::ExtensionHostServices, storage::EventStore};
 use astrcode_extensions::{
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
@@ -40,6 +40,8 @@ pub struct ServerRuntime {
     /// provider 与生效配置。`ConfigManager` 是配置写入入口，但 `effective` 与
     /// `llm_provider` 的存储位置只在这里，二者共享同一个 `Arc`。
     pub capabilities: Arc<SessionRuntimeServices>,
+    /// 启动时使用的工作目录，用于项目级扩展发现与后续重载。
+    pub startup_working_dir: PathBuf,
     /// 触发后通知 HTTP server 执行 graceful shutdown
     pub shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -68,13 +70,14 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 ///
 /// 启动顺序：
 /// 1. 加载并解析配置
-/// 2. 构建 LLM 提供者
-/// 3. 构建提示词组装器
-/// 4. 确定启动工作目录
-/// 5. 初始化会话管理器和存储后端
-/// 6. 加载扩展并创建扩展运行器
-/// 7. 绑定扩展创建子会话的宿主能力
-/// 8. 返回共享运行时容器
+/// 2. 构建提示词组装器
+/// 3. 确定启动工作目录
+/// 4. 初始化存储后端
+/// 5. 创建空的扩展运行器
+/// 6. 组装 ConfigManager（内部构建 providers）
+/// 7. 加载扩展（从 capabilities 获取 small_llm）
+/// 8. 绑定扩展创建子会话的宿主能力
+/// 9. 返回共享运行时容器
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
     // 1. 读取配置并解析成 EffectiveConfig。
     //
@@ -124,11 +127,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         },
     };
 
-    // 2. 构建配置管理器与共享的运行时能力。
-    //
-    // ConfigManager 不再持有自己的 effective/llm_provider 副本，而是让
-    // SessionRuntimeServices 成为唯一存储。配置写入路径直接更新 Capabilities，
-    // session 读到的就是最新值。
+    // 2. 构建提示词组装器。
     let context_settings = effective.context.clone();
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
 
@@ -141,13 +140,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    // 4. 构建 session manager 和事件存储。
+    // 4. 初始化事件存储。
     //
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
-    //
-    // InMemoryEventStore 仅在 `testing` feature 启用时可用；生产二进制始终使用
-    // FileSystemSessionRepository，与 opts.config_path 无关。
     #[cfg(feature = "testing")]
     let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
         Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new())
@@ -162,32 +158,15 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     );
     let event_store = store;
 
-    // 5. 加载扩展并创建 extension runner。
+    // 5. 创建空的扩展运行器。
     //
-    // 扩展工具不会在这里写入全局工具表；这里只保存扩展列表。
-    // 每个 session 需要工具时，再从 runner 收集工具适配器并生成快照。
-    let cwd_str = cwd.to_string_lossy().to_string();
-    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource;
-    let disk_source = DiskExtensionSource;
-    let extension_runtime = ExtensionRuntime::load(
-        ExtensionLoadContext {
-            working_dir: Some(cwd_str),
-            wasm_limits: WasmLimits {
-                fuel: effective.wasm.fuel,
-                memory_bytes: effective.wasm.memory_bytes,
-            },
-        },
-        Duration::from_secs(30),
-        &[&bundled_source, &disk_source],
-    )
-    .await;
-    for err in &extension_runtime.load_errors {
-        tracing::warn!("Extension load error: {err}");
-    }
-    let extension_runner = extension_runtime.runner;
+    // 先创建空 runner，后续加载 extensions 填充它。
+    // ConfigManager 持有 Arc 引用，加载后的扩展对已创建的 session 立即可见。
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
 
     // 6. 组装 ConfigManager 与 Capabilities。
     //
+    // ConfigManager 内部从 effective 构建 providers，不需要外部注入。
     // 二者共享同一份 effective/llm_provider 存储，配置写入直接更新 Capabilities。
     let (config_manager, capabilities) = crate::config_manager::ConfigManager::from_loaded_config(
         Arc::new(config_store),
@@ -204,23 +183,29 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&capabilities),
     ));
 
-    // 7. 给扩展运行时绑定"创建子会话"的宿主能力。
+    // 7. 加载扩展。
     //
-    // 扩展本身不能直接拿到 EventStore；当扩展工具返回 RunSession 声明式结果时，
-    // 绑定会话派生器，使扩展工具可通过 RunSession 声明式结果创建子 session。
-    // 子 session 也会生成自己的工具快照，而不是复用父会话或启动期的工具表。
-    // 绑定新的会话原子操作 API。
+    // HostServices 从 capabilities 获取 small_llm，为 trusted bundled extension
+    // 提供运行时依赖（EventStore、small_llm）。不传给 disk/wasm source。
+    let host_services = Arc::new(ExtensionHostServices::new(
+        Arc::clone(&event_store),
+        Some(capabilities.small_llm()),
+    ));
+    let load_errors =
+        load_extensions_into_runner(&extension_runner, &capabilities, &cwd, Some(host_services))
+            .await;
+    for err in &load_errors {
+        tracing::warn!("Extension load error: {err}");
+    }
+
+    // 8. 给扩展运行时绑定"创建子会话"的宿主能力。
     extension_runner.bind_session_ops(Arc::new(
         crate::session_operations::ServerSessionOperations {
             session_manager: Arc::clone(&session_manager),
         },
     ));
 
-    // 8. 返回运行时容器。
-    //
-    // ServerRuntime 保存的是"共享基础设施"：session、LLM、prompt、扩展、
-    // 配置和上下文预算。注意这里故意没有 tool_registry：
-    // 工具表是 session 级别的快照，不再是 bootstrap 级全局单例。
+    // 9. 返回运行时容器。
     Ok(ServerRuntime {
         event_store,
         config_manager,
@@ -228,6 +213,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager,
         extension_runner,
         capabilities,
+        startup_working_dir: cwd,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
@@ -243,7 +229,9 @@ pub enum BootstrapError {
 ///
 /// 返回的 LLM 配置使用空连接信息，LLM 功能不可用，但 HTTP API 仍然正常工作。
 fn fallback_default_effective() -> astrcode_core::config::EffectiveConfig {
-    use astrcode_core::config::{AgentSettings, ContextSettings, EffectiveConfig, WasmSettings};
+    use astrcode_core::config::{
+        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, WasmSettings,
+    };
 
     EffectiveConfig {
         llm: dummy_llm_settings(),
@@ -251,6 +239,7 @@ fn fallback_default_effective() -> astrcode_core::config::EffectiveConfig {
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
         wasm: WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     }
 }
 
@@ -275,4 +264,58 @@ fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
         reasoning: false,
         reasoning_split: false,
     }
+}
+
+impl ServerRuntime {
+    /// 停止所有扩展运行态任务。可重复调用。
+    pub async fn shutdown_extensions(&self) {
+        for error in self.extension_runner.shutdown().await {
+            tracing::warn!("extension shutdown error: {error}");
+        }
+    }
+
+    /// 按当前配置重载扩展集合，并让已打开 session 的工具快照在下一次 turn 重建。
+    pub async fn reload_extensions(&self) -> Vec<String> {
+        let small_llm = self.capabilities.small_llm();
+        let host_services = Arc::new(ExtensionHostServices::new(
+            Arc::clone(&self.event_store),
+            Some(small_llm),
+        ));
+        let load_errors = load_extensions_into_runner(
+            &self.extension_runner,
+            &self.capabilities,
+            &self.startup_working_dir,
+            Some(host_services),
+        )
+        .await;
+        self.session_manager.invalidate_tool_registries();
+        load_errors
+    }
+}
+
+/// 将扩展加载到已有的 runner 中。
+async fn load_extensions_into_runner(
+    runner: &Arc<ExtensionRunner>,
+    capabilities: &SessionRuntimeServices,
+    cwd: &std::path::Path,
+    host_services: Option<Arc<ExtensionHostServices>>,
+) -> Vec<String> {
+    let effective = capabilities.read_effective();
+    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
+        effective.extensions.extension_states.clone(),
+        host_services,
+    );
+    let disk_source = DiskExtensionSource::new(effective.extensions.extension_states.clone());
+    ExtensionRuntime::sync_sources(
+        runner,
+        &ExtensionLoadContext {
+            working_dir: Some(cwd.to_string_lossy().to_string()),
+            wasm_limits: WasmLimits {
+                fuel: effective.wasm.fuel,
+                memory_bytes: effective.wasm.memory_bytes,
+            },
+        },
+        &[&bundled_source, &disk_source],
+    )
+    .await
 }

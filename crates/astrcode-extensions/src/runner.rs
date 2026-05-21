@@ -16,7 +16,7 @@ use astrcode_core::{
     extension::*,
     tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 
 use crate::runtime::SessionOperations;
 
@@ -27,6 +27,8 @@ use crate::runtime::SessionOperations;
 /// - NonBlocking: 以即发即弃方式派生任务，使用快照上下文
 /// - Advisory: 结果仅记录日志，不强制执行
 pub struct ExtensionRunner {
+    /// 串行化注册/注销，避免同一扩展并发 start/stop。
+    lifecycle_lock: AsyncMutex<()>,
     /// 已注册的扩展列表（读写锁保护）
     extensions: RwLock<Vec<Arc<dyn Extension>>>,
     /// 从 register() 收集的类型化能力记录
@@ -35,6 +37,8 @@ pub struct ExtensionRunner {
     index: parking_lot::RwLock<Arc<HandlerIndex>>,
     /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
+    /// 每个扩展的宿主管理任务集合。
+    extension_tasks: RwLock<HashMap<String, ExtensionTasks>>,
     /// 钩子执行超时时间
     timeout: Duration,
 }
@@ -51,23 +55,23 @@ pub struct RegisteredSlashCommand {
     pub command: astrcode_core::extension::SlashCommand,
 }
 
-// ─── BoundPluginEventSink ──────────────────────────────────────────────
+// ─── BoundExtensionEventSink ──────────────────────────────────────────────
 
-/// 绑定了 plugin_id 和声明校验的事件发射器。
+/// 绑定了 extension_id 和声明校验的事件发射器。
 ///
-/// 由 `ExtensionRunner::make_plugin_event_sink` 构造，传给扩展钩子上下文。
-/// `plugin_id` 在构造时注入，调用方无法伪造身份。
+/// 由 `ExtensionRunner::make_extension_event_sink` 构造，传给扩展钩子上下文。
+/// `extension_id` 在构造时注入，调用方无法伪造身份。
 ///
 /// TODO: 补单元测试覆盖校验逻辑——未声明的 event_type、schema_version 超限、
 /// payload 超过 max_payload_bytes、正常发射路径。
-struct BoundPluginEventSink {
-    plugin_id: String,
-    declarations: HashMap<String, PluginEventDecl>,
+struct BoundExtensionEventSink {
+    extension_id: String,
+    declarations: HashMap<String, ExtensionEventDecl>,
     event_tx: mpsc::UnboundedSender<EventPayload>,
 }
 
 #[async_trait::async_trait]
-impl PluginEventSink for BoundPluginEventSink {
+impl ExtensionEventSink for BoundExtensionEventSink {
     async fn emit(
         &self,
         event_type: &str,
@@ -75,7 +79,7 @@ impl PluginEventSink for BoundPluginEventSink {
         payload: serde_json::Value,
     ) -> Result<(), ExtensionError> {
         let decl = self.declarations.get(event_type).ok_or_else(|| {
-            ExtensionError::Internal(format!("undeclared plugin event type: {event_type}"))
+            ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
         })?;
 
         if schema_version > decl.schema_version {
@@ -95,8 +99,8 @@ impl PluginEventSink for BoundPluginEventSink {
         }
 
         self.event_tx
-            .send(EventPayload::PluginEvent {
-                plugin_id: self.plugin_id.clone(),
+            .send(EventPayload::ExtensionEvent {
+                extension_id: self.extension_id.clone(),
                 event_type: event_type.to_owned(),
                 schema_version,
                 payload,
@@ -107,19 +111,23 @@ impl PluginEventSink for BoundPluginEventSink {
 
 // ─── Handler Index ──────────────────────────────────────────────────────
 
+type ExtensionHandler<H> = (String, HookMode, Arc<H>);
+type PrioritizedHandler<H> = (i32, String, HookMode, Arc<H>);
+type PrioritizedEventHandler<K, H> = (K, i32, String, HookMode, Arc<H>);
+
 /// 预排序的 handler 索引。
 ///
 /// 在每次 `register()` 后从所有 records 重建，确保分发时无需遍历+排序。
 /// 各列表按 priority 降序排列，provider/compact/lifecycle 按 event 分组。
 #[allow(clippy::type_complexity)]
 struct HandlerIndex {
-    pre_tool_use: Vec<(HookMode, Arc<dyn PreToolUseHandler>)>,
-    post_tool_use: Vec<(HookMode, Arc<dyn PostToolUseHandler>)>,
-    provider: HashMap<ProviderEvent, Vec<(HookMode, Arc<dyn ProviderHandler>)>>,
+    pre_tool_use: Vec<ExtensionHandler<dyn PreToolUseHandler>>,
+    post_tool_use: Vec<ExtensionHandler<dyn PostToolUseHandler>>,
+    provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
     prompt_build: Vec<Arc<dyn PromptBuildHandler>>,
     compact: HashMap<CompactEvent, Vec<Arc<dyn CompactHandler>>>,
     post_tool_use_failure: Vec<Arc<dyn PostToolUseFailureHandler>>,
-    lifecycle: HashMap<ExtensionEvent, Vec<(HookMode, Arc<dyn LifecycleHandler>)>>,
+    lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
     tool_metadata: std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>,
     static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)>,
@@ -128,18 +136,18 @@ struct HandlerIndex {
     command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
     keybindings: Vec<astrcode_core::extension::Keybinding>,
     status_items: Vec<astrcode_core::extension::StatusItem>,
-    plugin_event_decls: HashMap<String, Vec<PluginEventDecl>>,
-    plugin_data_dir_plugins: std::collections::HashSet<String>,
+    extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
+    extension_data_dir_extensions: std::collections::HashSet<String>,
 }
 
 fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
-    let mut pre: Vec<(i32, HookMode, Arc<dyn PreToolUseHandler>)> = Vec::new();
-    let mut post: Vec<(i32, HookMode, Arc<dyn PostToolUseHandler>)> = Vec::new();
-    let mut prov: Vec<(ProviderEvent, i32, HookMode, Arc<dyn ProviderHandler>)> = Vec::new();
+    let mut pre: Vec<PrioritizedHandler<dyn PreToolUseHandler>> = Vec::new();
+    let mut post: Vec<PrioritizedHandler<dyn PostToolUseHandler>> = Vec::new();
+    let mut prov: Vec<PrioritizedEventHandler<ProviderEvent, dyn ProviderHandler>> = Vec::new();
     let mut pb: Vec<(i32, Arc<dyn PromptBuildHandler>)> = Vec::new();
     let mut cmp: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)> = Vec::new();
     let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
-    let mut lc: Vec<(ExtensionEvent, i32, HookMode, Arc<dyn LifecycleHandler>)> = Vec::new();
+    let mut lc: Vec<PrioritizedEventHandler<ExtensionEvent, dyn LifecycleHandler>> = Vec::new();
     let mut tool_metadata = std::collections::HashMap::new();
     let mut static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)> = Vec::new();
     let mut tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)> = Vec::new();
@@ -147,19 +155,19 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
     let mut keybindings: Vec<astrcode_core::extension::Keybinding> = Vec::new();
     let mut status_items: Vec<astrcode_core::extension::StatusItem> = Vec::new();
-    let mut plugin_event_decls: HashMap<String, Vec<PluginEventDecl>> = HashMap::new();
-    let mut plugin_data_dir_plugins: std::collections::HashSet<String> =
+    let mut extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>> = HashMap::new();
+    let mut extension_data_dir_extensions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
     for record in records {
         for (mode, pri, h) in record.reg.pre_tool_use() {
-            pre.push((*pri, *mode, Arc::clone(h)));
+            pre.push((*pri, record.id.clone(), *mode, Arc::clone(h)));
         }
         for (mode, pri, h) in record.reg.post_tool_use() {
-            post.push((*pri, *mode, Arc::clone(h)));
+            post.push((*pri, record.id.clone(), *mode, Arc::clone(h)));
         }
         for (ev, mode, pri, h) in record.reg.provider() {
-            prov.push((*ev, *pri, *mode, Arc::clone(h)));
+            prov.push((*ev, *pri, record.id.clone(), *mode, Arc::clone(h)));
         }
         for (pri, h) in record.reg.prompt_build() {
             pb.push((*pri, Arc::clone(h)));
@@ -171,7 +179,7 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
             ptuf.push((*pri, Arc::clone(h)));
         }
         for (ev, mode, pri, h) in record.reg.lifecycle() {
-            lc.push((ev.clone(), *pri, *mode, Arc::clone(h)));
+            lc.push((ev.clone(), *pri, record.id.clone(), *mode, Arc::clone(h)));
         }
         // collect 缓存
         tool_metadata.extend(record.reg.all_tool_metadata().clone());
@@ -193,11 +201,14 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         for item in record.reg.status_items() {
             status_items.push(item.clone());
         }
-        if !record.reg.plugin_event_decls().is_empty() {
-            plugin_event_decls.insert(record.id.clone(), record.reg.plugin_event_decls().to_vec());
+        if !record.reg.extension_event_decls().is_empty() {
+            extension_event_decls.insert(
+                record.id.clone(),
+                record.reg.extension_event_decls().to_vec(),
+            );
         }
-        if record.reg.needs_plugin_data_dir() {
-            plugin_data_dir_plugins.insert(record.id.clone());
+        if record.reg.needs_extension_data_dir() {
+            extension_data_dir_extensions.insert(record.id.clone());
         }
     }
 
@@ -210,8 +221,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     lc.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     HandlerIndex {
-        pre_tool_use: pre.into_iter().map(|(_, m, h)| (m, h)).collect(),
-        post_tool_use: post.into_iter().map(|(_, m, h)| (m, h)).collect(),
+        pre_tool_use: pre.into_iter().map(|(_, id, m, h)| (id, m, h)).collect(),
+        post_tool_use: post.into_iter().map(|(_, id, m, h)| (id, m, h)).collect(),
         provider: group_by_event_with_mode(prov),
         prompt_build: pb.into_iter().map(|(_, h)| h).collect(),
         compact: group_by_event_plain(cmp),
@@ -224,21 +235,21 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         command_discoveries,
         keybindings,
         status_items,
-        plugin_event_decls,
-        plugin_data_dir_plugins,
+        extension_event_decls,
+        extension_data_dir_extensions,
     }
 }
 
 fn group_by_event_with_mode<K, H>(
-    mut items: Vec<(K, i32, HookMode, Arc<H>)>,
-) -> HashMap<K, Vec<(HookMode, Arc<H>)>>
+    mut items: Vec<PrioritizedEventHandler<K, H>>,
+) -> HashMap<K, Vec<ExtensionHandler<H>>>
 where
     K: std::hash::Hash + Eq,
     H: ?Sized,
 {
-    let mut map: HashMap<K, Vec<(HookMode, Arc<H>)>> = HashMap::new();
-    for (ev, _, mode, h) in items.drain(..) {
-        map.entry(ev).or_default().push((mode, h));
+    let mut map: HashMap<K, Vec<ExtensionHandler<H>>> = HashMap::new();
+    for (ev, _, extension_id, mode, h) in items.drain(..) {
+        map.entry(ev).or_default().push((extension_id, mode, h));
     }
     map
 }
@@ -327,6 +338,7 @@ impl ExtensionRunner {
     /// 创建新的扩展运行器。
     pub fn new(timeout: Duration) -> Self {
         Self {
+            lifecycle_lock: AsyncMutex::new(()),
             extensions: RwLock::new(Vec::new()),
             records: RwLock::new(Vec::new()),
             index: parking_lot::RwLock::new(Arc::new(HandlerIndex {
@@ -344,37 +356,41 @@ impl ExtensionRunner {
                 command_discoveries: Vec::new(),
                 keybindings: Vec::new(),
                 status_items: Vec::new(),
-                plugin_event_decls: HashMap::new(),
-                plugin_data_dir_plugins: std::collections::HashSet::new(),
+                extension_event_decls: HashMap::new(),
+                extension_data_dir_extensions: std::collections::HashSet::new(),
             })),
             session_ops: Arc::new(StdRwLock::new(None)),
+            extension_tasks: RwLock::new(HashMap::new()),
             timeout,
         }
     }
 
     /// 注册一个扩展。
-    ///
-    /// 锁持有顺序：`extensions` → `records` → `index`，全程不释放，确保
-    /// 「ext 已加入 extensions」与「records/index 已重建」对外原子可见。
-    /// 否则同 sid 并发 register 时可能出现 A 已 push 进 extensions 但还没
-    /// 写到 records，B 看到 extensions 重复短路返回，但 A 的 records 永远
-    /// 没机会 push 进去。
-    pub async fn register(&self, ext: Arc<dyn Extension>) {
+    pub async fn register(&self, ext: Arc<dyn Extension>) -> Result<bool, ExtensionError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let id = ext.id().to_string();
 
-        // ext.register() 只读扩展自身元数据，不涉及共享状态，在锁外调用。
+        if self.extensions.read().await.iter().any(|e| e.id() == id) {
+            tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
+            return Ok(false);
+        }
+
+        // register() 只收集声明；start() 才进入运行态。
         let mut reg = Registrar::new();
         ext.register(&mut reg);
-
-        let mut exts = self.extensions.write().await;
-        if exts.iter().any(|e| e.id() == id) {
-            tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
-            return;
+        if reg.needs_extension_data_dir() {
+            let dir = astrcode_support::hostpaths::extensions_data_dir(&id);
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                ExtensionError::Internal(format!("failed to create extension data dir: {e}"))
+            })?;
         }
-        exts.push(ext);
 
-        // 立刻在持有 extensions 写锁的同时更新 records/index，让三者保持原子一致。
-        // register 是 startup 一次性路径，多持几毫秒锁不影响性能。
+        let tasks = ExtensionTasks::new(id.clone());
+        ext.start(ExtensionCtx::new(tasks.clone())).await?;
+
+        self.extensions.write().await.push(ext);
+        self.extension_tasks.write().await.insert(id.clone(), tasks);
+
         if !reg.is_empty() {
             let mut records = self.records.write().await;
             records.push(ExtensionRecord {
@@ -383,16 +399,76 @@ impl ExtensionRunner {
             });
             log_handler_dispatch_order(&records);
             let new_index = Arc::new(build_handler_index(&records));
-            self.ensure_plugin_data_dirs(&new_index);
+            self.ensure_extensions_data_dir_dirs(&new_index);
             *self.index.write() = new_index;
         }
+
+        Ok(true)
     }
 
-    fn ensure_plugin_data_dirs(&self, index: &HandlerIndex) {
-        for plugin_id in &index.plugin_data_dir_plugins {
-            let dir = astrcode_support::hostpaths::plugin_data_dir(plugin_id);
+    /// 注销一个扩展，并重建分发表。
+    ///
+    /// 返回是否真的移除了该扩展。
+    pub async fn unregister(
+        &self,
+        extension_id: &str,
+        reason: StopReason,
+    ) -> Result<bool, ExtensionError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let mut exts = self.extensions.write().await;
+        let Some(pos) = exts.iter().position(|ext| ext.id() == extension_id) else {
+            return Ok(false);
+        };
+        let ext = exts.remove(pos);
+        drop(exts);
+
+        let mut records = self.records.write().await;
+        records.retain(|record| record.id != extension_id);
+        log_handler_dispatch_order(&records);
+        let new_index = Arc::new(build_handler_index(&records));
+        self.ensure_extensions_data_dir_dirs(&new_index);
+        *self.index.write() = new_index;
+        drop(records);
+
+        let tasks = self.extension_tasks.write().await.remove(extension_id);
+        if let Some(tasks) = &tasks {
+            tasks.cancel();
+        }
+        let stop_result = ext.stop(reason).await;
+        if let Some(tasks) = tasks {
+            tasks.wait(self.timeout).await;
+        }
+        stop_result?;
+        Ok(true)
+    }
+
+    /// 停止所有已注册扩展。用于宿主进程关闭。
+    pub async fn shutdown(&self) -> Vec<String> {
+        let ids = self.registered_extension_ids().await;
+        let mut errors = Vec::new();
+        for id in ids {
+            if let Err(e) = self.unregister(&id, StopReason::Shutdown).await {
+                errors.push(format!("failed to stop extension {id}: {e}"));
+            }
+        }
+        errors
+    }
+
+    /// 返回当前已注册扩展的 id 列表。
+    pub async fn registered_extension_ids(&self) -> Vec<String> {
+        self.extensions
+            .read()
+            .await
+            .iter()
+            .map(|ext| ext.id().to_string())
+            .collect()
+    }
+
+    fn ensure_extensions_data_dir_dirs(&self, index: &HandlerIndex) {
+        for extension_id in &index.extension_data_dir_extensions {
+            let dir = astrcode_support::hostpaths::extensions_data_dir(extension_id);
             if let Err(e) = std::fs::create_dir_all(&dir) {
-                tracing::warn!(plugin_id = %plugin_id, error = %e, "failed to create plugin data dir");
+                tracing::warn!(extension_id = %extension_id, error = %e, "failed to create extension data dir");
             }
         }
     }
@@ -415,6 +491,22 @@ impl ExtensionRunner {
         Arc::clone(&self.index.read())
     }
 
+    async fn spawn_extension_task<F>(&self, extension_id: &str, task_name: &'static str, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let tasks = self.extension_tasks.read().await.get(extension_id).cloned();
+        if let Some(tasks) = tasks {
+            tasks.spawn(task_name, fut);
+        } else {
+            tracing::debug!(
+                extension_id,
+                task = task_name,
+                "skip spawning task for stopped extension"
+            );
+        }
+    }
+
     // ─── 类型化分发方法 ──────────────────────────────────────────────
 
     /// PreToolUse 钩子分发。
@@ -426,7 +518,7 @@ impl ExtensionRunner {
         let mut ctx = ctx;
         let mut modified = false;
 
-        for (mode, handler) in &index.pre_tool_use {
+        for (extension_id, mode, handler) in &index.pre_tool_use {
             match mode {
                 HookMode::Blocking => {
                     let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
@@ -451,11 +543,12 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
-                    spawn_nonblocking(async move {
+                    self.spawn_extension_task(extension_id, "pre_tool_use", async move {
                         if let Err(e) = handler.handle(ctx).await {
                             tracing::warn!(error = %e, "non-blocking pre_tool_use handler failed");
                         }
-                    });
+                    })
+                    .await;
                 },
             }
         }
@@ -477,7 +570,7 @@ impl ExtensionRunner {
         let mut ctx = ctx;
         let mut modified = false;
 
-        for (mode, handler) in &index.post_tool_use {
+        for (extension_id, mode, handler) in &index.post_tool_use {
             match mode {
                 HookMode::Blocking => {
                     let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
@@ -508,11 +601,12 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
-                    spawn_nonblocking(async move {
+                    self.spawn_extension_task(extension_id, "post_tool_use", async move {
                         if let Err(e) = handler.handle(ctx).await {
                             tracing::warn!(error = %e, "non-blocking post_tool_use handler failed");
                         }
-                    });
+                    })
+                    .await;
                 },
             }
         }
@@ -540,7 +634,7 @@ impl ExtensionRunner {
 
         let mut ctx = ctx;
         let mut modified = false;
-        for (mode, handler) in handlers {
+        for (extension_id, mode, handler) in handlers {
             match mode {
                 HookMode::Blocking => {
                     let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
@@ -574,11 +668,12 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
-                    spawn_nonblocking(async move {
+                    self.spawn_extension_task(extension_id, "provider", async move {
                         if let Err(e) = handler.handle(ctx).await {
                             tracing::warn!(error = %e, "non-blocking provider handler failed");
                         }
-                    });
+                    })
+                    .await;
                 },
             }
         }
@@ -676,7 +771,7 @@ impl ExtensionRunner {
             return Ok(());
         };
 
-        for (mode, handler) in handlers {
+        for (extension_id, mode, handler) in handlers {
             match mode {
                 HookMode::Blocking => {
                     let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
@@ -694,11 +789,12 @@ impl ExtensionRunner {
                 HookMode::NonBlocking => {
                     let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
-                    spawn_nonblocking(async move {
+                    self.spawn_extension_task(extension_id, "lifecycle", async move {
                         if let Err(e) = handler.handle(ctx).await {
                             tracing::warn!(error = %e, "non-blocking lifecycle handler failed");
                         }
-                    });
+                    })
+                    .await;
                 },
             }
         }
@@ -759,20 +855,20 @@ impl ExtensionRunner {
 
     /// 为指定插件构造绑定身份的事件发射器。
     ///
-    /// 返回 `None` 表示该插件未声明任何 plugin event type。
-    pub fn make_plugin_event_sink(
+    /// 返回 `None` 表示该插件未声明任何 extension event type。
+    pub fn make_extension_event_sink(
         &self,
-        plugin_id: &str,
+        extension_id: &str,
         event_tx: mpsc::UnboundedSender<EventPayload>,
-    ) -> Option<Arc<dyn PluginEventSink>> {
+    ) -> Option<Arc<dyn ExtensionEventSink>> {
         let index = self.load_index();
-        let decls = index.plugin_event_decls.get(plugin_id)?;
-        let decl_map: HashMap<String, PluginEventDecl> = decls
+        let decls = index.extension_event_decls.get(extension_id)?;
+        let decl_map: HashMap<String, ExtensionEventDecl> = decls
             .iter()
             .map(|d| (d.event_type.clone(), d.clone()))
             .collect();
-        Some(Arc::new(BoundPluginEventSink {
-            plugin_id: plugin_id.to_owned(),
+        Some(Arc::new(BoundExtensionEventSink {
+            extension_id: extension_id.to_owned(),
             declarations: decl_map,
             event_tx,
         }))
@@ -840,20 +936,6 @@ fn command_dispatch_priority(extension_id: &str) -> u8 {
     } else {
         1
     }
-}
-
-/// 以即发即弃方式派生异步任务，观察 panic 并记录错误日志。
-fn spawn_nonblocking<F>(fut: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        if let Err(join_err) = tokio::spawn(fut).await {
-            if join_err.is_panic() {
-                tracing::error!("non-blocking handler panicked");
-            }
-        }
-    });
 }
 
 /// 类型化工具适配器，将 `ToolHandler` 包装为 `Tool` trait 实现。
@@ -956,4 +1038,107 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
     }
 
     ToolResult::text(content, true, metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use astrcode_core::extension::{
+        Extension, ExtensionCtx, ExtensionError, Registrar, StopReason,
+    };
+
+    use super::ExtensionRunner;
+
+    struct ManagedTaskExtension {
+        started: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+        task_stopped: Arc<AtomicBool>,
+        expected_reason: StopReason,
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for ManagedTaskExtension {
+        fn id(&self) -> &str {
+            "managed-task"
+        }
+
+        fn register(&self, _reg: &mut Registrar) {}
+
+        async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let shutdown = ctx.shutdown();
+            let task_stopped = Arc::clone(&self.task_stopped);
+            ctx.tasks().spawn("wait-for-stop", async move {
+                shutdown.cancelled().await;
+                task_stopped.store(true, Ordering::SeqCst);
+            });
+            Ok(())
+        }
+
+        async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
+            assert_eq!(reason, self.expected_reason);
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn unregister_stops_extension_and_managed_tasks() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let task_stopped = Arc::new(AtomicBool::new(false));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+
+        let registered = runner
+            .register(Arc::new(ManagedTaskExtension {
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+                task_stopped: Arc::clone(&task_stopped),
+                expected_reason: StopReason::Disabled,
+            }))
+            .await
+            .unwrap();
+        assert!(registered);
+
+        let unregistered = runner
+            .unregister("managed-task", StopReason::Disabled)
+            .await
+            .unwrap();
+        assert!(unregistered);
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert!(task_stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_all_extensions_with_shutdown_reason() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let task_stopped = Arc::new(AtomicBool::new(false));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+
+        runner
+            .register(Arc::new(ManagedTaskExtension {
+                started: Arc::clone(&started),
+                stopped: Arc::clone(&stopped),
+                task_stopped: Arc::clone(&task_stopped),
+                expected_reason: StopReason::Shutdown,
+            }))
+            .await
+            .unwrap();
+
+        let errors = runner.shutdown().await;
+        assert!(errors.is_empty());
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert!(task_stopped.load(Ordering::SeqCst));
+        assert_eq!(runner.count().await, 0);
+    }
 }

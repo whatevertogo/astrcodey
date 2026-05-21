@@ -4,18 +4,45 @@
 //! `astrcode-extensions` owns the extension runtime, while this crate decides
 //! which first-party extensions are linked into a binary.
 
+use std::{collections::BTreeMap, sync::Arc};
+
+use astrcode_core::extension::ExtensionHostServices;
 use astrcode_extensions::loader::{ExtensionLoadContext, ExtensionSource, LoadExtensionsResult};
 
 /// Source for all enabled first-party bundled extensions.
-pub struct BundledExtensionSource;
+pub struct BundledExtensionSource {
+    extension_states: BTreeMap<String, bool>,
+    host_services: Option<Arc<ExtensionHostServices>>,
+}
+
+impl BundledExtensionSource {
+    pub fn new(
+        extension_states: BTreeMap<String, bool>,
+        host_services: Option<Arc<ExtensionHostServices>>,
+    ) -> Self {
+        Self {
+            extension_states,
+            host_services,
+        }
+    }
+}
+
+impl Default for BundledExtensionSource {
+    fn default() -> Self {
+        Self::new(BTreeMap::new(), None)
+    }
+}
 
 #[async_trait::async_trait]
 impl ExtensionSource for BundledExtensionSource {
     async fn load(&self, _ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
-        LoadExtensionsResult {
-            extensions: bundled_extensions(),
-            errors: Vec::new(),
-        }
+        let mut errors = Vec::new();
+        let extensions = bundled_extensions(
+            &self.extension_states,
+            self.host_services.as_ref(),
+            &mut errors,
+        );
+        LoadExtensionsResult { extensions, errors }
     }
 }
 
@@ -23,17 +50,69 @@ impl ExtensionSource for BundledExtensionSource {
 ///
 /// Earlier entries keep precedence when multiple extensions expose the
 /// same tool name.
-pub fn bundled_extensions() -> Vec<std::sync::Arc<dyn astrcode_core::extension::Extension>> {
+pub fn bundled_extensions(
+    extension_states: &BTreeMap<String, bool>,
+    host_services: Option<&Arc<ExtensionHostServices>>,
+    errors: &mut Vec<String>,
+) -> Vec<std::sync::Arc<dyn astrcode_core::extension::Extension>> {
+    let mut extensions = Vec::new();
+
+    #[cfg(feature = "agent-tools")]
+    if is_enabled(extension_states, "astrcode-agent-tools") {
+        extensions.push(astrcode_extension_agent_tools::extension());
+    }
+    #[cfg(feature = "mcp")]
+    if is_enabled(extension_states, "astrcode-mcp") {
+        extensions.push(astrcode_extension_mcp::extension());
+    }
+    #[cfg(feature = "skill")]
+    if is_enabled(extension_states, "astrcode-skill") {
+        extensions.push(astrcode_extension_skill::extension());
+    }
+    #[cfg(feature = "todo-tool")]
+    if is_enabled(extension_states, "astrcode-todo-tool") {
+        extensions.push(astrcode_extension_todo_tool::extension());
+    }
+    #[cfg(feature = "mode")]
+    if is_enabled(extension_states, "astrcode-mode") {
+        extensions.push(astrcode_extension_mode::extension());
+    }
+    #[cfg(feature = "memory")]
+    if is_enabled(extension_states, "astrcode.memory") {
+        match host_services {
+            Some(hs) => {
+                match astrcode_extension_memory::extension(
+                    hs.small_llm.clone(),
+                    hs.session_read.clone(),
+                ) {
+                    Ok(ext) => extensions.push(ext),
+                    Err(e) => errors.push(format!("astrcode.memory failed to load: {e}")),
+                }
+            },
+            None => errors.push("astrcode.memory requires ExtensionHostServices".to_string()),
+        }
+    }
+
+    extensions
+}
+
+pub fn bundled_extension_ids() -> Vec<&'static str> {
     vec![
         #[cfg(feature = "agent-tools")]
-        astrcode_extension_agent_tools::extension(),
+        "astrcode-agent-tools",
         #[cfg(feature = "mcp")]
-        astrcode_extension_mcp::extension(),
+        "astrcode-mcp",
         #[cfg(feature = "skill")]
-        astrcode_extension_skill::extension(),
+        "astrcode-skill",
         #[cfg(feature = "todo-tool")]
-        astrcode_extension_todo_tool::extension(),
+        "astrcode-todo-tool",
         #[cfg(feature = "mode")]
-        astrcode_extension_mode::extension(),
+        "astrcode-mode",
+        #[cfg(feature = "memory")]
+        "astrcode.memory",
     ]
+}
+
+fn is_enabled(extension_states: &BTreeMap<String, bool>, extension_id: &str) -> bool {
+    extension_states.get(extension_id).copied().unwrap_or(true)
 }

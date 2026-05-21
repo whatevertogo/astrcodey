@@ -574,21 +574,21 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
         }
     }
 
-    let plugin_tools: Vec<_> = input
+    let extension_tools: Vec<_> = input
         .tools
         .iter()
-        .filter(|tool| is_plugin_tool(tool))
+        .filter(|tool| is_extension_tool(tool))
         .collect();
-    if !plugin_tools.is_empty() {
+    if !extension_tools.is_empty() {
         lines.push(String::new());
-        lines.push("Plugin Tools".into());
+        lines.push("Extension Tools".into());
         lines.push(
-            "- Plugin tools are already present in the provider-visible tool list. Call them \
+            "- Extension tools are already present in the provider-visible tool list. Call them \
              directly with their exposed schema; `tool_search_tool` is for MCP discovery, not \
-             plugin-tool discovery."
+             extension-tool discovery."
                 .into(),
         );
-        for tool in &plugin_tools {
+        for tool in &extension_tools {
             lines.push(format!("- `{}`", tool.name));
         }
     }
@@ -672,7 +672,7 @@ fn is_mcp_tool(tool: &ToolDefinition) -> bool {
     tool.name.starts_with("mcp__")
 }
 
-fn is_plugin_tool(tool: &ToolDefinition) -> bool {
+fn is_extension_tool(tool: &ToolDefinition) -> bool {
     tool.origin == ToolOrigin::Extension
         || (tool.origin == ToolOrigin::Bundled && !tool.name.starts_with("mcp__"))
 }
@@ -966,8 +966,8 @@ mod tests {
                     ToolOrigin::Bundled,
                 ),
                 tool(
-                    "plugin_lookup",
-                    "Lookup through a configured plugin.",
+                    "extension_lookup",
+                    "Lookup through a configured extension.",
                     ToolOrigin::Extension,
                 ),
             ],
@@ -1006,8 +1006,8 @@ mod tests {
         assert!(prompt.contains("- `read`"));
         assert!(prompt.contains("External MCP Tools"));
         assert!(prompt.contains("- `mcp__demo__search`"));
-        assert!(prompt.contains("Plugin Tools"));
-        assert!(prompt.contains("- `plugin_lookup`"));
+        assert!(prompt.contains("Extension Tools"));
+        assert!(prompt.contains("- `extension_lookup`"));
         assert!(prompt.contains("[SystemPromptInstruction]\n  extra hint"));
         assert!(prompt.contains("[Skills]\n  skill a"));
         assert!(prompt.contains("[Agents]\n  agent x"));
@@ -1071,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_tools_render_without_mcp_tools() {
+    fn extension_tools_render_without_mcp_tools() {
         let input = SystemPromptInput {
             working_dir: "/test".into(),
             os: "linux".into(),
@@ -1088,8 +1088,8 @@ mod tests {
                     ToolOrigin::Bundled,
                 ),
                 tool(
-                    "plugin_lookup",
-                    "Lookup through a configured plugin.",
+                    "extension_lookup",
+                    "Lookup through a configured extension.",
                     ToolOrigin::Extension,
                 ),
             ],
@@ -1100,9 +1100,9 @@ mod tests {
 
         let prompt = build_system_prompt(&input);
 
-        assert!(prompt.contains("Plugin Tools"));
-        assert!(prompt.contains("- `plugin_lookup`"));
-        assert!(prompt.contains("not plugin-tool discovery"));
+        assert!(prompt.contains("Extension Tools"));
+        assert!(prompt.contains("- `extension_lookup`"));
+        assert!(prompt.contains("not extension-tool discovery"));
         assert!(!prompt.contains("External MCP Tools"));
     }
 

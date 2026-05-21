@@ -70,6 +70,21 @@ impl TerminalSession {
         })
     }
 
+    /// Clear screen, scrollback, and history for session switch (e.g. /resume).
+    pub fn reset_for_session_switch(&mut self) -> io::Result<()> {
+        self.history_source.clear();
+        let writer = self.terminal.backend_mut();
+        std::io::Write::write_all(writer, b"\x1b[2J\x1b[3J\x1b[H")?;
+        std::io::Write::flush(writer)?;
+        let size = self.terminal.size()?;
+        self.terminal.last_known_screen_size = size;
+        self.terminal.last_known_cursor_pos = Position { x: 0, y: 0 };
+        let new_area = ratatui::layout::Rect::new(0, 0, size.width, 0);
+        self.terminal.set_viewport_area(new_area);
+        self.terminal.invalidate_viewport();
+        Ok(())
+    }
+
     pub fn composer_width(&self) -> usize {
         self.terminal.composer_width()
     }
@@ -114,6 +129,15 @@ impl TerminalSession {
             }
         }
 
+        // When the panel shrinks (e.g. closing slash palette), scroll_region_up
+        // has already pushed history off-screen. Refill by clearing visible area
+        // and re-inserting from history_source, then let update_inline_viewport
+        // position the viewport correctly.
+        let prev_height = self.terminal.viewport_area.height;
+        if height < prev_height {
+            self.refill_after_shrink(screen_size, height)?;
+        }
+
         let _ = io::stdout().sync_update(|_| {
             let needs_full_repaint = self.terminal.update_inline_viewport(height)?;
             if needs_full_repaint {
@@ -149,6 +173,44 @@ impl TerminalSession {
 
         // Re-insert the tail of history that fits on screen.
         let available_rows = screen_size.height.saturating_sub(INLINE_VIEWPORT_HEIGHT) as usize;
+        let replay_count = self
+            .history_source
+            .len()
+            .min(available_rows)
+            .min(REFLOW_MAX_LINES);
+        let start = self.history_source.len().saturating_sub(replay_count);
+        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..].to_vec();
+
+        if !lines_to_replay.is_empty() {
+            insert_history_lines(&mut self.terminal, lines_to_replay)?;
+        }
+
+        Ok(())
+    }
+
+    /// Re-fill visible history after the inline panel shrinks.
+    ///
+    /// When the panel grows (e.g. slash palette opens), `scroll_region_up` pushes
+    /// history off the top of the screen. When the panel shrinks again, the gap
+    /// can't be restored by scrolling back down (content is gone). Instead, we
+    /// clear only the visible screen (preserving terminal scrollback) and re-insert
+    /// from `history_source`, then let `update_inline_viewport` position correctly.
+    fn refill_after_shrink(
+        &mut self,
+        screen_size: ratatui::layout::Size,
+        panel_height: u16,
+    ) -> io::Result<()> {
+        let new_area = ratatui::layout::Rect::new(0, 0, screen_size.width, 0);
+        self.terminal.set_viewport_area(new_area);
+
+        // Clear visible screen AND scrollback to avoid duplicates on repeated shrink.
+        let writer = self.terminal.backend_mut();
+        std::io::Write::write_all(writer, b"\x1b[2J\x1b[3J\x1b[H")?;
+        std::io::Write::flush(writer)?;
+        self.terminal.last_known_cursor_pos = Position { x: 0, y: 0 };
+        self.terminal.invalidate_viewport();
+
+        let available_rows = screen_size.height.saturating_sub(panel_height) as usize;
         let replay_count = self
             .history_source
             .len()

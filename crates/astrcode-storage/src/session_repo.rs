@@ -29,15 +29,15 @@ use crate::{
     tool_artifacts::{slice_tool_result, write_tool_result_file},
 };
 
-fn source_plugin_dir_component(source_plugin: &str) -> Result<String, StorageError> {
-    if source_plugin.is_empty() {
+fn source_extension_dir_component(source_extension: &str) -> Result<String, StorageError> {
+    if source_extension.is_empty() {
         return Err(StorageError::InvalidId(
-            "source_plugin cannot be empty".into(),
+            "source_extension cannot be empty".into(),
         ));
     }
 
     let mut encoded = String::new();
-    for byte in source_plugin.bytes() {
+    for byte in source_extension.bytes() {
         if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
             encoded.push(byte as char);
         } else {
@@ -147,7 +147,7 @@ impl FileSystemSessionRepository {
         None
     }
 
-    /// 递归搜索 `base` 下所有 session 目录的 `subagents/{plugin}/` 子树。
+    /// 递归搜索 `base` 下所有 session 目录的 `subagents/{extension}/` 子树。
     fn search_subagents_tree<'a>(
         &'a self,
         base: &'a Path,
@@ -165,23 +165,23 @@ impl FileSystemSessionRepository {
                 {
                     continue;
                 }
-                let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                let Ok(mut extension_entries) = tokio::fs::read_dir(&subagents).await else {
                     continue;
                 };
-                while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
-                    let plugin_name = plugin_entry.file_name();
-                    if plugin_name.to_string_lossy() == ".recycled" {
+                while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
+                    let extension_name = extension_entry.file_name();
+                    if extension_name.to_string_lossy() == ".recycled" {
                         continue;
                     }
-                    let plugin_dir = plugin_entry.path();
-                    let candidate = plugin_dir.join(id.as_str());
+                    let extension_dir = extension_entry.path();
+                    let candidate = extension_dir.join(id.as_str());
                     if tokio::fs::metadata(&candidate)
                         .await
                         .is_ok_and(|m| m.is_dir())
                     {
                         return Some(candidate);
                     }
-                    if let Some(found) = self.search_subagents_tree(&plugin_dir, id).await {
+                    if let Some(found) = self.search_subagents_tree(&extension_dir, id).await {
                         return Some(found);
                     }
                 }
@@ -305,18 +305,18 @@ impl EventStore for FileSystemSessionRepository {
         model_id: &str,
         parent_session_id: Option<&SessionId>,
         tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
-        source_plugin: Option<&str>,
+        source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
-        let dir = match (parent_session_id, source_plugin) {
-            (Some(parent_id), Some(plugin)) => {
+        let dir = match (parent_session_id, source_extension) {
+            (Some(parent_id), Some(extension)) => {
                 let parent_dir = self.existing_session_dir(parent_id).await?;
-                let plugin_dir = source_plugin_dir_component(plugin)?;
+                let extension_dir = source_extension_dir_component(extension)?;
                 parent_dir
                     .join("subagents")
-                    .join(plugin_dir)
+                    .join(extension_dir)
                     .join(session_id.as_str())
             },
             _ => self.session_dir_from_working_dir(working_dir, session_id),
@@ -331,7 +331,7 @@ impl EventStore for FileSystemSessionRepository {
                 model_id: model_id.into(),
                 parent_session_id: parent_session_id.cloned(),
                 tool_policy: tool_policy.cloned(),
-                source_plugin: source_plugin.map(String::from),
+                source_extension: source_extension.map(String::from),
             },
         );
 
@@ -494,16 +494,21 @@ impl EventStore for FileSystemSessionRepository {
             .await
             .retain(|_, meta| !meta.dir.starts_with(&dir));
 
-        // 结构：subagents/{plugin}/{child_id}/
-        // 回收到：subagents/.recycled/{plugin}/{child_id}/
+        // 结构：subagents/{extension}/{child_id}/
+        // 回收到：subagents/.recycled/{extension}/{child_id}/
         // 这样 restore 时能直接 rename 回原位。
-        let plugin_dir = dir.parent(); // subagents/{plugin}/
-        let subagents_dir = plugin_dir.and_then(|p| p.parent()); // subagents/
+        let extension_dir = dir.parent(); // subagents/{extension}/
+        let subagents_dir = extension_dir.and_then(|p| p.parent()); // subagents/
 
-        if let (Some(plugin_dir), Some(subagents_dir)) = (plugin_dir, subagents_dir) {
+        if let (Some(extension_dir), Some(subagents_dir)) = (extension_dir, subagents_dir) {
             if subagents_dir.file_name().is_some_and(|n| n == "subagents") {
-                let plugin_name = plugin_dir.file_name().unwrap_or_default().to_string_lossy();
-                let recycled = subagents_dir.join(".recycled").join(plugin_name.as_ref());
+                let extension_name = extension_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let recycled = subagents_dir
+                    .join(".recycled")
+                    .join(extension_name.as_ref());
                 tokio::fs::create_dir_all(&recycled).await?;
                 let dest = recycled.join(dir.file_name().unwrap_or_default());
                 tokio::fs::rename(&dir, &dest).await?;
@@ -520,30 +525,30 @@ impl EventStore for FileSystemSessionRepository {
         validate_session_id(session_id.as_str())
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
-        // 在所有 .recycled/{plugin}/{session_id} 目录中搜索
+        // 在所有 .recycled/{extension}/{session_id} 目录中搜索
         let recycled_path = self
             .find_recycled_session_dir(session_id)
             .await
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
 
-        // 结构：subagents/.recycled/{plugin}/{session_id}
-        // 还原到：subagents/{plugin}/{session_id}
-        let plugin_dir = recycled_path
-            .parent() // .recycled/{plugin}/
+        // 结构：subagents/.recycled/{extension}/{session_id}
+        // 还原到：subagents/{extension}/{session_id}
+        let extension_dir = recycled_path
+            .parent() // .recycled/{extension}/
             .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
-        let plugin_name = plugin_dir
+        let extension_name = extension_dir
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let recycled_root = plugin_dir
+        let recycled_root = extension_dir
             .parent() // .recycled/
             .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
         let subagents_dir = recycled_root
             .parent() // subagents/
             .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
 
-        let dest_parent = subagents_dir.join(&plugin_name);
+        let dest_parent = subagents_dir.join(&extension_name);
         tokio::fs::create_dir_all(&dest_parent).await?;
         let dest = dest_parent.join(session_id.as_str());
 
@@ -651,7 +656,7 @@ impl FileSystemSessionRepository {
         self.all_session_roots().await
     }
 
-    /// 在所有项目的 subagents/.recycled/{plugin}/ 目录中搜索指定 session。
+    /// 在所有项目的 subagents/.recycled/{extension}/ 目录中搜索指定 session。
     async fn find_recycled_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
         for root in self.all_session_roots().await {
             if let Some(found) = self.search_recycled_in_root(&root, id).await {
@@ -661,7 +666,7 @@ impl FileSystemSessionRepository {
         None
     }
 
-    /// 搜索 sessions_root 下所有 session 的 subagents/.recycled/{plugin}/{id}。
+    /// 搜索 sessions_root 下所有 session 的 subagents/.recycled/{extension}/{id}。
     fn search_recycled_in_root<'a>(
         &'a self,
         sessions_root: &'a Path,
@@ -684,15 +689,15 @@ impl FileSystemSessionRepository {
                 {
                     continue;
                 }
-                // Check subagents/.recycled/{plugin}/{id}
+                // Check subagents/.recycled/{extension}/{id}
                 let recycled_dir = entry.path().join("subagents").join(".recycled");
                 if tokio::fs::metadata(&recycled_dir)
                     .await
                     .is_ok_and(|m| m.is_dir())
                 {
-                    if let Ok(mut plugin_entries) = tokio::fs::read_dir(&recycled_dir).await {
-                        while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
-                            let candidate = plugin_entry.path().join(id.as_str());
+                    if let Ok(mut extension_entries) = tokio::fs::read_dir(&recycled_dir).await {
+                        while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
+                            let candidate = extension_entry.path().join(id.as_str());
                             if tokio::fs::metadata(&candidate)
                                 .await
                                 .is_ok_and(|m| m.is_dir())
@@ -702,23 +707,24 @@ impl FileSystemSessionRepository {
                         }
                     }
                 }
-                // Recurse into subagents/{plugin}/ for nested sessions
+                // Recurse into subagents/{extension}/ for nested sessions
                 let subagents = entry.path().join("subagents");
                 if tokio::fs::metadata(&subagents)
                     .await
                     .is_ok_and(|m| m.is_dir())
                 {
-                    let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                    let Ok(mut extension_entries) = tokio::fs::read_dir(&subagents).await else {
                         continue;
                     };
-                    while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
-                        let pname = plugin_entry.file_name();
+                    while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
+                        let pname = extension_entry.file_name();
                         if pname.to_string_lossy() == ".recycled" {
                             continue;
                         }
-                        if plugin_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                            if let Some(found) =
-                                self.search_recycled_in_root(&plugin_entry.path(), id).await
+                        if extension_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                            if let Some(found) = self
+                                .search_recycled_in_root(&extension_entry.path(), id)
+                                .await
                             {
                                 return Some(found);
                             }
@@ -774,16 +780,16 @@ impl FileSystemSessionRepository {
                     .await
                     .is_ok_and(|m| m.is_dir())
                 {
-                    let Ok(mut plugin_entries) = tokio::fs::read_dir(&subagents).await else {
+                    let Ok(mut extension_entries) = tokio::fs::read_dir(&subagents).await else {
                         continue;
                     };
-                    while let Ok(Some(plugin_entry)) = plugin_entries.next_entry().await {
-                        let plugin_name = plugin_entry.file_name();
-                        if plugin_name.to_string_lossy() == ".recycled" {
+                    while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
+                        let extension_name = extension_entry.file_name();
+                        if extension_name.to_string_lossy() == ".recycled" {
                             continue;
                         }
-                        if plugin_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                            self.collect_session_ids_recursive(&plugin_entry.path(), ids)
+                        if extension_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                            self.collect_session_ids_recursive(&extension_entry.path(), ids)
                                 .await;
                         }
                     }
@@ -811,21 +817,22 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
 
-        let (working_dir, model_id, parent_session_id, source_plugin) = match &first_event.payload {
-            EventPayload::SessionStarted {
-                working_dir,
-                model_id,
-                parent_session_id,
-                tool_policy: _,
-                source_plugin,
-            } => (
-                working_dir.clone(),
-                model_id.clone(),
-                parent_session_id.clone(),
-                source_plugin.clone(),
-            ),
-            _ => return Ok(None),
-        };
+        let (working_dir, model_id, parent_session_id, source_extension) =
+            match &first_event.payload {
+                EventPayload::SessionStarted {
+                    working_dir,
+                    model_id,
+                    parent_session_id,
+                    tool_policy: _,
+                    source_extension,
+                } => (
+                    working_dir.clone(),
+                    model_id.clone(),
+                    parent_session_id.clone(),
+                    source_extension.clone(),
+                ),
+                _ => return Ok(None),
+            };
 
         let updated_at = last_event
             .as_ref()
@@ -845,7 +852,7 @@ impl FileSystemSessionRepository {
             phase: astrcode_core::event::Phase::default(),
             latest_cursor,
             first_user_message,
-            source_plugin,
+            source_extension,
         }))
     }
 }
@@ -1224,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_child_sessions_use_safe_plugin_dir_and_can_reopen() {
+    async fn extension_child_sessions_use_safe_extension_dir_and_can_reopen() {
         let temp_dir = tempfile::tempdir().unwrap();
         let base_path = temp_dir.path().join("projects");
         let parent_id = SessionId::from("parent");
@@ -1239,7 +1246,7 @@ mod tests {
             "mock",
             Some(&parent_id),
             None,
-            Some("owner/plugin.alpha"),
+            Some("owner/extension.alpha"),
         )
         .await
         .unwrap();
@@ -1251,7 +1258,7 @@ mod tests {
                 .join("sessions")
                 .join(parent_id.as_str())
                 .join("subagents")
-                .join("owner%2Fplugin%2Ealpha")
+                .join("owner%2Fextension%2Ealpha")
                 .join(child_id.as_str())
                 .exists()
         );
@@ -1265,7 +1272,10 @@ mod tests {
             child.parent_session_id.as_ref(),
             Some(&SessionId::from("parent"))
         );
-        assert_eq!(child.source_plugin.as_deref(), Some("owner/plugin.alpha"));
+        assert_eq!(
+            child.source_extension.as_deref(),
+            Some("owner/extension.alpha")
+        );
     }
 
     #[tokio::test]
@@ -1283,7 +1293,7 @@ mod tests {
             "mock",
             Some(&parent_id),
             None,
-            Some("test-plugin"),
+            Some("test-extension"),
         )
         .await
         .unwrap();

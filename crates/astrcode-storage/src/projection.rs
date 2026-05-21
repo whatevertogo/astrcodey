@@ -33,13 +33,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model_id,
             parent_session_id,
             tool_policy,
-            source_plugin,
+            source_extension,
         } => {
             model.working_dir = working_dir.clone();
             model.model_id = model_id.clone();
             model.parent_session_id = parent_session_id.clone();
             model.tool_policy = tool_policy.clone();
-            model.source_plugin = source_plugin.clone();
+            model.source_extension = source_extension.clone();
             model.phase = Phase::Idle;
             if model.created_at.is_empty() {
                 model.created_at = event.timestamp.to_rfc3339();
@@ -249,15 +249,15 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::BackgroundTaskCompleted { .. } => {},
         EventPayload::Custom { .. } => {},
         EventPayload::RecapGenerated { .. } => {},
-        EventPayload::PluginEvent {
-            plugin_id,
+        EventPayload::ExtensionEvent {
+            extension_id,
             event_type,
             schema_version,
             ..
         } => {
-            model.plugin_events.push(
+            model.extension_events.push(
                 event.seq.unwrap_or_default(),
-                plugin_id.clone(),
+                extension_id.clone(),
                 event_type.clone(),
                 *schema_version,
             );

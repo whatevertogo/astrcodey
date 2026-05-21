@@ -3,7 +3,7 @@
 use astrcode_core::{
     config::ModelSelection,
     event::EventPayload,
-    extension::{ExtensionEvent, LifecycleContext, ProviderContext},
+    extension::{ExchangeSummary, ExtensionEvent, LifecycleContext, ProviderContext},
     llm::LlmMessage,
     types::*,
 };
@@ -61,7 +61,26 @@ impl SharedTurnContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
-            plugin_event_sink: None,
+            extension_event_sink: None,
+            last_exchange: None,
+        }
+    }
+
+    /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
+    pub fn lifecycle_ctx_with_exchange(
+        &self,
+        user_message: String,
+        assistant_message: String,
+    ) -> LifecycleContext {
+        LifecycleContext {
+            session_id: self.session_id.to_string(),
+            working_dir: self.working_dir.clone(),
+            model: self.model_selection(),
+            extension_event_sink: None,
+            last_exchange: Some(ExchangeSummary {
+                user_message,
+                assistant_message,
+            }),
         }
     }
 

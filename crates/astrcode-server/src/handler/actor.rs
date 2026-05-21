@@ -251,6 +251,8 @@ impl CommandHandler {
         event_bus: Arc<ServerEventBus>,
         actor_tx: mpsc::UnboundedSender<CommandMessage>,
     ) -> Self {
+        let model_selection =
+            super::model_selection::ModelSelectionController::new(runtime.config_manager.clone());
         Self {
             runtime,
             event_bus,
@@ -258,6 +260,7 @@ impl CommandHandler {
             active_turns: HashMap::new(),
             queued_inputs: HashMap::new(),
             actor_tx,
+            model_selection,
         }
     }
 

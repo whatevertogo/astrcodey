@@ -204,7 +204,7 @@ async fn execute_tool_call_blocking(
             background_task_reader: runtime.capabilities.background_task_reader,
             file_observation_store: runtime.capabilities.file_observation_store,
             session_ops: runtime.capabilities.session_ops,
-            plugin_event_sink: None,
+            extension_event_sink: None,
         },
     };
 
@@ -282,7 +282,7 @@ async fn execute_tool_call_with_background(
             background_task_reader: runtime.capabilities.background_task_reader.clone(),
             file_observation_store: runtime.capabilities.file_observation_store.clone(),
             session_ops: runtime.capabilities.session_ops.clone(),
-            plugin_event_sink: None,
+            extension_event_sink: None,
         },
     };
 

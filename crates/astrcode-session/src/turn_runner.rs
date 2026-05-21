@@ -238,7 +238,7 @@ impl TurnRunner {
                     return self
                         .postprocess_complete_stage(
                             &extension_runner,
-                            lifecycle_ctx.clone(),
+                            user_text.to_string(),
                             state,
                             finish_reason,
                         )
@@ -519,14 +519,17 @@ impl TurnRunner {
     async fn postprocess_complete_stage(
         &self,
         extension_runner: &astrcode_extensions::runner::ExtensionRunner,
-        lifecycle_ctx: astrcode_core::extension::LifecycleContext,
+        user_text: String,
         state: TurnState,
         finish_reason: String,
     ) -> Result<TurnOutput, TurnError> {
         self.dispatch_after_provider_response(extension_runner)
             .await?;
+        let end_ctx = self
+            .shared
+            .lifecycle_ctx_with_exchange(user_text, state.final_text.clone());
         extension_runner
-            .emit_lifecycle(ExtensionEvent::TurnEnd, lifecycle_ctx)
+            .emit_lifecycle(ExtensionEvent::TurnEnd, end_ctx)
             .await?;
         Ok(TurnOutput {
             text: state.final_text,

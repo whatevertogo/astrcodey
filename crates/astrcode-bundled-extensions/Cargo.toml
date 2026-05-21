@@ -5,19 +5,22 @@ edition = "2021"
 description = "First-party bundled extension registration"
 
 [features]
-default = ["agent-tools", "mcp", "skill", "todo-tool", "mode"]
+default = ["agent-tools", "mcp", "skill", "todo-tool", "mode", "memory"]
 agent-tools = ["dep:astrcode-extension-agent-tools"]
 mcp = ["dep:astrcode-extension-mcp"]
 skill = ["dep:astrcode-extension-skill"]
 todo-tool = ["dep:astrcode-extension-todo-tool"]
 mode = ["dep:astrcode-extension-mode"]
+memory = ["dep:astrcode-extension-memory"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 async-trait = { workspace = true }
+tracing = { workspace = true }
 astrcode-extension-agent-tools = { path = "../astrcode-extension-agent-tools", optional = true, default-features = false }
 astrcode-extension-mcp = { path = "../astrcode-extension-mcp", optional = true, default-features = false }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", optional = true, default-features = false }
 astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", optional = true, default-features = false }
 astrcode-extension-mode = { path = "../astrcode-extension-mode", optional = true, default-features = false }
+astrcode-extension-memory = { path = "../astrcode-extension-memory", optional = true, default-features = false }

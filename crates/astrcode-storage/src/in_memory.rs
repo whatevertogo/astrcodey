@@ -57,7 +57,7 @@ impl EventStore for InMemoryEventStore {
         model_id: &str,
         parent_session_id: Option<&SessionId>,
         tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
-        source_plugin: Option<&str>,
+        source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
         let mut event = Event::new(
             session_id.clone(),
@@ -67,7 +67,7 @@ impl EventStore for InMemoryEventStore {
                 model_id: model_id.into(),
                 parent_session_id: parent_session_id.cloned(),
                 tool_policy: tool_policy.cloned(),
-                source_plugin: source_plugin.map(String::from),
+                source_extension: source_extension.map(String::from),
             },
         );
         // EventLog seq 是会话内 0-indexed；第一条 SessionStarted 为 0。

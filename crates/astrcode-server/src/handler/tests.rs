@@ -10,7 +10,7 @@ use std::{
 
 use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, LlmSettings, OpenAiApiMode},
+    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},
     extension::{
         CommandContext, Extension, ExtensionCommandResult, ExtensionError, ExtensionEvent,
@@ -185,7 +185,7 @@ impl astrcode_core::extension::CommandHandler for StaticCommandHandler {
         _ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         if command_name == self.command_name {
-            return Ok(ExtensionCommandResult::display("plugin command", false));
+            return Ok(ExtensionCommandResult::display("extension command", false));
         }
         Err(ExtensionError::NotFound(command_name.into()))
     }
@@ -455,6 +455,7 @@ fn test_runtime_with_settings(
         },
         agent: astrcode_core::config::AgentSettings::default(),
         wasm: astrcode_core::config::WasmSettings::default(),
+        extensions: ExtensionSettings::default(),
     };
     let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
@@ -487,6 +488,7 @@ fn test_runtime_with_settings(
         session_manager,
         extension_runner,
         capabilities,
+        startup_working_dir: std::env::temp_dir(),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
 }
@@ -706,7 +708,8 @@ async fn client_create_session_reports_start_hook_failure() {
     runtime
         .extension_runner
         .register(Arc::new(FailSessionStartExtension))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -977,7 +980,8 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
         .register(Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1008,7 +1012,8 @@ async fn stream_error_still_dispatches_turn_end() {
         .register(Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1320,7 +1325,8 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
     runtime
         .extension_runner
         .register(astrcode_extension_skill::extension())
-        .await;
+        .await
+        .unwrap();
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1377,7 +1383,7 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
 }
 
 #[tokio::test]
-async fn command_list_keeps_reserved_and_plugin_priority_over_skills() {
+async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
     let workspace = unique_workspace("slash-command-priority");
     write_project_skill(
         &workspace,
@@ -1387,20 +1393,22 @@ async fn command_list_keeps_reserved_and_plugin_priority_over_skills() {
     write_project_skill(
         &workspace,
         "reviewnow",
-        "---\ndescription: Skill named reviewnow.\n---\nShould not override plugin.",
+        "---\ndescription: Skill named reviewnow.\n---\nShould not override extension.",
     );
     let runtime = test_runtime();
     runtime
         .extension_runner
         .register(astrcode_extension_skill::extension())
-        .await;
+        .await
+        .unwrap();
     runtime
         .extension_runner
         .register(Arc::new(StaticCommandExtension {
-            id: "test-plugin",
+            id: "test-extension",
             command_name: "reviewnow",
         }))
-        .await;
+        .await
+        .unwrap();
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1421,7 +1429,7 @@ async fn command_list_keeps_reserved_and_plugin_priority_over_skills() {
         .iter()
         .find(|command| command.name == "reviewnow")
         .expect("reviewnow command");
-    assert_eq!(reviewnow.source, "plugin");
+    assert_eq!(reviewnow.source, "extension");
     let _ = fs::remove_dir_all(workspace);
 }
 

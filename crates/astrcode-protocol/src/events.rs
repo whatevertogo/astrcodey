@@ -65,6 +65,9 @@ pub enum ClientNotification {
         /// 新的显示文本。空字符串表示隐藏。
         text: String,
     },
+
+    /// 扩展注册表发生变化，客户端应清空并重新拉取命令/快捷键/状态栏快照。
+    ExtensionRegistryChanged,
 }
 
 /// UI 交互请求的类型。
@@ -143,7 +146,7 @@ pub struct ExtensionCommandInfo {
     pub name: String,
     pub description: String,
     pub needs_argument: bool,
-    /// 命令来源：`builtin`、`plugin` 或 `skill`。
+    /// 命令来源：`builtin`、`extension` 或 `skill`。
     pub source: String,
 }
 

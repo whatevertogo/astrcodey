@@ -72,7 +72,7 @@ impl SessionOperations for ServerSessionOperations {
                 String::new(),
                 request.system_prompt,
                 request.tool_policy,
-                request.source_plugin.as_deref(),
+                request.source_extension.as_deref(),
                 request.tool_call_id.into(),
             )
             .await

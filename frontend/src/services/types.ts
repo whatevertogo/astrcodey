@@ -186,6 +186,7 @@ export type ConversationDelta =
   | { kind: 'toolCallBackgrounded'; callId: string; taskId: string }
   | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
   | { kind: 'statusItemUpdate'; id: string; text: string }
+  | { kind: 'extensionRegistryChanged' }
 
 // ── App State ──
 
@@ -214,8 +215,16 @@ export interface ConfigView {
   configPath: string
   activeProfile: string
   activeModel: string
+  extensionStates: Record<string, boolean>
   profiles: ProfileView[]
   warning?: string
+}
+
+export interface ExtensionStateView {
+  extensionId: string
+  enabled: boolean
+  loaded: boolean
+  source: 'builtin' | 'disk' | 'unknown'
 }
 
 export interface CurrentModelInfo {

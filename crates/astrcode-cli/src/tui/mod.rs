@@ -29,7 +29,7 @@ pub(crate) mod theme;
 use std::{io, sync::Arc};
 
 use astrcode_client::client::AstrcodeClient;
-use astrcode_protocol::commands::ClientCommand;
+use astrcode_protocol::commands::{ClientCommand, UiResponseValue};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio_stream::StreamExt;
 
@@ -127,10 +127,25 @@ pub async fn run() -> io::Result<()> {
             },
         }
 
+        if app.needs_extension_refresh {
+            app.needs_extension_refresh = false;
+            if app.active_session_id.is_some() {
+                client
+                    .send_command(&ClientCommand::ListExtensionCommands)
+                    .await
+                    .map_err(io_error)?;
+            }
+        }
+
         if app.should_quit {
             break;
         }
         if dirty {
+            // Session switch: clear old content before flushing new scrollback.
+            if app.needs_terminal_reset {
+                app.needs_terminal_reset = false;
+                terminal.reset_for_session_switch()?;
+            }
             // Flush scrollback entries into terminal native scrollback.
             let entries = std::mem::take(&mut app.scrollback_queue);
             terminal.flush_scrollback(entries, &theme, &app.message_renderers)?;
@@ -160,6 +175,36 @@ async fn handle_key(
     client: &Arc<Client>,
     terminal: &mut TerminalSession,
 ) -> io::Result<()> {
+    // 服务端 UI picker 模式：拦截 Up/Down/Enter/Esc
+    if app.ui_picker.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.close_ui_picker();
+                app.status_text = "Ready".into();
+            },
+            KeyCode::Up => {
+                app.ui_picker_up();
+            },
+            KeyCode::Down => {
+                app.ui_picker_down();
+            },
+            KeyCode::Enter => {
+                if let Some((request_id, selected)) = app.ui_picker_accept() {
+                    client
+                        .send_command(&ClientCommand::UiResponse {
+                            request_id,
+                            value: UiResponseValue::Select { selected },
+                        })
+                        .await
+                        .map_err(io_error)?;
+                    app.status_text = "Selection submitted".into();
+                }
+            },
+            _ => {},
+        }
+        return Ok(());
+    }
+
     // Session picker 模式：拦截 Up/Down/Enter/Esc
     if app.session_picker.is_some() {
         match key.code {
@@ -598,6 +643,54 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         }
 
         lines
+    } else if let Some(picker) = &app.ui_picker {
+        // 服务端 UI picker 渲染（滑动窗口）
+        let max_visible = 10usize;
+        let total = picker.items.len();
+        let selected = picker.selected.min(total.saturating_sub(1));
+        let window_start = if total <= max_visible || selected < max_visible / 2 {
+            0
+        } else if selected >= total.saturating_sub(max_visible / 2) {
+            total.saturating_sub(max_visible)
+        } else {
+            selected.saturating_sub(max_visible / 2)
+        };
+        let window_end = (window_start + max_visible).min(total);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!("  {} (↑↓ Enter Esc):", picker.message),
+            theme.dim,
+        )));
+        if window_start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("    ↑ {} more", window_start),
+                theme.dim,
+            )));
+        }
+        for i in window_start..window_end {
+            let item = &picker.items[i];
+            let marker = if i == selected { "▸" } else { " " };
+            let style = if i == selected {
+                theme.popup_selected
+            } else {
+                theme.body
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {marker} {item}"),
+                style,
+            )));
+        }
+        if window_end < total {
+            lines.push(Line::from(Span::styled(
+                format!("    ↓ {} more", total - window_end),
+                theme.dim,
+            )));
+        }
+        if total == 0 {
+            lines.push(Line::from(Span::styled("    No options", theme.dim)));
+        }
+        lines
     } else if let Some(picker) = &app.session_picker {
         // Session picker 渲染（滑动窗口）
         let max_visible = 10usize;
@@ -689,17 +782,17 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         "Enter send · /help"
     };
     // 拼接插件注册的状态栏项（按 key 字母序，排除空值）
-    let plugin_status: String = app
+    let extension_status: String = app
         .status_items
         .iter()
         .filter(|(_, v)| !v.is_empty())
         .map(|(_, v)| v.as_str())
         .collect::<Vec<_>>()
         .join(" · ");
-    let footer_text = if plugin_status.is_empty() {
+    let footer_text = if extension_status.is_empty() {
         format!("  {model} · {cwd} · {session}   {hints}")
     } else {
-        format!("  [{plugin_status}] {model} · {cwd} · {session}   {hints}")
+        format!("  [{extension_status}] {model} · {cwd} · {session}   {hints}")
     };
     let footer_line = Line::from(Span::styled(footer_text, theme.footer));
 

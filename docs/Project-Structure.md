@@ -125,7 +125,7 @@ frontend/
 │   ├── services/
 │   │   ├── api.ts          # HTTP API 调用
 │   │   ├── protocol.ts     # 协议类型定义与解码器
-│   │   ├── sse-stream.ts   # SSE 流处理（Tauri 环境使用 plugin-http）
+│   │   ├── sse-stream.ts   # SSE 流处理（Tauri 环境使用 extension-http）
 │   │   └── types.ts        # TypeScript 类型（含 KeybindingInfo、StatusItemInfo）
 │   ├── store/
 │   │   └── conversation.ts # 会话状态管理（Zustand）
@@ -152,7 +152,7 @@ src-tauri/
 │   ├── commands.rs         # Sidecar 管理、窗口控制、目录选择
 │   ├── instance.rs         # 单实例协调（文件锁 + TCP 激活）
 │   └── paths.rs            # 实例数据路径
-├── capabilities/           # 权限配置（含 HTTP plugin 权限）
+├── capabilities/           # 权限配置（含 HTTP extension 权限）
 ├── icons/                  # 应用图标
 ├── binaries/               # 嵌入式二进制 (astrcode-http-server)
 ├── Cargo.toml
@@ -164,7 +164,7 @@ src-tauri/
 - **Sidecar 模式**: 嵌入 `astrcode-http-server` 作为 sidecar 进程
 - **通信方式**: HTTP API + SSE（本地动态端口）
 - **单实例协调**: 文件锁 + TCP 激活（后启动的实例通知已有实例聚焦窗口）
-- **HTTP Plugin**: 通过 `tauri-plugin-http` 绕过 webkit2gtk 网络栈，解决 Linux SSE 缓冲问题
+- **HTTP extension**: 通过 `tauri-plugin-http` 绕过 webkit2gtk 网络栈，解决 Linux SSE 缓冲问题
 - **安全策略**: CSP 配置限制外部连接
 
 ## CI/CD 工作流

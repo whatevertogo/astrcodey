@@ -57,7 +57,7 @@ impl Session {
         model_id: &str,
         parent: Option<&SessionId>,
         tool_policy: Option<&ChildToolPolicy>,
-        source_plugin: Option<&str>,
+        source_extension: Option<&str>,
         runtime: Arc<SessionRuntimeState>,
         caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
@@ -68,7 +68,7 @@ impl Session {
                 model_id,
                 parent,
                 tool_policy,
-                source_plugin,
+                source_extension,
             )
             .await?;
         // tool_policy 走 event log 持久化；同步注入 runtime 让首次 refresh_tools 立刻生效。
@@ -180,7 +180,8 @@ impl Session {
                     session_id: session_id.to_string(),
                     working_dir: model.working_dir.clone(),
                     model: ModelSelection::simple(model.model_id.clone()),
-                    plugin_event_sink: None,
+                    extension_event_sink: None,
+                    last_exchange: None,
                 },
             )
             .await?;
@@ -520,7 +521,7 @@ impl Session {
         task: String,
         extra_system_prompt: Option<String>,
         tool_policy: Option<ChildToolPolicy>,
-        source_plugin: Option<&str>,
+        source_extension: Option<&str>,
         tool_call_id: ToolCallId,
     ) -> Result<Session, SessionError> {
         let child_runtime = Arc::new(SessionRuntimeState::default());
@@ -535,7 +536,7 @@ impl Session {
             model_id,
             Some(&self.id),
             tool_policy.as_ref(),
-            source_plugin,
+            source_extension,
             child_runtime,
             Arc::clone(&self.caps),
         )

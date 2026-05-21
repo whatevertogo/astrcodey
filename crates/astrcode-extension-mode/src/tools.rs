@@ -4,7 +4,10 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata};
+use astrcode_core::{
+    render::{RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,10 +26,10 @@ pub const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
 pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
-        description: "Switch agent mode. `code` (default) allows full execution; `plan` is \
-                      read-only for planning. The first switch from `plan` back to `code` \
-                      triggers an exit-review checklist; call again after review to complete the \
-                      transition."
+        description: "Switch the agent running mode. Available modes: \"code\" (default execution \
+                      with full tools) and \"plan\" (read-only planning mode, use when user wants \
+                      to plan). In plan mode, the first switch back to code triggers an exit \
+                      review gate; call again after review to complete the transition."
             .into(),
         parameters: json!({
             "type": "object",
@@ -272,6 +275,16 @@ pub fn handle_upsert_plan(
     let is_create = store::load_plan(plan_dir)?.is_none();
     let path = store::save_plan(plan_dir, &args.content)?;
 
+    let operation = if is_create { "create" } else { "update" };
+    let ui_render = RenderSpec::Box {
+        title: Some(format!("Plan {operation}")),
+        tone: RenderTone::Success,
+        children: vec![RenderSpec::Markdown {
+            text: args.content.clone(),
+            tone: RenderTone::Default,
+        }],
+    };
+
     Ok(ToolResult::text(
         if is_create {
             format!("Plan artifact created at {}.", path)
@@ -281,11 +294,12 @@ pub fn handle_upsert_plan(
         false,
         tool_metadata([
             ("path", json!(path)),
-            (
-                "operation",
-                json!(if is_create { "create" } else { "update" }),
-            ),
+            ("operation", json!(operation)),
             ("planContent", json!(args.content)),
+            (
+                UI_RENDER_METADATA_KEY,
+                serde_json::to_value(&ui_render).unwrap_or_default(),
+            ),
         ]),
     ))
 }

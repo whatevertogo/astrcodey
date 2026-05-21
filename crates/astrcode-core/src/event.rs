@@ -67,7 +67,7 @@ pub enum EventPayload {
         tool_policy: Option<ChildToolPolicy>,
         /// 创建该子 session 的扩展 ID，用于按插件组织存储目录。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_plugin: Option<String>,
+        source_extension: Option<String>,
     },
 
     /// 会话使用的模型已变更。
@@ -370,11 +370,11 @@ pub enum EventPayload {
 
     /// 插件命名空间事件。
     ///
-    /// 由 [`crate::extension::PluginEventSink`] 发出，`plugin_id` 由 runtime
+    /// 由 [`crate::extension::ExtensionEventSink`] 发出，`extension_id` 由 runtime
     /// 在构造 sink 时注入，插件无法伪造。`event_type` 必须在 Registrar 中声明。
-    PluginEvent {
+    ExtensionEvent {
         /// 插件 ID，充当事件命名空间。
-        plugin_id: String,
+        extension_id: String,
         /// 插件声明的事件类型名（如 `"memory.accepted"`）。
         event_type: String,
         /// payload schema 版本，用于向前兼容。

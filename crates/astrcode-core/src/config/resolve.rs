@@ -165,6 +165,9 @@ impl Config {
                     * 1024
                     * 1024,
             },
+            extensions: ExtensionSettings {
+                extension_states: self.runtime.extension_states.unwrap_or_default(),
+            },
         })
     }
 }

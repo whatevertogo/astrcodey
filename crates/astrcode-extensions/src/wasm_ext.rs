@@ -217,6 +217,10 @@ impl Extension for WasmExtension {
         &self.id
     }
 
+    // WASM extensions currently only declare handlers through the existing
+    // register ABI. Runtime start/stop hooks intentionally stay as the
+    // Extension trait defaults until the guest ABI grows matching exports.
+
     fn register(&self, reg: &mut Registrar) {
         let inner = Arc::clone(&self.inner);
 

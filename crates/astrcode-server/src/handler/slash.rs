@@ -47,12 +47,12 @@ pub(in crate::handler) fn command_error_code(error: &HandlerError) -> i32 {
     }
 }
 
-/// 判断命令来源：skill 或 plugin。
+/// 判断命令来源：skill 或 extension。
 fn command_source(extension_id: &str) -> &'static str {
     if extension_id == "astrcode-skill" {
         "skill"
     } else {
-        "plugin"
+        "extension"
     }
 }
 
@@ -94,6 +94,14 @@ impl CommandHandler {
                     Ok(PromptSubmission::Handled { message })
                 },
             };
+        }
+
+        // 内置 /model 命令
+        if command.name == "model" {
+            self.start_model_selection().await?;
+            return Ok(PromptSubmission::Handled {
+                message: "model selection started".into(),
+            });
         }
 
         // 扩展命令分发
@@ -195,14 +203,24 @@ impl CommandHandler {
             "builtin",
         );
 
-        // 扩展命令：plugin 优先于 skill
+        // 内置 model 命令
+        push_command_info(
+            &mut infos,
+            &mut seen,
+            "model",
+            "Select the active AI model",
+            false,
+            "builtin",
+        );
+
+        // 扩展命令：extension 优先于 skill
         let mut extension_commands = self
             .runtime
             .extension_runner
             .collect_commands_for_typed(working_dir)
             .await;
         extension_commands.sort_by_key(|(ext_id, _, _)| match command_source(ext_id.as_str()) {
-            "plugin" => 0,
+            "extension" => 0,
             "skill" => 1,
             _ => 2,
         });
