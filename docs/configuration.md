@@ -10,6 +10,8 @@ AstrCode uses a hierarchical configuration system with JSON files and environmen
 
 ## Configuration Structure
 
+null in runtime is default
+
 ```json
 {
   "version": "1",
