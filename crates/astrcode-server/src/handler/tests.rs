@@ -821,7 +821,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
 }
 
 #[tokio::test]
-async fn submit_prompt_rejects_second_running_turn() {
+async fn submit_prompt_queues_second_running_turn_for_next_turn() {
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let handler =
@@ -832,14 +832,14 @@ async fn submit_prompt_rejects_second_running_turn() {
         .submit_input_for_session(sid.clone(), "first".into())
         .await
         .unwrap();
-    let error = handler
+    let queued = handler
         .submit_input_for_session(sid.clone(), "second".into())
         .await
-        .unwrap_err();
-    assert!(
-        matches!(error, HandlerError::TurnAlreadyRunning),
-        "expected TurnAlreadyRunning, got {error:?}"
-    );
+        .unwrap();
+    assert!(matches!(
+        queued,
+        PromptSubmission::Handled { message } if message == "queued for next turn"
+    ));
 
     let mut saw_busy = false;
     while let Ok(notification) = event_rx.try_recv() {
@@ -848,7 +848,10 @@ async fn submit_prompt_rejects_second_running_turn() {
             break;
         }
     }
-    assert!(saw_busy, "second prompt should be rejected while turn runs");
+    assert!(
+        !saw_busy,
+        "queued second prompt should not emit busy rejection error"
+    );
 
     handler.abort_session(sid).await.unwrap();
 }

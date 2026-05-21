@@ -3,7 +3,10 @@
 //! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use astrcode_core::{
     event::{Event, EventPayload},
@@ -78,6 +81,8 @@ pub struct CommandHandler {
     active_session_id: Option<SessionId>,
     /// 当前正在执行的回合，按 session 隔离
     active_turns: HashMap<SessionId, ActiveTurn>,
+    /// 输入排队队列：当 session 正在执行 turn 时，后续输入排队到下一 turn。
+    queued_inputs: HashMap<SessionId, VecDeque<String>>,
     /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
     actor_tx: mpsc::UnboundedSender<CommandMessage>,
 }

@@ -166,6 +166,8 @@ pub(in crate::handler) enum CommandMessage {
         text: String,
         reply: oneshot::Sender<Result<PromptSubmission, HandlerError>>,
     },
+    /// 向正在执行的 turn 注入中途消息（下一 step 可见）。
+    InjectMidTurnForSession { session_id: SessionId, text: String },
     /// 手动压缩
     CompactSession {
         session_id: SessionId,
@@ -209,6 +211,40 @@ pub(in crate::handler) enum CommandMessage {
 }
 
 impl CommandHandler {
+    fn enqueue_input_for_next_turn(&mut self, session_id: SessionId, text: String) {
+        self.queued_inputs
+            .entry(session_id)
+            .or_default()
+            .push_back(text);
+    }
+
+    async fn maybe_start_queued_turn(&mut self, session_id: &SessionId) {
+        if self.active_turns.contains_key(session_id) {
+            return;
+        }
+        let next_text = self
+            .queued_inputs
+            .get_mut(session_id)
+            .and_then(|queue| queue.pop_front());
+        let Some(text) = next_text else {
+            return;
+        };
+        if self
+            .queued_inputs
+            .get(session_id)
+            .is_some_and(|queue| queue.is_empty())
+        {
+            self.queued_inputs.remove(session_id);
+        }
+        if let Err(error) = self
+            .start_turn_for_session(session_id.clone(), text.clone(), text, None)
+            .await
+        {
+            tracing::error!(%session_id, error = %error, "failed to start queued turn");
+            self.send_error(super::slash::command_error_code(&error), &error.to_string());
+        }
+    }
+
     /// 创建新的 Handler 实例。
     pub(super) fn new(
         runtime: Arc<ServerRuntime>,
@@ -220,6 +256,7 @@ impl CommandHandler {
             event_bus,
             active_session_id: None,
             active_turns: HashMap::new(),
+            queued_inputs: HashMap::new(),
             actor_tx,
         }
     }
@@ -238,13 +275,11 @@ impl CommandHandler {
             let actor_tx = tx.clone();
             runtime.session_manager.set_prompt_submit_hook(Arc::new(
                 move |session_id, text| {
-                    let (reply, _rx) = oneshot::channel();
-                    if let Err(e) = actor_tx.send(CommandMessage::SubmitInputForSession {
+                    if let Err(e) = actor_tx.send(CommandMessage::InjectMidTurnForSession {
                         session_id: session_id.clone(),
                         text,
-                        reply,
                     }) {
-                        tracing::error!(%session_id, error = %e, "failed to enqueue child-agent prompt submission");
+                        tracing::error!(%session_id, error = %e, "failed to inject child-agent mid-turn message");
                     }
                 },
             ));
@@ -337,7 +372,22 @@ impl CommandHandler {
                 text,
                 reply,
             } => {
-                let _ = reply.send(self.submit_input_for_session(session_id, text).await);
+                if self.active_turns.contains_key(&session_id) {
+                    self.enqueue_input_for_next_turn(session_id, text);
+                    let _ = reply.send(Ok(PromptSubmission::Handled {
+                        message: "queued for next turn".into(),
+                    }));
+                } else {
+                    let _ = reply.send(self.submit_input_for_session(session_id, text).await);
+                }
+            },
+            CommandMessage::InjectMidTurnForSession { session_id, text } => {
+                if let Err(error) = self
+                    .inject_mid_turn_message_for_session(&session_id, text)
+                    .await
+                {
+                    tracing::warn!(%session_id, error = %error, "failed to inject mid-turn message");
+                }
             },
             CommandMessage::CompactSession { session_id, reply } => {
                 let _ = reply.send(self.compact_session(&session_id).await);
@@ -354,7 +404,9 @@ impl CommandHandler {
                 turn_id,
                 completion,
             } => {
+                let sid = session_id.clone();
                 self.cleanup_agent_turn(session_id, turn_id, completion);
+                self.maybe_start_queued_turn(&sid).await;
             },
             CommandMessage::SubmitInputWithCompletion {
                 session_id,

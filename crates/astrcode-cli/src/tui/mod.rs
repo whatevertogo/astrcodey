@@ -193,14 +193,14 @@ async fn handle_key(
 
     match key.code {
         KeyCode::Esc => {
-            if app.show_slash_palette {
-                app.close_slash();
-            } else if app.is_streaming {
+            if app.is_streaming {
                 client
                     .send_command(&ClientCommand::Abort)
                     .await
                     .map_err(io_error)?;
                 app.status_text = "Stopping turn".into();
+            } else if app.show_slash_palette {
+                app.close_slash();
             }
         },
         KeyCode::Enter => {
