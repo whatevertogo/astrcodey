@@ -33,13 +33,20 @@ use crate::files::tool_call_id;
 const MAX_BUFFER_BYTES: usize = 1_024 * 1_024; // 1 MB
 const DEFAULT_READ_WAIT_MS: u64 = 100;
 const MAX_READ_WAIT_MS: u64 = 10_000;
+/// 终端空闲超时：最后一次 send/read 后超过此时间自动关闭。
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600); // 10 分钟
+/// 每个 session 允许的最大并发终端数。
+const MAX_TERMINALS_PER_SESSION: usize = 5;
 
 // ─── Registry ────────────────────────────────────────────────────────────
 
 /// 单个终端的运行时状态（buffer + 写端 + 进程引用）。
 struct TerminalEntry {
+    /// 所属 session ID，用于隔离和批量清理。
+    session_id: String,
+    /// 最后一次 send/read 操作的时间戳，用于空闲超时判定。
+    last_activity: Mutex<std::time::Instant>,
     /// 接收读线程写入的 stdout/stderr。每次 read action 取走后清空。
-    /// 同时维护 `dropped_bytes` 表示因 buffer 上限丢弃的字节数。
     output: Mutex<TerminalBuffer>,
     /// PTY master 写端（向子进程 stdin 写入）。
     writer: Mutex<Box<dyn Write + Send>>,
@@ -47,7 +54,6 @@ struct TerminalEntry {
     /// 而子进程会收到 SIGHUP。drop 此字段等同于关闭终端。
     _master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     /// PTY 子进程引用。Drop 时关闭 PTY 终止子进程。
-    /// 用 Mutex<Option<...>> 支持 close action 主动释放。
     child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
     /// 子进程结束后填入退出码。reader 线程检测到 EOF 后由 wait 线程更新。
     exit_code: Mutex<Option<i32>>,
@@ -76,10 +82,7 @@ impl TerminalBuffer {
     }
 }
 
-/// 全局终端 registry。
-///
-/// FIXME：当前 v1 不做自动清理；如果 LLM 忘记 close，终端会一直挂着直到进程退出。
-/// 后续可加：空闲超时、session 关联清理、最大 N 个限制。
+/// 全局终端 registry，按 session 隔离并提供自动清理。
 struct TerminalRegistry {
     terminals: Mutex<HashMap<String, Arc<TerminalEntry>>>,
 }
@@ -104,8 +107,82 @@ impl TerminalRegistry {
         self.terminals.lock().remove(id)
     }
 
-    fn list(&self) -> Vec<String> {
-        self.terminals.lock().keys().cloned().collect()
+    /// 列出指定 session 的活跃终端 ID。
+    fn list_for_session(&self, session_id: &str) -> Vec<String> {
+        self.terminals
+            .lock()
+            .iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// 统计指定 session 当前的终端数。
+    fn count_for_session(&self, session_id: &str) -> usize {
+        self.terminals
+            .lock()
+            .values()
+            .filter(|entry| entry.session_id == session_id)
+            .count()
+    }
+
+    /// 清理指定 session 的所有终端（session 关闭时调用）。
+    pub fn cleanup_session(session_id: &str) {
+        let registry = Self::global();
+        let ids: Vec<String> = registry
+            .terminals
+            .lock()
+            .iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in ids {
+            if let Some(entry) = registry.remove(&id) {
+                kill_entry(&entry);
+            }
+        }
+        if !ids.is_empty() {
+            tracing::info!(session_id, count = ids.len(), "cleaned up session terminals");
+        }
+    }
+
+    /// 清理所有空闲超时和已死亡的终端。
+    ///
+    /// 由 `list` / `start` action 触发，避免专门的后台线程。
+    fn gc(&self) {
+        let now = std::time::Instant::now();
+        let to_remove: Vec<String> = self
+            .terminals
+            .lock()
+            .iter()
+            .filter(|(_, entry)| {
+                let idle = now.duration_since(*entry.last_activity.lock()) > IDLE_TIMEOUT;
+                let dead = entry.exit_code.lock().is_some();
+                idle || dead
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &to_remove {
+            if let Some(entry) = self.remove(id) {
+                kill_entry(&entry);
+                tracing::debug!(terminal_id = %id, session_id = %entry.session_id, "terminal gc'd");
+            }
+        }
+    }
+}
+
+/// 杀掉 entry 中的子进程（如果还活着）。
+fn kill_entry(entry: &TerminalEntry) {
+    if let Some(mut child) = entry.child.lock().take() {
+        let _ = child.kill();
+        let exit_code = child
+            .wait()
+            .ok()
+            .map(|status| status.exit_code() as i32)
+            .unwrap_or(-1);
+        *entry.exit_code.lock() = Some(exit_code);
     }
 }
 
@@ -175,11 +252,11 @@ impl Tool for TerminalTool {
             .map_err(|e| ToolError::InvalidArguments(format!("invalid terminal args: {e}")))?;
 
         let result = match args.action.as_str() {
-            "start" => action_start(self, args).await,
+            "start" => action_start(self, args, &ctx.session_id).await,
             "send" => action_send(args).await,
             "read" => action_read(args).await,
             "close" => action_close(args).await,
-            "list" => action_list(),
+            "list" => action_list(&ctx.session_id),
             other => Err(ToolError::InvalidArguments(format!(
                 "unknown action '{other}', expected start / send / read / close / list"
             ))),
@@ -201,7 +278,20 @@ impl Tool for TerminalTool {
 async fn action_start(
     tool: &TerminalTool,
     args: TerminalArgs,
+    session_id: &str,
 ) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
+    let registry = TerminalRegistry::global();
+
+    // 先做一轮 GC 清理空闲/死亡终端
+    registry.gc();
+
+    // 检查 session 并发限制
+    if registry.count_for_session(session_id) >= MAX_TERMINALS_PER_SESSION {
+        return Err(ToolError::Execution(format!(
+            "session already has {MAX_TERMINALS_PER_SESSION} active terminals; close one first"
+        )));
+    }
+
     let command = args
         .command
         .ok_or_else(|| ToolError::InvalidArguments("'start' requires 'command'".into()))?;
@@ -247,6 +337,8 @@ async fn action_start(
 
     let id = format!("term-{}", Uuid::new_v4());
     let entry = Arc::new(TerminalEntry {
+        session_id: session_id.to_string(),
+        last_activity: Mutex::new(std::time::Instant::now()),
         output: Mutex::new(TerminalBuffer::default()),
         writer: Mutex::new(writer),
         _master: Mutex::new(Some(pair.master)),
@@ -305,6 +397,9 @@ async fn action_send(
     let entry = TerminalRegistry::global()
         .get(&id)
         .ok_or_else(|| ToolError::Execution(format!("terminal '{id}' not found")))?;
+
+    // 更新活跃时间
+    *entry.last_activity.lock() = std::time::Instant::now();
 
     {
         let mut writer = entry.writer.lock();
