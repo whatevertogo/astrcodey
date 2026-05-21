@@ -98,7 +98,7 @@ impl ConfigManager {
         &self.capabilities
     }
 
-    pub fn read_effective(&self) -> RwLockReadGuard<'_, EffectiveConfig> {
+    pub fn read_effective(&self) -> Arc<EffectiveConfig> {
         self.capabilities.read_effective()
     }
 

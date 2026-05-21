@@ -10,6 +10,7 @@ astrcode-context = { path = "../astrcode-context" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-support = { path = "../astrcode-support" }
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
