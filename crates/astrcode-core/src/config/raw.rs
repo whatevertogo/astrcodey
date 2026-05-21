@@ -220,14 +220,14 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
             models: vec![
                 ModelConfig {
                     id: "deepseek-v4-pro".into(),
-                    max_tokens: Some(518000),
+                    max_tokens: Some(393216),
                     context_limit: Some(1000000),
-                    reasoning: None,
+                    reasoning: Some(true),
                     reasoning_split: None,
                 },
                 ModelConfig {
-                    id: "deepseek-v4-pro".into(),
-                    max_tokens: Some(518000),
+                    id: "deepseek-v4-flash".into(),
+                    max_tokens: Some(393216),
                     context_limit: Some(1000000),
                     reasoning: Some(true),
                     reasoning_split: None,
@@ -248,7 +248,7 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
             models: vec![ModelConfig {
                 id: "gpt-4.1".into(),
                 max_tokens: Some(16384),
-                context_limit: Some(1000000),
+                context_limit: Some(128000),
                 reasoning: None,
                 reasoning_split: None,
             }],
