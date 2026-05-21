@@ -31,6 +31,7 @@ interface ConversationState {
   modelRefreshKey: number
   agentSessions: AgentSessionLink[]
   statusItems: Record<string, string>
+  transientHint: string | null
 
   initServer: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -180,6 +181,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   modelRefreshKey: 0,
   agentSessions: [],
   statusItems: {},
+  transientHint: null,
 
   initServer: async () => {
     set({ connectionStatus: 'connecting', connectionError: null })
@@ -298,6 +300,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
       phase: 'idle',
       compactSubmitting: false,
       agentSessions: [],
+      transientHint: null,
     })
 
     try {
@@ -341,6 +344,13 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         if (response.message === 'compact accepted') {
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
+        } else if (response.message === 'queued for next turn') {
+          set({ transientHint: '已加入队列，将在下一轮自动执行' })
+          setTimeout(() => {
+            if (get().transientHint === '已加入队列，将在下一轮自动执行') {
+              set({ transientHint: null })
+            }
+          }, 2500)
         } else if (response.message.trim()) {
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],

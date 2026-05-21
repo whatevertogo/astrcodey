@@ -24,6 +24,7 @@ export default function TopBar({
   const phase = useAppStore((s) => s.phase)
   const activeSessionTitle = useAppStore((s) => s.activeSessionTitle)
   const agentSessions = useAppStore((s) => s.agentSessions)
+  const transientHint = useAppStore((s) => s.transientHint)
   const switchSession = useAppStore((s) => s.switchSession)
 
   const [subsessionMenuOpen, setSubsessionMenuOpen] = useState(false)
@@ -77,6 +78,11 @@ export default function TopBar({
         {phase !== 'idle' && (
           <span className="shrink-0 text-xs text-text-secondary">
             {PHASE_LABELS[phase] ?? phase}
+          </span>
+        )}
+        {transientHint && (
+          <span className="ml-2 shrink-0 rounded-full bg-accent-soft/20 px-2 py-0.5 text-xs text-accent">
+            {transientHint}
           </span>
         )}
       </div>

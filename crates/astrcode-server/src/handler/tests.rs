@@ -84,6 +84,10 @@ impl LlmProvider for MockLlm {
 }
 
 struct PendingLlm;
+struct BlockFirstThenImmediateLlm {
+    gate: Arc<tokio::sync::Notify>,
+    calls: AtomicUsize,
+}
 struct DelayedLlm {
     started: Arc<tokio::sync::Notify>,
 }
@@ -226,6 +230,35 @@ impl LlmProvider for PendingLlm {
         ModelLimits {
             max_input_tokens: 1024,
             max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for BlockFirstThenImmediateLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call == 0 {
+            self.gate.notified().await;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::ContentDelta {
+            delta: format!("reply-{call}"),
+        });
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
+            max_output_tokens: 8_192,
         }
     }
 }
@@ -854,6 +887,66 @@ async fn submit_prompt_queues_second_running_turn_for_next_turn() {
     );
 
     handler.abort_session(sid).await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_inputs_run_fifo_for_same_session() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let runtime = test_runtime_with_llm(Arc::new(BlockFirstThenImmediateLlm {
+        gate: Arc::clone(&gate),
+        calls: AtomicUsize::new(0),
+    }));
+    let handler = CommandHandler::spawn_actor(
+        Arc::clone(&runtime),
+        test_event_bus(&runtime, tokio::sync::broadcast::channel(64).0),
+    );
+
+    let sid = handler.create_session(".".into()).await.unwrap();
+    handler
+        .submit_input_for_session(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    handler
+        .submit_input_for_session(sid.clone(), "second".into())
+        .await
+        .unwrap();
+    handler
+        .submit_input_for_session(sid.clone(), "third".into())
+        .await
+        .unwrap();
+
+    gate.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = runtime.event_store.replay_events(&sid).await.unwrap();
+            let completed = events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::TurnCompleted { .. }))
+                .count();
+            if completed >= 3 {
+                let user_messages: Vec<String> = events
+                    .into_iter()
+                    .filter_map(|event| match event.payload {
+                        EventPayload::UserMessage { text, .. } => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    user_messages,
+                    vec![
+                        "first".to_string(),
+                        "second".to_string(),
+                        "third".to_string()
+                    ]
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("queued turns should complete");
 }
 
 #[tokio::test]
