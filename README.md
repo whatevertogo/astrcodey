@@ -8,7 +8,8 @@ cli：
 
 app：
 web：
-<img width="1401" height="995" alt="image" src="https://github.com/user-attachments/assets/4e59f8fe-2344-4e78-ab36-c1fb19c549fc" />
+<img width="1252" height="960" alt="image" src="https://github.com/user-attachments/assets/af918c12-6fb7-4d72-b9ea-64133a2e2729" />
+
 
 
 A Rust-built AI coding agent platform.
