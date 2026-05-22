@@ -136,16 +136,12 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
         .find(|definition| definition.name == "edit")
         .expect("edit definition should exist");
 
-    assert!(find_files.description.contains("file paths only"));
-    assert!(grep.description.contains("Search file contents"));
+    assert!(find_files.description.contains("glob pattern"));
+    assert!(grep.description.contains("regex or literal"));
     assert!(grep.description.contains("files_with_matches"));
-    assert!(read_file.description.contains("known file"));
-    assert!(write_file.description.contains("complete final content"));
-    assert!(
-        edit_file
-            .description
-            .contains("narrow exact string replacement")
-    );
+    assert!(read_file.description.contains("Read a file"));
+    assert!(write_file.description.contains("Create or fully replace"));
+    assert!(edit_file.description.contains("Replace exact strings"));
 }
 
 #[tokio::test]

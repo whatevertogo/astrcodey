@@ -143,8 +143,16 @@ fn find_files_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "find".into(),
-        description: "Find file paths only by glob (`*.rs`, `**/*.ts`). For content, use `grep`."
-            .into(),
+        description: concat!(
+            "Fast file pattern matching tool that works with any codebase size.\n",
+            "- Supports glob patterns like `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
+            "- Returns matching file paths sorted by modification time (most recent first)\n",
+            "- Use this tool when you need to find files by name patterns\n",
+            "- For searching file contents, use `grep` instead\n",
+            "- For open-ended searches requiring multiple rounds of finding and grepping, use \
+             `agent` instead",
+        )
+        .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({

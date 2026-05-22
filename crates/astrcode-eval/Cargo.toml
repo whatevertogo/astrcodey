@@ -2,6 +2,7 @@
 name = "astrcode-eval"
 version = "0.1.4"
 edition = "2021"
+description = "Agent task evaluation framework: benchmark runner, scoring judge, metrics collection, and report generation"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }

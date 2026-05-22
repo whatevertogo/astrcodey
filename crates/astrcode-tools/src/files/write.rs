@@ -112,9 +112,17 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "write".into(),
-        description: "Create a UTF-8 file or fully replace one when the complete final content is \
-                      known. Use `edit` or `patch` for partial changes."
-            .into(),
+        description: concat!(
+            "Writes a file to the local filesystem.\n",
+            "Usage:\n",
+            "- This tool will overwrite the existing file if there is one at the provided path. ",
+            "You MUST `read` existing files first.\n",
+            "- Prefer `edit` for modifying existing files — it only sends the diff. ",
+            "Only use `write` to create new files or for complete rewrites.\n",
+            "- NEVER create documentation files (*.md) or README files unless explicitly \
+             requested.",
+        )
+        .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

@@ -91,9 +91,9 @@ fn task_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "task".into(),
-        description: "Manage background shell tasks for this session. action=list shows running \
-                      tasks; action=cancel stops one by id. Use after launching a long-running \
-                      shell command to confirm it is alive."
+        description: "Manage background shell tasks. `action=list` shows running tasks; \
+                      `action=cancel` stops one by ID. Use after launching a background `shell` \
+                      to check or clean up."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,

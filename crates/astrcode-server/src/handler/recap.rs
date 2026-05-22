@@ -108,5 +108,33 @@ async fn collect_llm_text(mut rx: mpsc::UnboundedReceiver<LlmEvent>) -> Result<S
             _ => {},
         }
     }
-    Ok(text)
+    Ok(strip_dsml_tags(&text))
+}
+
+/// 剥离模型内部 tool call 格式标签（如 DeepSeek 的 `<｜｜DSML｜｜...>`）。
+/// 模型在无 tools 的请求中偶尔会把内部格式当纯文本输出。
+fn strip_dsml_tags(text: &str) -> String {
+    const DSML_OPEN: &str = "<｜｜DSML｜｜";
+    if !text.contains(DSML_OPEN) {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut remaining: &str = &text;
+    while let Some(start) = remaining.find(DSML_OPEN) {
+        result.push_str(&remaining[..start]);
+        // 跳过整个 DSML 块：从 <｜｜DSML｜｜...> 到匹配的 </｜｜DSML｜｜...>
+        remaining = &remaining[start..];
+        let end_tag = "</｜｜DSML｜｜";
+        if let Some(end) = remaining.find(end_tag) {
+            // 找到闭合标签的 '>' 之后继续
+            let after_close = &remaining[end..];
+            remaining = after_close.find('>').map(|i| &after_close[i + 1..]).unwrap_or("");
+        } else {
+            // 没有闭合标签，跳到行尾
+            remaining = remaining.find('\n').map(|i| &remaining[i..]).unwrap_or("");
+        }
+    }
+    result.push_str(remaining);
+    let cleaned = result.trim().to_string();
+    if cleaned.is_empty() { text.to_string() } else { cleaned }
 }

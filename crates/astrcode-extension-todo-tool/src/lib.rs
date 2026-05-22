@@ -17,11 +17,29 @@ use serde_json::{Value, json};
 pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 
 const TODO_WRITE_DESCRIPTION: &str = "\
-Persist the progress snapshot for this session. Always send the full current list, not a patch. \
-                                      Use it for multi-step work that benefits from tracking; \
-                                      skip it for trivial one-step tasks, pure Q&A, or anything \
-                                      achievable in roughly three actions. Keep exactly one item \
-                                      `in_progress` at a time.";
+Update the todo list for the current session. To be used proactively to track progress and pending \
+                                      tasks.
+
+## When to Use
+- Complex multi-step tasks requiring 3 or more distinct steps
+- Non-trivial tasks that need careful planning or multiple operations
+- User provides multiple tasks (numbered or comma-separated list)
+- After receiving new instructions — immediately capture them as todos
+- When you start working on a task — mark it `in_progress` BEFORE beginning
+- After completing a task — mark it `completed` and add any follow-up tasks
+
+## When NOT to Use
+- Single, straightforward tasks
+- Trivial tasks completable in under 3 steps
+- Pure Q&A or informational requests
+
+## Rules
+- Always send the full current list, not a patch.
+- Keep exactly one item `in_progress` at a time.
+- Each item must have `content` (imperative: \"Fix auth bug\") and `activeForm` (continuous: \
+                                      \"Fixing auth bug\").
+- Only mark `completed` when FULLY accomplished — if tests fail or implementation is partial, keep \
+                                      `in_progress`.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
@@ -117,7 +135,7 @@ fn todo_write_metadata()
     map.insert(
         TODO_WRITE_TOOL_NAME.to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
-            "Maintain the current progress snapshot for this branch of work.Use it when you want \
+            "Maintain the current progress snapshot for this branch of work. Use it when you want \
              to keep track of multi-step progress that benefits from tracking.",
         )
         .caveat(

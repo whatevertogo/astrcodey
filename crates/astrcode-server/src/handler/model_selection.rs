@@ -190,7 +190,7 @@ impl ModelSelectionFlow {
         ClientNotification::ExtensionCommandResult {
             command_name: "model".into(),
             content: format!(
-                "{} model set to {}/{}. Restart your session to apply changes.",
+                "{} model set to {}/{}. it will work for next turn.",
                 target.display_name(),
                 profile,
                 model

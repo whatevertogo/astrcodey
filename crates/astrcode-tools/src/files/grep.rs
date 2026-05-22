@@ -229,10 +229,21 @@ fn grep_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "grep".into(),
-        description: "Search file contents (regex or literal). Default `outputMode=\
-                      files_with_matches` returns paths only — switch to `content` for matching \
-                      lines or `count` for per-file tallies. Use `find` for path globs."
-            .into(),
+        description: concat!(
+            "A powerful search tool built on ripgrep.\n",
+            "Usage:\n",
+            "- ALWAYS use `grep` for content search tasks. NEVER invoke shell `grep` or `rg`.\n",
+            "- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`)\n",
+            "- Filter files with `glob` parameter (e.g., `*.js`, `**/*.tsx`) ",
+              "or `fileType` parameter (e.g., `rust`, `typescript`)\n",
+            "- Output modes: `content` shows matching lines, ",
+              "`files_with_matches` shows only file paths (default), ",
+              "`count` shows match counts\n",
+            "- For file names by pattern, use `find` instead\n",
+            "- For open-ended searches requiring multiple rounds, use `agent` instead\n",
+            "- Multiline matching: by default patterns match within single lines only. ",
+              "For cross-line patterns, set `multiline` to true",
+        ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({
@@ -254,7 +265,10 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                     "type": "boolean",
                     "description": "Recurse into subdirs (default true for directories)."
                 },
-                "caseInsensitive": { "type": "boolean" },
+                "caseInsensitive": {
+                    "type": "boolean",
+                    "description": "Case-insensitive search (default false)."
+                },
                 "multiline": {
                     "type": "boolean",
                     "description": "Allow matches across lines; '.' matches newline."

@@ -519,11 +519,9 @@ fn terminal_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "terminal".into(),
-        description: "Manage long-lived PTY terminals for interactive REPLs, debuggers, or \
-                      multi-step scripts. Actions: 'start' launches a process and returns its \
-                      id; 'send' writes to stdin (include trailing newline if needed); 'read' \
-                      drains output accumulated since last read; 'close' terminates and cleans \
-                      up; 'list' shows active terminals. Prefer `shell` for one-shot commands."
+        description: "Manage long-lived PTY sessions for interactive REPLs (python, node), \
+                      debuggers (gdb), or multi-step scripts. Actions: `start`, `send`, `read`, \
+                      `close`, `list`. For one-shot commands, prefer `shell`."
             .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,

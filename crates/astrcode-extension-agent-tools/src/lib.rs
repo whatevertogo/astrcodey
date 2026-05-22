@@ -95,11 +95,16 @@ impl AgentShared {
 
 const AGENT_TOOL_DESCRIPTION: &str =
     "Delegate a complex, multi-step task to a specialized subagent. Each subagent type has its \
-     own tool set listed in [Agents].\n\nWhen NOT to use:\n- Reading 1-3 known files → use \
+     own tool set listed in [Agents].\nWhen NOT to use:\n- Reading 1-3 known files → use \
      `read`\n- Searching for a symbol or pattern → use `grep`/`find` directly\n- Anything \
-     achievable in 2-6 direct tool calls → do it yourself\n\nMultiple agents can run in parallel \
-     for independent subtasks. Set `waitForResult=false` to background a subagent and continue \
-     reasoning; you will be notified when it completes.";
+     achievable in 2-6 direct tool calls → do it yourself\nMultiple agents can run in parallel \
+     for independent subtasks. Set `waitForResult=false` to background a subagent; you will be \
+     notified when it completes.\n\nWriting a good `prompt`:\n- Think of it as briefing a smart \
+     colleague who just walked into the room: give enough context up front.\n- State up front \
+     whether the agent should write code, explore, or only research — never assume it will infer \
+     the intent.\n- Include relevant file paths, line numbers, and specific patterns so it can \
+     act immediately.\n- If the task depends on a previous agent's output, summarize that output \
+     in the prompt rather than expecting the subagent to read the whole conversation.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 

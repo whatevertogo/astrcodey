@@ -515,6 +515,18 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
          result again."
             .to_string(),
         String::new(),
+        "## Tool Selection Guide".to_string(),
+        "- Read files → `read`".to_string(),
+        "- Search file contents → `grep`".to_string(),
+        "- Find files by name pattern → `find`".to_string(),
+        "- Edit existing files (preferred) → `edit`".to_string(),
+        "- Write new files → `write`".to_string(),
+        "- Multi-file changes or file creation/deletion → `patch`".to_string(),
+        "- Execute commands (package install, tests, builds, git) → `shell`".to_string(),
+        "- Interactive REPLs or debuggers → `terminal`".to_string(),
+        "- Complex multi-step tasks → `agent`".to_string(),
+        "- Long-running work → `shell` with `runInBackground=true`".to_string(),
+        String::new(),
     ];
 
     // Builtin tools + bundled tools with prompt tags (sorted by rank).

@@ -185,10 +185,17 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "patch".into(),
-        description: "Apply a unified diff for multi-file changes, distant hunks, file create, or \
-                      delete. If some hunks fail, applied changes are kept (partial commit). Use \
-                      `edit` for a single replacement."
-            .into(),
+        description: concat!(
+            "Apply a unified diff for multi-file changes, file creation, or deletion.\n",
+            "Usage:\n",
+            "- If some hunks fail, successful ones are still applied (partial commit).\n",
+            "- For single-file edits, prefer `edit` — `patch` is for multi-file or distant \
+             changes.\n",
+            "- Use `patch` to create new files (`--- /dev/null` → `+++ path`) or delete files.\n",
+            "- The diff format follows standard unified diff: `--- a/path`, `+++ b/path`, ",
+            "`@@ ... @@` hunk headers, then ` ` (context), `+` (add), `-` (remove) lines.",
+        )
+        .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

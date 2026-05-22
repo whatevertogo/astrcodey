@@ -126,12 +126,20 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
-        description: "Apply a narrow exact string replacement in an existing file. `read` first \
-                      and copy `oldStr` verbatim from the output — whitespace and indentation \
-                      must match. Must match exactly once unless `replaceAll=true`. Use `edits` \
-                      for atomic multi-replacement; use `patch` for multi-file or distant \
-                      changes."
-            .into(),
+        description: concat!(
+            "Performs exact string replacements in files.\n",
+            "Usage:\n",
+            "- You MUST `read` the file first. This tool will error if you haven't.\n",
+            "- When editing text from `read` output, preserve the exact indentation (tabs/spaces) ",
+              "as it appears AFTER the line number prefix (line number + tab). ",
+              "Never include any part of the line number prefix in `oldStr` or `newStr`.\n",
+            "- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n",
+            "- The edit will FAIL if `oldStr` is not unique in the file. ",
+              "Either provide a larger string with more surrounding context to make it unique, ",
+              "or use `replaceAll` to change every instance.\n",
+            "- Use `replaceAll` for renaming variables or replacing strings across the file.\n",
+            "- Use `edits` for multiple replacements in one call; use `patch` for multi-file changes.",
+        ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

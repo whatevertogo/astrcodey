@@ -3,8 +3,7 @@
 //! Implements [`LlmProvider`] for Anthropic's Messages API with SSE streaming,
 //! tool use, and thinking support.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
@@ -215,8 +214,7 @@ impl LlmProvider for AnthropicProvider {
                                         let initial_args = block
                                             .get("input")
                                             .filter(|v| {
-                                                v.is_object()
-                                                    && !v.as_object().unwrap().is_empty()
+                                                v.is_object() && !v.as_object().unwrap().is_empty()
                                             })
                                             .map(|v| v.to_string())
                                             .unwrap_or_default();
@@ -438,9 +436,9 @@ fn convert_tools(tools: &[ToolDefinition]) -> serde_json::Value {
 /// 由前缀稳定性保证。
 /// 判断 URL 路径是否已包含版本段（如 `/v1`、`/v2`）。
 fn is_versioned_path(url: &str) -> bool {
-    url.rsplit('/')
-        .next()
-        .is_some_and(|seg| seg.starts_with('v') && seg.len() > 1 && seg[1..].chars().all(|c| c.is_ascii_digit()))
+    url.rsplit('/').next().is_some_and(|seg| {
+        seg.starts_with('v') && seg.len() > 1 && seg[1..].chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {

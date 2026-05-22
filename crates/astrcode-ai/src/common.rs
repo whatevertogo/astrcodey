@@ -172,8 +172,8 @@ async fn parse_sse_response(
 
     if bytes_read > 0 && !has_data_line {
         return Err(LlmError::StreamParse(format!(
-            "LLM returned 200 but response is not valid SSE (no data: lines found). \
-             Content-Type: {}, bytes: {}, preview: {}",
+            "LLM returned 200 but response is not valid SSE (no data: lines found). Content-Type: \
+             {}, bytes: {}, preview: {}",
             content_type.as_deref().unwrap_or("<missing>"),
             bytes_read,
             truncate_str(&body_preview, 256),
@@ -256,8 +256,8 @@ async fn parse_sse_response_with_event_type(
 
     if bytes_read > 0 && !has_data_line {
         return Err(LlmError::StreamParse(format!(
-            "LLM returned 200 but response is not valid SSE (no data: lines found). \
-             Content-Type: {}, bytes: {}, preview: {}",
+            "LLM returned 200 but response is not valid SSE (no data: lines found). Content-Type: \
+             {}, bytes: {}, preview: {}",
             content_type.as_deref().unwrap_or("<missing>"),
             bytes_read,
             truncate_str(&body_preview, 256),

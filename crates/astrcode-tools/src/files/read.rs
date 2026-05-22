@@ -157,10 +157,24 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "read".into(),
-        description: "Read a known file. Use `offset`+`limit` for source files, \
-                      `charOffset`+`maxChars` for persisted tool results. Not for directories — \
-                      use `find`."
-            .into(),
+        description: concat!(
+            "Reads a file from the local filesystem. You can access any file directly.\n",
+            "Usage:\n",
+            "- ALWAYS `read` a file before editing it with `edit` — this tool will error \
+             otherwise.\n",
+            "- Results are returned using `cat -n` format, with line numbers starting at 1. ",
+            "Everything after the line number prefix is the actual file content.\n",
+            "- You can optionally specify `offset` and `limit` for long files, ",
+            "but it's recommended to read the whole file when first encountering it.\n",
+            "- When you already know which part you need, use `offset`+`limit` to read only that \
+             section.\n",
+            "- This tool only reads files, not directories. To list a directory, use `find` or \
+             `shell ls`.\n",
+            "- For persisted tool-result paths from earlier calls, use `charOffset`+`maxChars` to \
+             paginate.\n",
+            "- Supports plain text, source code, JSON, Markdown, and other UTF-8 encoded files.",
+        )
+        .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({

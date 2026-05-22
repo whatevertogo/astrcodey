@@ -244,17 +244,44 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
     let definition = ToolDefinition {
         name: "shell".into(),
         description: format!(
-            "Run a command via {} ({}s default timeout, max 600). Returns stdout, stderr, exit \
-             code. Set `runInBackground=true` for long-running tasks (dev servers, watchers); \
-             track or cancel them with `task`. Prefer `read`/`grep`/`find`/`edit` for file ops.",
-            shell.name, timeout_secs,
+            concat!(
+                "Executes a given {shell} command and returns its output. The working directory ",
+                "persists between commands, but shell state does not.\n",
+                "## Tool Preference\n",
+                "Avoid using this tool for operations that have dedicated tools:\n",
+                "- File search → `find` (NOT `find` or `ls`)\n",
+                "- Content search → `grep` (NOT `grep`/`rg`)\n",
+                "- Read files → `read` (NOT `cat`/`head`/`tail`)\n",
+                "- Edit files → `edit` (NOT `sed`/`awk`)\n",
+                "- Write files → `write` (NOT `echo >`/`cat <<EOF`)\n",
+                "While `shell` can do similar things, dedicated tools provide better results.\n",
+                "## Usage\n",
+                "- Specify `timeout` in seconds (up to 600s). Default: {timeout_secs}s.\n",
+                "- Use `runInBackground=true` for dev servers, watchers, long builds. Track with ",
+                "`task`; check output by calling `task` with `action=list`.\n",
+                "- When issuing multiple independent commands, make multiple `shell` calls in ",
+                "parallel. When commands depend on each other, chain with `&&` in a single call.\n",
+                "- Use absolute paths and avoid `cd` — set `cwd` parameter instead.\n",
+                "## Git Workflow\n",
+                "- Create new commits for changes. Never amend or force-push existing commits.\n",
+                "- Never skip git hooks (`--no-verify`, `--no-hooks`).\n",
+                "- Fetch first before pushing to check for remote changes.\n",
+                "- Do not modify git configuration (user.name, user.email, etc.).\n",
+                "## Background Tasks\n",
+                "- After launching a background task, immediately store its info for later \
+                 tracking.\n",
+                "- Do NOT use `sleep` to wait for background tasks. Use `task action=list` to \
+                 poll.",
+            ),
+            shell = shell.name,
+            timeout_secs = timeout_secs,
         ),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string" },
+                "command": { "type": "string", "description": "Shell command to execute. Use absolute paths; chain dependent commands with &&." },
                 "intent": {
                     "type": "string",
                     "description": "Short active-voice reason, shown in audit/UI."
