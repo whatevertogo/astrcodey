@@ -201,8 +201,8 @@ mod tests {
         let messages = vec![
             LlmMessage::user("short"),
             LlmMessage::assistant("brief"),
-            LlmMessage::user("x".repeat(400)),
-            LlmMessage::assistant("y".repeat(400)),
+            LlmMessage::user("x".repeat(2000)),
+            LlmMessage::assistant("y".repeat(2000)),
         ];
         let growth = estimate_turn_growth(&messages, 200);
         assert!(growth >= 200);
