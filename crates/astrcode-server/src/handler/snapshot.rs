@@ -1,21 +1,7 @@
 //! 会话快照 — 内部模型转传输层 DTO。
 
-use astrcode_core::{
-    llm::{LlmContent, LlmMessage},
-    storage::AgentSessionStatus,
-};
-use astrcode_protocol::events::{
-    AgentSessionLinkDto, AgentSessionStatusDto, MessageDto, SessionSnapshot,
-};
-
-/// Agent 会话状态转换。
-pub(crate) fn agent_status_to_dto(status: AgentSessionStatus) -> AgentSessionStatusDto {
-    match status {
-        AgentSessionStatus::Running => AgentSessionStatusDto::Running,
-        AgentSessionStatus::Completed => AgentSessionStatusDto::Completed,
-        AgentSessionStatus::Failed => AgentSessionStatusDto::Failed,
-    }
-}
+use astrcode_core::llm::{LlmContent, LlmMessage};
+use astrcode_protocol::events::{AgentSessionLinkDto, MessageDto, SessionSnapshot};
 
 /// 构建会话快照 DTO，用于客户端同步。
 pub(crate) fn session_snapshot(
@@ -34,7 +20,7 @@ pub(crate) fn session_snapshot(
                 child_session_id: link.child_session_id.to_string(),
                 agent_name: link.agent_name.clone(),
                 task: link.task.clone(),
-                status: agent_status_to_dto(link.status),
+                status: link.status.into(),
             })
             .collect(),
     }

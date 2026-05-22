@@ -7,7 +7,6 @@ use astrcode_protocol::http::{
 };
 
 use super::{args::format_args_inline, blocks::completed_block_from_payload};
-use crate::handler::snapshot;
 
 pub(in crate::http) fn event_to_deltas(
     event: &Event,
@@ -156,9 +155,7 @@ pub(in crate::http) fn event_to_deltas(
                 child_session_id: child_session_id.to_string(),
                 agent_name: agent_name.clone(),
                 task: task.clone(),
-                status: snapshot::agent_status_to_dto(
-                    astrcode_core::storage::AgentSessionStatus::Running,
-                ),
+                status: astrcode_core::storage::AgentSessionStatus::Running.into(),
             },
         }],
 
@@ -175,13 +172,11 @@ pub(in crate::http) fn event_to_deltas(
                     task: String::new(),
                     status: match &event.payload {
                         EventPayload::AgentSessionCompleted { .. } => {
-                            snapshot::agent_status_to_dto(
-                                astrcode_core::storage::AgentSessionStatus::Completed,
-                            )
+                            astrcode_core::storage::AgentSessionStatus::Completed.into()
                         },
-                        EventPayload::AgentSessionFailed { .. } => snapshot::agent_status_to_dto(
-                            astrcode_core::storage::AgentSessionStatus::Failed,
-                        ),
+                        EventPayload::AgentSessionFailed { .. } => {
+                            astrcode_core::storage::AgentSessionStatus::Failed.into()
+                        },
                         _ => unreachable!(),
                     },
                 },

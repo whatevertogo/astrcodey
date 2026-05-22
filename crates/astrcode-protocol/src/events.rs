@@ -109,6 +109,16 @@ pub enum AgentSessionStatusDto {
     Failed,
 }
 
+impl From<astrcode_core::storage::AgentSessionStatus> for AgentSessionStatusDto {
+    fn from(status: astrcode_core::storage::AgentSessionStatus) -> Self {
+        match status {
+            astrcode_core::storage::AgentSessionStatus::Running => AgentSessionStatusDto::Running,
+            astrcode_core::storage::AgentSessionStatus::Completed => AgentSessionStatusDto::Completed,
+            astrcode_core::storage::AgentSessionStatus::Failed => AgentSessionStatusDto::Failed,
+        }
+    }
+}
+
 /// 父会话派生的子 Agent 会话链接（JSON-RPC 线缆 DTO）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionLinkDto {

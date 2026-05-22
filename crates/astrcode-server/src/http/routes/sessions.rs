@@ -24,7 +24,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::{HttpState, error_response, projection::blocks::messages_to_blocks};
-use crate::handler::{HandlerError, ManualCompactOutcome, PromptSubmission, snapshot};
+use crate::handler::{HandlerError, ManualCompactOutcome, PromptSubmission};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -367,7 +367,7 @@ fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotRespons
                 child_session_id: link.child_session_id.to_string(),
                 agent_name: link.agent_name.clone(),
                 task: link.task.clone(),
-                status: snapshot::agent_status_to_dto(link.status),
+                status: link.status.into(),
             })
             .collect(),
     }
