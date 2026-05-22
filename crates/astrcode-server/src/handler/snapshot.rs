@@ -49,8 +49,7 @@ pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
         .content
         .iter()
         .map(content_to_text)
-        .collect::<Vec<_>>()
-        .join("");
+        .collect::<String>();
 
     // Compact summary 消息是 synthetic user message，但在客户端应显示为系统消息
     let role = if is_compact_summary_message(&content) {
@@ -106,16 +105,20 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn compact_summary_message_converts_to_system_role() {
-        let compact_msg = LlmMessage {
+    /// 辅助函数：创建简单的文本消息
+    fn simple_text_message(text: &str) -> LlmMessage {
+        LlmMessage {
             role: LlmRole::User,
-            content: vec![LlmContent::Text {
-                text: "<compact_summary>\nSummary:\nTest summary\n</compact_summary>".into(),
-            }],
+            content: vec![LlmContent::Text { text: text.into() }],
             name: None,
             reasoning_content: None,
-        };
+        }
+    }
+
+    #[test]
+    fn compact_summary_message_converts_to_system_role() {
+        let compact_msg =
+            simple_text_message("<compact_summary>\nSummary:\nTest summary\n</compact_summary>");
 
         let dto = message_to_dto(&compact_msg);
 
@@ -125,14 +128,7 @@ mod tests {
 
     #[test]
     fn regular_user_message_preserves_user_role() {
-        let user_msg = LlmMessage {
-            role: LlmRole::User,
-            content: vec![LlmContent::Text {
-                text: "Hello, how are you?".into(),
-            }],
-            name: None,
-            reasoning_content: None,
-        };
+        let user_msg = simple_text_message("Hello, how are you?");
 
         let dto = message_to_dto(&user_msg);
 
