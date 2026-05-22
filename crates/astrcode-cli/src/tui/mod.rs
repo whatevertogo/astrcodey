@@ -123,6 +123,22 @@ pub async fn run() -> io::Result<()> {
                         });
                     }
                 }
+                // 处理 compact 完成后的排队输入
+                if app.has_queued_inputs() && !app.is_compacting && !app.is_streaming {
+                    if let Some(queued_input) = app.take_queued_input() {
+                        app.status_text = format!(
+                            "Processing queued input ({})",
+                            app.queued_inputs.len() + 1
+                        );
+                        client
+                            .send_command(&ClientCommand::SubmitPrompt {
+                                text: queued_input,
+                                attachments: vec![],
+                            })
+                            .await
+                            .map_err(io_error)?;
+                    }
+                }
                 dirty = true;
             },
         }
@@ -416,6 +432,23 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
             .send_command(&ClientCommand::InjectMessage { text: input })
             .await
             .map_err(io_error)?;
+        return Ok(());
+    }
+
+    if app.is_compacting {
+        let input = app.take_input();
+        if input.trim().is_empty() {
+            return Ok(());
+        }
+        app.remember_input(&input);
+        app.queued_inputs.push(input.clone());
+        app.push_user(&input);
+        let queue_status = if app.queued_inputs.len() == 1 {
+            "1 message queued".to_string()
+        } else {
+            format!("{} messages queued", app.queued_inputs.len())
+        };
+        app.status_text = queue_status;
         return Ok(());
     }
 

@@ -362,13 +362,56 @@ fn apply_event(app: &mut App, event: &Event) {
             tracing::debug!(call_id = %call_id, tool = %tool_name, is_error = result.is_error, "tool_close");
         },
         EventPayload::CompactionStarted => {
+            app.is_compacting = true;
             app.push_message(
                 MessageRole::System,
-                "System".into(),
+                "Compacting".into(),
                 "Compacting context...".into(),
                 true,
                 Some("compaction".into()),
             );
+            app.status_text = "Compacting...".into();
+        },
+        EventPayload::CompactionCompleted { messages_removed } => {
+            app.is_compacting = false;
+
+            // 更新 streaming 消息为完成状态
+            if let Some(idx) = app
+                .messages
+                .iter()
+                .position(|m| m.key.as_deref() == Some("compaction"))
+            {
+                app.messages.remove(idx);
+            }
+
+            // 检查是否有排队的输入
+            let queue_count = app.queued_inputs.len();
+            let has_queued_input = queue_count > 0;
+            if has_queued_input {
+                app.push_message(
+                    MessageRole::System,
+                    "Compacted".into(),
+                    format!(
+                        "Compacted (removed {} messages), processing queued input...",
+                        messages_removed
+                    ),
+                    false,
+                    None,
+                );
+            } else {
+                app.push_message(
+                    MessageRole::System,
+                    "Compacted".into(),
+                    format!("Compacted (removed {} messages)", messages_removed),
+                    false,
+                    None,
+                );
+            }
+            app.status_text = if has_queued_input {
+                format!("Processing queued input ({})", queue_count)
+            } else {
+                "Ready".into()
+            };
         },
         EventPayload::ErrorOccurred { message, .. } => {
             app.show_error(message);

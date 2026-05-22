@@ -158,6 +158,7 @@ impl CommandHandler {
 
         let fp = hex_fingerprint(system_prompt.as_bytes());
         let trigger = compact_trigger_name(CompactTrigger::ManualCommand).into();
+        let messages_removed = compaction.messages_removed;
         let events = session
             .append_compact_boundary(
                 system_prompt,
@@ -172,6 +173,11 @@ impl CommandHandler {
         for event in &events {
             self.broadcast_event(event.clone());
         }
+
+        // 发送 CompactionCompleted 事件
+        session
+            .emit_live(None, EventPayload::CompactionCompleted { messages_removed })
+            .await;
 
         let state = session
             .read_model()

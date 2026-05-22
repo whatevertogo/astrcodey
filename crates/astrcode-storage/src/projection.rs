@@ -235,9 +235,15 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::ErrorOccurred { .. } => {
             model.phase = Phase::Error;
         },
+        EventPayload::CompactionStarted => {
+            model.phase = Phase::Compacting;
+        },
+        EventPayload::CompactionCompleted { .. } => {
+            model.phase = Phase::Idle;
+        },
+        // All durable events musb be shown in the above
         // Non-durable events: never persisted to JSONL, only broadcast for live UI.
         EventPayload::ToolCallStarted { .. }
-        | EventPayload::CompactionStarted
         | EventPayload::AssistantTextDelta { .. }
         | EventPayload::ThinkingDelta { .. }
         | EventPayload::ToolCallArgumentsDelta { .. }
