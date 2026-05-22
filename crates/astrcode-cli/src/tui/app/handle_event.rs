@@ -590,7 +590,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
         };
 
         // Compact summary 消息使用特殊标签
-        let label = if is_compact_summary_message(&message.content) {
+        let label = if astrcode_context::compaction::is_compact_summary_text(&message.content) {
             "Compacted"
         } else {
             match &role {
@@ -606,11 +606,6 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     }
     app.status_text = format!("Resumed {}", short_id(session_id));
     tracing::debug!(session_id = %session_id, messages = snapshot.messages.len(), "resume_snapshot");
-}
-
-/// 检测消息内容是否是 compact summary synthetic message。
-fn is_compact_summary_message(content: &str) -> bool {
-    content.trim_start().starts_with("<compact_summary>")
 }
 
 fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
