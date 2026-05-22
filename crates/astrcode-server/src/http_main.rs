@@ -7,9 +7,6 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use astrcode_support::event_fanout::EventFanout;
-use axum::serve::ListenerExt;
-
 #[tokio::main]
 async fn main() {
     let _guard = astrcode_log::init();
@@ -30,42 +27,8 @@ async fn main() {
             tracing::error!("Invalid ASTRCODE_HTTP_ADDR: {error}");
             std::process::exit(1);
         });
-    let event_tx = Arc::new(EventFanout::new());
-    let shutdown_token = runtime.shutdown_token.clone();
-    let runtime_for_shutdown = Arc::clone(&runtime);
-    let (app, auth_token) =
-        astrcode_server::http::router(runtime, event_tx).unwrap_or_else(|error| {
-            tracing::error!("Failed to initialize HTTP router: {error}");
-            std::process::exit(1);
-        });
-    // 关键：SSE 末尾事件常常是单独一小条（如 turn_completed），如果不开 TCP_NODELAY，
-    // Linux 内核 Nagle 算法会把短小写积累 ~40-200ms 等更多数据再一起 flush，
-    // 客户端会感受到「最后一条事件晚到」→ UI 仍显示「生成中」。
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::error!("Failed to bind {addr}: {error}");
-            std::process::exit(1);
-        })
-        .tap_io(|stream| {
-            let _ = stream.set_nodelay(true);
-        });
 
-    tracing::info!("HTTP server ready at http://{addr}");
-    tracing::info!(
-        "Auth token: {}...{}",
-        &auth_token[..4],
-        &auth_token[auth_token.len() - 4..]
-    );
-    astrcode_server::http::write_run_info(addr.port(), &auth_token);
-    if let Err(error) = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_token.cancelled().await;
-            tracing::info!("graceful shutdown triggered");
-            runtime_for_shutdown.shutdown_extensions().await;
-        })
-        .await
-    {
+    if let Err(error) = astrcode_server::http::run_http_server(runtime, addr).await {
         tracing::error!("HTTP server failed: {error}");
         std::process::exit(1);
     }

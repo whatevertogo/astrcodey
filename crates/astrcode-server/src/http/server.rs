@@ -129,16 +129,6 @@ pub fn router(
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.
-///
-/// 关于 TCP_NODELAY：SSE 末尾事件常常是单独一小条（如 `turn_completed`），不开
-/// TCP_NODELAY 时 Linux Nagle 会把短小写积累 ~40-200ms 再 flush，体感上 UI
-/// 一直停在「生成中」。两条 HTTP 入口都要做这一步：
-///
-/// - 这里：被 `astrcode-cli` 用
-/// - `http_main.rs::main`：独立 HTTP 二进制
-///
-/// 改一处时记得同步另一处。`ListenerExt::tap_io` 返回的类型与 `TcpListener`
-/// 不兼容，所以两处都要直接对 bind 结果链式调 `tap_io`，不便共用 helper。
 pub async fn run_http_server(
     runtime: Arc<ServerRuntime>,
     addr: std::net::SocketAddr,
