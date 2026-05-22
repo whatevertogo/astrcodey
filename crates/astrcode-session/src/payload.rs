@@ -5,6 +5,7 @@
 use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
     event::EventPayload,
+    extension::CompactStrategy,
     types::{Cursor, MessageId, SessionId},
 };
 
@@ -44,6 +45,8 @@ pub fn compact_boundary_payload(
     trigger: impl Into<String>,
     compaction: &CompactResult,
     continued_session_id: SessionId,
+    base_event_seq: u64,
+    strategy: CompactStrategy,
 ) -> EventPayload {
     EventPayload::CompactBoundaryCreated {
         trigger: trigger.into(),
@@ -52,6 +55,8 @@ pub fn compact_boundary_payload(
         summary: compaction.summary.clone(),
         transcript_path: compaction.transcript_path.clone(),
         continued_session_id,
+        base_event_seq,
+        strategy,
     }
 }
 

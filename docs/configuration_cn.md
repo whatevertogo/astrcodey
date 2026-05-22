@@ -26,6 +26,7 @@ runtime 里面 null 表示默认值
     "llmTemperature": 0.7,
     "compactAutoEnabled": true,
     "compactThresholdPercent": 83.5,
+    "compactKeepRecentTurns": null,
     "agentMaxDepth": 3,
     "agentToolMaxParallelCalls": 5
   },
@@ -100,10 +101,15 @@ runtime 里面 null 表示默认值
 | `compactAutoEnabled` | boolean | true | 是否启用自动上下文压缩 |
 | `compactThresholdPercent` | number | 83.5 | 上下文占用超过此百分比时触发自动压缩 |
 | `compactMaxRetryAttempts` | number | 3 | 压缩失败的最大重试次数 |
-| `compactMaxOutputTokens` | number | 8000 | LLM 压缩输出的最大 token 数 |
-| `postCompactMaxFiles` | number | 10 | 压缩后恢复的最近文件数量上限 |
-| `postCompactTokenBudget` | number | 16000 | 文件恢复的总 token 预算 |
-| `postCompactMaxTokensPerFile` | number | 4000 | 单个恢复文件的最大 token 数 |
+| `compactMaxOutputTokens` | number | 20000 | LLM 压缩输出的最大 token 数 |
+| `compactKeepRecentTurns` | number or null | null | 自动/反应式压缩时保留的最近完整 user turn 组数。`null` 使用默认尾部策略，`0` 尽量压缩全部可压缩历史 |
+| `compactCircuitBreakerThreshold` | number | 3 | 自动 compact 的 LLM 连续失败达到该次数后临时跳过 auto compact |
+| `compactCircuitBreakerCooldownSecs` | number | 60 | compact 熔断器打开后的冷却时间（秒） |
+| `predictiveCompactEnabled` | boolean | false | 是否在预计当前 turn 会超过上下文窗口前提前 compact |
+| `predictiveCompactBaselineGrowthTokens` | number | 15000 | 预测性 compact 使用的最小 token 增长估算 |
+| `postCompactMaxFiles` | number | 5 | 压缩后恢复的最近文件数量上限 |
+| `postCompactTokenBudget` | number | 50000 | 文件恢复的总 token 预算 |
+| `postCompactMaxTokensPerFile` | number | 5000 | 单个恢复文件的最大 token 数 |
 | `agentMaxDepth` | number | 3 | 子 agent 最大嵌套深度（root=0, child=1, ...） |
 | `agentToolMaxParallelCalls` | number | 5 | 单轮中允许的最大并行工具调用数 |
 | `wasmFuel` | number | 100000000 | WASM 扩展的 fuel 限制（指令数） |

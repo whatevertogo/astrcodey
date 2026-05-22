@@ -202,6 +202,8 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             post_tokens,
             summary,
             transcript_path,
+            base_event_seq,
+            strategy,
             ..
         } => {
             model.compact_boundaries.push(CompactBoundaryView {
@@ -211,6 +213,8 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 summary: summary.clone(),
                 transcript_path: transcript_path.clone(),
                 seq: event.seq.unwrap_or_default(),
+                base_event_seq: *base_event_seq,
+                strategy: strategy.clone(),
             });
             model.phase = Phase::Idle;
         },
@@ -241,6 +245,12 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::CompactionCompleted { .. } => {
             model.phase = Phase::Idle;
         },
+        EventPayload::CompactionSkipped { .. } => {
+            model.phase = Phase::Idle;
+        },
+        EventPayload::CompactionFailed { .. } => {
+            model.phase = Phase::Idle;
+        },
         EventPayload::Custom { .. } => {},
         EventPayload::RecapGenerated { .. } => {},
         EventPayload::ExtensionEvent {
@@ -268,5 +278,132 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::ToolCallBackgrounded { .. }
         | EventPayload::BackgroundTaskOutput { .. }
         | EventPayload::BackgroundTaskCompleted { .. } => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{
+        event::{Event, EventPayload},
+        extension::CompactStrategy,
+        llm::LlmMessage,
+        types::{SessionId, new_message_id},
+    };
+
+    use super::replay;
+
+    fn event(seq: u64, session_id: &SessionId, payload: EventPayload) -> Event {
+        let mut event = Event::new(session_id.clone(), None, payload);
+        event.seq = Some(seq);
+        event
+    }
+
+    #[test]
+    fn replay_applies_compact_boundary_as_durable_state_transition() {
+        let session_id = SessionId::from("session-compact-replay");
+        let mut events = vec![
+            event(
+                1,
+                &session_id,
+                EventPayload::SessionStarted {
+                    working_dir: ".".into(),
+                    model_id: "mock".into(),
+                    parent_session_id: None,
+                    tool_policy: None,
+                    source_extension: None,
+                },
+            ),
+            event(
+                2,
+                &session_id,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "old user".into(),
+                },
+            ),
+            event(
+                3,
+                &session_id,
+                EventPayload::AssistantMessageCompleted {
+                    message_id: new_message_id(),
+                    text: "old assistant".into(),
+                    reasoning_content: None,
+                },
+            ),
+            event(
+                4,
+                &session_id,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "recent user".into(),
+                },
+            ),
+        ];
+
+        let full = replay(session_id.clone(), &events);
+        assert_eq!(
+            full.messages,
+            vec![
+                LlmMessage::user("old user"),
+                LlmMessage::assistant("old assistant"),
+                LlmMessage::user("recent user"),
+            ]
+        );
+
+        let context_messages = vec![LlmMessage::user(
+            "<compact_summary>summary</compact_summary>",
+        )];
+        let retained_messages = vec![LlmMessage::user("recent user")];
+        events.extend([
+            event(
+                5,
+                &session_id,
+                EventPayload::CompactBoundaryCreated {
+                    trigger: "auto_threshold".into(),
+                    pre_tokens: 100,
+                    post_tokens: 20,
+                    summary: "summary".into(),
+                    transcript_path: None,
+                    continued_session_id: session_id.clone(),
+                    base_event_seq: 4,
+                    strategy: CompactStrategy::Auto,
+                },
+            ),
+            event(
+                6,
+                &session_id,
+                EventPayload::SessionContinuedFromCompaction {
+                    parent_session_id: session_id.clone(),
+                    parent_cursor: "4".into(),
+                    summary: "summary".into(),
+                    transcript_path: None,
+                    context_messages: context_messages.clone(),
+                    retained_messages: retained_messages.clone(),
+                },
+            ),
+        ]);
+
+        let compacted = replay(session_id.clone(), &events);
+        assert_eq!(compacted.context_messages, context_messages);
+        assert_eq!(compacted.messages, retained_messages);
+        assert_eq!(compacted.compact_boundaries[0].base_event_seq, 4);
+
+        events.push(event(
+            7,
+            &session_id,
+            EventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "after compact".into(),
+            },
+        ));
+
+        let continued = replay(session_id, &events);
+        assert_eq!(
+            continued.messages,
+            vec![
+                LlmMessage::user("recent user"),
+                LlmMessage::user("after compact"),
+            ]
+        );
     }
 }

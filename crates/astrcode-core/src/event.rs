@@ -267,6 +267,22 @@ pub enum EventPayload {
         messages_removed: usize,
     },
 
+    /// 上下文压缩已跳过（compare-and-append 冲突或条件不满足）。
+    ///
+    /// live 状态事件，不持久化。
+    CompactionSkipped {
+        /// 跳过原因。
+        reason: String,
+    },
+
+    /// 上下文压缩失败。
+    ///
+    /// live 状态事件，不持久化。
+    CompactionFailed {
+        /// 失败原因。
+        reason: String,
+    },
+
     /// compact 在父会话中创建了 continuation 边界。
     CompactBoundaryCreated {
         /// compact 触发来源，例如 `manual_command`。
@@ -282,6 +298,10 @@ pub enum EventPayload {
         transcript_path: Option<String>,
         /// 接续对话的子会话 ID。
         continued_session_id: SessionId,
+        /// compact 基于的事件 seq（replay 后、compact 前锁定），用于幂等校验。
+        base_event_seq: u64,
+        /// compact 策略，记录用于 replay 和审计。
+        strategy: crate::extension::CompactStrategy,
     },
 
     /// 子会话从父会话的 compact 边界继续。
@@ -411,6 +431,10 @@ impl EventPayload {
                 | Self::ToolCallBackgrounded { .. }
                 | Self::BackgroundTaskOutput { .. }
                 | Self::BackgroundTaskCompleted { .. }
+                | Self::CompactionStarted
+                | Self::CompactionCompleted { .. }
+                | Self::CompactionSkipped { .. }
+                | Self::CompactionFailed { .. }
         )
     }
 }
@@ -586,6 +610,10 @@ mod tests {
                 summary: "summary".into(),
                 transcript_path: None,
                 continued_session_id: "child".into(),
+                base_event_seq: 0,
+                strategy: crate::extension::CompactStrategy::Manual {
+                    keep_recent_turns: None,
+                },
             }
             .is_durable(),
             "CompactBoundaryCreated is the durable parent-session audit fact"
@@ -613,6 +641,10 @@ mod tests {
             summary: "summary".into(),
             transcript_path: Some("compact.jsonl".into()),
             continued_session_id: "child-session".into(),
+            base_event_seq: 42,
+            strategy: crate::extension::CompactStrategy::Manual {
+                keep_recent_turns: None,
+            },
         };
 
         let value = serde_json::to_value(&payload).unwrap();

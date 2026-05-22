@@ -53,6 +53,11 @@ pub struct CompactResult {
     pub transcript_path: Option<String>,
 }
 
+pub struct CompactExecution {
+    pub result: CompactResult,
+    pub llm_api_failed: bool,
+}
+
 impl CompactResult {
     /// 追加 compact 后恢复的运行时上下文。
     ///
@@ -124,12 +129,22 @@ impl From<LlmError> for CompactError {
 }
 
 /// 不调用 LLM 的 compact fallback，并使用指定的 summary 渲染选项。
+#[cfg(test)]
 fn compact_messages_with_render_options(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
     render_options: &CompactSummaryRenderOptions,
 ) -> Result<CompactResult, CompactSkipReason> {
-    let parts = prepare_compact_parts(messages, system_prompt)?;
+    compact_messages_with_render_options_and_keep(messages, system_prompt, render_options, None)
+}
+
+fn compact_messages_with_render_options_and_keep(
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+    render_options: &CompactSummaryRenderOptions,
+    keep_recent_turns: Option<usize>,
+) -> Result<CompactResult, CompactSkipReason> {
+    let parts = prepare_compact_parts(messages, system_prompt, keep_recent_turns)?;
     let summary = summarize_prefix(&parts.prefix);
     Ok(finish_compact_summary(
         summary,
@@ -148,13 +163,14 @@ pub async fn compact_messages_with_request<F, Fut>(
     settings: &ContextSettings,
     custom_instructions: &[String],
     render_options: &CompactSummaryRenderOptions,
+    keep_recent_turns: Option<usize>,
     mut request_text: F,
 ) -> Result<CompactResult, CompactError>
 where
     F: FnMut(Vec<LlmMessage>) -> Fut,
     Fut: Future<Output = Result<String, CompactError>>,
 {
-    let parts = prepare_compact_parts(messages, system_prompt)?;
+    let parts = prepare_compact_parts(messages, system_prompt, keep_recent_turns)?;
     let mut repair_feedback: Option<String> = None;
     let mut ptl_rounds_dropped = 0usize;
     let mut repair_attempts = 0u8;
@@ -228,8 +244,9 @@ pub async fn compact_messages_with_fallback<F, Fut>(
     settings: &ContextSettings,
     custom_instructions: &[String],
     render_options: &CompactSummaryRenderOptions,
+    keep_recent_turns: Option<usize>,
     request_text: F,
-) -> Result<CompactResult, CompactSkipReason>
+) -> Result<CompactExecution, CompactSkipReason>
 where
     F: FnMut(Vec<LlmMessage>) -> Fut,
     Fut: Future<Output = Result<String, CompactError>>,
@@ -240,15 +257,29 @@ where
         settings,
         custom_instructions,
         render_options,
+        keep_recent_turns,
         request_text,
     )
     .await
     {
-        Ok(result) => Ok(result),
+        Ok(result) => Ok(CompactExecution {
+            result,
+            llm_api_failed: false,
+        }),
         Err(CompactError::Skip(reason)) => Err(reason),
         Err(error) => {
+            let llm_api_failed = matches!(error, CompactError::Llm(_));
             tracing::warn!(%error, "LLM compact failed, falling back to deterministic");
-            compact_messages_with_render_options(messages, system_prompt, render_options)
+            compact_messages_with_render_options_and_keep(
+                messages,
+                system_prompt,
+                render_options,
+                keep_recent_turns,
+            )
+            .map(|result| CompactExecution {
+                result,
+                llm_api_failed,
+            })
         },
     }
 }
@@ -299,7 +330,7 @@ pub fn is_prompt_too_long_message(message: &str) -> bool {
     positive && !negative
 }
 
-fn split_compact_start(messages: &[LlmMessage]) -> Option<usize> {
+fn split_compact_start(messages: &[LlmMessage], keep_recent_turns: Option<usize>) -> Option<usize> {
     let has_compressible = messages
         .iter()
         .any(|m| m.role == LlmRole::Assistant && !is_synthetic_context_message(m));
@@ -307,18 +338,19 @@ fn split_compact_start(messages: &[LlmMessage]) -> Option<usize> {
         return None;
     }
 
-    // Retain the last non-synthetic user turn and everything after it
-    // (tool results, assistant responses in the same round).
-    let last_user_idx = messages.iter().enumerate().rev().find_map(|(i, m)| {
-        (m.role == LlmRole::User && !is_synthetic_context_message(m)).then_some(i)
-    })?;
-
-    // Nothing to compact if the only non-synthetic content is the last user turn.
-    if last_user_idx == 0 {
+    let turn_starts = user_turn_starts(messages);
+    let keep_turns = keep_recent_turns.unwrap_or(1);
+    if keep_turns >= turn_starts.len() {
         return None;
     }
 
-    Some(last_user_idx)
+    if keep_turns == 0 {
+        return Some(messages.len());
+    }
+
+    turn_starts
+        .get(turn_starts.len().saturating_sub(keep_turns))
+        .copied()
 }
 
 fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
@@ -331,11 +363,13 @@ fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
 fn prepare_compact_parts(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
+    keep_recent_turns: Option<usize>,
 ) -> Result<PreparedCompactParts, CompactSkipReason> {
     if messages.is_empty() {
         return Err(CompactSkipReason::Empty);
     }
-    let keep_start = split_compact_start(messages).ok_or(CompactSkipReason::NothingToCompact)?;
+    let keep_start = split_compact_start(messages, keep_recent_turns)
+        .ok_or(CompactSkipReason::NothingToCompact)?;
 
     let prefix = messages[..keep_start].to_vec();
     let prepared_input = plan::prepare_compact_input(&prefix);
@@ -353,6 +387,17 @@ fn prepare_compact_parts(
         pre_tokens,
         messages_removed,
     })
+}
+
+fn user_turn_starts(messages: &[LlmMessage]) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message.role == LlmRole::User && !is_synthetic_context_message(message))
+                .then_some(index)
+        })
+        .collect()
 }
 
 fn request_messages(
@@ -607,6 +652,47 @@ The summary should preserve the compact contract and omit this scratchpad later.
     }
 
     #[test]
+    fn compact_keep_recent_turns_supports_zero_and_exact_tail_count() {
+        let messages = vec![
+            LlmMessage::user("u1"),
+            LlmMessage::assistant("a1"),
+            LlmMessage::user("u2"),
+            LlmMessage::assistant("a2"),
+            LlmMessage::user("u3"),
+            LlmMessage::assistant("a3"),
+        ];
+
+        let full = compact_messages_with_render_options_and_keep(
+            &messages,
+            None,
+            &Default::default(),
+            Some(0),
+        )
+        .unwrap();
+        assert!(full.retained_messages.is_empty());
+        assert_eq!(full.messages_removed, 6);
+
+        let keep_two = compact_messages_with_render_options_and_keep(
+            &messages,
+            None,
+            &Default::default(),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(keep_two.retained_messages.len(), 4);
+        assert_eq!(visible_message_text(&keep_two.retained_messages[0]), "u2");
+        assert_eq!(keep_two.messages_removed, 2);
+
+        let nothing = compact_messages_with_render_options_and_keep(
+            &messages,
+            None,
+            &Default::default(),
+            Some(3),
+        );
+        assert!(matches!(nothing, Err(CompactSkipReason::NothingToCompact)));
+    }
+
+    #[test]
     fn prompt_too_long_classifier_ignores_rate_limits() {
         assert!(is_prompt_too_long_message(
             "maximum context length exceeded"
@@ -650,6 +736,7 @@ scratchpad that should not survive
         );
 
         assert!(message.starts_with("<compact_summary>\nThis session is being continued"));
+        assert!(message.contains("Resume directly: do not acknowledge this summary"));
         assert!(message.contains("Summary:\n1. Primary Request and Intent:"));
         assert!(message.contains("read the full transcript at C:\\Users\\18794"));
 
@@ -786,6 +873,7 @@ scratchpad that should be ignored
             &settings,
             &[String::from("preserve compact instruction")],
             &CompactSummaryRenderOptions::default(),
+            None,
             move |request| {
                 *captured_for_request.lock().unwrap() = request;
                 async { Ok(valid_compact_summary().to_string()) }
@@ -837,6 +925,7 @@ scratchpad that should be ignored
             &settings,
             &[],
             &CompactSummaryRenderOptions::default(),
+            None,
             move |request| {
                 *captured_for_request.lock().unwrap() = request;
                 async { Ok(valid_compact_summary().to_string()) }
@@ -879,6 +968,7 @@ scratchpad that should be ignored
             &settings,
             &[],
             &CompactSummaryRenderOptions::default(),
+            None,
             move |request| {
                 requests_for_request.lock().unwrap().push(request);
                 let attempts = Arc::clone(&attempts_for_request);

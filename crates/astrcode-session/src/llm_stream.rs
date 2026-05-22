@@ -154,6 +154,9 @@ pub async fn consume_llm_stream(
                         recoverable,
                     },
                 );
+                if recoverable {
+                    return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
+                }
                 return Err(TurnError::Llm(LlmError::StreamParse(message)));
             },
         }

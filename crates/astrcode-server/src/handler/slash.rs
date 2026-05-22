@@ -86,7 +86,14 @@ impl CommandHandler {
     ) -> Result<PromptSubmission, HandlerError> {
         // 内置 /compact 命令
         if command.name == "compact" {
-            return match self.compact_session(&sid).await? {
+            let keep_recent_turns = if command.arguments.trim().is_empty() {
+                None
+            } else {
+                Some(command.arguments.trim().parse::<usize>().map_err(|_| {
+                    HandlerError::Other("compact expects an optional non-negative integer".into())
+                })?)
+            };
+            return match self.compact_session(&sid, keep_recent_turns).await? {
                 super::ManualCompactOutcome::Compacted { .. } => Ok(PromptSubmission::Handled {
                     message: "compact accepted".into(),
                 }),

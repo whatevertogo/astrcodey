@@ -114,6 +114,10 @@ impl Config {
                     .runtime
                     .compact_auto_enabled
                     .unwrap_or(super::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
+                predictive_compact_enabled: self
+                    .runtime
+                    .predictive_compact_enabled
+                    .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED),
                 compact_threshold_percent: self
                     .runtime
                     .compact_threshold_percent
@@ -126,6 +130,22 @@ impl Config {
                     .runtime
                     .compact_max_output_tokens
                     .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
+                compact_keep_recent_turns: self
+                    .runtime
+                    .compact_keep_recent_turns
+                    .or(super::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS),
+                predictive_compact_baseline_growth_tokens: self
+                    .runtime
+                    .predictive_compact_baseline_growth_tokens
+                    .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS),
+                compact_circuit_breaker_threshold: self
+                    .runtime
+                    .compact_circuit_breaker_threshold
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD),
+                compact_circuit_breaker_cooldown_secs: self
+                    .runtime
+                    .compact_circuit_breaker_cooldown_secs
+                    .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS),
                 post_compact_max_files: self
                     .runtime
                     .post_compact_max_files

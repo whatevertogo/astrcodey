@@ -109,7 +109,10 @@ pub enum ClientCommand {
     /// 压缩当前会话上下文。
     ///
     /// 此操作会触发会话历史压缩，以控制上下文长度和 Token 消耗。
-    Compact,
+    Compact {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        keep_recent_turns: Option<usize>,
+    },
 
     // ---- 状态查询 ----
     /// 获取当前服务器/会话状态。

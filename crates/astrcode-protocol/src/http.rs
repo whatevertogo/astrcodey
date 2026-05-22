@@ -56,6 +56,9 @@ pub struct CompactSessionRequest {
     /// 额外 compact 指令，v1 暂不接入生产链路。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// 保留最近 N 个完整 user turn group。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_recent_turns: Option<usize>,
 }
 
 /// 手动 compact 响应。

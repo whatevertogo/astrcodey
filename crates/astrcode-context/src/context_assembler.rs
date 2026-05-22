@@ -5,10 +5,12 @@ use astrcode_core::llm::{LlmMessage, ModelLimits};
 use crate::{
     ContextSettings,
     compaction::{
-        CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions,
-        compact_messages_with_fallback,
+        CompactError, CompactExecution, CompactResult, CompactSkipReason,
+        CompactSummaryRenderOptions, compact_messages_with_fallback,
     },
-    token_budget::{build_prompt_snapshot, should_compact},
+    token_budget::{
+        build_prompt_snapshot, estimate_turn_growth, should_compact, should_compact_predictive,
+    },
 };
 
 /// 一次 provider request 的上下文准备输入。
@@ -34,7 +36,20 @@ pub struct ContextPrepareInput<'a> {
 #[derive(Debug, Clone)]
 pub struct PreparedContext {
     pub messages: Vec<LlmMessage>,
-    pub compaction: Option<CompactResult>,
+    pub compaction: Option<PreparedCompaction>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedCompaction {
+    pub result: CompactResult,
+    pub llm_api_failed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrepareMessagesOptions {
+    pub allow_auto_compact: bool,
+    pub force_compact: bool,
+    pub keep_recent_turns: Option<usize>,
 }
 
 /// LLM 上下文组装门面。
@@ -55,6 +70,7 @@ impl LlmContextAssembler {
     pub async fn prepare_messages_with_llm<F, Fut>(
         &self,
         input: ContextPrepareInput<'_>,
+        options: PrepareMessagesOptions,
         request_text: F,
     ) -> PreparedContext
     where
@@ -62,8 +78,20 @@ impl LlmContextAssembler {
         Fut: Future<Output = Result<String, CompactError>>,
     {
         let mut messages = input.messages;
-        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits);
-        let compaction = if self.settings.auto_compact_enabled && should_compact(snapshot) {
+        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits.clone());
+        let should_compact_now = options.force_compact
+            || (options.allow_auto_compact
+                && (should_compact(snapshot)
+                    || (self.settings.predictive_compact_enabled
+                        && should_compact_predictive(
+                            snapshot,
+                            estimate_turn_growth(
+                                &messages,
+                                self.settings.predictive_compact_baseline_growth_tokens,
+                            ),
+                            input.model_limits.clone(),
+                        ))));
+        let compaction = if should_compact_now {
             let render_options = CompactSummaryRenderOptions {
                 custom_instructions: input.custom_instructions.clone(),
                 ..Default::default()
@@ -74,6 +102,9 @@ impl LlmContextAssembler {
                 &self.settings,
                 &input.custom_instructions,
                 &render_options,
+                options
+                    .keep_recent_turns
+                    .or(self.settings.compact_keep_recent_turns),
                 request_text,
             )
             .await
@@ -114,6 +145,20 @@ impl LlmContextAssembler {
         )
     }
 
+    pub fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
+        let snapshot = self.prompt_snapshot(input);
+        should_compact(snapshot)
+            || (self.settings.predictive_compact_enabled
+                && should_compact_predictive(
+                    snapshot,
+                    estimate_turn_growth(
+                        &input.messages,
+                        self.settings.predictive_compact_baseline_growth_tokens,
+                    ),
+                    input.model_limits.clone(),
+                ))
+    }
+
     fn snapshot(
         &self,
         messages: &[LlmMessage],
@@ -129,15 +174,18 @@ impl LlmContextAssembler {
     }
 }
 
-fn prepared_context_from_compaction(compaction: CompactResult) -> PreparedContext {
+fn prepared_context_from_compaction(compaction: CompactExecution) -> PreparedContext {
     let messages = [
-        compaction.context_messages.clone(),
-        compaction.retained_messages.clone(),
+        compaction.result.context_messages.clone(),
+        compaction.result.retained_messages.clone(),
     ]
     .concat();
     PreparedContext {
         messages,
-        compaction: Some(compaction),
+        compaction: Some(PreparedCompaction {
+            result: compaction.result,
+            llm_api_failed: compaction.llm_api_failed,
+        }),
     }
 }
 
@@ -167,6 +215,11 @@ mod tests {
                     },
                     custom_instructions: Vec::new(),
                 },
+                PrepareMessagesOptions {
+                    allow_auto_compact: true,
+                    force_compact: false,
+                    keep_recent_turns: None,
+                },
                 |_msgs| async {
                     Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
                         "test".into(),
@@ -184,6 +237,11 @@ mod tests {
                         max_output_tokens: 1024,
                     },
                     custom_instructions: Vec::new(),
+                },
+                PrepareMessagesOptions {
+                    allow_auto_compact: true,
+                    force_compact: false,
+                    keep_recent_turns: None,
                 },
                 |_msgs| async {
                     Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(

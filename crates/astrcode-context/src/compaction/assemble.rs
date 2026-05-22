@@ -8,6 +8,11 @@ use super::{COMPACT_SUMMARY_END, COMPACT_SUMMARY_MARKER, parse::extract_summary_
 pub const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The \
      summary below covers the earlier portion of the conversation.";
+pub const COMPACT_CONTINUATION_INSTRUCTIONS: &str =
+    "Continue the conversation from where it left off without asking the user any further \
+     questions. Resume directly: do not acknowledge this summary, do not recap it, and do not \
+     preface your response with \"I'll continue\" or similar. Pick up the last task as if the \
+     context break never happened.";
 pub const COMPACT_TRANSCRIPT_HINT_PREFIX: &str =
     "If you need specific details from before compaction (like exact code snippets, error \
      messages, or content you generated), read the full transcript at ";
@@ -45,6 +50,7 @@ pub(crate) fn compact_summary_message_text(
 ) -> String {
     let mut body = vec![
         COMPACT_CONTINUATION_PREAMBLE.to_string(),
+        COMPACT_CONTINUATION_INSTRUCTIONS.to_string(),
         String::new(),
         format_compact_summary(summary),
     ];
@@ -96,10 +102,15 @@ pub(crate) fn parse_compact_summary_message(content: &str) -> Option<CompactSumm
 }
 
 fn strip_compact_preamble(body: &str) -> &str {
-    body.trim_start()
+    let stripped = body
+        .trim_start()
         .strip_prefix(COMPACT_CONTINUATION_PREAMBLE)
         .map(str::trim)
-        .unwrap_or(body)
+        .unwrap_or(body);
+    stripped
+        .strip_prefix(COMPACT_CONTINUATION_INSTRUCTIONS)
+        .map(str::trim)
+        .unwrap_or(stripped)
 }
 
 fn strip_compact_transcript_hint(body: &str) -> &str {

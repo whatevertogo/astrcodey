@@ -141,6 +141,16 @@ pub struct RuntimeSection {
     pub compact_max_retry_attempts: Option<u8>,
     /// LLM 压缩输出的最大 token 数。
     pub compact_max_output_tokens: Option<usize>,
+    /// 自动/反应式 compact 保留的最近完整 turn 数。
+    pub compact_keep_recent_turns: Option<usize>,
+    /// auto-compact LLM 熔断器触发阈值。
+    pub compact_circuit_breaker_threshold: Option<u32>,
+    /// auto-compact LLM 熔断器冷却时间（秒）。
+    pub compact_circuit_breaker_cooldown_secs: Option<u64>,
+    /// 是否启用预测性 compact。
+    pub predictive_compact_enabled: Option<bool>,
+    /// 预测下一轮 token 增长时的保底值。
+    pub predictive_compact_baseline_growth_tokens: Option<usize>,
     /// 压缩后恢复的最近读取文件数量上限。
     pub post_compact_max_files: Option<usize>,
     /// 压缩后恢复文件的总 token 预算。

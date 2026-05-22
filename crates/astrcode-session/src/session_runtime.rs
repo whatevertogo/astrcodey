@@ -1,11 +1,14 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{event::Event, extension::ChildToolPolicy, tool::FileObservationStore};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
-use crate::{background::BackgroundTaskManager, tool_exec::InMemoryFileObservationStore};
+use crate::{
+    background::BackgroundTaskManager, compact_circuit_breaker::CompactCircuitBreaker,
+    tool_exec::InMemoryFileObservationStore,
+};
 
 /// session 内部 broadcast channel 容量。
 ///
@@ -36,6 +39,7 @@ pub struct SessionRuntimeState {
     /// `refresh_tools` 在每次重建工具表时读取此字段，保证子 session 的所有 turn
     /// 都看到一致的裁剪后工具集（含 resume 路径）。
     tool_policy: Mutex<Option<ChildToolPolicy>>,
+    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 本 session 事件的 fanout 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_tx: broadcast::Sender<Event>,
@@ -50,6 +54,10 @@ impl Default for SessionRuntimeState {
             bg_tasks: Arc::new(Mutex::new(BackgroundTaskManager::new())),
             extra_system_prompt: Mutex::new(None),
             tool_policy: Mutex::new(None),
+            compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
+                3,
+                Duration::from_secs(60),
+            )),
             event_tx,
         }
     }
@@ -86,6 +94,16 @@ impl SessionRuntimeState {
 
     pub fn set_tool_policy(&self, policy: Option<ChildToolPolicy>) {
         *self.tool_policy.lock() = policy;
+    }
+
+    pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
+        &self.compact_circuit_breaker
+    }
+
+    pub fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
+        self.compact_circuit_breaker
+            .lock()
+            .reconfigure(threshold, cooldown);
     }
 
     /// 订阅本 session 的事件流。

@@ -178,10 +178,14 @@ pub(in crate::http) async fn list_commands(
 pub(in crate::http) async fn compact_session(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
-    Json(_request): Json<CompactSessionRequest>,
+    Json(request): Json<CompactSessionRequest>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.handler.compact_session(session_id).await {
+    match state
+        .handler
+        .compact_session(session_id, request.keep_recent_turns)
+        .await
+    {
         Ok(ManualCompactOutcome::Compacted { session_id }) => Json(CompactSessionResponse {
             accepted: true,
             deferred: false,

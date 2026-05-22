@@ -110,6 +110,8 @@ pub enum TurnError {
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
     Extension(#[from] astrcode_core::extension::ExtensionError),
+    #[error("prompt is still too long after reactive compaction")]
+    CompactExhausted,
     #[error("{0}")]
     Internal(String),
 }

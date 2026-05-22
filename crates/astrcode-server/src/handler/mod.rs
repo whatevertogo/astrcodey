@@ -142,8 +142,8 @@ impl CommandHandler {
                 self.abort_active_turn().await?;
             },
 
-            ClientCommand::Compact => {
-                self.compact_active_session().await?;
+            ClientCommand::Compact { keep_recent_turns } => {
+                self.compact_active_session(keep_recent_turns).await?;
             },
 
             ClientCommand::GetState => {

@@ -5,23 +5,28 @@
 //! Agent 是无状态的短暂对象，处理完一个回合后即被丢弃。
 //! `drive_agent` 负责在回合执行时转发事件流并等待最终输出。
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use astrcode_context::{
-    compaction::CompactResult, context_assembler::ContextPrepareInput,
+    compaction::CompactResult,
+    context_assembler::{ContextPrepareInput, PrepareMessagesOptions},
     prompt_engine::system_messages_from_prompt,
 };
 use astrcode_core::{
     event::{Event, EventPayload},
-    extension::{CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
-    llm::{LlmContent, LlmEvent, LlmMessage, LlmRole},
+    extension::{CompactStrategy, CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
+    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole},
     tool::ToolDefinition,
     types::*,
 };
+use astrcode_support::hash::hex_fingerprint;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
-    compact::{CompactHookContext, collect_compact_instructions, dispatch_post_compact},
+    compact::{
+        CompactHookContext, collect_compact_instructions, compact_trigger_name,
+        dispatch_post_compact, persist_compact_result,
+    },
     deferred_tools::append_deferred_tools_reminder,
     llm_stream::{
         StreamOutcome, assistant_message_with_thinking, consume_llm_stream,
@@ -105,10 +110,19 @@ pub struct TurnRunner {
     session: Arc<Session>,
     shared: SharedTurnContext,
     system_prompt: String,
+    extra_system_prompt: Option<String>,
     initial_history: Vec<LlmMessage>,
     tools: ToolPipeline,
     /// 订阅 session broadcast，用于在 step 边界接收中途注入的 UserMessage。
     event_rx: broadcast::Receiver<Event>,
+}
+
+#[derive(Clone)]
+struct CompactionStageMeta {
+    base_event_seq: u64,
+    trigger: CompactTrigger,
+    strategy: CompactStrategy,
+    llm_api_failed: bool,
 }
 
 impl TurnRunner {
@@ -150,11 +164,17 @@ impl TurnRunner {
             Arc::clone(&session),
             capabilities,
         );
+        let context_settings = caps.context_assembler().settings().clone();
+        runtime.configure_compact_circuit_breaker(
+            context_settings.compact_circuit_breaker_threshold,
+            Duration::from_secs(context_settings.compact_circuit_breaker_cooldown_secs),
+        );
         let event_rx = session.subscribe();
         Ok(Self {
             session,
             shared,
             system_prompt,
+            extra_system_prompt: session_state.extra_system_prompt.clone(),
             initial_history,
             tools,
             event_rx,
@@ -201,9 +221,36 @@ impl TurnRunner {
                 .prepare_stage(&extension_runner, &mut state, &event_tx)
                 .await?;
             let visible_tools = state.visible_tools();
-            let outcome = self
+            let outcome = match self
                 .llm_stage(&extension_runner, prepared, &visible_tools, &event_tx)
-                .await?;
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(TurnError::Llm(LlmError::PromptTooLong(_))) if !state.reactive_compact_used => {
+                    state.reactive_compact_used = true;
+                    if !self
+                        .run_reactive_compaction(&extension_runner, &mut state, &event_tx)
+                        .await?
+                    {
+                        return end_turn_with_error_typed(
+                            &extension_runner,
+                            &self.shared,
+                            TurnError::CompactExhausted,
+                        )
+                        .await;
+                    }
+                    continue;
+                },
+                Err(TurnError::Llm(LlmError::PromptTooLong(_))) => {
+                    return end_turn_with_error_typed(
+                        &extension_runner,
+                        &self.shared,
+                        TurnError::CompactExhausted,
+                    )
+                    .await;
+                },
+                Err(error) => return Err(error),
+            };
 
             match outcome {
                 StreamOutcome::Complete {
@@ -350,20 +397,42 @@ impl TurnRunner {
             model_limits: llm.model_limits(),
             custom_instructions,
         };
+        let should_auto_compact = context_assembler.should_auto_compact(&input);
+        let base_event_seq = if should_auto_compact {
+            Some(self.read_base_event_seq().await?)
+        } else {
+            None
+        };
         let request_fn = crate::compact::make_compact_request_fn(Arc::clone(&llm));
         let mut prepared = context_assembler
-            .prepare_messages_with_llm(input, request_fn)
+            .prepare_messages_with_llm(
+                input,
+                PrepareMessagesOptions {
+                    allow_auto_compact: should_auto_compact
+                        && self.should_attempt_llm_compact(CompactTrigger::AutoThreshold),
+                    force_compact: false,
+                    keep_recent_turns: context_assembler.settings().compact_keep_recent_turns,
+                },
+                request_fn,
+            )
             .await;
 
         if let Some(ref mut compaction) = prepared.compaction {
             self.handle_compaction_stage(
                 extension_runner,
                 state,
-                compaction,
+                &mut compaction.result,
                 context_assembler.settings(),
                 event_tx,
+                CompactionStageMeta {
+                    base_event_seq: base_event_seq.unwrap_or_default(),
+                    trigger: CompactTrigger::AutoThreshold,
+                    strategy: CompactStrategy::Auto,
+                    llm_api_failed: compaction.llm_api_failed,
+                },
             )
             .await;
+            state.messages = [system_messages.clone(), prepared.messages.clone()].concat();
         }
 
         let mut context_messages = prepared.messages;
@@ -386,6 +455,7 @@ impl TurnRunner {
         compaction: &mut CompactResult,
         settings: &astrcode_context::ContextSettings,
         event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+        meta: CompactionStageMeta,
     ) {
         send_event(event_tx.as_ref(), EventPayload::CompactionStarted);
         let visible_tools = state.visible_tools();
@@ -403,11 +473,150 @@ impl TurnRunner {
             session_id: self.shared.session_id.as_str(),
             working_dir: &self.shared.working_dir,
             model_id: &self.shared.model_id,
-            trigger: CompactTrigger::AutoThreshold,
+            trigger: meta.trigger,
             message_count: state.messages.len(),
         };
         if let Err(e) = dispatch_post_compact(extension_runner, hook_ctx, compaction).await {
             tracing::warn!(error = %e, "PostCompact extension dispatch failed");
+        }
+
+        if meta.trigger == CompactTrigger::AutoThreshold && meta.llm_api_failed {
+            self.session
+                .runtime()
+                .compact_circuit_breaker()
+                .lock()
+                .record_llm_failure();
+        }
+
+        let fp = hex_fingerprint(self.system_prompt.as_bytes());
+        let trigger_name = compact_trigger_name(meta.trigger);
+        match persist_compact_result(
+            &self.session,
+            compaction,
+            trigger_name,
+            &self.system_prompt,
+            &fp,
+            self.extra_system_prompt.as_deref(),
+            meta.base_event_seq,
+            meta.strategy,
+        )
+        .await
+        {
+            Ok(persisted) => {
+                if meta.trigger == CompactTrigger::AutoThreshold && !meta.llm_api_failed {
+                    self.session
+                        .runtime()
+                        .compact_circuit_breaker()
+                        .lock()
+                        .record_success();
+                }
+                send_event(
+                    event_tx.as_ref(),
+                    EventPayload::CompactionCompleted {
+                        messages_removed: persisted.messages_removed,
+                    },
+                );
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "auto-compact persist skipped");
+                send_event(
+                    event_tx.as_ref(),
+                    EventPayload::CompactionSkipped {
+                        reason: e.to_string(),
+                    },
+                );
+            },
+        }
+    }
+
+    async fn run_reactive_compaction(
+        &mut self,
+        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        state: &mut TurnState,
+        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    ) -> Result<bool, TurnError> {
+        self.refresh_system_prompt(state).await?;
+
+        let llm = self.session.caps().llm();
+        let context_assembler = Arc::clone(self.session.caps().context_assembler());
+        let custom_instructions = collect_compact_instructions(
+            extension_runner,
+            CompactHookContext {
+                session_id: self.shared.session_id.as_str(),
+                working_dir: &self.shared.working_dir,
+                model_id: &self.shared.model_id,
+                trigger: CompactTrigger::ReactivePromptTooLong,
+                message_count: state.messages.len(),
+            },
+        )
+        .await
+        .unwrap_or_default();
+
+        let (system_messages, visible_messages): (Vec<_>, Vec<_>) = state
+            .messages
+            .iter()
+            .cloned()
+            .partition(|message| message.role == LlmRole::System);
+        let input = ContextPrepareInput {
+            messages: visible_messages,
+            system_prompt: Some(&self.system_prompt),
+            model_limits: llm.model_limits(),
+            custom_instructions,
+        };
+        let request_fn = crate::compact::make_compact_request_fn(Arc::clone(&llm));
+        let base_event_seq = self.read_base_event_seq().await?;
+        let mut prepared = context_assembler
+            .prepare_messages_with_llm(
+                input,
+                PrepareMessagesOptions {
+                    allow_auto_compact: false,
+                    force_compact: true,
+                    keep_recent_turns: context_assembler.settings().compact_keep_recent_turns,
+                },
+                request_fn,
+            )
+            .await;
+        let Some(ref mut compaction) = prepared.compaction else {
+            return Ok(false);
+        };
+
+        self.handle_compaction_stage(
+            extension_runner,
+            state,
+            &mut compaction.result,
+            context_assembler.settings(),
+            event_tx,
+            CompactionStageMeta {
+                base_event_seq,
+                trigger: CompactTrigger::ReactivePromptTooLong,
+                strategy: CompactStrategy::ReactivePromptTooLong,
+                llm_api_failed: compaction.llm_api_failed,
+            },
+        )
+        .await;
+        state.messages = [system_messages, prepared.messages].concat();
+        Ok(true)
+    }
+
+    async fn read_base_event_seq(&self) -> Result<u64, TurnError> {
+        Ok(self
+            .session
+            .latest_cursor()
+            .await
+            .map_err(|e| TurnError::Internal(e.to_string()))?
+            .and_then(|c| c.parse::<u64>().ok())
+            .unwrap_or(0))
+    }
+
+    fn should_attempt_llm_compact(&self, trigger: CompactTrigger) -> bool {
+        match trigger {
+            CompactTrigger::AutoThreshold => self
+                .session
+                .runtime()
+                .compact_circuit_breaker()
+                .lock()
+                .should_attempt(),
+            CompactTrigger::ManualCommand | CompactTrigger::ReactivePromptTooLong => true,
         }
     }
 
@@ -463,6 +672,9 @@ impl TurnRunner {
         let message_id = new_message_id();
         match consume_llm_stream(rx, event_tx, message_id).await {
             Ok(outcome) => Ok(outcome),
+            Err(TurnError::Llm(LlmError::PromptTooLong(message))) => {
+                Err(TurnError::Llm(LlmError::PromptTooLong(message)))
+            },
             Err(error) => end_turn_with_error_typed(extension_runner, &self.shared, error).await,
         }
     }
@@ -578,6 +790,9 @@ impl TurnRunner {
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, TurnError> {
         match llm.generate(send_messages, tools.to_vec()).await {
             Ok(rx) => Ok(rx),
+            Err(LlmError::PromptTooLong(message)) => {
+                Err(TurnError::Llm(LlmError::PromptTooLong(message)))
+            },
             Err(e) => {
                 send_event(
                     event_tx.as_ref(),
