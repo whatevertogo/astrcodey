@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import type { ConversationBlock } from '../../services/types'
 import { cn } from '../../lib/utils'
 import { emptyStateSurface } from '../../lib/styles'
+import { useAppStore } from '../../store/conversation'
 import AssistantMessage from './AssistantMessage'
 import UserMessage from './UserMessage'
 import ToolCallBlock from './ToolCallBlock'
@@ -23,6 +24,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const shouldStickRef = useRef(true)
   const prevLengthRef = useRef(0)
+  const queuedMessages = useAppStore((s) => s.queuedMessages)
 
   const updateStickiness = useCallback(() => {
     const container = listRef.current
@@ -38,7 +40,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   useEffect(() => {
     const shouldAutoScroll =
       prevLengthRef.current === 0 || shouldStickRef.current
-    prevLengthRef.current = blocks.length
+    prevLengthRef.current = blocks.length + queuedMessages.length
     if (!shouldAutoScroll) return
 
     requestAnimationFrame(() => {
@@ -47,7 +49,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       }
       updateStickiness()
     })
-  }, [blocks, updateStickiness])
+  }, [blocks, queuedMessages.length, updateStickiness])
 
   const renderedBlocks = blocks.map((block, index) => {
     const prevBlock = index > 0 ? blocks[index - 1] : null
@@ -99,6 +101,21 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
         </div>
       )}
       {renderedBlocks}
+      {queuedMessages.map((text, index) => (
+        <div
+          key={`queued-${index}`}
+          className="mx-auto w-[min(100%,var(--chat-content-max-width))] min-w-0"
+        >
+          <div className="flex justify-end">
+            <div className="max-w-[80%] rounded-2xl rounded-br-md border border-dashed border-border bg-user-bubble/60 px-4 py-3 text-[15px] leading-[1.7] text-text-primary">
+              <span className="mr-2 text-[11px] text-text-secondary">
+                排队中
+              </span>
+              {text}
+            </div>
+          </div>
+        </div>
+      ))}
       <div ref={bottomRef} />
     </div>
   )

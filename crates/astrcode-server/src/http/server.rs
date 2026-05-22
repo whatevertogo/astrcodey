@@ -125,17 +125,15 @@ pub async fn run_http_server(
     let shutdown_token = runtime.shutdown_token.clone();
     let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
-    tracing::info!(
-        "Auth token: {}...{}",
-        &auth_token[..4],
-        &auth_token[auth_token.len() - 4..]
-    );
-    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|stream| {
+    tracing::info!("Auth token: {}", masked_token(&auth_token));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    let listener = listener.tap_io(|stream| {
         let _ = stream.set_nodelay(true);
     });
-    let local_port = addr.port();
+    let local_port = local_addr.port();
     write_run_info(local_port, &auth_token);
-    tracing::info!("HTTP server ready at http://{addr}");
+    tracing::info!("HTTP server ready at http://{local_addr}");
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
@@ -181,4 +179,26 @@ pub fn write_run_info(port: u16, auth_token: &str) {
 pub fn remove_run_info() {
     let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
     let _ = std::fs::remove_file(path);
+}
+
+fn masked_token(token: &str) -> String {
+    let chars: Vec<_> = token.chars().collect();
+    if chars.len() <= 8 {
+        return "<redacted>".into();
+    }
+    let prefix: String = chars.iter().take(4).collect();
+    let suffix: String = chars.iter().skip(chars.len().saturating_sub(4)).collect();
+    format!("{prefix}...{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::masked_token;
+
+    #[test]
+    fn masked_token_handles_short_env_tokens() {
+        assert_eq!(masked_token("abc"), "<redacted>");
+        assert_eq!(masked_token("12345678"), "<redacted>");
+        assert_eq!(masked_token("123456789"), "1234...6789");
+    }
 }

@@ -21,19 +21,19 @@ export default function InputBar() {
   const submitPrompt = useAppStore((s) => s.submitPrompt)
   const abortCurrentTurn = useAppStore((s) => s.abortCurrentTurn)
   const phase = useAppStore((s) => s.phase)
-  const control = useAppStore((s) => s.control)
   const workingDir = useAppStore((s) => s.workingDir)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const modelRefreshKey = useAppStore((s) => s.modelRefreshKey)
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
   const compactSubmitting = useAppStore((s) => s.compactSubmitting)
   const statusItems = useAppStore((s) => s.statusItems)
+  const queuedMessages = useAppStore((s) => s.queuedMessages)
 
   const [value, setValue] = useState('')
   const [isComposing, setIsComposing] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const isBusy = isExecutionPhase(phase) || compactSubmitting
-  const canSubmit = (control?.canSubmitPrompt ?? false) && !compactSubmitting
+  const canSubmit = !!activeSessionId && !compactSubmitting
 
   // ── slash command panel state ──
   const [slashTriggerVisible, setSlashTriggerVisible] = useState(false)
@@ -257,7 +257,7 @@ export default function InputBar() {
                   onKeyUp={handleCursorActivity}
                   onCompositionStart={() => setIsComposing(true)}
                   onCompositionEnd={() => setIsComposing(false)}
-                  disabled={!activeSessionId || (!canSubmit && !isBusy)}
+                  disabled={!activeSessionId}
                 />
                 <div className="flex items-center justify-between">
                   <div className="flex flex-shrink-0 items-center gap-2">
@@ -280,9 +280,14 @@ export default function InputBar() {
                           {text}
                         </span>
                       ))}
+                    {queuedMessages.length > 0 && (
+                      <span className="text-[11px] text-text-secondary">
+                        {queuedMessages.length} 条排队中
+                      </span>
+                    )}
                   </div>
                   <div className="flex flex-shrink-0 items-center gap-2">
-                    {isBusy ? (
+                    {isBusy && (
                       <button
                         className={composerInterruptButton}
                         type="button"
@@ -298,30 +303,29 @@ export default function InputBar() {
                           '中断'
                         )}
                       </button>
-                    ) : (
-                      <button
-                        className={cn(composerSubmitButton)}
-                        type="button"
-                        onClick={() => void submit()}
-                        disabled={
-                          !value.trim() || !activeSessionId || !canSubmit
-                        }
-                        aria-label="发送消息"
-                        title="发送消息"
-                      >
-                        <svg
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <line x1="12" y1="19" x2="12" y2="5"></line>
-                          <polyline points="5 12 12 5 19 12"></polyline>
-                        </svg>
-                      </button>
                     )}
+                    <button
+                      className={cn(composerSubmitButton)}
+                      type="button"
+                      onClick={() => void submit()}
+                      disabled={
+                        !value.trim() || !activeSessionId || !canSubmit
+                      }
+                      aria-label={isBusy ? '加入队列' : '发送消息'}
+                      title={isBusy ? '加入队列' : '发送消息'}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <line x1="12" y1="19" x2="12" y2="5"></line>
+                        <polyline points="5 12 12 5 19 12"></polyline>
+                      </svg>
+                    </button>
                   </div>
                 </div>
               </div>

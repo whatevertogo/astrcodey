@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::Event,
+    event::{Event, EventPayload},
     types::{Cursor, SessionId},
 };
 use astrcode_protocol::{
@@ -34,6 +34,8 @@ use super::{
 };
 use crate::bootstrap::ServerRuntime;
 
+type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
+
 /// SSE live stream 的内部状态。
 ///
 /// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
@@ -46,8 +48,7 @@ struct LiveStreamState {
     /// Lagged 后设为 true，下一次 poll 返回 None 关闭流。
     closing: bool,
     /// 单个事件产出多条 delta 时，剩余待发送的缓冲。
-    pending:
-        std::collections::VecDeque<Result<axum::response::sse::Event, std::convert::Infallible>>,
+    pending: std::collections::VecDeque<SseItem>,
     /// 会话是否已有消息，用于正确计算 can_request_compact。
     has_messages: bool,
     /// 是否已完成初始 stale event 排水。
@@ -170,58 +171,20 @@ pub(in crate::http) async fn session_stream(
 
             loop {
                 match state.rx.recv().await {
-                    Some(ClientNotification::Event(event))
-                        if event.session_id == state.session_id =>
-                    {
-                        if state
-                            .replay_max_seq
-                            .zip(event.seq)
-                            .is_some_and(|(max_seq, event_seq)| event_seq <= max_seq)
-                        {
+                    Some(notification) => {
+                        let mut items: std::collections::VecDeque<_> =
+                            notification_to_sse_items(&mut state, notification)
+                                .await
+                                .into();
+                        if items.is_empty() {
                             continue;
                         }
-                        let deltas = event_to_deltas(&event, state.has_messages);
-                        if deltas.is_empty() {
-                            continue;
-                        }
-                        let cursor = event_cursor(&state.runtime, &event).await;
-                        let mut items: std::collections::VecDeque<_> = deltas
-                            .into_iter()
-                            .map(|delta| {
-                                Ok(sse_event(&ConversationStreamEnvelopeDto {
-                                    session_id: state.session_id.to_string(),
-                                    cursor: ConversationCursorDto {
-                                        value: cursor.clone(),
-                                    },
-                                    delta,
-                                }))
-                            })
-                            .collect();
                         let Some(first) = items.pop_front() else {
                             continue;
                         };
                         state.pending = items;
                         return Some((first, state));
                     },
-                    Some(ClientNotification::StatusItemUpdate { id, text }) => {
-                        let cursor = state_cursor(&state.runtime, &state.session_id).await;
-                        let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
-                            session_id: state.session_id.to_string(),
-                            cursor: ConversationCursorDto { value: cursor },
-                            delta: ConversationDeltaDto::StatusItemUpdate { id, text },
-                        }));
-                        return Some((item, state));
-                    },
-                    Some(ClientNotification::ExtensionRegistryChanged) => {
-                        let cursor = state_cursor(&state.runtime, &state.session_id).await;
-                        let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
-                            session_id: state.session_id.to_string(),
-                            cursor: ConversationCursorDto { value: cursor },
-                            delta: ConversationDeltaDto::ExtensionRegistryChanged,
-                        }));
-                        return Some((item, state));
-                    },
-                    Some(_) => {},
                     None => return None,
                 }
             }
@@ -264,7 +227,7 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
     let Some(replay_max) = state.replay_max_seq else {
         return;
     };
-    let mut new_durable_events = Vec::new();
+    let mut buffered = Vec::new();
     loop {
         match state.rx.try_recv() {
             Ok(ClientNotification::Event(event)) if event.session_id == state.session_id => {
@@ -276,33 +239,82 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
                 if seq <= replay_max {
                     continue;
                 }
-                new_durable_events.push(event);
+                buffered.push(ClientNotification::Event(event));
             },
-            // 非目标 session 事件、StatusItemUpdate、ExtensionRegistryChanged 等丢弃。
+            Ok(notification @ ClientNotification::StatusItemUpdate { .. })
+            | Ok(notification @ ClientNotification::ExtensionRegistryChanged) => {
+                buffered.push(notification);
+            },
+            // 非目标 session 事件和其它全局通知不属于 conversation stream。
             Ok(_) => continue,
             Err(_) => break,
         }
     }
-    for event in new_durable_events {
-        let deltas = event_to_deltas(&event, state.has_messages);
-        if deltas.is_empty() {
-            continue;
-        }
-        let cursor = event_cursor(&state.runtime, &event).await;
-        let items: std::collections::VecDeque<_> = deltas
-            .into_iter()
-            .map(|delta| {
-                Ok(sse_event(&ConversationStreamEnvelopeDto {
-                    session_id: state.session_id.to_string(),
-                    cursor: ConversationCursorDto {
-                        value: cursor.clone(),
-                    },
-                    delta,
-                }))
-            })
-            .collect();
+    for notification in buffered {
+        let items = notification_to_sse_items(state, notification).await;
         state.pending.extend(items);
     }
+}
+
+async fn notification_to_sse_items(
+    state: &mut LiveStreamState,
+    notification: ClientNotification,
+) -> Vec<SseItem> {
+    match notification {
+        ClientNotification::Event(event) if event.session_id == state.session_id => {
+            if state
+                .replay_max_seq
+                .zip(event.seq)
+                .is_some_and(|(max_seq, event_seq)| event_seq <= max_seq)
+            {
+                return Vec::new();
+            }
+            if event_adds_message(&event) {
+                state.has_messages = true;
+            }
+            let deltas = event_to_deltas(&event, state.has_messages);
+            if deltas.is_empty() {
+                return Vec::new();
+            }
+            let cursor = event_cursor(&state.runtime, &event).await;
+            deltas
+                .into_iter()
+                .map(|delta| {
+                    Ok(sse_event(&ConversationStreamEnvelopeDto {
+                        session_id: state.session_id.to_string(),
+                        cursor: ConversationCursorDto {
+                            value: cursor.clone(),
+                        },
+                        delta,
+                    }))
+                })
+                .collect()
+        },
+        ClientNotification::StatusItemUpdate { id, text } => {
+            let cursor = state_cursor(&state.runtime, &state.session_id).await;
+            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
+                session_id: state.session_id.to_string(),
+                cursor: ConversationCursorDto { value: cursor },
+                delta: ConversationDeltaDto::StatusItemUpdate { id, text },
+            }))]
+        },
+        ClientNotification::ExtensionRegistryChanged => {
+            let cursor = state_cursor(&state.runtime, &state.session_id).await;
+            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
+                session_id: state.session_id.to_string(),
+                cursor: ConversationCursorDto { value: cursor },
+                delta: ConversationDeltaDto::ExtensionRegistryChanged,
+            }))]
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn event_adds_message(event: &Event) -> bool {
+    matches!(
+        event.payload,
+        EventPayload::UserMessage { .. } | EventPayload::AssistantMessageCompleted { .. }
+    )
 }
 
 fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {

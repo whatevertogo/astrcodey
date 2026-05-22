@@ -347,6 +347,47 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 
     let body = read_sse_until(stream_response.into_body(), r#""phase":"idle""#).await;
     assert!(body.contains(r#""canSubmitPrompt":true"#));
+    assert!(body.contains(r#""canRequestCompact":true"#));
+}
+
+#[tokio::test]
+async fn stream_preserves_global_updates_during_replay_drain() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+
+    runtime
+        .event_store
+        .append_event(Event::new(
+            sid,
+            None,
+            EventPayload::UserMessage {
+                message_id: "missed-message".into(),
+                text: "missed while reconnecting".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=1"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    event_tx.send(ClientNotification::ExtensionRegistryChanged);
+
+    let body = read_sse_until(response.into_body(), "extensionRegistryChanged").await;
+    assert!(body.contains("missed while reconnecting"));
+    assert!(body.contains("extensionRegistryChanged"));
 }
 
 #[tokio::test]

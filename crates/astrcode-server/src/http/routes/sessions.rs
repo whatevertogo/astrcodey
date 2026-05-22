@@ -306,17 +306,23 @@ fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotRespons
         .first_user_message()
         .unwrap_or_else(|| session_title(&session.working_dir));
 
-    let mut blocks = messages_to_blocks(&session.messages, &session.background_tool_calls);
-    for boundary in &session.compact_boundaries {
-        blocks.push(ConversationBlockDto::CompactSummary {
+    // compact boundary blocks 在前（代表被压缩的历史），retained message blocks 在后
+    let mut blocks: Vec<ConversationBlockDto> = session
+        .compact_boundaries
+        .iter()
+        .map(|boundary| ConversationBlockDto::CompactSummary {
             id: format!("compact-{}", boundary.seq),
             summary: boundary.summary.clone(),
             trigger: boundary.trigger.clone(),
             pre_tokens: boundary.pre_tokens,
             post_tokens: boundary.post_tokens,
             transcript_path: boundary.transcript_path.clone(),
-        });
-    }
+        })
+        .collect();
+    blocks.extend(messages_to_blocks(
+        &session.messages,
+        &session.background_tool_calls,
+    ));
 
     ConversationSnapshotResponseDto {
         session_id: session.session_id.to_string(),
@@ -420,6 +426,96 @@ mod tests {
             },
             other => panic!("unexpected block: {other:?}"),
         }
+    }
+
+    #[test]
+    fn conversation_snapshot_places_compact_summary_before_retained_messages() {
+        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+
+        let mut session = SessionReadModel::empty("session-compact".into());
+        session.working_dir = "D:/work/project".into();
+        session.latest_seq = Some(7);
+        // compact 之后的 retained messages
+        session.messages.push(LlmMessage::user("recent user"));
+        session
+            .messages
+            .push(LlmMessage::assistant("recent assistant"));
+        // compact boundary 元数据
+        session.compact_boundaries.push(CompactBoundaryView {
+            trigger: "manual_command".into(),
+            pre_tokens: 1000,
+            post_tokens: 200,
+            summary: "Earlier conversation was compacted".into(),
+            transcript_path: None,
+            seq: 5,
+            base_event_seq: 4,
+            strategy: CompactStrategy::Manual {
+                keep_recent_turns: None,
+            },
+        });
+
+        let dto = conversation_to_dto(session);
+
+        // 顺序：CompactSummary → User → Assistant
+        assert_eq!(dto.blocks.len(), 3);
+        assert!(matches!(
+            &dto.blocks[0],
+            ConversationBlockDto::CompactSummary { .. }
+        ));
+        assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
+        assert!(matches!(
+            &dto.blocks[2],
+            ConversationBlockDto::Assistant { .. }
+        ));
+    }
+
+    #[test]
+    fn conversation_snapshot_multiple_compacts_are_ordered_before_messages() {
+        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+
+        let mut session = SessionReadModel::empty("session-multi-compact".into());
+        session.working_dir = "D:/work/project".into();
+        session.latest_seq = Some(20);
+        session.messages.push(LlmMessage::user("latest user"));
+        // 两次 compact，按 seq 递增
+        session.compact_boundaries.push(CompactBoundaryView {
+            trigger: "auto_threshold".into(),
+            pre_tokens: 800,
+            post_tokens: 100,
+            summary: "First compaction".into(),
+            transcript_path: None,
+            seq: 5,
+            base_event_seq: 4,
+            strategy: CompactStrategy::Auto,
+        });
+        session.compact_boundaries.push(CompactBoundaryView {
+            trigger: "auto_threshold".into(),
+            pre_tokens: 600,
+            post_tokens: 80,
+            summary: "Second compaction".into(),
+            transcript_path: None,
+            seq: 12,
+            base_event_seq: 11,
+            strategy: CompactStrategy::Auto,
+        });
+
+        let dto = conversation_to_dto(session);
+
+        // 顺序：CompactSummary(seq5) → CompactSummary(seq12) → User
+        assert_eq!(dto.blocks.len(), 3);
+        match &dto.blocks[0] {
+            ConversationBlockDto::CompactSummary { id, .. } => {
+                assert_eq!(id, "compact-5");
+            },
+            other => panic!("expected CompactSummary, got {other:?}"),
+        }
+        match &dto.blocks[1] {
+            ConversationBlockDto::CompactSummary { id, .. } => {
+                assert_eq!(id, "compact-12");
+            },
+            other => panic!("expected CompactSummary, got {other:?}"),
+        }
+        assert!(matches!(&dto.blocks[2], ConversationBlockDto::User { .. }));
     }
 
     #[test]

@@ -71,9 +71,7 @@ impl CommandHandler {
         text: String,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (tx, rx) = oneshot::channel();
-        let turn_id = self
-            .start_turn_for_session(sid, text, Some(tx))
-            .await?;
+        let turn_id = self.start_turn_for_session(sid, text, Some(tx)).await?;
         Ok((turn_id, rx))
     }
 
@@ -180,7 +178,7 @@ impl CommandHandler {
     }
 
     /// 执行活跃 Turn 的中止逻辑：扩展通知、任务清理、事件写入。
-    async fn abort_active_turn_inner(&self, mut active_turn: ActiveTurn) {
+    pub(in crate::handler) async fn abort_active_turn_inner(&self, mut active_turn: ActiveTurn) {
         // 从 session 读取 working_dir 和 model_id 构建 lifecycle context
         if let Ok(session_state) = active_turn.session.read_model().await {
             let lifecycle_ctx = LifecycleContext {

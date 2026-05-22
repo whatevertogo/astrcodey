@@ -156,15 +156,11 @@ impl CommandHandler {
 
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
+                if let Some(active_turn) = self.active_turns.remove(&session_id) {
+                    self.abort_active_turn_inner(active_turn).await;
+                }
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {
-                        // 中止该会话的活跃回合并清理资源
-                        if let Some(mut turn) = self.active_turns.remove(&session_id) {
-                            if !turn.handle.is_finished() {
-                                turn.handle.abort();
-                            }
-                            turn.resolve_completion(turn::TurnCompletion::Aborted);
-                        }
                         if self.active_session_id.as_ref() == Some(&session_id) {
                             self.active_session_id = None;
                         }

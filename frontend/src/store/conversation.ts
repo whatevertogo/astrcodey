@@ -32,6 +32,7 @@ interface ConversationState {
   agentSessions: AgentSessionLink[]
   statusItems: Record<string, string>
   transientHint: string | null
+  queuedMessages: string[]
 
   initServer: () => Promise<void>
   refreshSessions: () => Promise<void>
@@ -185,6 +186,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   agentSessions: [],
   statusItems: {},
   transientHint: null,
+  queuedMessages: [],
 
   initServer: async () => {
     set({ connectionStatus: 'connecting', connectionError: null })
@@ -254,6 +256,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         compactSubmitting: false,
         workingDir: null,
         agentSessions: [],
+        queuedMessages: [],
       })
     }
     await get().refreshSessions()
@@ -281,6 +284,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         compactSubmitting: false,
         workingDir: null,
         agentSessions: [],
+        queuedMessages: [],
       })
     }
     await get().refreshSessions()
@@ -304,6 +308,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
       compactSubmitting: false,
       agentSessions: [],
       transientHint: null,
+      queuedMessages: [],
     })
 
     try {
@@ -348,8 +353,8 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   },
 
   submitPrompt: async (text: string) => {
-    const { activeSessionId, control } = get()
-    if (!activeSessionId || !control?.canSubmitPrompt) {
+    const { activeSessionId } = get()
+    if (!activeSessionId) {
       return false
     }
 
@@ -368,12 +373,9 @@ export const useAppStore = create<ConversationState>((set, get) => ({
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
         } else if (response.message === 'queued for next turn') {
-          set({ transientHint: '已加入队列，将在下一轮自动执行' })
-          setTimeout(() => {
-            if (get().transientHint === '已加入队列，将在下一轮自动执行') {
-              set({ transientHint: null })
-            }
-          }, 2500)
+          set((current) => ({
+            queuedMessages: [...current.queuedMessages, text],
+          }))
         } else if (response.message.trim()) {
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
@@ -406,6 +408,10 @@ export const useAppStore = create<ConversationState>((set, get) => ({
       case 'appendBlock':
         set((current) => ({
           blocks: upsertBlock(current.blocks, delta.block),
+          queuedMessages:
+            delta.block.kind === 'user' && current.queuedMessages.length > 0
+              ? current.queuedMessages.slice(1)
+              : current.queuedMessages,
         }))
         // 新用户消息到达时刷新侧边栏标题
         if (delta.block.kind === 'user') {

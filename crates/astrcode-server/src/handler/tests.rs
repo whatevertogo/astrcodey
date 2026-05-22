@@ -1623,10 +1623,9 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
     // transcript 记录的是 skill 展开后的内容（统一路径，与 agent 实际接收一致）
     let state = runtime.event_store.session_read_model(&sid).await.unwrap();
     assert!(
-        state
-            .messages
-            .iter()
-            .any(|message| message_to_dto(message).content.contains("<skill-name>reviewnow</skill-name>")),
+        state.messages.iter().any(|message| message_to_dto(message)
+            .content
+            .contains("<skill-name>reviewnow</skill-name>")),
         "transcript should contain resolved skill content"
     );
     let _ = fs::remove_dir_all(workspace);
