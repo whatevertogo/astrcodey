@@ -426,6 +426,8 @@ async fn background_tool_call(
     let bg_result_tx = runtime.capabilities.background_result_tx.clone();
     let bg_manager = runtime.capabilities.background_tasks.clone();
     let register_task_id = task_id.clone();
+    let bg_arguments = call.tool_input.to_string();
+    let bg_arguments_json = Some(call.tool_input.clone());
 
     let watcher_handle = tokio::spawn(async move {
         // 等待 exec 完成（或被 cancel abort 导致 oneshot 断开）
@@ -469,6 +471,8 @@ async fn background_tool_call(
                 task_id: bg_task_id.clone(),
                 tool_name: bg_tool_name,
                 result,
+                arguments: bg_arguments,
+                arguments_json: bg_arguments_json,
             });
         }
 

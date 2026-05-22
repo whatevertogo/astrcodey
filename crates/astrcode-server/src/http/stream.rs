@@ -50,6 +50,9 @@ struct LiveStreamState {
         std::collections::VecDeque<Result<axum::response::sse::Event, std::convert::Infallible>>,
     /// 会话是否已有消息，用于正确计算 can_request_compact。
     has_messages: bool,
+    /// 是否已完成初始 stale event 排水。
+    /// replay_max_seq 存在时为 false，首次 unfold 调用时执行一次性排水。
+    drained: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,10 +147,21 @@ pub(in crate::http) async fn session_stream(
             closing: false,
             pending: std::collections::VecDeque::new(),
             has_messages,
+            drained: false,
         },
         |mut state| async move {
             if state.closing {
                 return None;
+            }
+
+            // 首次进入 live 阶段时，一次性排空 rx 缓冲区中的 stale 事件。
+            // replay 阶段已通过 durable event 重建了完整状态；缓冲区中的 live-only
+            // 事件（AssistantTextDelta / ToolOutputDelta 等，无 seq）属于 replay
+            // 覆盖时段的残留，送达后会导致前端对已 finalize 的 block 重复追加。
+            // 排水仅丢弃 live-only 事件；seq > replay_max_seq 的 durable 事件保留。
+            if !state.drained {
+                state.drained = true;
+                drain_stale_live_events(&mut state).await;
             }
 
             if let Some(item) = state.pending.pop_front() {
@@ -239,6 +253,55 @@ async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String
             );
             "0".to_string()
         },
+    }
+}
+
+/// 一次性排空 rx 缓冲区，丢弃 replay 时段残留的 live-only 事件。
+///
+/// 仅在有 replay_max_seq 时有效（即客户端携带 cursor 连接、有历史事件重放）。
+/// durable 事件（带 seq）且 seq > replay_max_seq 的保留到 pending。
+async fn drain_stale_live_events(state: &mut LiveStreamState) {
+    let Some(replay_max) = state.replay_max_seq else {
+        return;
+    };
+    let mut new_durable_events = Vec::new();
+    loop {
+        match state.rx.try_recv() {
+            Ok(ClientNotification::Event(event)) if event.session_id == state.session_id => {
+                // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
+                let Some(seq) = event.seq else {
+                    continue;
+                };
+                // 已被 replay 覆盖的 durable 事件也丢弃。
+                if seq <= replay_max {
+                    continue;
+                }
+                new_durable_events.push(event);
+            },
+            // 非目标 session 事件、StatusItemUpdate、ExtensionRegistryChanged 等丢弃。
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    for event in new_durable_events {
+        let deltas = event_to_deltas(&event, state.has_messages);
+        if deltas.is_empty() {
+            continue;
+        }
+        let cursor = event_cursor(&state.runtime, &event).await;
+        let items: std::collections::VecDeque<_> = deltas
+            .into_iter()
+            .map(|delta| {
+                Ok(sse_event(&ConversationStreamEnvelopeDto {
+                    session_id: state.session_id.to_string(),
+                    cursor: ConversationCursorDto {
+                        value: cursor.clone(),
+                    },
+                    delta,
+                }))
+            })
+            .collect();
+        state.pending.extend(items);
     }
 }
 

@@ -19,6 +19,8 @@ pub struct BackgroundTaskCompletion {
     pub task_id: BackgroundTaskId,
     pub tool_name: String,
     pub result: ToolResult,
+    pub arguments: String,
+    pub arguments_json: Option<serde_json::Value>,
 }
 
 impl BackgroundTaskCompletion {
@@ -31,8 +33,8 @@ impl BackgroundTaskCompletion {
             call_id: call_id.clone(),
             tool_name: self.tool_name.clone(),
             result: self.result.clone(),
-            arguments: String::new(),
-            arguments_json: None,
+            arguments: self.arguments,
+            arguments_json: self.arguments_json,
         };
         let background_task_completed = EventPayload::BackgroundTaskCompleted {
             task_id: self.task_id,
