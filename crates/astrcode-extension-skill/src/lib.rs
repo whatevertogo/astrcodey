@@ -299,9 +299,10 @@ struct SkillToolArgs {
 fn skill_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SKILL_TOOL_NAME.into(),
-        description: "Load a named skill's instructions into the conversation. Call this when the \
-                      current task matches a skill listed in [Skills], or when the user invokes \
-                      it via slash command (e.g. `/commit`)."
+        description: "Load a named skill's instructions into the conversation. The skill's rules \
+                      will govern your subsequent behavior until the skill completes.\nCall this \
+                      when the current task matches a skill listed in [Skills], or when the user \
+                      invokes it via slash command (e.g. `/commit`)."
             .into(),
         parameters: json!({
             "type": "object",

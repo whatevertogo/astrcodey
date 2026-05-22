@@ -139,9 +139,13 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
     assert!(find_files.description.contains("glob pattern"));
     assert!(grep.description.contains("regex or literal"));
     assert!(grep.description.contains("files_with_matches"));
-    assert!(read_file.description.contains("Read a file"));
-    assert!(write_file.description.contains("Create or fully replace"));
-    assert!(edit_file.description.contains("Replace exact strings"));
+    assert!(read_file.description.contains("Reads a file"));
+    assert!(
+        write_file
+            .description
+            .contains("Creates a new file or completely overwrites")
+    );
+    assert!(edit_file.description.contains("exact string replacements"));
 }
 
 #[tokio::test]

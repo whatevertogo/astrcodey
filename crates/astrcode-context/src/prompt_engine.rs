@@ -71,7 +71,10 @@ const TASK_GUIDELINES: &str =
      flag it immediately.\n\nVerify before claiming completion: run relevant tests, check the \
      build. If you cannot verify, say so explicitly. Never manufacture passing results.\n\nFor \
      multi-file changes, complete all edits before reporting success. Do not present partial \
-     states as finished work.";
+     states as finished work.\n\nGit workflow: create new commits for changes. Never amend or \
+     force-push existing commits. Never skip git hooks (`--no-verify`, `--no-hooks`). Fetch first \
+     before pushing to check for remote changes. Do not modify git configuration (user.name, \
+     user.email, etc.).";
 
 const COMMUNICATION: &str =
     "Write for the reader, not for a console log. Before your first tool call, briefly state what \
@@ -504,8 +507,8 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
     }
 
     let mut lines = vec![
-        "Use the narrowest tool that can answer the request. Prefer read-only inspection before \
-         mutation."
+        "Prefer the narrowest tool that can answer the request. Read before you write; search \
+         before you ask."
             .to_string(),
         "All file paths passed to builtin file tools must stay inside the working directory \
          unless the tool explicitly accepts a persisted result reference."
@@ -514,18 +517,30 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
          context and inspect it with `read` chunks instead of asking the tool to inline the whole \
          result again."
             .to_string(),
+        "Avoid using `shell` for operations that have dedicated tools — dedicated tools produce \
+         more reliable results."
+            .to_string(),
         String::new(),
         "## Tool Selection Guide".to_string(),
-        "- Read files → `read`".to_string(),
+        "Reading:".to_string(),
+        "- Read file content → `read`".to_string(),
+        "Searching:".to_string(),
         "- Search file contents → `grep`".to_string(),
         "- Find files by name pattern → `find`".to_string(),
+        "Modifying:".to_string(),
         "- Edit existing files (preferred) → `edit`".to_string(),
-        "- Write new files → `write`".to_string(),
+        "- Create new files → `write`".to_string(),
         "- Multi-file changes or file creation/deletion → `patch`".to_string(),
-        "- Execute commands (package install, tests, builds, git) → `shell`".to_string(),
-        "- Interactive REPLs or debuggers → `terminal`".to_string(),
-        "- Complex multi-step tasks → `agent`".to_string(),
+        "Executing:".to_string(),
+        "- Run commands (tests, builds, git, installs) → `shell`".to_string(),
         "- Long-running work → `shell` with `runInBackground=true`".to_string(),
+        "- Interactive REPLs or debuggers → `terminal`".to_string(),
+        "Planning & Discovery:".to_string(),
+        "- Track progress → `todoWrite`".to_string(),
+        "- Switch to planning mode → `switchMode`".to_string(),
+        "- Load a skill → `Skill`".to_string(),
+        "- Find external MCP tools → `tool_search_tool`".to_string(),
+        "- Delegate multi-step tasks → `agent`".to_string(),
         String::new(),
     ];
 
@@ -553,7 +568,12 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
     if !regular.is_empty() {
         lines.push("Builtin Tools".into());
         for tool in &regular {
-            lines.push(format!("- `{}`", tool.name));
+            let short = tool_short_description(&tool.name);
+            if short.is_empty() {
+                lines.push(format!("- `{}`", tool.name));
+            } else {
+                lines.push(format!("- `{}`: {}", tool.name, short));
+            }
         }
     }
 
@@ -561,11 +581,9 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
         lines.push(String::new());
         lines.push("Agent Collaboration Tools".into());
         lines.push(
-            "- Use the agent tool to delegate isolated tasks to specialized subagents, but do not \
-             use it excessively. For simple, directed searches (e.g. for a specific file, symbol, \
-             or function), use find/grep directly. For broader exploration, use agent with \
-             subagentType=explore only when a simple search proves insufficient or when the task \
-             will clearly require more than 3 queries."
+            "- Use `agent` to delegate isolated tasks to specialized subagents. For simple, \
+             directed searches, use `find`/`grep` directly. For broader exploration, use agent \
+             with `subagentType=explore` when a simple search proves insufficient."
                 .into(),
         );
         for tool in &collab {
@@ -647,6 +665,27 @@ fn tool_summary_rank(name: &str) -> u8 {
         "edit" => 91,
         "write" => 92,
         _ => 50,
+    }
+}
+
+/// One-line summary for each builtin tool, shown in the Tool Summary list.
+fn tool_short_description(name: &str) -> &'static str {
+    match name {
+        "read" => "read file content with line numbers",
+        "find" => "find files by glob pattern",
+        "grep" => "search file contents by regex or literal text",
+        "shell" => "execute shell commands",
+        "task" => "manage background shell tasks",
+        "terminal" => "manage interactive PTY sessions",
+        "tool_search_tool" => "find MCP tools by name or keyword",
+        "Skill" => "load a named skill's instructions",
+        "todoWrite" => "update session progress todo list",
+        "switchMode" => "switch between code and plan modes",
+        "upsertSessionPlan" => "create or update the session plan",
+        "patch" => "apply unified diff across multiple files",
+        "edit" => "exact string replacement in a file",
+        "write" => "create or completely overwrite a file",
+        _ => "",
     }
 }
 

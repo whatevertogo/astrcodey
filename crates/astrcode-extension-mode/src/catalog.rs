@@ -45,14 +45,6 @@ pub const PLAN_REQUIRED_HEADINGS: &[&str] = &[
     "Assumptions",
 ];
 
-/// Review checklist shown to the LLM during the exit gate.
-pub const EXIT_REVIEW_CHECKLIST: &[&str] = &[
-    "Are all assumptions in the plan verified against the actual code?",
-    "Are edge cases and affected files identified?",
-    "Are verification steps concrete and sufficient?",
-    "Is the plan executable as-is?",
-];
-
 /// Tools blocked in plan mode.
 const PLAN_RESTRICTED_TOOLS: &[&str] = &[];
 
@@ -68,8 +60,6 @@ pub struct ModeSpec {
     pub allowed_transitions: Vec<ModeId>,
     /// Whether this mode requires a plan artifact to exist before allowing exit.
     pub requires_plan_artifact: bool,
-    /// Number of review passes required before exiting this mode.
-    pub exit_review_passes: u32,
 }
 
 /// Registry of available modes with lookup by ID.
@@ -129,7 +119,6 @@ pub fn builtin_mode_specs() -> Vec<ModeSpec> {
             restricted_tools: HashSet::new(),
             allowed_transitions: transitions.clone(),
             requires_plan_artifact: false,
-            exit_review_passes: 0,
         },
         ModeSpec {
             id: ModeId::plan(),
@@ -142,7 +131,6 @@ pub fn builtin_mode_specs() -> Vec<ModeSpec> {
                 .collect(),
             allowed_transitions: transitions,
             requires_plan_artifact: true,
-            exit_review_passes: 1,
         },
     ]
 }

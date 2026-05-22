@@ -230,19 +230,17 @@ fn grep_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "grep".into(),
         description: concat!(
-            "A powerful search tool built on ripgrep.\n",
+            "Searches file contents by regex or literal text.\n",
             "Usage:\n",
-            "- ALWAYS use `grep` for content search tasks. NEVER invoke shell `grep` or `rg`.\n",
-            "- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`)\n",
-            "- Filter files with `glob` parameter (e.g., `*.js`, `**/*.tsx`) ",
-              "or `fileType` parameter (e.g., `rust`, `typescript`)\n",
-            "- Output modes: `content` shows matching lines, ",
-              "`files_with_matches` shows only file paths (default), ",
-              "`count` shows match counts\n",
-            "- For file names by pattern, use `find` instead\n",
-            "- For open-ended searches requiring multiple rounds, use `agent` instead\n",
-            "- Multiline matching: by default patterns match within single lines only. ",
-              "For cross-line patterns, set `multiline` to true",
+            "- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`). Set \
+             `literal` to true when searching for exact text that contains regex special \
+             characters.\n",
+            "- Filter by file with `glob` (e.g., `*.js`, `**/*.tsx`) or `fileType` (e.g., \
+             `rust`, `typescript`).\n",
+            "- Output modes: `content` (matching lines with context), `files_with_matches` \
+             (file paths only, default), `count` (match counts per file).\n",
+            "- For cross-line patterns, set `multiline` to true.\n",
+            "- For finding files by name, use `find`. For multi-round searches, use `agent`.",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,

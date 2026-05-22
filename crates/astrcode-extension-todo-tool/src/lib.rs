@@ -37,7 +37,8 @@ Update the todo list for the current session. To be used proactively to track pr
 - Always send the full current list, not a patch.
 - Keep exactly one item `in_progress` at a time.
 - Each item must have `content` (imperative: \"Fix auth bug\") and `activeForm` (continuous: \
-                                      \"Fixing auth bug\").
+                                      \"Fixing auth bug\"). The `activeForm` is shown to the user \
+                                      as a real-time status indicator.
 - Only mark `completed` when FULLY accomplished — if tests fail or implementation is partial, keep \
                                       `in_progress`.";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;

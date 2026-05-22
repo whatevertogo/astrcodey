@@ -15,9 +15,6 @@ pub(crate) struct ModeState {
     /// Set when a transition just happened; cleared after injection.
     #[serde(default, alias = "pendingTransitionContext")]
     pub pending_transition_context: Option<String>,
-    /// Exit gate: number of review passes completed during current plan mode session.
-    #[serde(default, alias = "exitReviewPassesCompleted")]
-    pub exit_review_passes_completed: u32,
 }
 
 impl ModeState {
@@ -26,7 +23,6 @@ impl ModeState {
             current_mode: "code".into(),
             previous_mode: None,
             pending_transition_context: None,
-            exit_review_passes_completed: 0,
         }
     }
 }
@@ -115,7 +111,6 @@ mod tests {
         let state = ModeState::initial();
         assert_eq!(state.current_mode, "code");
         assert!(state.previous_mode.is_none());
-        assert_eq!(state.exit_review_passes_completed, 0);
     }
 
     #[test]
@@ -125,7 +120,6 @@ mod tests {
             current_mode: "plan".into(),
             previous_mode: Some("code".into()),
             pending_transition_context: Some("entered plan".into()),
-            exit_review_passes_completed: 1,
         };
         save_mode_state(&root, &state).unwrap();
         let loaded = load_mode_state(&root).unwrap();

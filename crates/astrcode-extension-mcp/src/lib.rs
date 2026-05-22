@@ -396,8 +396,8 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
 fn tool_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL_SEARCH_TOOL_NAME.into(),
-        description: "Find an external MCP tool by name or keyword and return its schema. Call \
-                      this only when builtin tools \
+        description: "Find an external MCP tool by name or keyword and return its input schema \
+                      (not execute it). Call this only when builtin tools \
                       (`read`/`grep`/`find`/`edit`/`patch`/`write`/`shell`) cannot accomplish the \
                       task. After it returns, call the matching `mcp__...` tool directly using \
                       the schema shown."

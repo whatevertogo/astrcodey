@@ -127,18 +127,19 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
         description: concat!(
-            "Performs exact string replacements in files.\n",
+            "Performs exact string replacements in an existing file.\n",
             "Usage:\n",
             "- You MUST `read` the file first. This tool will error if you haven't.\n",
             "- When editing text from `read` output, preserve the exact indentation (tabs/spaces) ",
-              "as it appears AFTER the line number prefix (line number + tab). ",
-              "Never include any part of the line number prefix in `oldStr` or `newStr`.\n",
-            "- ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.\n",
+              "as it appears AFTER the line number prefix. ",
+              "Never include line numbers in `oldStr` or `newStr`.\n",
             "- The edit will FAIL if `oldStr` is not unique in the file. ",
-              "Either provide a larger string with more surrounding context to make it unique, ",
-              "or use `replaceAll` to change every instance.\n",
-            "- Use `replaceAll` for renaming variables or replacing strings across the file.\n",
-            "- Use `edits` for multiple replacements in one call; use `patch` for multi-file changes.",
+              "Provide more surrounding context to make it unique, or use `replaceAll`.\n",
+            "- Use `replaceAll` to rename variables or replace strings across the file.\n",
+            "- Use `edits` for multiple replacements in one call — all replacements are applied \
+             atomically (all succeed or none are written). Use `patch` for multi-file changes.\n",
+            "- If the file was modified externally since your last `read`, the edit will be \
+             rejected. Re-`read` the file and retry.",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,

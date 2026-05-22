@@ -186,14 +186,19 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "patch".into(),
         description: concat!(
-            "Apply a unified diff for multi-file changes, file creation, or deletion.\n",
+            "Applies a unified diff to one or more files. Use for multi-file changes, file \
+             creation, or deletion.\n",
             "Usage:\n",
-            "- If some hunks fail, successful ones are still applied (partial commit).\n",
             "- For single-file edits, prefer `edit` — `patch` is for multi-file or distant \
              changes.\n",
-            "- Use `patch` to create new files (`--- /dev/null` → `+++ path`) or delete files.\n",
-            "- The diff format follows standard unified diff: `--- a/path`, `+++ b/path`, ",
-            "`@@ ... @@` hunk headers, then ` ` (context), `+` (add), `-` (remove) lines.",
+            "- If some hunks fail, successful ones are still applied (partial commit).\n",
+            "- Create a new file with `--- /dev/null` → `+++ path`. Delete a file with `--- path` \
+             → `+++ /dev/null`.\n",
+            "- Context lines (space-prefixed) must match the original file exactly, including \
+             indentation and whitespace.\n",
+            "- The `a/` and `b/` prefixes in `---` and `+++` paths are stripped automatically.\n",
+            "- Standard unified diff format: `--- a/path`, `+++ b/path`, `@@ ... @@` hunk \
+             headers, then ` ` (context), `+` (add), `-` (remove) lines.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

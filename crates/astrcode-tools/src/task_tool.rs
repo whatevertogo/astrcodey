@@ -91,10 +91,15 @@ fn task_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "task".into(),
-        description: "Manage background shell tasks. `action=list` shows running tasks; \
-                      `action=cancel` stops one by ID. Use after launching a background `shell` \
-                      to check or clean up."
-            .into(),
+        description: concat!(
+            "Manages background shell tasks.\n",
+            "Usage:\n",
+            "- `action=list`: shows all running background tasks with their status and output.\n",
+            "- `action=cancel`: stops a task by ID. Use when a background task is no longer \
+             needed.\n",
+            "- After launching a background `shell`, use this tool to check progress or clean up.",
+        )
+        .into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({
