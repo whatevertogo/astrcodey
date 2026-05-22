@@ -259,6 +259,14 @@ pub enum EventPayload {
     /// boundary / continuation 事件。
     CompactionStarted,
 
+    /// 上下文压缩已完成。
+    ///
+    /// 持久化事件，记录压缩操作的结果，用于通知 TUI 更新状态和自动触发队列中的输入。
+    CompactionCompleted {
+        /// 被移除的消息数量。
+        messages_removed: usize,
+    },
+
     /// compact 在父会话中创建了 continuation 边界。
     CompactBoundaryCreated {
         /// compact 触发来源，例如 `manual_command`。
@@ -398,7 +406,6 @@ impl EventPayload {
                 | Self::ThinkingDelta { .. }
                 | Self::ToolCallArgumentsDelta { .. }
                 | Self::ToolOutputDelta { .. }
-                | Self::CompactionStarted
                 | Self::AgentRunStarted
                 | Self::AgentRunCompleted { .. }
                 | Self::ToolCallBackgrounded { .. }
@@ -527,10 +534,6 @@ mod tests {
                 },
             }
             .is_durable()
-        );
-        assert!(
-            !EventPayload::CompactionStarted.is_durable(),
-            "CompactionStarted is live UI state only"
         );
         assert!(
             !EventPayload::ThinkingDelta {

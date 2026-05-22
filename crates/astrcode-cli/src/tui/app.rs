@@ -30,6 +30,7 @@ pub struct App {
     pub status_text: String,
     pub error: Option<String>,
     pub is_streaming: bool,
+    pub is_compacting: bool,
     pub should_quit: bool,
     /// Ctrl+C 二次确认：首次按下后等待第二次确认退出。
     pub quit_pending: bool,
@@ -110,6 +111,7 @@ impl App {
             status_text: "Ready".into(),
             error: None,
             is_streaming: false,
+            is_compacting: false,
             should_quit: false,
             quit_pending: false,
             extension_commands: Vec::new(),

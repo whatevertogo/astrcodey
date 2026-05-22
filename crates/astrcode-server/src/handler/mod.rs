@@ -85,6 +85,8 @@ pub struct CommandHandler {
     active_turns: HashMap<SessionId, ActiveTurn>,
     /// 输入排队队列：当 session 正在执行 turn 时，后续输入排队到下一 turn。
     queued_inputs: HashMap<SessionId, VecDeque<String>>,
+    /// 正在压缩的 session 集合，用于在 compact 期间排队输入。
+    compacting_sessions: std::collections::HashSet<SessionId>,
     /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
     actor_tx: mpsc::UnboundedSender<CommandMessage>,
     /// 模型选择流程。

@@ -259,6 +259,7 @@ impl CommandHandler {
             active_session_id: None,
             active_turns: HashMap::new(),
             queued_inputs: HashMap::new(),
+            compacting_sessions: std::collections::HashSet::new(),
             actor_tx,
             model_selection,
         }
@@ -375,7 +376,9 @@ impl CommandHandler {
                 text,
                 reply,
             } => {
-                if self.active_turns.contains_key(&session_id) {
+                if self.active_turns.contains_key(&session_id)
+                    || self.compacting_sessions.contains(&session_id)
+                {
                     self.enqueue_input_for_next_turn(session_id, text);
                     let _ = reply.send(Ok(PromptSubmission::Handled {
                         message: "queued for next turn".into(),
@@ -393,7 +396,14 @@ impl CommandHandler {
                 }
             },
             CommandMessage::CompactSession { session_id, reply } => {
-                let _ = reply.send(self.compact_session(&session_id).await);
+                let sid = session_id.clone();
+                let result = self.compact_session(&session_id).await;
+                // Compact 完成后移除 compacting 状态并触发队列
+                if matches!(result, Ok(ManualCompactOutcome::Compacted { .. })) {
+                    self.compacting_sessions.remove(&sid);
+                    self.maybe_start_queued_turn(&sid).await;
+                }
+                let _ = reply.send(result);
             },
             CommandMessage::AbortSession { session_id, reply } => {
                 let _ = reply.send(self.abort_session(&session_id).await);

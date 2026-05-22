@@ -362,13 +362,36 @@ fn apply_event(app: &mut App, event: &Event) {
             tracing::debug!(call_id = %call_id, tool = %tool_name, is_error = result.is_error, "tool_close");
         },
         EventPayload::CompactionStarted => {
+            app.is_compacting = true;
             app.push_message(
                 MessageRole::System,
-                "System".into(),
+                "Compacting".into(),
                 "Compacting context...".into(),
                 true,
                 Some("compaction".into()),
             );
+            app.status_text = "Compacting...".into();
+        },
+        EventPayload::CompactionCompleted { messages_removed } => {
+            app.is_compacting = false;
+
+            // 更新 streaming 消息为完成状态
+            if let Some(idx) = app
+                .messages
+                .iter()
+                .position(|m| m.key.as_deref() == Some("compaction"))
+            {
+                app.messages.remove(idx);
+            }
+
+            app.push_message(
+                MessageRole::System,
+                "Compacted".into(),
+                format!("Compacted (removed {} messages)", messages_removed),
+                false,
+                None,
+            );
+            app.status_text = "Ready".into();
         },
         EventPayload::ErrorOccurred { message, .. } => {
             app.show_error(message);
@@ -555,6 +578,8 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     app.stream_states.clear();
     app.child_agents.clear();
     app.child_session_map.clear();
+    // 重置 compacting 状态，防止状态不一致
+    app.is_compacting = false;
 
     for message in &snapshot.messages {
         let role = match message.role.as_str() {
