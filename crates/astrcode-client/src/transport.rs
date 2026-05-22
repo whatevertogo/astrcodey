@@ -20,7 +20,9 @@ use astrcode_protocol::{
     },
     version::{ClientInfo, InitializeRequest, InitializeResponse},
 };
+use astrcode_support::event_fanout::EventFanout;
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 /// 客户端与服务端之间的传输层接口。
 ///
@@ -36,26 +38,20 @@ pub trait ClientTransport: Send + Sync {
     /// 发送命令并等待第一个响应事件。
     ///
     /// 这是 `send` + `subscribe` 的便捷封装：先订阅事件流，再发送命令，
-    /// 然后循环接收直到拿到第一条有效事件。跳过因消费滞后导致的 `Lagged` 错误。
+    /// 然后循环接收直到拿到第一条有效事件。
     async fn execute(&self, command: &ClientCommand) -> Result<ClientNotification, TransportError> {
         let mut rx = self.subscribe().await?;
         self.send(command).await?;
-        loop {
-            match rx.recv().await {
-                Ok(event) => return Ok(event),
-                // 消费滞后时跳过，继续等待下一条有效事件。
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(TransportError::StreamDisconnected);
-                },
-            }
+        match rx.recv().await {
+            Some(event) => Ok(event),
+            None => Err(TransportError::StreamDisconnected),
         }
     }
 
-    /// 订阅服务端事件流，返回一个广播接收端。
+    /// 订阅服务端事件流，返回一个 mpsc 接收端。
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError>;
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError>;
 }
 
 pub use astrcode_protocol::transport::TransportError;
@@ -69,8 +65,8 @@ pub struct StdioClientTransport {
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     /// 下一条 JSON-RPC request id。
     next_id: AtomicU64,
-    /// 事件广播发送端，读取线程通过它将事件分发给所有订阅者。
-    event_tx: tokio::sync::broadcast::Sender<ClientNotification>,
+    /// 事件 fan-out 通道，读取线程通过它将事件分发给所有订阅者。
+    event_tx: Arc<EventFanout<ClientNotification>>,
     /// 子进程句柄，持有以确保子进程生命周期与传输层一致。
     _child: std::process::Child,
 }
@@ -143,9 +139,9 @@ impl StdioClientTransport {
             )));
         }
 
-        // 创建广播通道，容量 16384 应对高速事件流和子 agent 并发。
-        let (event_tx, _) = tokio::sync::broadcast::channel(16384);
-        let tx = event_tx.clone();
+        // 创建事件 fan-out 通道，读取线程通过它将事件分发给所有订阅者。
+        let event_tx = Arc::new(EventFanout::new());
+        let tx = Arc::clone(&event_tx);
 
         // 启动后台读取线程，从子进程 stdout 逐行解析事件并广播。
         std::thread::spawn(move || {
@@ -161,12 +157,12 @@ impl StdioClientTransport {
                     continue;
                 };
                 if let Ok(event) = notification_from_jsonrpc_message(&message) {
-                    let _ = tx.send(event);
+                    tx.send(event);
                     continue;
                 }
                 if let Some(result) = message.result {
                     if let Ok(event) = serde_json::from_value::<ClientNotification>(result) {
-                        let _ = tx.send(event);
+                        tx.send(event);
                     }
                 }
             }
@@ -200,7 +196,7 @@ impl ClientTransport for StdioClientTransport {
 
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError> {
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

@@ -7,6 +7,7 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
+use astrcode_support::event_fanout::EventFanout;
 use axum::serve::ListenerExt;
 
 #[tokio::main]
@@ -29,8 +30,7 @@ async fn main() {
             tracing::error!("Invalid ASTRCODE_HTTP_ADDR: {error}");
             std::process::exit(1);
         });
-    // TODO: 更好的capacity？
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
     let shutdown_token = runtime.shutdown_token.clone();
     let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) =

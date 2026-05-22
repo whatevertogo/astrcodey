@@ -1,28 +1,22 @@
 use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{event::Event, extension::ChildToolPolicy, tool::FileObservationStore};
+use astrcode_support::event_fanout::EventFanout;
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
-use tokio::sync::broadcast;
 
 use crate::{
     background::BackgroundTaskManager, compact_circuit_breaker::CompactCircuitBreaker,
     tool_exec::InMemoryFileObservationStore,
 };
 
-/// session 内部 broadcast channel 容量。
-///
-/// 256 是「单 session 内并发订阅者较少」的折中值；订阅者消费速度跟不上时会触发
-/// `RecvError::Lagged`，订阅者需自行通过游标补齐。
-const SESSION_EVENT_BROADCAST_CAPACITY: usize = 256;
-
 /// 单个 session 在当前进程内持有的瞬态状态。
 ///
 /// 这里的状态随 session 生命周期存在，但不属于可持久化事实。
 ///
-/// `event_tx` 故意放在 `SessionRuntimeState` 而非 `Session`：同一 sid 多次
+/// `event_out` 故意放在 `SessionRuntimeState` 而非 `Session`：同一 sid 多次
 /// `Session::open` 会得到多个 `Session` 实例（廉价的 store handle clone），
-/// 但所有实例必须共享同一份 `SessionRuntimeState`（含 broadcast）才能让所有订阅者
+/// 但所有实例必须共享同一份 `SessionRuntimeState`（含 EventFanout）才能让所有订阅者
 /// 看到全部事件。SessionRuntimeRegistry / SessionManager 保证 per-sid 唯一。
 ///
 /// 注意：直接通过 `Session::create_with_id` 而绕过 `SessionRuntimeRegistry` 创建的 session
@@ -40,14 +34,14 @@ pub struct SessionRuntimeState {
     /// 都看到一致的裁剪后工具集（含 resume 路径）。
     tool_policy: Mutex<Option<ChildToolPolicy>>,
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
-    /// 本 session 事件的 fanout 通道。同一 sid 下所有 Session 实例共享这份 sender，
+    /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
-    event_tx: broadcast::Sender<Event>,
+    event_out: Arc<EventFanout<Event>>,
 }
 
 impl Default for SessionRuntimeState {
     fn default() -> Self {
-        let (event_tx, _) = broadcast::channel(SESSION_EVENT_BROADCAST_CAPACITY);
+        let event_out = Arc::new(EventFanout::new());
         Self {
             file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
             tool_registry: Mutex::new(Arc::new(ToolRegistry::new())),
@@ -58,7 +52,7 @@ impl Default for SessionRuntimeState {
                 3,
                 Duration::from_secs(60),
             )),
-            event_tx,
+            event_out,
         }
     }
 }
@@ -107,12 +101,12 @@ impl SessionRuntimeState {
     }
 
     /// 订阅本 session 的事件流。
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
-        self.event_tx.subscribe()
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        self.event_out.subscribe()
     }
 
-    /// 向本 session 的 broadcast 推一个事件。返回是否真的发出（无订阅者时返回 false）。
-    pub(crate) fn fanout(&self, event: Event) -> bool {
-        self.event_tx.send(event).is_ok()
+    /// 向本 session 的 fan-out 通道推一个事件。
+    pub(crate) fn fanout(&self, event: Event) {
+        self.event_out.send(event);
     }
 }

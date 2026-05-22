@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use astrcode_protocol::events::ClientNotification;
+use astrcode_support::event_fanout::EventFanout;
 use axum::{
     Router,
     http::{Method, header},
@@ -10,7 +11,6 @@ use axum::{
     routing::{delete, get, post},
     serve::ListenerExt,
 };
-use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use super::{
@@ -44,12 +44,12 @@ impl From<getrandom::Error> for HttpServerError {
 /// so it can include it in `Authorization: Bearer <token>` headers.
 pub fn router(
     runtime: Arc<ServerRuntime>,
-    event_tx: broadcast::Sender<ClientNotification>,
+    event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Result<(Router, String), HttpServerError> {
     let auth_token = configured_auth_token()?;
     let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
         runtime.event_store.clone(),
-        event_tx.clone(),
+        Arc::clone(&event_tx),
     ));
     {
         let event_bus = Arc::clone(&event_bus);
@@ -143,7 +143,7 @@ pub async fn run_http_server(
     runtime: Arc<ServerRuntime>,
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
-    let (event_tx, _) = broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
     let shutdown_token = runtime.shutdown_token.clone();
     let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;

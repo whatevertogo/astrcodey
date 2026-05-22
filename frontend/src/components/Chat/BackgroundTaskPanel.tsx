@@ -3,7 +3,6 @@ import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import type { ConversationBlock } from '../../services/types'
 
-/** 工具名到人类可读标签的映射 */
 const TOOL_LABELS: Record<string, string> = {
   shell: 'Shell',
   read: 'Read',
@@ -19,32 +18,19 @@ function toolLabel(name: string): string {
   return TOOL_LABELS[name] ?? name
 }
 
-type ToolCallBlock = Extract<ConversationBlock, { kind: 'toolCall' }>
-
-function hasTaskId(
-  block: ConversationBlock
-): block is ToolCallBlock & { taskId: string } {
-  return block.kind === 'toolCall' && block.taskId !== undefined
-}
-
 function BackgroundTaskPanel() {
   const [collapsed, setCollapsed] = useState(true)
   const blocks = useAppStore((s) => s.blocks)
 
-  const bgBlocks = useMemo(() => blocks.filter(hasTaskId), [blocks])
-
   const running = useMemo(
-    () => bgBlocks.filter((b) => b.status === 'backgrounded'),
-    [bgBlocks]
+    () => blocks.filter(
+      (b): b is Extract<ConversationBlock, { kind: 'toolCall' }> & { taskId: string } =>
+        b.kind === 'toolCall' && b.taskId !== undefined && b.status === 'backgrounded'
+    ),
+    [blocks]
   )
 
-  const completed = useMemo(
-    () =>
-      bgBlocks.filter((b) => b.status === 'complete' || b.status === 'error'),
-    [bgBlocks]
-  )
-
-  if (bgBlocks.length === 0) return null
+  if (running.length === 0) return null
 
   return (
     <div className="shrink-0 border-t border-border bg-surface/80 px-4 py-0 backdrop-blur-[8px]">
@@ -69,42 +55,24 @@ function BackgroundTaskPanel() {
           <polyline points="9 18 15 12 9 6" />
         </svg>
         <span className="flex items-center gap-1.5">
-          {running.length > 0 && (
-            <>
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
-              <span>{running.length} 个后台任务运行中</span>
-            </>
-          )}
-          {running.length === 0 && completed.length > 0 && (
-            <span>{completed.length} 个后台任务已完成</span>
-          )}
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
+          <span>{running.length} 个后台任务运行中</span>
         </span>
       </button>
 
       {!collapsed && (
         <div className="flex flex-col gap-1 pb-2">
-          {bgBlocks.map((block) => (
+          {running.map((block) => (
             <div
               key={block.id}
               className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs hover:bg-black/[0.02]"
             >
-              <span
-                className={cn(
-                  'inline-block h-1.5 w-1.5 shrink-0 rounded-full',
-                  block.status === 'backgrounded' && 'bg-accent animate-pulse',
-                  block.status === 'complete' && 'bg-green-500',
-                  block.status === 'error' && 'bg-red-500'
-                )}
-              />
+              <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-accent animate-pulse" />
               <span className="font-medium text-text-primary">
                 {toolLabel(block.name)}
               </span>
               <span className="min-w-0 flex-1 truncate text-text-secondary">
-                {block.status === 'backgrounded'
-                  ? '运行中...'
-                  : block.status === 'error'
-                    ? '失败'
-                    : '完成'}
+                运行中...
               </span>
               <span className="shrink-0 font-mono text-[10px] text-text-muted">
                 {block.taskId?.slice(0, 8) ?? '—'}

@@ -17,7 +17,7 @@ use astrcode_core::{
     },
     types::*,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     payload::{compact_boundary_payload, session_continued_from_compaction_payload},
@@ -125,11 +125,11 @@ impl Session {
         &self.caps
     }
 
-    /// 订阅本 session 的事件广播。
+    /// 订阅本 session 的事件 fan-out 通道。
     ///
-    /// 同 sid 不同 Session 实例订阅的是同一份 broadcast（在 runtime 上），
+    /// 同 sid 不同 Session 实例订阅的是同一份 EventFanout（在 runtime 上），
     /// 因此一个订阅者能看到任何实例发出的事件。
-    pub fn subscribe(&self) -> broadcast::Receiver<Event> {
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Event> {
         self.runtime.subscribe()
     }
 

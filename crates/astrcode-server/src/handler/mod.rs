@@ -132,9 +132,8 @@ impl CommandHandler {
                         title: summary.first_user_message.clone(),
                     })
                     .collect();
-                let _ = self
-                    .event_bus
-                    .broadcast_sender()
+                self.event_bus
+                    .fanout()
                     .send(ClientNotification::SessionList { sessions: items });
             },
 
@@ -208,13 +207,13 @@ impl CommandHandler {
                         priority: item.priority,
                     })
                     .collect();
-                let _ = self.event_bus.broadcast_sender().send(
-                    ClientNotification::ExtensionCommandList {
+                self.event_bus
+                    .fanout()
+                    .send(ClientNotification::ExtensionCommandList {
                         commands: infos,
                         keybindings,
                         status_items,
-                    },
-                );
+                    });
             },
 
             ClientCommand::ExecuteExtensionCommand {

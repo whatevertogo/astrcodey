@@ -18,7 +18,8 @@ use agent_client_protocol::{
 };
 use astrcode_core::{event::Event, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
-use tokio::sync::broadcast;
+use astrcode_support::event_fanout::EventFanout;
+use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
@@ -31,7 +32,7 @@ use crate::{
 /// This function blocks until the connection is closed or an unrecoverable
 /// error occurs.
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
-    let (event_tx, _) = broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
     let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
         runtime.event_store.clone(),
         event_tx,
@@ -140,7 +141,7 @@ async fn handle_prompt(
 ) -> Result<StopReason, Error> {
     let session_id = SessionId::from(req.session_id.to_string());
     let text = prompt_to_text(&req.prompt)?;
-    let mut event_rx = event_bus.broadcast_sender().subscribe();
+    let mut event_rx = event_bus.fanout().subscribe();
 
     let (turn_id, mut completion_rx) = command_handle
         .submit_prompt_with_completion(session_id.clone(), text)
@@ -155,7 +156,7 @@ async fn handle_prompt(
         tokio::select! {
             result = event_rx.recv() => {
                 match result {
-                    Ok(ClientNotification::Event(event)) => {
+                    Some(ClientNotification::Event(event)) => {
                         if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
                             if let astrcode_core::event::EventPayload::CompactBoundaryCreated { continued_session_id, .. } = &event.payload {
                                 accepted_sessions.insert(continued_session_id.clone());
@@ -163,11 +164,8 @@ async fn handle_prompt(
                             forward_event(&event, &acp_session_id, cx);
                         }
                     },
-                    Ok(_) => {},
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(count, "ACP event subscriber lagged");
-                    },
-                    Err(broadcast::error::RecvError::Closed) => {
+                    Some(_) => {},
+                    None => {
                         return Ok(StopReason::EndTurn);
                     },
                 }
@@ -196,10 +194,10 @@ async fn handle_prompt(
     }
 }
 
-/// Deterministic flush of queued events in the broadcast channel after
-/// completion signal. Uses `try_recv` to drain without blocking.
+/// Deterministic flush of queued events after completion signal.
+/// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
-    event_rx: &mut broadcast::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
     accepted_sessions: &mut HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,
@@ -220,11 +218,8 @@ fn flush_queued_events(
                 }
             },
             Ok(_) => {},
-            Err(broadcast::error::TryRecvError::Empty)
-            | Err(broadcast::error::TryRecvError::Closed) => break,
-            Err(broadcast::error::TryRecvError::Lagged(count)) => {
-                tracing::warn!(count, "ACP event subscriber lagged during flush");
-            },
+            Err(mpsc::error::TryRecvError::Empty)
+            | Err(mpsc::error::TryRecvError::Disconnected) => break,
         }
     }
 }

@@ -20,7 +20,7 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_support::hash::hex_fingerprint;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
     compact::{
@@ -113,8 +113,8 @@ pub struct TurnRunner {
     extra_system_prompt: Option<String>,
     initial_history: Vec<LlmMessage>,
     tools: ToolPipeline,
-    /// 订阅 session broadcast，用于在 step 边界接收中途注入的 UserMessage。
-    event_rx: broadcast::Receiver<Event>,
+    /// 订阅 session 事件通道，用于在 step 边界接收中途注入的 UserMessage。
+    event_rx: mpsc::UnboundedReceiver<Event>,
 }
 
 #[derive(Clone)]
@@ -333,13 +333,13 @@ impl TurnRunner {
         }
     }
 
-    /// 在 step 边界非阻塞 drain broadcast 中所有已到达的 `UserMessage` 事件，
+    /// 在 step 边界非阻塞 drain 事件通道中所有已到达的 `UserMessage` 事件，
     /// 将其作为 user role 消息追加到 `state.messages`。
     ///
-    /// TODO: 当前从 session broadcast（容量 256，混合所有事件类型）中过滤 UserMessage，
-    /// 存在噪音遍历开销。若未来多 agent 并发导致事件量激增使 Lagged 频繁发生，
+    /// 当前从 session 事件通道（混合所有事件类型）中过滤 UserMessage，
+    /// 存在噪音遍历开销。若未来多 agent 并发导致事件量激增，
     /// 考虑改用专用 mpsc channel（TurnHandle 暴露 sender）或 Session 级
-    /// `Arc<Mutex<VecDeque<MidTurnMessage>>>` 替代 broadcast 过滤方案。
+    /// `Arc<Mutex<VecDeque<MidTurnMessage>>>` 替代事件通道过滤方案。
     fn drain_mid_turn_messages(&mut self, state: &mut TurnState) {
         loop {
             match self.event_rx.try_recv() {
@@ -349,14 +349,8 @@ impl TurnRunner {
                     }
                     // 非 UserMessage 事件忽略
                 },
-                Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!(
-                        skipped = n,
-                        "broadcast receiver lagged, skipping lost events"
-                    );
-                },
-                Err(broadcast::error::TryRecvError::Closed) => break,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
             }
         }
     }

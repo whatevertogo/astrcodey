@@ -242,6 +242,7 @@ version = "0.1.4"
 dependencies = [
  "astrcode-core",
  "astrcode-protocol",
+ "astrcode-support",
  "async-trait",
  "parking_lot",
  "serde",
@@ -520,6 +521,7 @@ version = "0.1.4"
 dependencies = [
  "astrcode-core",
  "dirs",
+ "parking_lot",
  "serde",
  "serde_yaml",
  "tokio",

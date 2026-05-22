@@ -18,6 +18,7 @@ use astrcode_server::{
     handler::CommandHandler,
     transport::{ServerTransport, StdioTransport, write_error_response, write_initialize_response},
 };
+use astrcode_support::event_fanout::EventFanout;
 
 #[tokio::main]
 async fn main() {
@@ -60,11 +61,11 @@ async fn main() {
     };
     write_initialize_response(request_id, accepted_version);
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
 
     let event_bus = Arc::new(astrcode_server::server_event_bus::ServerEventBus::new(
         runtime.event_store.clone(),
-        event_tx.clone(),
+        Arc::clone(&event_tx),
     ));
     {
         let event_bus = Arc::clone(&event_bus);
@@ -76,10 +77,10 @@ async fn main() {
     }
     let handler = CommandHandler::spawn_actor(Arc::clone(&runtime), Arc::clone(&event_bus));
 
-    // Background task: broadcast events → stdout
+    // Background task: forward events → stdout
     let mut event_rx = event_tx.subscribe();
     tokio::spawn(async move {
-        while let Ok(event) = event_rx.recv().await {
+        while let Some(event) = event_rx.recv().await {
             let line = match notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
             {

@@ -24,7 +24,8 @@ use astrcode_core::{
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_session::{compact_boundary_payload, session_continued_from_compaction_payload};
 use astrcode_storage::in_memory::InMemoryEventStore;
-use tokio::sync::{broadcast, mpsc};
+use astrcode_support::event_fanout::EventFanout;
+use tokio::sync::mpsc;
 
 use super::*;
 
@@ -691,7 +692,9 @@ fn compacted_session_id(outcome: ManualCompactOutcome) -> SessionId {
     }
 }
 
-async fn recv_event(event_rx: &mut broadcast::Receiver<ClientNotification>) -> ClientNotification {
+async fn recv_event(
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
+) -> ClientNotification {
     tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
         .await
         .expect("event should arrive")
@@ -700,7 +703,7 @@ async fn recv_event(event_rx: &mut broadcast::Receiver<ClientNotification>) -> C
 
 fn test_event_bus(
     runtime: &Arc<crate::bootstrap::ServerRuntime>,
-    event_tx: broadcast::Sender<ClientNotification>,
+    event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Arc<crate::server_event_bus::ServerEventBus> {
     Arc::new(crate::server_event_bus::ServerEventBus::new(
         runtime.event_store.clone(),
@@ -741,7 +744,9 @@ fn compact_summary_text(current_work: &str) -> String {
     )
 }
 
-async fn wait_for_turn_completed(event_rx: &mut broadcast::Receiver<ClientNotification>) -> String {
+async fn wait_for_turn_completed(
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
+) -> String {
     loop {
         let notification = recv_event(event_rx).await;
         let ClientNotification::Event(event) = notification else {
@@ -754,7 +759,7 @@ async fn wait_for_turn_completed(event_rx: &mut broadcast::Receiver<ClientNotifi
 }
 
 async fn drain_until_compact_boundary(
-    event_rx: &mut broadcast::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
 ) -> SessionId {
     loop {
         let notification = recv_event(event_rx).await;
@@ -803,7 +808,7 @@ async fn append_user_assistant_pair(
 }
 
 async fn collect_turn_ids_until_completed(
-    event_rx: &mut broadcast::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
 ) -> (String, Vec<Option<TurnId>>) {
     let mut turn_ids = Vec::new();
     loop {
@@ -882,7 +887,8 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
         .create_session(&sid, ".", "mock-model", None, None, None)
         .await
         .unwrap();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
 
     let event = Event::new(
         sid.clone(),
@@ -908,7 +914,8 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
 #[tokio::test]
 async fn create_session_configures_system_prompt() {
     let runtime = test_runtime();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -947,7 +954,8 @@ async fn client_create_session_reports_start_hook_failure() {
         .register(Arc::new(FailSessionStartExtension))
         .await
         .unwrap();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -972,7 +980,8 @@ async fn client_create_session_reports_start_hook_failure() {
 #[tokio::test]
 async fn submit_prompt_reuses_session_system_prompt() {
     let runtime = test_runtime();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1007,7 +1016,8 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
         .create_session(&sid, ".", "mock-model", None, None, None)
         .await
         .unwrap();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1029,7 +1039,8 @@ async fn submit_prompt_configures_missing_session_system_prompt() {
 #[tokio::test]
 async fn submit_prompt_uses_one_turn_id_for_turn_events() {
     let runtime = test_runtime();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1083,7 +1094,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             .contains(&ToolCallId::from("call-1"))
     );
 
-    let (event_tx, _) = broadcast::channel(16);
+    let event_tx = Arc::new(EventFanout::new());
     let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
@@ -1114,7 +1125,8 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
 
 #[tokio::test]
 async fn submit_prompt_queues_second_running_turn_for_next_turn() {
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1157,7 +1169,7 @@ async fn queued_inputs_run_fifo_for_same_session() {
     }));
     let handler = CommandHandler::spawn_actor(
         Arc::clone(&runtime),
-        test_event_bus(&runtime, tokio::sync::broadcast::channel(64).0),
+        test_event_bus(&runtime, Arc::new(EventFanout::new())),
     );
 
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -1219,7 +1231,7 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
         }))
         .await
         .unwrap();
-    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -1251,7 +1263,7 @@ async fn stream_error_still_dispatches_turn_end() {
         }))
         .await
         .unwrap();
-    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -1274,7 +1286,8 @@ async fn read_before_edit_guard_survives_across_turns() {
     let runtime = test_runtime_with_llm(Arc::new(ReadThenEditAcrossTurnsLlm {
         call_count: AtomicUsize::new(0),
     }));
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
@@ -1315,7 +1328,8 @@ async fn read_before_edit_guard_survives_across_turns() {
 
 #[tokio::test]
 async fn abort_stops_active_turn_and_records_completion() {
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1333,7 +1347,8 @@ async fn abort_stops_active_turn_and_records_completion() {
 
 #[tokio::test]
 async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let started = Arc::new(tokio::sync::Notify::new());
     let runtime = test_runtime_with_llm(Arc::new(DelayedLlm {
         started: Arc::clone(&started),
@@ -1365,7 +1380,8 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
 
 #[tokio::test]
 async fn compact_session_rejects_running_turn_without_compaction_started() {
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(128);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1408,7 +1424,8 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
 
 #[tokio::test]
 async fn stale_agent_finish_after_abort_is_ignored() {
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
@@ -1449,7 +1466,8 @@ async fn stale_agent_finish_after_abort_is_ignored() {
 async fn compact_command_rewrites_provider_history_without_exposing_summary() {
     let settings = astrcode_context::ContextSettings::default();
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1498,7 +1516,8 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         Arc::new(MockLlm),
         astrcode_context::ContextSettings::default(),
     );
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1535,7 +1554,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
 #[tokio::test]
 async fn unknown_slash_command_falls_through_as_regular_prompt() {
     let runtime = test_runtime();
-    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -1567,7 +1586,8 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
         .register(astrcode_extension_skill::extension())
         .await
         .unwrap();
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(256);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
@@ -1649,7 +1669,7 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         }))
         .await
         .unwrap();
-    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    let event_tx = Arc::new(EventFanout::new());
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
     let sid = handler
@@ -1677,7 +1697,8 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
 async fn compact_command_compacts_existing_hidden_context_again() {
     let settings = astrcode_context::ContextSettings::default();
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1748,7 +1769,8 @@ async fn auto_compact_applies_in_memory_during_turn() {
         ..Default::default()
     };
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1824,7 +1846,8 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
             ..Default::default()
         },
     );
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1902,7 +1925,8 @@ async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
             ..Default::default()
         },
     );
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -1955,7 +1979,8 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
             ..Default::default()
         },
     );
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 
@@ -2012,7 +2037,8 @@ async fn auto_compact_breaker_skips_after_llm_compact_failure() {
             ..Default::default()
         },
     );
-    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let event_tx = Arc::new(EventFanout::new());
+    let mut event_rx = event_tx.subscribe();
     let handler =
         CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
 

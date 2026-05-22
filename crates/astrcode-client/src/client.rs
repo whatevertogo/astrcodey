@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use astrcode_core::event::EventPayload;
 use astrcode_protocol::{commands::*, events::*};
+use tokio::sync::mpsc;
 
 use crate::{
     error::ClientError,
@@ -46,20 +47,12 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     {
         let mut rx = self.transport.subscribe().await?;
         self.transport.send(cmd).await?;
-        loop {
-            match rx.recv().await {
-                Ok(notification) => {
-                    if predicate(&notification) {
-                        return Ok(notification);
-                    }
-                    continue;
-                },
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return Err(ClientError::UnexpectedResponse);
-                },
+        while let Some(notification) = rx.recv().await {
+            if predicate(&notification) {
+                return Ok(notification);
             }
         }
+        Err(ClientError::UnexpectedResponse)
     }
 
     /// 创建新的会话。
@@ -191,9 +184,8 @@ impl ClientTransport for MockTransport {
 
     async fn subscribe(
         &self,
-    ) -> Result<tokio::sync::broadcast::Receiver<ClientNotification>, TransportError> {
-        // 创建一个空的广播通道，返回接收端。
-        let (_, rx) = tokio::sync::broadcast::channel(16);
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+        let (_, rx) = mpsc::unbounded_channel::<ClientNotification>();
         Ok(rx)
     }
 }

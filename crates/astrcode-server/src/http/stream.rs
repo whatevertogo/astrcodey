@@ -29,7 +29,7 @@ use axum::{
 };
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 use super::{
     HttpState, error_response,
@@ -41,7 +41,7 @@ use crate::bootstrap::ServerRuntime;
 ///
 /// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
 struct LiveStreamState {
-    rx: broadcast::Receiver<ClientNotification>,
+    rx: mpsc::UnboundedReceiver<ClientNotification>,
     runtime: Arc<ServerRuntime>,
     session_id: SessionId,
     /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
@@ -113,7 +113,7 @@ pub(in crate::http) async fn session_stream(
         );
     }
 
-    let rx = http_state.event_bus.broadcast_sender().subscribe();
+    let rx = http_state.event_bus.fanout().subscribe();
     let (missed_events, replay_error) = match query.cursor.as_ref() {
         Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
         Some(cursor) => match http_state
@@ -185,7 +185,7 @@ pub(in crate::http) async fn session_stream(
 
             loop {
                 match state.rx.recv().await {
-                    Ok(ClientNotification::Event(event))
+                    Some(ClientNotification::Event(event))
                         if event.session_id == state.session_id =>
                     {
                         if state
@@ -219,7 +219,7 @@ pub(in crate::http) async fn session_stream(
                         state.pending = items;
                         return Some((first, state));
                     },
-                    Ok(ClientNotification::StatusItemUpdate { id, text }) => {
+                    Some(ClientNotification::StatusItemUpdate { id, text }) => {
                         let cursor = state_cursor(&state.runtime, &state.session_id).await;
                         let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
                             session_id: state.session_id.to_string(),
@@ -228,7 +228,7 @@ pub(in crate::http) async fn session_stream(
                         }));
                         return Some((item, state));
                     },
-                    Ok(ClientNotification::ExtensionRegistryChanged) => {
+                    Some(ClientNotification::ExtensionRegistryChanged) => {
                         let cursor = state_cursor(&state.runtime, &state.session_id).await;
                         let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
                             session_id: state.session_id.to_string(),
@@ -237,18 +237,8 @@ pub(in crate::http) async fn session_stream(
                         }));
                         return Some((item, state));
                     },
-                    Ok(_) => {},
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let cursor = state_cursor(&state.runtime, &state.session_id).await;
-                        let item = Ok(sse_event(&ConversationStreamEnvelopeDto {
-                            session_id: state.session_id.to_string(),
-                            cursor: ConversationCursorDto { value: cursor },
-                            delta: ConversationDeltaDto::RehydrateRequired,
-                        }));
-                        state.closing = true;
-                        return Some((item, state));
-                    },
-                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Some(_) => {},
+                    None => return None,
                 }
             }
         },
