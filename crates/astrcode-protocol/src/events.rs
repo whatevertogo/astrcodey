@@ -113,7 +113,9 @@ impl From<astrcode_core::storage::AgentSessionStatus> for AgentSessionStatusDto 
     fn from(status: astrcode_core::storage::AgentSessionStatus) -> Self {
         match status {
             astrcode_core::storage::AgentSessionStatus::Running => AgentSessionStatusDto::Running,
-            astrcode_core::storage::AgentSessionStatus::Completed => AgentSessionStatusDto::Completed,
+            astrcode_core::storage::AgentSessionStatus::Completed => {
+                AgentSessionStatusDto::Completed
+            },
             astrcode_core::storage::AgentSessionStatus::Failed => AgentSessionStatusDto::Failed,
         }
     }
