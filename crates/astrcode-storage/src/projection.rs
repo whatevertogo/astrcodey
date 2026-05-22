@@ -241,18 +241,6 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::CompactionCompleted { .. } => {
             model.phase = Phase::Idle;
         },
-        // All durable events musb be shown in the above
-        // Non-durable events: never persisted to JSONL, only broadcast for live UI.
-        EventPayload::ToolCallStarted { .. }
-        | EventPayload::AssistantTextDelta { .. }
-        | EventPayload::ThinkingDelta { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. }
-        | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::AgentRunStarted
-        | EventPayload::AgentRunCompleted { .. }
-        | EventPayload::ToolCallBackgrounded { .. }
-        | EventPayload::BackgroundTaskOutput { .. }
-        | EventPayload::BackgroundTaskCompleted { .. } => {},
         EventPayload::Custom { .. } => {},
         EventPayload::RecapGenerated { .. } => {},
         EventPayload::ExtensionEvent {
@@ -268,5 +256,17 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 *schema_version,
             );
         },
+        // All durable events musb be shown in the above
+        // Non-durable events: never persisted to JSONL, only broadcast for live UI.
+        EventPayload::ToolCallStarted { .. }
+        | EventPayload::AssistantTextDelta { .. }
+        | EventPayload::ThinkingDelta { .. }
+        | EventPayload::ToolCallArgumentsDelta { .. }
+        | EventPayload::ToolOutputDelta { .. }
+        | EventPayload::AgentRunStarted
+        | EventPayload::AgentRunCompleted { .. }
+        | EventPayload::ToolCallBackgrounded { .. }
+        | EventPayload::BackgroundTaskOutput { .. }
+        | EventPayload::BackgroundTaskCompleted { .. } => {},
     }
 }
