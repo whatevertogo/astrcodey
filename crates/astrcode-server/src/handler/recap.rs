@@ -119,7 +119,7 @@ fn strip_dsml_tags(text: &str) -> String {
         return text.to_string();
     }
     let mut result = String::with_capacity(text.len());
-    let mut remaining: &str = &text;
+    let mut remaining: &str = text;
     while let Some(start) = remaining.find(DSML_OPEN) {
         result.push_str(&remaining[..start]);
         // 跳过整个 DSML 块：从 <｜｜DSML｜｜...> 到匹配的 </｜｜DSML｜｜...>
@@ -128,7 +128,10 @@ fn strip_dsml_tags(text: &str) -> String {
         if let Some(end) = remaining.find(end_tag) {
             // 找到闭合标签的 '>' 之后继续
             let after_close = &remaining[end..];
-            remaining = after_close.find('>').map(|i| &after_close[i + 1..]).unwrap_or("");
+            remaining = after_close
+                .find('>')
+                .map(|i| &after_close[i + 1..])
+                .unwrap_or("");
         } else {
             // 没有闭合标签，跳到行尾
             remaining = remaining.find('\n').map(|i| &remaining[i..]).unwrap_or("");
@@ -136,5 +139,9 @@ fn strip_dsml_tags(text: &str) -> String {
     }
     result.push_str(remaining);
     let cleaned = result.trim().to_string();
-    if cleaned.is_empty() { text.to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        text.to_string()
+    } else {
+        cleaned
+    }
 }

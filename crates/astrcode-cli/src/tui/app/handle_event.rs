@@ -715,6 +715,7 @@ fn human_action(tool_name: &str) -> &str {
         "grep" => "Search",
         "patch" => "Patch",
         "agent" => "Task",
+        "switchMode" => "Mode",
         other => other,
     }
 }

@@ -6,7 +6,10 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeDevCommand": "node scripts/dev-server.mjs",
+    "beforeDevCommand": {
+      "script": "node scripts/dev-server.mjs",
+      "cwd": "../frontend"
+    },
     "beforeBuildCommand": "npm run prepare:sidecar -- --release && npm run build"
   },
   "app": {

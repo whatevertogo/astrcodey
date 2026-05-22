@@ -29,7 +29,7 @@ members = [
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "fs", "signal", "process", "sync"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = "1.0.150"
 thiserror = "2"
 async-trait = "0.1"
 arc-swap = "1"
@@ -54,7 +54,7 @@ toml = "0.8"
 glob = "0.3"
 globset = "0.4"
 ignore = "0.4"
-similar = "2"
+similar = "3.1.0"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"

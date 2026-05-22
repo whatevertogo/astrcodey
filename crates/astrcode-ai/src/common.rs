@@ -56,8 +56,8 @@ pub async fn stream_with_retry(
                 if retry.should_retry_transport(attempt) {
                     let delay = retry.delay(attempt);
                     tracing::warn!(
-                        "LLM request failed with transport error (attempt {attempt}/{}), \
-                         retrying after {}ms: {e}",
+                        "LLM request failed with transport error (attempt {attempt}/{}), retrying \
+                         after {}ms: {e}",
                         retry.max_transport_retries,
                         delay.as_millis(),
                     );
@@ -70,7 +70,24 @@ pub async fn stream_with_retry(
 
         let status = response.status();
         if status.is_success() {
-            return parse_sse_response(response, &tx, &parse_sse_line).await;
+            match parse_sse_response(response, &tx, &parse_sse_line).await {
+                Ok(()) => return Ok(()),
+                Err(LlmError::Transport(msg)) => {
+                    if retry.should_retry_transport(attempt) {
+                        let delay = retry.delay(attempt);
+                        tracing::warn!(
+                            "LLM stream read failed with transport error (attempt {attempt}/{}), \
+                             retrying after {}ms: {msg}",
+                            retry.max_transport_retries,
+                            delay.as_millis(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Transport(msg));
+                },
+                Err(e) => return Err(e),
+            }
         }
 
         if retry.should_retry(attempt, status.as_u16()) {
@@ -118,8 +135,8 @@ pub async fn stream_with_event_type(
                 if retry.should_retry_transport(attempt) {
                     let delay = retry.delay(attempt);
                     tracing::warn!(
-                        "LLM request failed with transport error (attempt {attempt}/{}), \
-                         retrying after {}ms: {e}",
+                        "LLM request failed with transport error (attempt {attempt}/{}), retrying \
+                         after {}ms: {e}",
                         retry.max_transport_retries,
                         delay.as_millis(),
                     );
@@ -132,7 +149,24 @@ pub async fn stream_with_event_type(
 
         let status = response.status();
         if status.is_success() {
-            return parse_sse_response_with_event_type(response, &tx, &handle_event).await;
+            match parse_sse_response_with_event_type(response, &tx, &handle_event).await {
+                Ok(()) => return Ok(()),
+                Err(LlmError::Transport(msg)) => {
+                    if retry.should_retry_transport(attempt) {
+                        let delay = retry.delay(attempt);
+                        tracing::warn!(
+                            "LLM stream read failed with transport error (attempt {attempt}/{}), \
+                             retrying after {}ms: {msg}",
+                            retry.max_transport_retries,
+                            delay.as_millis(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(LlmError::Transport(msg));
+                },
+                Err(e) => return Err(e),
+            }
         }
 
         if retry.should_retry(attempt, status.as_u16()) {

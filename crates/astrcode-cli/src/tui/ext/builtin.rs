@@ -529,6 +529,64 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
+// ─── SwitchMode ───────────────────────────────────────────────────────────
+
+pub struct SwitchModeRenderer;
+
+impl ToolRenderer for SwitchModeRenderer {
+    fn tool_name(&self) -> &str {
+        "switchMode"
+    }
+
+    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
+        DefaultToolRenderer.render_call(ctx)
+    }
+
+    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+        if result.is_error {
+            return None;
+        }
+        let gate_status = result.metadata.get("gateStatus").and_then(|v| v.as_str());
+        if gate_status != Some("review_pending") {
+            return None;
+        }
+        let plan = result
+            .metadata
+            .get("planContent")
+            .and_then(|v| v.as_str())?;
+        let review_pass = result
+            .metadata
+            .get("reviewPass")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        let required = result
+            .metadata
+            .get("requiredPasses")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+
+        let subtitle = format!(
+            "Review the plan below. Call switchMode again to approve (pass \
+             {review_pass}/{required})."
+        );
+
+        Some(RenderSpec::Box {
+            title: Some("Plan review".into()),
+            tone: RenderTone::Accent,
+            children: vec![
+                RenderSpec::Text {
+                    text: subtitle,
+                    tone: RenderTone::Default,
+                },
+                RenderSpec::Markdown {
+                    text: plan.to_string(),
+                    tone: RenderTone::Default,
+                },
+            ],
+        })
+    }
+}
+
 // ─── UpsertSessionPlan ────────────────────────────────────────────────────
 
 pub struct UpsertSessionPlanRenderer;
@@ -582,5 +640,6 @@ pub fn register_builtin(
     tool_reg.register(Arc::new(ShellRenderer));
     tool_reg.register(Arc::new(PatchRenderer));
     tool_reg.register(Arc::new(AgentRenderer));
+    tool_reg.register(Arc::new(SwitchModeRenderer));
     tool_reg.register(Arc::new(UpsertSessionPlanRenderer));
 }

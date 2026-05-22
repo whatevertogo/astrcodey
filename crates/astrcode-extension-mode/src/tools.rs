@@ -26,20 +26,16 @@ pub const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
 pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
-        description: ("Switch the agent running mode. Available modes:\n\
-                      - \"code\" (default): full execution with all tools.\n\
-                      - \"plan\": read-only planning mode — explore the codebase and produce a \
-                      structured plan before implementation.\n\n\
-                      Enter plan mode proactively when the task matches ANY of these:\n\
-                      • Implementing a new feature\n\
-                      • Multiple valid approaches exist and you need to pick one\n\
-                      • The user want you to plan\n\
-                      • Planning will be helpful for the task\n\n\
-                      Do NOT enter plan mode for:\n\
-                      • Single-file fixes or small tweaks\n\
-                      • Clear, well-scoped tasks with obvious solutions\n\
-                      • User explicitly said to just do it\n\n\
-                    ").into(),
+        description: ("Switch the agent running mode. Available modes:\n- \"code\" (default): \
+                       full execution with all tools.\n- \"plan\": read-only planning mode — \
+                       explore the codebase and produce a structured plan before \
+                       implementation.\n\nEnter plan mode proactively when the task matches ANY \
+                       of these:\n• Implementing a new feature\n• Multiple valid approaches \
+                       exist and you need to pick one\n• The user want you to plan\n• Planning \
+                       will be helpful for the task\n\nDo NOT enter plan mode for:\n• \
+                       Single-file fixes or small tweaks\n• Clear, well-scoped tasks with \
+                       obvious solutions\n• User explicitly said to just do it\n\n")
+            .into(),
         parameters: json!({
             "type": "object",
             "additionalProperties": false,
@@ -153,6 +149,7 @@ pub fn handle_switch_mode(
     if current_spec.exit_review_passes > 0
         && state.exit_review_passes_completed < current_spec.exit_review_passes
     {
+        let mut plan_content_for_review: Option<String> = None;
         // Check plan artifact exists.
         if current_spec.requires_plan_artifact {
             match store::load_plan(plan_dir)? {
@@ -182,6 +179,7 @@ pub fn handle_switch_mode(
                             ]),
                         ));
                     }
+                    plan_content_for_review = Some(content);
                 },
             }
         }
@@ -189,6 +187,37 @@ pub fn handle_switch_mode(
         // First exit attempt: return review checkpoint.
         state.exit_review_passes_completed += 1;
         store::save_mode_state(mode_root, &state)?;
+
+        if let Some(plan) = plan_content_for_review {
+            let ui_render = RenderSpec::Box {
+                title: Some("Plan review".into()),
+                tone: RenderTone::Accent,
+                children: vec![
+                    RenderSpec::Markdown {
+                        text: plan.clone(),
+                        tone: RenderTone::Default,
+                    },
+                    RenderSpec::Text {
+                        text: review_checklist_message(),
+                        tone: RenderTone::Muted,
+                    },
+                ],
+            };
+            return Ok(ToolResult::text(
+                review_checklist_message(),
+                false,
+                tool_metadata([
+                    ("gateStatus", json!("review_pending")),
+                    ("reviewPass", json!(state.exit_review_passes_completed)),
+                    ("requiredPasses", json!(current_spec.exit_review_passes)),
+                    ("planContent", json!(plan)),
+                    (
+                        UI_RENDER_METADATA_KEY,
+                        serde_json::to_value(&ui_render).unwrap_or_default(),
+                    ),
+                ]),
+            ));
+        }
 
         return Ok(ToolResult::text(
             review_checklist_message(),

@@ -625,11 +625,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             for (key, value) in &extra_headers {
                 req = req.header(key.as_str(), value.as_str());
             }
-            let response = match req
-                .json(&body)
-                .send()
-                .await
-            {
+            let response = match req.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     if retry.should_retry_transport(attempt) {
@@ -649,7 +645,24 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
 
             let status = response.status();
             if status.is_success() {
-                return Self::parse_stream::<A>(response, api_mode, &tx).await;
+                match Self::parse_stream::<A>(response, api_mode, &tx).await {
+                    Ok(()) => return Ok(()),
+                    Err(LlmError::Transport(msg)) => {
+                        if retry.should_retry_transport(attempt) {
+                            let delay = retry.delay(attempt);
+                            tracing::warn!(
+                                "LLM stream read failed with transport error (attempt \
+                                 {attempt}/{}), retrying after {}ms: {msg}",
+                                retry.max_transport_retries,
+                                delay.as_millis(),
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        return Err(LlmError::Transport(msg));
+                    },
+                    Err(e) => return Err(e),
+                }
             }
 
             if retry.should_retry(attempt, status.as_u16()) {
