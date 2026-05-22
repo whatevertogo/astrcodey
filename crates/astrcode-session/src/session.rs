@@ -429,27 +429,38 @@ impl Session {
             turn_runner::{TurnRunner, run_turn},
         };
 
-        // 从 session-owned 状态读取 model_id，与当前 provider 对应。
+        // ── Turn 开始生命周期事件 ────────────────────────────────────
+        self.emit_durable(Some(&turn_id), EventPayload::TurnStarted)
+            .await
+            .ok();
+        self.emit_durable(
+            Some(&turn_id),
+            EventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: text.clone(),
+            },
+        )
+        .await
+        .ok();
+        self.emit_live(Some(&turn_id), EventPayload::AgentRunStarted)
+            .await;
+
+        // ── Runtime 准备 ────────────────────────────────────────────
         let model_id = self.runtime.model_id();
         if let Err(e) = self.update_model_id(&model_id).await {
             tracing::warn!(session_id = %self.id, error = %e, "failed to update session model_id");
         }
 
-        // 第一次读 state：取 working_dir 和 fingerprint。projection 缓存在 store 内，
-        // 同 session 多次 read_model 是 O(1) HashMap 查询，不会触发 replay。
         let pre_state = self
             .read_model()
             .await
             .map_err(|e| TurnError::Internal(format!("read session: {e}")))?;
         let working_dir = pre_state.working_dir.clone();
 
-        // 工具表：runtime 未填充时构建快照
         if self.runtime.tool_registry().list_definitions().is_empty() {
             self.refresh_tools(&working_dir).await;
         }
 
-        // system prompt：fingerprint 命中时跳过。`None` extra 表示保留——refresh_prompt
-        // 内部用 cached_state 解析当前值，避免再读一次 projection。
         let stored_fingerprint = pre_state.system_prompt_fingerprint.clone();
         let prompt_changed = match self
             .refresh_prompt_with_state(
@@ -467,19 +478,11 @@ impl Session {
             },
         };
 
-        // 后台工具结果泵：把 BackgroundTaskCompletion 翻译成事件写入 session
-        // （store + runtime 广播）。
-        // `spawn_background_forwarder` 内部已经 `tokio::spawn`，丢弃返回的 JoinHandle
-        // 让其在 rx 关闭（所有 sender drop）时自然结束；panic 时 task 终止，下一次
-        // background 完成会因 sender 端 mpsc 已关闭而走 None 分支退出，不会泄漏。
         let (background_result_tx, background_result_rx) =
             mpsc::unbounded_channel::<BackgroundTaskCompletion>();
         let bg_session = Arc::new(self.clone());
-        // TODO: 更好的后台处理？
         let _forwarder = spawn_background_forwarder(background_result_rx, bg_session, None);
 
-        // refresh_prompt 写过事件时 projection 已变，需要 re-read；命中 fingerprint
-        // 跳过的情况下 pre_state 仍然反映最新状态。
         let session_state = if prompt_changed {
             self.read_model()
                 .await
@@ -493,11 +496,54 @@ impl Session {
             Some(background_result_tx),
         )?;
 
+        // ── Turn 执行 + 结束生命周期事件 ─────────────────────────────
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let turn_id_for_task = turn_id.clone();
+        let session_for_completion = Arc::new(self.clone());
         let join = tokio::spawn(async move {
             let result = run_turn(&mut agent, &text, &turn_id_for_task).await;
+
+            let finish_reason = match &result.output {
+                Ok(out) => out.finish_reason.clone(),
+                Err(_) => "error".into(),
+            };
+            // 提取需要在 TurnCompleted 之前发射的 ErrorOccurred 信息。
+            // 先于 completion_tx.send 提取，避免 result 被 move 后不可用。
+            let pending_error = match (&result.output, result.emitted_error) {
+                (Err(e), false) => Some(e.to_string()),
+                _ => None,
+            };
+            // 先通知调用方（completion_tx），再 emit。
+            // 若被 abort，completion_tx 之后的代码不会执行，由 abort handler 发 aborted。
             let _ = completion_tx.send(result);
+            if let Some(error_msg) = pending_error {
+                let _ = session_for_completion
+                    .emit_durable(
+                        Some(&turn_id_for_task),
+                        EventPayload::ErrorOccurred {
+                            code: -32603,
+                            message: error_msg,
+                            recoverable: false,
+                        },
+                    )
+                    .await;
+            }
+            let _ = session_for_completion
+                .emit_durable(
+                    Some(&turn_id_for_task),
+                    EventPayload::TurnCompleted {
+                        finish_reason: finish_reason.clone(),
+                    },
+                )
+                .await;
+            session_for_completion
+                .emit_live(
+                    Some(&turn_id_for_task),
+                    EventPayload::AgentRunCompleted {
+                        reason: finish_reason,
+                    },
+                )
+                .await;
         });
 
         Ok(TurnHandle::new(turn_id, join, completion_rx))

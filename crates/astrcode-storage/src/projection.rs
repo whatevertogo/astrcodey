@@ -217,7 +217,11 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 base_event_seq: *base_event_seq,
                 strategy: strategy.clone(),
             });
-            model.phase = Phase::Idle;
+            // Auto compact 在 turn 期间发生，不应将 phase 改为 Idle。
+            // 手动 compact 时没有 active turn，Idle 是正确状态。
+            if trigger != "auto_threshold" {
+                model.phase = Phase::Idle;
+            }
         },
         EventPayload::SessionContinuedFromCompaction {
             context_messages,
@@ -226,7 +230,9 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         } => {
             model.context_messages = context_messages.clone();
             model.messages = retained_messages.clone();
-            model.phase = Phase::Idle;
+            // 不改变 phase，保留之前的状态。
+            // auto compact 在 turn 期间发生，phase 应保持 Thinking/Streaming。
+            // 手动 compact 时 phase 已经是 Idle（由 CompactBoundaryCreated 设置）。
         },
         EventPayload::SessionForked {
             context_messages,

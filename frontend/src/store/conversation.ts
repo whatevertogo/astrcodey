@@ -40,6 +40,7 @@ interface ConversationState {
   deleteProject: (workingDir: string) => Promise<void>
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
+  refreshConversationSnapshot: () => Promise<void>
   submitPrompt: (text: string) => Promise<boolean>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: ConversationDelta) => void
@@ -326,6 +327,26 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     }
   },
 
+  refreshConversationSnapshot: async () => {
+    const { activeSessionId } = get()
+    if (!activeSessionId) return
+
+    try {
+      const snapshot = await api.getConversation(activeSessionId)
+
+      set({
+        blocks: snapshot.blocks,
+        control: snapshot.control,
+        cursor: snapshot.cursor.value,
+        phase: phaseFromControl(snapshot.control),
+        activeSessionTitle: snapshot.sessionTitle,
+        agentSessions: snapshot.agentSessions ?? [],
+      })
+    } catch (err) {
+      console.error('Failed to refresh conversation snapshot:', err)
+    }
+  },
+
   submitPrompt: async (text: string) => {
     const { activeSessionId, control } = get()
     if (!activeSessionId || !control?.canSubmitPrompt) {
@@ -479,9 +500,12 @@ export const useAppStore = create<ConversationState>((set, get) => ({
       case 'sessionContinued': {
         void get().refreshSessions()
         // Same-session compact: newSessionId == parentSessionId.
-        // switchSession clears blocks and reloads from API, which returns
-        // the compacted conversation snapshot — effectively refreshing the view.
-        void get().switchSession(delta.newSessionId)
+        // Use lightweight refresh without breaking the SSE stream.
+        if (delta.newSessionId === delta.parentSessionId) {
+          void get().refreshConversationSnapshot()
+        } else {
+          void get().switchSession(delta.newSessionId)
+        }
         break
       }
 

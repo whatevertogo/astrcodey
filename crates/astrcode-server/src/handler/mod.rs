@@ -388,7 +388,7 @@ impl CommandHandler {
             }
         }
 
-        self.start_turn_for_session(sid, text.clone(), text, None)
+        self.start_turn_for_session(sid, text, None)
             .await
             .map(|turn_id| PromptSubmission::Accepted { turn_id })
     }

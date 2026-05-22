@@ -258,7 +258,7 @@ impl CommandHandler {
             self.queued_inputs.remove(session_id);
         }
         if let Err(error) = self
-            .start_turn_for_session(session_id.clone(), text.clone(), text, None)
+            .start_turn_for_session(session_id.clone(), text, None)
             .await
         {
             tracing::error!(%session_id, error = %error, "failed to start queued turn");
@@ -423,9 +423,10 @@ impl CommandHandler {
             } => {
                 let sid = session_id.clone();
                 let result = self.compact_session(&session_id, keep_recent_turns).await;
-                // Compact 完成后移除 compacting 状态并触发队列
+                // 无论 compact 成功、跳过还是失败，都必须移除 compacting 标记，
+                // 否则该 session 后续输入会被永久排队。
+                self.compacting_sessions.remove(&sid);
                 if matches!(result, Ok(ManualCompactOutcome::Compacted { .. })) {
-                    self.compacting_sessions.remove(&sid);
                     self.maybe_start_queued_turn(&sid).await;
                 }
                 let _ = reply.send(result);

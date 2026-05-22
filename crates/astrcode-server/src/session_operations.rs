@@ -1,7 +1,7 @@
 //! ServerSessionOperations — 纯粹的会话原子操作实现。
 //!
-//! 只做基础动作，不附带 agent 特有的编排逻辑（父子事件、progress 转发、ephemeral 回收）。
-//! 这些编排由调用方（插件）自行组合。
+//! 只做基础动作，生命周期事件（TurnStarted/UserMessage/TurnCompleted 等）
+//! 由 Session::submit 内部统一管理。
 
 use std::sync::Arc;
 
@@ -12,10 +12,6 @@ use astrcode_core::{
         SubmitTurnRequest, SubmitTurnResult,
     },
     types::{SessionId, new_message_id, new_turn_id},
-};
-use astrcode_session::{
-    agent_turn_completed_durable_payload, agent_turn_completed_live_payload,
-    agent_turn_started_durable_payloads, agent_turn_started_live_payload,
 };
 
 use crate::session_manager::SessionManager;

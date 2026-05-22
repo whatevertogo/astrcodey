@@ -188,9 +188,8 @@ impl CommandHandler {
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        for event in &persisted.events {
-            self.broadcast_event(event.clone());
-        }
+        // persist_compact_result 已通过 session.append_event → runtime.fanout 发送事件，
+        // 无需在此再次 broadcast_event（避免双发）
 
         // 发送 CompactionCompleted 事件
         session

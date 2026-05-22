@@ -10,10 +10,7 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
-use astrcode_session::{
-    Session, agent_turn_completed_durable_payload, agent_turn_completed_live_payload,
-    agent_turn_started_durable_payloads, agent_turn_started_live_payload,
-};
+use astrcode_session::Session;
 use tokio::{
     sync::{mpsc, oneshot},
     task::{AbortHandle, JoinHandle},
@@ -75,7 +72,7 @@ impl CommandHandler {
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (tx, rx) = oneshot::channel();
         let turn_id = self
-            .start_turn_for_session(sid, text.clone(), text, Some(tx))
+            .start_turn_for_session(sid, text, Some(tx))
             .await?;
         Ok((turn_id, rx))
     }
@@ -84,7 +81,6 @@ impl CommandHandler {
     pub(in crate::handler) async fn start_turn_for_session(
         &mut self,
         sid: SessionId,
-        visible_text: String,
         user_text: String,
         completion_tx: Option<oneshot::Sender<TurnCompletion>>,
     ) -> Result<TurnId, HandlerError> {
@@ -115,18 +111,8 @@ impl CommandHandler {
         let turn_id = new_turn_id();
         let session_arc = Arc::new(session);
 
-        // 记录 Turn 开始事件（durable）
-        for payload in agent_turn_started_durable_payloads(new_message_id(), visible_text) {
-            session_arc
-                .emit_durable(Some(&turn_id), payload)
-                .await
-                .map_err(|e| HandlerError::Other(format!("persist turn start event: {e}")))?;
-        }
-        session_arc
-            .emit_live(Some(&turn_id), agent_turn_started_live_payload())
-            .await;
-
-        // 启动 Agent 后台任务（Session::submit 内部刷新 tool registry / system prompt）
+        // Turn 生命周期事件（TurnStarted / UserMessage / AgentRunStarted）现在
+        // 由 Session::submit 内部统一发射，此处不再重复。
         let inner_abort_handle = Arc::new(parking_lot::Mutex::new(None));
         let handle = self.spawn_agent_turn(AgentTurnInput {
             turn_id: turn_id.clone(),
@@ -236,14 +222,18 @@ impl CommandHandler {
             .session
             .emit_durable(
                 Some(&active_turn.turn_id),
-                agent_turn_completed_durable_payload("aborted".into()),
+                EventPayload::TurnCompleted {
+                    finish_reason: "aborted".into(),
+                },
             )
             .await;
         active_turn
             .session
             .emit_live(
                 Some(&active_turn.turn_id),
-                agent_turn_completed_live_payload("aborted".into()),
+                EventPayload::AgentRunCompleted {
+                    reason: "aborted".into(),
+                },
             )
             .await;
         self.event_bus
@@ -340,7 +330,9 @@ impl CommandHandler {
         session
             .emit_durable(
                 None,
-                agent_turn_completed_durable_payload("interrupted".into()),
+                EventPayload::TurnCompleted {
+                    finish_reason: "interrupted".into(),
+                },
             )
             .await
             .map_err(|e| {
@@ -349,7 +341,9 @@ impl CommandHandler {
         session
             .emit_live(
                 None,
-                agent_turn_completed_live_payload("interrupted".into()),
+                EventPayload::AgentRunCompleted {
+                    reason: "interrupted".into(),
+                },
             )
             .await;
         self.event_bus.sync_durable_events(session_id).await;
@@ -397,12 +391,13 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
 }
 
 /// Agent Turn 后台任务：通过 `Session::submit` 启动，等待完成后写终态事件。
+/// Agent Turn 后台任务：通过 `Session::submit` 启动，等待完成后通知 actor 清理。
 ///
-/// 历史上这里手动装配 `TurnRunner` 与 background forwarder，现在已搬到
-/// `Session::submit` 内部。本函数只负责：
+/// 生命周期事件（ErrorOccurred / TurnCompleted / AgentRunCompleted）由
+/// `Session::submit` 内部统一发射。本函数只负责：
 /// 1. 调用 `Session::submit` 启动 turn；
 /// 2. 等待 `TurnHandle::wait` 拿到 `RunTurnResult`；
-/// 3. 写 `TurnCompleted` / `TurnFailed` 事件并通知 actor 清理。
+/// 3. 通知 actor 清理 active_turns 条目。
 async fn run_agent_turn_task(input: AgentTurnInput) {
     let AgentTurnInput {
         turn_id,
@@ -417,6 +412,8 @@ async fn run_agent_turn_task(input: AgentTurnInput) {
     let handle = match session.submit(text, turn_id.clone()).await {
         Ok(handle) => handle,
         Err(e) => {
+            // submit 在发 TurnStarted 之后的准备阶段失败，
+            // 需要手动补写 error + TurnCompleted 把 phase 恢复到 Idle。
             session
                 .emit_durable(
                     Some(&turn_id),
@@ -431,13 +428,17 @@ async fn run_agent_turn_task(input: AgentTurnInput) {
             let _ = session
                 .emit_durable(
                     Some(&turn_id),
-                    agent_turn_completed_durable_payload("error".into()),
+                    EventPayload::TurnCompleted {
+                        finish_reason: "error".into(),
+                    },
                 )
                 .await;
             session
                 .emit_live(
                     Some(&turn_id),
-                    agent_turn_completed_live_payload("error".into()),
+                    EventPayload::AgentRunCompleted {
+                        reason: "error".into(),
+                    },
                 )
                 .await;
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
@@ -462,20 +463,10 @@ async fn run_agent_turn_task(input: AgentTurnInput) {
         return;
     };
 
+    // TurnCompleted / AgentRunCompleted 已由 submit 内部发射，
+    // 此处只做 handler 特有的清理。
     match result.output {
         Ok(output) => {
-            let _ = session
-                .emit_durable(
-                    Some(&turn_id),
-                    agent_turn_completed_durable_payload(output.finish_reason.clone()),
-                )
-                .await;
-            session
-                .emit_live(
-                    Some(&turn_id),
-                    agent_turn_completed_live_payload(output.finish_reason.clone()),
-                )
-                .await;
             event_bus.sync_durable_events(&sid).await;
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
                 session_id: sid,
@@ -486,31 +477,6 @@ async fn run_agent_turn_task(input: AgentTurnInput) {
             });
         },
         Err(error) => {
-            if !result.emitted_error {
-                session
-                    .emit_durable(
-                        Some(&turn_id),
-                        EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: error.to_string(),
-                            recoverable: false,
-                        },
-                    )
-                    .await
-                    .ok();
-            }
-            let _ = session
-                .emit_durable(
-                    Some(&turn_id),
-                    agent_turn_completed_durable_payload("error".into()),
-                )
-                .await;
-            session
-                .emit_live(
-                    Some(&turn_id),
-                    agent_turn_completed_live_payload("error".into()),
-                )
-                .await;
             event_bus.sync_durable_events(&sid).await;
             let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
                 session_id: sid,
