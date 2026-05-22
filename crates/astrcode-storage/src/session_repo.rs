@@ -1419,6 +1419,10 @@ mod tests {
                 summary: "summary".into(),
                 transcript_path: Some("compact.jsonl".into()),
                 continued_session_id: session_id.clone(),
+                base_event_seq: 0,
+                strategy: astrcode_core::extension::CompactStrategy::Manual {
+                    keep_recent_turns: None,
+                },
             },
         ))
         .await

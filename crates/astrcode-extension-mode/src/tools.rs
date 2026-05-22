@@ -27,9 +27,10 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: "Switch the agent running mode. Available modes: \"code\" (default execution \
-                      with full tools) and \"plan\" (read-only planning mode, use when user wants \
-                      to plan). In plan mode, the first switch back to code triggers an exit \
-                      review gate; call again after review to complete the transition."
+                      with full tools) and \"plan\" (read-only planning mode, use when the user \
+                      or yourself wants to plan). In plan mode, the first switch back to code \
+                      triggers an exit review gate; call again after review to complete the \
+                      transition."
             .into(),
         parameters: json!({
             "type": "object",

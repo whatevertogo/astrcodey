@@ -26,6 +26,7 @@ null in runtime is default
     "llmTemperature": 0.7,
     "compactAutoEnabled": true,
     "compactThresholdPercent": 83.5,
+    "compactKeepRecentTurns": null,
     "agentMaxDepth": 3,
     "agentToolMaxParallelCalls": 5
   },
@@ -100,10 +101,15 @@ Each model in `models` array:
 | `compactAutoEnabled` | boolean | true | Enable automatic context compaction |
 | `compactThresholdPercent` | number | 83.5 | Trigger auto-compact when context usage exceeds this percentage |
 | `compactMaxRetryAttempts` | number | 3 | Maximum retry attempts for compaction |
-| `compactMaxOutputTokens` | number | 8000 | Maximum tokens for LLM compaction output |
-| `postCompactMaxFiles` | number | 10 | Maximum files to restore after compaction |
-| `postCompactTokenBudget` | number | 16000 | Token budget for file restoration |
-| `postCompactMaxTokensPerFile` | number | 4000 | Maximum tokens per restored file |
+| `compactMaxOutputTokens` | number | 20000 | Maximum tokens for LLM compaction output |
+| `compactKeepRecentTurns` | number or null | null | Recent complete user-turn groups to keep for auto/reactive compaction. `null` keeps the default tail, `0` compacts as much history as possible |
+| `compactCircuitBreakerThreshold` | number | 3 | Consecutive auto-compact LLM failures before auto compact is temporarily skipped |
+| `compactCircuitBreakerCooldownSecs` | number | 60 | Cooldown before retrying auto compact after the circuit breaker opens |
+| `predictiveCompactEnabled` | boolean | false | Enable predictive compaction before the current turn is likely to exceed the context window |
+| `predictiveCompactBaselineGrowthTokens` | number | 15000 | Minimum estimated token growth used by predictive compaction |
+| `postCompactMaxFiles` | number | 5 | Maximum files to restore after compaction |
+| `postCompactTokenBudget` | number | 50000 | Token budget for file restoration |
+| `postCompactMaxTokensPerFile` | number | 5000 | Maximum tokens per restored file |
 | `agentMaxDepth` | number | 3 | Maximum sub-agent nesting depth (root=0, child=1, ...) |
 | `agentToolMaxParallelCalls` | number | 5 | Maximum parallel tool calls per turn |
 | `wasmFuel` | number | 100000000 | Fuel limit for WASM extensions (instruction count) |

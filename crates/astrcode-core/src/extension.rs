@@ -428,6 +428,20 @@ pub enum CompactTrigger {
     AutoThreshold,
     /// 用户手动执行 compact 命令。
     ManualCommand,
+    /// LLM 返回 prompt_too_long 后的强制补救 compact。
+    ReactivePromptTooLong,
+}
+
+/// Compact 使用的策略，记录在事件中用于 replay 和审计。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompactStrategy {
+    Auto,
+    Manual {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        keep_recent_turns: Option<usize>,
+    },
+    ReactivePromptTooLong,
 }
 
 // ─── Hook Mode ───────────────────────────────────────────────────────────

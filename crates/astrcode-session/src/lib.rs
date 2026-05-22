@@ -4,6 +4,7 @@
 
 pub mod background;
 pub mod compact;
+pub(crate) mod compact_circuit_breaker;
 pub(crate) mod deferred_tools;
 pub(crate) mod llm_stream;
 pub mod payload;

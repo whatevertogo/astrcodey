@@ -117,11 +117,8 @@ fn todo_write_metadata()
     map.insert(
         TODO_WRITE_TOOL_NAME.to_string(),
         astrcode_core::tool::ToolPromptMetadata::new(
-            "Maintain the current progress snapshot for this branch of work.",
-        )
-        .caveat(
-            "Do not use for trivial one-step work, pure Q&A, or tasks that can be completed in \
-             roughly three straightforward actions.",
+            "Maintain the current progress snapshot for this branch of work.Use it when you want \
+             to keep track of multi-step progress that benefits from tracking.",
         )
         .caveat(
             "Keep exactly one item in `in_progress` at a time. Mark an item `in_progress` before \

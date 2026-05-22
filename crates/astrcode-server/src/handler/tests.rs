@@ -13,8 +13,8 @@ use astrcode_core::{
     config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload, Phase},
     extension::{
-        CommandContext, Extension, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-        HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
+        CommandContext, CompactStrategy, Extension, ExtensionCommandResult, ExtensionError,
+        ExtensionEvent, HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
@@ -29,6 +29,11 @@ use tokio::sync::{broadcast, mpsc};
 use super::*;
 
 struct MockLlm;
+struct ReactiveCompactLlm {
+    calls: AtomicUsize,
+}
+struct ExhaustedReactiveCompactLlm;
+struct AutoCompactFailingLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
@@ -78,6 +83,159 @@ impl LlmProvider for MockLlm {
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
             max_input_tokens: 200000,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ReactiveCompactLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let is_compact_request = messages.last().is_some_and(|message| {
+            message.role == LlmRole::User
+                && message_to_dto(message)
+                    .content
+                    .contains("Do not call tools")
+        });
+
+        if is_compact_request {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: r#"<summary>
+1. Primary Request and Intent:
+   reactive compact summary
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - (none)
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   reactive retry
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+                    .into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+            return Ok(rx);
+        }
+
+        if call == 0 {
+            return Err(LlmError::PromptTooLong("prompt too long".into()));
+        }
+
+        assert!(
+            messages.iter().any(|message| message_to_dto(message)
+                .content
+                .contains("<compact_summary>")),
+            "reactive retry should include compact summary"
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::ContentDelta {
+            delta: "reactive retry succeeded".into(),
+        });
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for ExhaustedReactiveCompactLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let is_compact_request = messages.last().is_some_and(|message| {
+            message.role == LlmRole::User
+                && message_to_dto(message)
+                    .content
+                    .contains("Do not call tools")
+        });
+
+        if is_compact_request {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: compact_summary_text("reactive compact summary"),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+            return Ok(rx);
+        }
+
+        Err(LlmError::PromptTooLong("prompt too long".into()))
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AutoCompactFailingLlm {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let is_compact_request = messages.last().is_some_and(|message| {
+            message.role == LlmRole::User
+                && message_to_dto(message)
+                    .content
+                    .contains("Do not call tools")
+        });
+        if is_compact_request {
+            return Err(LlmError::Transport("compact llm failed".into()));
+        }
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::ContentDelta {
+            delta: "normal response".into(),
+        });
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 100,
             max_output_tokens: 1024,
         }
     }
@@ -446,9 +604,16 @@ fn test_runtime_with_settings(
         },
         context: ContextSettings {
             auto_compact_enabled: context_settings.auto_compact_enabled,
+            predictive_compact_enabled: context_settings.predictive_compact_enabled,
             compact_threshold_percent: context_settings.compact_threshold_percent,
             compact_max_retry_attempts: context_settings.compact_max_retry_attempts,
             compact_max_output_tokens: context_settings.compact_max_output_tokens,
+            compact_keep_recent_turns: context_settings.compact_keep_recent_turns,
+            predictive_compact_baseline_growth_tokens: context_settings
+                .predictive_compact_baseline_growth_tokens,
+            compact_circuit_breaker_threshold: context_settings.compact_circuit_breaker_threshold,
+            compact_circuit_breaker_cooldown_secs: context_settings
+                .compact_circuit_breaker_cooldown_secs,
             post_compact_max_files: context_settings.post_compact_max_files,
             post_compact_token_budget: context_settings.post_compact_token_budget,
             post_compact_max_tokens_per_file: context_settings.post_compact_max_tokens_per_file,
@@ -543,6 +708,39 @@ fn test_event_bus(
     ))
 }
 
+fn compact_summary_text(current_work: &str) -> String {
+    format!(
+        r#"<summary>
+1. Primary Request and Intent:
+   compact test
+
+2. Key Technical Concepts:
+   - compact
+
+3. Files and Code Sections:
+   - (none)
+
+4. Errors and fixes:
+   - (none)
+
+5. Problem Solving:
+   compacted
+
+6. All user messages:
+   - (none)
+
+7. Pending Tasks:
+   - (none)
+
+8. Current Work:
+   {current_work}
+
+9. Optional Next Step:
+   - (none)
+</summary>"#
+    )
+}
+
 async fn wait_for_turn_completed(event_rx: &mut broadcast::Receiver<ClientNotification>) -> String {
     loop {
         let notification = recv_event(event_rx).await;
@@ -571,6 +769,37 @@ async fn drain_until_compact_boundary(
             return continued_session_id;
         }
     }
+}
+
+async fn append_user_assistant_pair(
+    store: &Arc<dyn EventStore>,
+    session_id: &SessionId,
+    user: &str,
+    assistant: &str,
+) {
+    store
+        .append_event(Event::new(
+            session_id.clone(),
+            None,
+            EventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: user.into(),
+            },
+        ))
+        .await
+        .unwrap();
+    store
+        .append_event(Event::new(
+            session_id.clone(),
+            None,
+            EventPayload::AssistantMessageCompleted {
+                message_id: new_message_id(),
+                text: assistant.into(),
+                reasoning_content: None,
+            },
+        ))
+        .await
+        .unwrap();
 }
 
 async fn collect_turn_ids_until_completed(
@@ -609,7 +838,15 @@ fn compact_payload_helpers_split_projection_and_audit_fields() {
         transcript_path: Some("compact.jsonl".into()),
     };
 
-    let boundary = compact_boundary_payload("manual_command", &compaction, "child".into());
+    let boundary = compact_boundary_payload(
+        "manual_command",
+        &compaction,
+        "child".into(),
+        0,
+        CompactStrategy::Manual {
+            keep_recent_turns: None,
+        },
+    );
     let continued =
         session_continued_from_compaction_payload("parent".into(), "7".into(), &compaction);
 
@@ -1140,7 +1377,10 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
         .unwrap();
     while event_rx.try_recv().is_ok() {}
 
-    let error = handler.compact_session(sid.clone()).await.unwrap_err();
+    let error = handler
+        .compact_session(sid.clone(), None)
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, HandlerError::CompactBlocked),
         "expected CompactBlocked, got {error:?}"
@@ -1223,7 +1463,7 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
     }
 
     let compacted_id = handler
-        .compact_session(session_id.clone())
+        .compact_session(session_id.clone(), None)
         .await
         .map(compacted_session_id)
         .unwrap();
@@ -1451,7 +1691,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     }
 
     let first_compacted = handler
-        .compact_session(session_id.clone())
+        .compact_session(session_id.clone(), None)
         .await
         .map(compacted_session_id)
         .unwrap();
@@ -1475,7 +1715,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     let second_compacted = handler
-        .compact_session(session_id.clone())
+        .compact_session(session_id.clone(), None)
         .await
         .map(compacted_session_id)
         .unwrap();
@@ -1571,4 +1811,261 @@ async fn auto_compact_applies_in_memory_during_turn() {
         }
     }
     assert_eq!(compaction_started_count, 1);
+}
+
+#[tokio::test]
+async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
+    let runtime = test_runtime_with_settings(
+        Arc::new(ReactiveCompactLlm {
+            calls: AtomicUsize::new(0),
+        }),
+        astrcode_context::ContextSettings {
+            auto_compact_enabled: false,
+            ..Default::default()
+        },
+    );
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+
+    let session_id = handler.create_session(".".into()).await.unwrap();
+    for index in 0..3 {
+        runtime
+            .event_store
+            .append_event(Event::new(
+                session_id.clone(),
+                None,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: format!("old user {index} {}", "x ".repeat(20)),
+                },
+            ))
+            .await
+            .unwrap();
+        runtime
+            .event_store
+            .append_event(Event::new(
+                session_id.clone(),
+                None,
+                EventPayload::AssistantMessageCompleted {
+                    message_id: new_message_id(),
+                    text: format!("old answer {index} {}", "y ".repeat(20)),
+                    reasoning_content: None,
+                },
+            ))
+            .await
+            .unwrap();
+    }
+
+    handler
+        .submit_input_for_session(session_id.clone(), "current".into())
+        .await
+        .unwrap();
+
+    let mut saw_compaction_started = 0usize;
+    let mut saw_compaction_completed = 0usize;
+    loop {
+        let notification = recv_event(&mut event_rx).await;
+        let ClientNotification::Event(event) = notification else {
+            continue;
+        };
+        match event.payload {
+            EventPayload::CompactionStarted => saw_compaction_started += 1,
+            EventPayload::CompactionCompleted { .. } => saw_compaction_completed += 1,
+            EventPayload::AssistantMessageCompleted { text, .. }
+                if text == "reactive retry succeeded" =>
+            {
+                break;
+            },
+            _ => {},
+        }
+    }
+
+    assert_eq!(saw_compaction_started, 1);
+    assert_eq!(saw_compaction_completed, 1);
+    assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+    let state = runtime
+        .event_store
+        .session_read_model(&session_id)
+        .await
+        .unwrap();
+    assert!(!state.context_messages.is_empty());
+}
+
+#[tokio::test]
+async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
+    let runtime = test_runtime_with_settings(
+        Arc::new(ExhaustedReactiveCompactLlm),
+        astrcode_context::ContextSettings {
+            auto_compact_enabled: false,
+            ..Default::default()
+        },
+    );
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+
+    let session_id = handler.create_session(".".into()).await.unwrap();
+    append_user_assistant_pair(
+        &runtime.event_store,
+        &session_id,
+        "old user",
+        "old assistant",
+    )
+    .await;
+
+    handler
+        .submit_input_for_session(session_id, "current".into())
+        .await
+        .unwrap();
+
+    let mut saw_compaction_completed = false;
+    let mut saw_compact_exhausted = false;
+    loop {
+        let notification = recv_event(&mut event_rx).await;
+        let ClientNotification::Event(event) = notification else {
+            continue;
+        };
+        match event.payload {
+            EventPayload::CompactionCompleted { .. } => saw_compaction_completed = true,
+            EventPayload::ErrorOccurred { message, .. } => {
+                saw_compact_exhausted =
+                    message.contains("prompt is still too long after reactive compaction");
+            },
+            EventPayload::TurnCompleted { finish_reason } => {
+                assert_eq!(finish_reason, "error");
+                break;
+            },
+            _ => {},
+        }
+    }
+
+    assert!(saw_compaction_completed);
+    assert!(saw_compact_exhausted);
+}
+
+#[tokio::test]
+async fn auto_compact_uses_configured_keep_recent_turns() {
+    let runtime = test_runtime_with_settings(
+        Arc::new(MockLlm),
+        astrcode_context::ContextSettings {
+            compact_threshold_percent: 0.0,
+            compact_keep_recent_turns: Some(2),
+            ..Default::default()
+        },
+    );
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+
+    let session_id = handler.create_session(".".into()).await.unwrap();
+    for index in 0..3 {
+        append_user_assistant_pair(
+            &runtime.event_store,
+            &session_id,
+            &format!("old user {index}"),
+            &format!("old assistant {index}"),
+        )
+        .await;
+    }
+
+    handler
+        .submit_input_for_session(session_id.clone(), "current".into())
+        .await
+        .unwrap();
+    assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
+
+    let state = runtime
+        .event_store
+        .session_read_model(&session_id)
+        .await
+        .unwrap();
+    let visible = state
+        .messages
+        .iter()
+        .map(|message| message_to_dto(message).content)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(!visible.contains("old user 0"));
+    assert!(!visible.contains("old user 1"));
+    assert!(visible.contains("old user 2"));
+    assert!(visible.contains("current"));
+    assert!(matches!(
+        state
+            .compact_boundaries
+            .first()
+            .map(|boundary| &boundary.strategy),
+        Some(CompactStrategy::Auto)
+    ));
+}
+
+#[tokio::test]
+async fn auto_compact_breaker_skips_after_llm_compact_failure() {
+    let runtime = test_runtime_with_settings(
+        Arc::new(AutoCompactFailingLlm),
+        astrcode_context::ContextSettings {
+            compact_threshold_percent: 0.0,
+            compact_circuit_breaker_threshold: 1,
+            compact_circuit_breaker_cooldown_secs: 60,
+            ..Default::default()
+        },
+    );
+    let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(512);
+    let handler =
+        CommandHandler::spawn_actor(Arc::clone(&runtime), test_event_bus(&runtime, event_tx));
+
+    let session_id = handler.create_session(".".into()).await.unwrap();
+    append_user_assistant_pair(
+        &runtime.event_store,
+        &session_id,
+        "old user",
+        "old assistant",
+    )
+    .await;
+
+    handler
+        .submit_input_for_session(session_id.clone(), "first".into())
+        .await
+        .unwrap();
+
+    let mut first_compactions = 0usize;
+    loop {
+        let notification = recv_event(&mut event_rx).await;
+        let ClientNotification::Event(event) = notification else {
+            continue;
+        };
+        match event.payload {
+            EventPayload::CompactionStarted => first_compactions += 1,
+            EventPayload::TurnCompleted { finish_reason } => {
+                assert_eq!(finish_reason, "stop");
+                break;
+            },
+            _ => {},
+        }
+    }
+    assert_eq!(first_compactions, 1);
+
+    handler
+        .submit_input_for_session(session_id, "second".into())
+        .await
+        .unwrap();
+
+    let mut second_compactions = 0usize;
+    loop {
+        let notification = recv_event(&mut event_rx).await;
+        let ClientNotification::Event(event) = notification else {
+            continue;
+        };
+        match event.payload {
+            EventPayload::CompactionStarted => second_compactions += 1,
+            EventPayload::TurnCompleted { finish_reason } => {
+                assert_eq!(finish_reason, "stop");
+                break;
+            },
+            _ => {},
+        }
+    }
+    assert_eq!(second_compactions, 0);
 }

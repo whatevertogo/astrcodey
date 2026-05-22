@@ -285,6 +285,10 @@ pub struct CompactBoundaryView {
     pub transcript_path: Option<String>,
     /// boundary 事件的 seq。
     pub seq: u64,
+    /// compact 基于的事件 seq（幂等校验键）。
+    pub base_event_seq: u64,
+    /// compact 策略。
+    pub strategy: crate::extension::CompactStrategy,
 }
 
 // ─── extension Event Index ────────────────────────────────────────────────

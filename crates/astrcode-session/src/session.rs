@@ -576,6 +576,7 @@ impl ToolResultArtifactReader for Session {
 // ─── Compact ────────────────────────────────────────────────────────
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub async fn append_compact_boundary(
         &self,
         system_prompt: String,
@@ -583,6 +584,8 @@ impl Session {
         extra_system_prompt: Option<String>,
         trigger_name: String,
         compaction: astrcode_context::compaction::CompactResult,
+        base_event_seq: u64,
+        strategy: astrcode_core::extension::CompactStrategy,
     ) -> Result<Vec<Event>, SessionError> {
         let cursor = self.latest_cursor().await?.unwrap_or_else(|| "0".into());
         let extra_system_prompt = extra_system_prompt.and_then(|s| {
@@ -594,7 +597,13 @@ impl Session {
             self.append_event(Event::new(
                 self.id.clone(),
                 None,
-                compact_boundary_payload(trigger_name, &compaction, self.id.clone()),
+                compact_boundary_payload(
+                    trigger_name,
+                    &compaction,
+                    self.id.clone(),
+                    base_event_seq,
+                    strategy,
+                ),
             ))
             .await?,
         );

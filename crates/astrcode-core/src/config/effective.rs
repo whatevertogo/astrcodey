@@ -70,12 +70,22 @@ pub struct LlmSettings {
 pub struct ContextSettings {
     /// 是否启用自动压缩（当上下文占用达到阈值时自动触发）。
     pub auto_compact_enabled: bool,
+    /// 是否启用预测性 compact。
+    pub predictive_compact_enabled: bool,
     /// 触发自动压缩的上下文占用百分比阈值（0–100）。
     pub compact_threshold_percent: f32,
     /// 压缩失败时的最大重试次数。
     pub compact_max_retry_attempts: u8,
     /// LLM 压缩输出的最大 token 数。
     pub compact_max_output_tokens: usize,
+    /// 自动/反应式 compact 保留的最近完整 turn 数。
+    pub compact_keep_recent_turns: Option<usize>,
+    /// 预测下一轮 token 增长时的保底值。
+    pub predictive_compact_baseline_growth_tokens: usize,
+    /// auto-compact LLM 熔断器触发阈值。
+    pub compact_circuit_breaker_threshold: u32,
+    /// auto-compact LLM 熔断器冷却时间（秒）。
+    pub compact_circuit_breaker_cooldown_secs: u64,
     /// 压缩后恢复的最近读取文件数量上限。
     pub post_compact_max_files: usize,
     /// 压缩后恢复文件的总 token 预算。
@@ -88,9 +98,17 @@ impl Default for ContextSettings {
     fn default() -> Self {
         Self {
             auto_compact_enabled: super::defaults::DEFAULT_COMPACT_AUTO_ENABLED,
+            predictive_compact_enabled: super::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED,
             compact_threshold_percent: super::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT,
             compact_max_retry_attempts: super::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS,
             compact_max_output_tokens: super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS,
+            compact_keep_recent_turns: super::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS,
+            predictive_compact_baseline_growth_tokens:
+                super::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS,
+            compact_circuit_breaker_threshold:
+                super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD,
+            compact_circuit_breaker_cooldown_secs:
+                super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS,
             post_compact_max_files: super::defaults::DEFAULT_POST_COMPACT_MAX_FILES,
             post_compact_token_budget: super::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET,
             post_compact_max_tokens_per_file:

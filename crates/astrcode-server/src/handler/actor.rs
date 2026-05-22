@@ -84,10 +84,15 @@ impl CommandHandle {
     pub async fn compact_session(
         &self,
         session_id: SessionId,
+        keep_recent_turns: Option<usize>,
     ) -> Result<ManualCompactOutcome, HandlerError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(CommandMessage::CompactSession { session_id, reply })
+            .send(CommandMessage::CompactSession {
+                session_id,
+                keep_recent_turns,
+                reply,
+            })
             .map_err(|_| HandlerError::Other("command actor is unavailable".into()))?;
         rx.await
             .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
@@ -171,6 +176,7 @@ pub(in crate::handler) enum CommandMessage {
     /// 手动压缩
     CompactSession {
         session_id: SessionId,
+        keep_recent_turns: Option<usize>,
         reply: oneshot::Sender<Result<ManualCompactOutcome, HandlerError>>,
     },
     /// 中止 Turn
@@ -395,9 +401,13 @@ impl CommandHandler {
                     tracing::warn!(%session_id, error = %error, "failed to inject mid-turn message");
                 }
             },
-            CommandMessage::CompactSession { session_id, reply } => {
+            CommandMessage::CompactSession {
+                session_id,
+                keep_recent_turns,
+                reply,
+            } => {
                 let sid = session_id.clone();
-                let result = self.compact_session(&session_id).await;
+                let result = self.compact_session(&session_id, keep_recent_turns).await;
                 // Compact 完成后移除 compacting 状态并触发队列
                 if matches!(result, Ok(ManualCompactOutcome::Compacted { .. })) {
                     self.compacting_sessions.remove(&sid);

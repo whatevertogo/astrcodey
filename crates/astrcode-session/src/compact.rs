@@ -2,17 +2,20 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use astrcode_context::compaction::CompactError;
+use astrcode_context::compaction::{CompactError, CompactResult};
 use astrcode_core::{
     config::ModelSelection,
+    event::Event,
     extension::{
-        CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactTrigger,
-        ExtensionError,
+        CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactStrategy,
+        CompactTrigger, ExtensionError,
     },
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use tokio::sync::mpsc;
+
+use crate::{Session, session::SessionError};
 
 type CompactRequestFn = Box<
     dyn FnMut(Vec<LlmMessage>) -> Pin<Box<dyn Future<Output = Result<String, CompactError>> + Send>>
@@ -82,6 +85,7 @@ pub fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
     match trigger {
         CompactTrigger::AutoThreshold => "auto_threshold",
         CompactTrigger::ManualCommand => "manual_command",
+        CompactTrigger::ReactivePromptTooLong => "reactive_prompt_too_long",
     }
 }
 
@@ -115,5 +119,78 @@ pub fn make_compact_request_fn(llm: Arc<dyn LlmProvider>) -> CompactRequestFn {
                 .map_err(CompactError::Llm)?;
             collect_stream_text(rx).await.map_err(CompactError::Llm)
         })
+    })
+}
+
+// ─── persist_compact_result ─────────────────────────────────────────
+
+/// persist_compact_result 返回的持久化结果。
+pub struct PersistedCompaction {
+    pub events: Vec<Event>,
+    pub base_event_seq: u64,
+    pub messages_removed: usize,
+}
+
+/// compare-and-append 冲突：compact LLM 调用期间有新事件写入。
+#[derive(Debug, thiserror::Error)]
+#[error("compaction conflict: expected seq {expected}, actual {actual}")]
+pub struct CompactionConflict {
+    pub expected: u64,
+    pub actual: u64,
+}
+
+/// persist_compact_result 的错误类型。
+#[derive(Debug, thiserror::Error)]
+pub enum PersistCompactError {
+    #[error("{0}")]
+    Conflict(#[from] CompactionConflict),
+    #[error("{0}")]
+    Session(#[from] SessionError),
+}
+
+/// 纯持久化：校验 expected seq → append compact boundary events。
+///
+/// 不发 live event。`base_event_seq` 由调用方在 prepare 阶段产生并传入。
+/// 若当前 cursor 与 `base_event_seq` 不一致则返回 conflict（调用方可选择放弃持久化）。
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_compact_result(
+    session: &Session,
+    compaction: &CompactResult,
+    trigger_name: &str,
+    system_prompt: &str,
+    fingerprint: &str,
+    extra_system_prompt: Option<&str>,
+    base_event_seq: u64,
+    strategy: CompactStrategy,
+) -> Result<PersistedCompaction, PersistCompactError> {
+    // compare-and-append: 校验当前 cursor 与预期一致
+    let current_seq = session
+        .latest_cursor()
+        .await?
+        .and_then(|c| c.parse::<u64>().ok())
+        .unwrap_or(0);
+    if current_seq != base_event_seq {
+        return Err(PersistCompactError::Conflict(CompactionConflict {
+            expected: base_event_seq,
+            actual: current_seq,
+        }));
+    }
+
+    let events = session
+        .append_compact_boundary(
+            system_prompt.to_owned(),
+            fingerprint.to_owned(),
+            extra_system_prompt.map(|s| s.to_owned()),
+            trigger_name.to_owned(),
+            compaction.clone(),
+            base_event_seq,
+            strategy,
+        )
+        .await?;
+
+    Ok(PersistedCompaction {
+        events,
+        base_event_seq,
+        messages_removed: compaction.messages_removed,
     })
 }

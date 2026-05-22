@@ -32,6 +32,16 @@ pub const DEFAULT_COMPACT_THRESHOLD_PERCENT: f32 = 83.5;
 pub const DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS: u8 = 3;
 /// LLM 压缩输出的最大 token 数。
 pub const DEFAULT_COMPACT_MAX_OUTPUT_TOKENS: usize = 20_000;
+/// 自动/反应式 compact 默认保留的最近完整 turn 数。
+pub const DEFAULT_COMPACT_KEEP_RECENT_TURNS: Option<usize> = Some(1);
+/// auto-compact LLM 熔断器触发阈值。
+pub const DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+/// auto-compact LLM 熔断器冷却时间（秒）。
+pub const DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 60;
+/// 是否启用预测性 compact。
+pub const DEFAULT_PREDICTIVE_COMPACT_ENABLED: bool = false;
+/// 预测下一轮 token 增长时的保底值。
+pub const DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS: usize = 15_000;
 /// 压缩后恢复的最近读取文件数量上限。
 pub const DEFAULT_POST_COMPACT_MAX_FILES: usize = 5;
 /// 压缩后恢复文件的总 token 预算。

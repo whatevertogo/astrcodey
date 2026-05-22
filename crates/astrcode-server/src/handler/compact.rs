@@ -2,13 +2,16 @@ use astrcode_context::compaction::{
     CompactSkipReason, CompactSummaryRenderOptions, compact_messages_with_fallback,
 };
 use astrcode_core::{
-    event::EventPayload, extension::CompactTrigger, storage::CompactSnapshotInput, types::SessionId,
+    event::EventPayload,
+    extension::{CompactStrategy, CompactTrigger},
+    storage::CompactSnapshotInput,
+    types::SessionId,
 };
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::{
     compact::{
         CompactHookContext, collect_compact_instructions, compact_trigger_name,
-        dispatch_post_compact, make_compact_request_fn,
+        dispatch_post_compact, make_compact_request_fn, persist_compact_result,
     },
     post_compact::enrich_post_compact_context,
 };
@@ -23,12 +26,15 @@ pub enum ManualCompactOutcome {
 }
 
 impl CommandHandler {
-    pub(super) async fn compact_active_session(&mut self) -> Result<(), HandlerError> {
+    pub(super) async fn compact_active_session(
+        &mut self,
+        keep_recent_turns: Option<usize>,
+    ) -> Result<(), HandlerError> {
         let Some(sid) = self.active_session_id.clone() else {
             self.send_error(40400, "No active session");
             return Ok(());
         };
-        match self.compact_session(&sid).await {
+        match self.compact_session(&sid, keep_recent_turns).await {
             Ok(ManualCompactOutcome::Compacted { .. }) => Ok(()),
             Ok(ManualCompactOutcome::Skipped { message }) => {
                 self.send_error(40000, &message);
@@ -45,6 +51,7 @@ impl CommandHandler {
     pub async fn compact_session(
         &mut self,
         sid: &SessionId,
+        keep_recent_turns: Option<usize>,
     ) -> Result<ManualCompactOutcome, HandlerError> {
         if self.active_turns.contains_key(sid) {
             self.send_error(40900, "Cannot compact while a turn is running");
@@ -122,11 +129,12 @@ impl CommandHandler {
             &settings,
             &custom_instructions,
             &render_options,
+            keep_recent_turns,
             request_fn,
         )
         .await
         {
-            Ok(compaction) => compaction,
+            Ok(compaction) => compaction.result,
             Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
                 return Ok(ManualCompactOutcome::Skipped {
                     message: "Nothing to compact".into(),
@@ -160,26 +168,38 @@ impl CommandHandler {
             .await;
 
         let fp = hex_fingerprint(system_prompt.as_bytes());
-        let trigger = compact_trigger_name(CompactTrigger::ManualCommand).into();
-        let messages_removed = compaction.messages_removed;
-        let events = session
-            .append_compact_boundary(
-                system_prompt,
-                fp,
-                state.extra_system_prompt.clone(),
-                trigger,
-                compaction,
-            )
+        let trigger = compact_trigger_name(CompactTrigger::ManualCommand);
+        let base_event_seq = session
+            .latest_cursor()
             .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            .map_err(|e| HandlerError::Other(e.to_string()))?
+            .and_then(|c| c.parse::<u64>().ok())
+            .unwrap_or(0);
+        let persisted = persist_compact_result(
+            &session,
+            &compaction,
+            trigger,
+            &system_prompt,
+            &fp,
+            state.extra_system_prompt.as_deref(),
+            base_event_seq,
+            CompactStrategy::Manual { keep_recent_turns },
+        )
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        for event in &events {
+        for event in &persisted.events {
             self.broadcast_event(event.clone());
         }
 
         // 发送 CompactionCompleted 事件
         session
-            .emit_live(None, EventPayload::CompactionCompleted { messages_removed })
+            .emit_live(
+                None,
+                EventPayload::CompactionCompleted {
+                    messages_removed: persisted.messages_removed,
+                },
+            )
             .await;
 
         let state = session
