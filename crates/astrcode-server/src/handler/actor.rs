@@ -151,6 +151,16 @@ impl CommandHandle {
         rx.await
             .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
     }
+
+    /// 删除指定工作目录下的所有会话，返回删除数量。
+    pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(CommandMessage::DeleteProject { working_dir, reply })
+            .map_err(|_| HandlerError::Other("command actor is unavailable".into()))?;
+        rx.await
+            .map_err(|_| HandlerError::Other("command actor dropped response".into()))?
+    }
 }
 
 /// Actor 内部消息类型，涵盖所有需要异步处理的操作。
@@ -213,6 +223,11 @@ pub(in crate::handler) enum CommandMessage {
         source_id: SessionId,
         at_cursor: Option<String>,
         reply: oneshot::Sender<Result<SessionId, HandlerError>>,
+    },
+    /// 删除指定工作目录下的所有会话
+    DeleteProject {
+        working_dir: String,
+        reply: oneshot::Sender<Result<usize, HandlerError>>,
     },
 }
 
@@ -447,6 +462,9 @@ impl CommandHandler {
                 reply,
             } => {
                 let _ = reply.send(self.fork_session(source_id, at_cursor).await);
+            },
+            CommandMessage::DeleteProject { working_dir, reply } => {
+                let _ = reply.send(self.delete_project(working_dir).await);
             },
         }
     }

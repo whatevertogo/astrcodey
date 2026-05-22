@@ -274,34 +274,9 @@ pub(in crate::http) async fn delete_project(
     State(state): State<HttpState>,
     Query(params): Query<DeleteProjectParams>,
 ) -> Response {
-    match state.runtime.session_manager.list_summaries().await {
-        Ok(summaries) => {
-            let matching: Vec<_> = summaries
-                .into_iter()
-                .filter(|s| s.working_dir == params.working_dir)
-                .collect();
-            let mut deleted_count = 0usize;
-            for summary in &matching {
-                match state
-                    .handler
-                    .handle(ClientCommand::DeleteSession {
-                        session_id: summary.session_id.to_string(),
-                    })
-                    .await
-                {
-                    Ok(()) => deleted_count += 1,
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %summary.session_id,
-                            error = %error,
-                            "delete_project: failed to delete session, continuing"
-                        );
-                    },
-                }
-            }
-            Json(DeleteProjectResponseDto { deleted_count }).into_response()
-        },
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "list_failed", error),
+    match state.handler.delete_project(params.working_dir).await {
+        Ok(deleted_count) => Json(DeleteProjectResponseDto { deleted_count }).into_response(),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "delete_failed", error),
     }
 }
 

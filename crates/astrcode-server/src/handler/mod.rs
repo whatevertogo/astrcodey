@@ -539,6 +539,41 @@ impl CommandHandler {
         Ok(new_sid)
     }
 
+    /// 删除指定工作目录下的所有会话，返回删除数量。
+    pub async fn delete_project(&mut self, working_dir: String) -> Result<usize, HandlerError> {
+        let summaries = self
+            .runtime
+            .session_manager
+            .list_summaries()
+            .await
+            .map_err(|e| HandlerError::Other(format!("list sessions: {e}")))?;
+
+        let matching: Vec<_> = summaries
+            .into_iter()
+            .filter(|s| s.working_dir == working_dir)
+            .collect();
+
+        let mut deleted_count = 0usize;
+        for summary in &matching {
+            match self
+                .handle(ClientCommand::DeleteSession {
+                    session_id: summary.session_id.to_string(),
+                })
+                .await
+            {
+                Ok(()) => deleted_count += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %summary.session_id,
+                        error = %error,
+                        "delete_project: failed to delete session, continuing"
+                    );
+                },
+            }
+        }
+        Ok(deleted_count)
+    }
+
     // ─── 模型选择 ───────────────────────────────────────────────────────
 
     /// 设置当前会话使用的主模型，格式为 `profile/model`。
