@@ -157,6 +157,19 @@ pub trait EventStore: Send + Sync {
     async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
         Ok(())
     }
+
+    /// 返回指定会话在存储层中的真实目录路径。
+    ///
+    /// 工具需要往 session 目录写入附属数据（todos、mode、plan 等）时，
+    /// 应通过此方法获取路径，而不是自行拼接——子 session 的真实目录
+    /// 可能在 `subagents/{extension}/` 下，无法从 session_id + working_dir 推断。
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, StorageError> {
+        let _ = session_id;
+        Ok(None)
+    }
 }
 
 /// 工具结果 artifact 读取能力。

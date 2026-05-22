@@ -668,6 +668,13 @@ impl EventStore for FileSystemSessionRepository {
         let meta = self.get_or_open_meta(session_id).await?;
         meta.log.force_sync()
     }
+
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, StorageError> {
+        Ok(self.session_dir(session_id).await)
+    }
 }
 
 /// 判断目录是否位于 subagents 子树下。

@@ -20,7 +20,7 @@ mod prompts;
 mod store;
 mod tools;
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
     extension::{
@@ -31,6 +31,7 @@ use astrcode_core::{
     llm::LlmMessage,
     tool::{ToolResult, tool_metadata},
 };
+use astrcode_support::hostpaths;
 use serde_json::json;
 
 pub use crate::catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec};
@@ -127,8 +128,19 @@ impl ToolHandler for ModeToolHandler {
         working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
-        let mode_root = store::mode_store_root(ctx.session_id.as_str(), working_dir);
-        let plan_dir = store::plan_dir(ctx.session_id.as_str(), working_dir);
+        let base = ctx
+            .capabilities
+            .session_store_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                hostpaths::session_dir_for_project_path(
+                    &PathBuf::from(working_dir),
+                    ctx.session_id.as_str(),
+                )
+            });
+        let mode_root = store::mode_dir_from_base(&base);
+        let plan_dir = store::plan_dir_from_base(&base);
 
         match tool_name {
             SWITCH_MODE_TOOL_NAME => Ok(
@@ -161,7 +173,17 @@ struct ModePreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let mode_root = store::mode_store_root(&ctx.session_id, &ctx.working_dir);
+        let base = ctx
+            .session_store_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                hostpaths::session_dir_for_project_path(
+                    &PathBuf::from(&ctx.working_dir),
+                    &ctx.session_id,
+                )
+            });
+        let mode_root = store::mode_dir_from_base(&base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
@@ -197,7 +219,17 @@ impl CommandHandler for ModeSlashCommandHandler {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let mode_root = store::mode_store_root(&ctx.session_id, working_dir);
+        let base = ctx
+            .session_store_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                hostpaths::session_dir_for_project_path(
+                    &PathBuf::from(working_dir),
+                    &ctx.session_id,
+                )
+            });
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         let target_mode = match arguments.trim() {
@@ -240,7 +272,17 @@ impl CommandHandler for ModeSlashCommandHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for ModeProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let mode_root = store::mode_store_root(&ctx.session_id, &ctx.working_dir);
+        let base = ctx
+            .session_store_dir
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                hostpaths::session_dir_for_project_path(
+                    &PathBuf::from(&ctx.working_dir),
+                    &ctx.session_id,
+                )
+            });
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         if let Some(context) = state.pending_transition_context.take() {

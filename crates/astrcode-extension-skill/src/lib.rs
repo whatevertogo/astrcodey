@@ -912,6 +912,7 @@ mod tests {
             session_id: "session".into(),
             working_dir: workspace.to_string_lossy().into_owned(),
             model: ModelSelection::simple("mock"),
+            session_store_dir: None,
         };
         let result = handler
             .execute("commit", "staged files", &workspace.to_string_lossy(), &ctx)

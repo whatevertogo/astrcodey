@@ -227,6 +227,7 @@ fn pre_tool_use_context(command: &str) -> PreToolUseContext {
         tool_input: serde_json::json!({ "command": command }),
         available_tools: vec![],
         extension_event_sink: None,
+        session_store_dir: None,
     }
 }
 

@@ -131,6 +131,7 @@ impl ToolPipeline {
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
                 extension_event_sink: None,
+                session_store_dir: self.shared.session_store_dir.clone(),
             };
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
@@ -414,6 +415,7 @@ impl ToolPipeline {
                     tool_result: result.clone(),
                     is_error: result.is_error,
                     extension_event_sink: None,
+                    session_store_dir: self.shared.session_store_dir.clone(),
                 };
 
                 match self.extension_runner.emit_post_tool_use(post_ctx).await? {

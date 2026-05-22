@@ -124,6 +124,13 @@ impl CommandHandler {
                     .model_id
                     .clone(),
             ),
+            session_store_dir: self
+                .runtime
+                .session_manager
+                .session_store_dir(&sid)
+                .await
+                .ok()
+                .flatten(),
         };
 
         match self

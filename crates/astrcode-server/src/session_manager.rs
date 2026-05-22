@@ -280,6 +280,16 @@ impl SessionManager {
             .map_err(SessionManagerError::from)
     }
 
+    pub(crate) async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, SessionManagerError> {
+        self.event_store
+            .session_store_dir(session_id)
+            .await
+            .map_err(SessionManagerError::from)
+    }
+
     pub(crate) async fn recycle_session(
         &self,
         session_id: &SessionId,

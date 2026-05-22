@@ -725,6 +725,8 @@ pub struct PreToolUseContext {
     pub available_tools: Vec<ToolDefinition>,
     /// 插件事件发射器（仅插件钩子会有值）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
+    /// session 在存储层的真实目录路径。
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for PreToolUseContext {
@@ -752,6 +754,8 @@ pub struct PostToolUseContext {
     pub is_error: bool,
     /// 插件事件发射器（仅插件钩子会有值）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
+    /// session 在存储层的真实目录路径。
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for PostToolUseContext {
@@ -775,6 +779,8 @@ pub struct ProviderContext {
     pub working_dir: String,
     pub model: ModelSelection,
     pub messages: Vec<crate::llm::LlmMessage>,
+    /// session 在存储层的真实目录路径。
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 /// PromptBuild 钩子上下文。
@@ -837,6 +843,8 @@ pub struct CommandContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
+    /// session 在存储层的真实目录路径。
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 // ─── Handler Traits ──────────────────────────────────────────────

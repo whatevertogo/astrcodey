@@ -135,11 +135,13 @@ impl TurnRunner {
         background_result_tx: Option<
             mpsc::UnboundedSender<crate::background::BackgroundTaskCompletion>,
         >,
+        session_store_dir: Option<std::path::PathBuf>,
     ) -> Result<Self, TurnError> {
         let shared = SharedTurnContext {
             session_id: session.id().clone(),
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
+            session_store_dir: session_store_dir.clone(),
         };
         let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
         let initial_history = session_state.provider_messages();
@@ -157,6 +159,7 @@ impl TurnRunner {
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: caps.session_ops(),
             small_model_id: Some(caps.read_effective().small_llm.model_id.clone()),
+            session_store_dir,
         };
         let tools = ToolPipeline::new(
             shared.clone(),

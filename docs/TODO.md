@@ -8,6 +8,7 @@
 
 - [ ]  插件增加配置功能
 - [ ]  以前写过的子agent管理加入进去，减少异步agent带来的问题，优化后台任务逻辑
+- [ ]  系统提示词sessionstart固定化，保证kv缓存,需要触发 compact（手动 /compact 或自动 compact）或者来重新build
 
 ## 中优先级
 

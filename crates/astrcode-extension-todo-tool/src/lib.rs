@@ -1,6 +1,6 @@
 //! astrcode-extension-todo-tool — session-local progress todo list.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
 
 use astrcode_core::{
     extension::{
@@ -51,6 +51,11 @@ pub(crate) fn progress_store_root(session_id: &str, working_dir: &str) -> PathBu
     hostpaths::session_dir_for_project_path(&PathBuf::from(working_dir), session_id).join("todos")
 }
 
+/// Compute todo storage root from a known session base directory.
+pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
+    base.join("todos")
+}
+
 /// Return bundled todo extension.
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(TodoToolExtension)
@@ -91,8 +96,11 @@ impl ToolHandler for TodoWriteToolHandler {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let store =
-            ProgressListStore::new(progress_store_root(ctx.session_id.as_str(), working_dir));
+        let root = match ctx.capabilities.session_store_dir.as_deref() {
+            Some(base) => todo_dir_from_base(base),
+            None => progress_store_root(ctx.session_id.as_str(), working_dir),
+        };
+        let store = ProgressListStore::new(root);
         Ok(match handle_todo_write(arguments, &store) {
             Ok(result) => result,
             Err(error) => {
@@ -108,7 +116,10 @@ struct TodoReminderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for TodoReminderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = progress_store_root(&ctx.session_id, &ctx.working_dir);
+        let root = match ctx.session_store_dir.as_deref() {
+            Some(base) => todo_dir_from_base(base),
+            None => progress_store_root(&ctx.session_id, &ctx.working_dir),
+        };
         ProgressReminder::new(root)
             .before_provider_request()
             .map_err(ExtensionError::Internal)
@@ -121,7 +132,10 @@ struct TodoPostToolUseHandler;
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = progress_store_root(&ctx.session_id, &ctx.working_dir);
+            let root = match ctx.session_store_dir.as_deref() {
+                Some(base) => todo_dir_from_base(base),
+                None => progress_store_root(&ctx.session_id, &ctx.working_dir),
+            };
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;

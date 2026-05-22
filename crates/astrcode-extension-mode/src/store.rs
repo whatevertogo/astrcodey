@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_support::hostpaths;
 use serde::{Deserialize, Serialize};
 
 /// Per-session mode state persisted to disk.
@@ -30,14 +29,14 @@ impl ModeState {
 const MODE_STATE_FILE: &str = "mode-state.json";
 const PLAN_FILE: &str = "plan.md";
 
-/// Compute the mode state storage root for a session.
-pub fn mode_store_root(session_id: &str, working_dir: &str) -> PathBuf {
-    hostpaths::session_dir_for_project_path(&PathBuf::from(working_dir), session_id).join("mode")
+/// Compute the mode state storage root from a known session base directory.
+pub fn mode_dir_from_base(base: &Path) -> PathBuf {
+    base.join("mode")
 }
 
-/// Compute the plan artifact directory for a session.
-pub fn plan_dir(session_id: &str, working_dir: &str) -> PathBuf {
-    hostpaths::session_plan_dir_for_project_path(&PathBuf::from(working_dir), session_id)
+/// Compute the plan artifact directory from a known session base directory.
+pub fn plan_dir_from_base(base: &Path) -> PathBuf {
+    base.join("plan")
 }
 
 pub fn load_mode_state(root: &Path) -> Result<ModeState, String> {

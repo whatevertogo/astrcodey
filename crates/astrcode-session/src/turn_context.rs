@@ -52,6 +52,7 @@ pub struct SharedTurnContext {
     pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 impl SharedTurnContext {
@@ -91,6 +92,7 @@ impl SharedTurnContext {
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
             messages,
+            session_store_dir: self.session_store_dir.clone(),
         }
     }
 

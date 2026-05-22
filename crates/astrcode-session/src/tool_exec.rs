@@ -44,6 +44,8 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
     /// 小模型 ID，供子 agent 工具使用。
     pub small_model_id: Option<String>,
+    /// session 在存储层的真实目录路径。
+    pub session_store_dir: Option<std::path::PathBuf>,
 }
 
 pub(crate) struct ToolCallRuntimeContext {
@@ -207,6 +209,7 @@ async fn execute_tool_call_blocking(
         capabilities: ToolCapabilities {
             model_id: Some(runtime.model_id),
             small_model_id: runtime.capabilities.small_model_id,
+            session_store_dir: runtime.capabilities.session_store_dir,
             available_tools: Some(runtime.tools),
             tool_result_reader: runtime.tool_result_reader,
             background_task_reader: runtime.capabilities.background_task_reader,
@@ -286,6 +289,7 @@ async fn execute_tool_call_with_background(
         capabilities: ToolCapabilities {
             model_id: Some(runtime.model_id.clone()),
             small_model_id: runtime.capabilities.small_model_id.clone(),
+            session_store_dir: runtime.capabilities.session_store_dir.clone(),
             available_tools: Some(runtime.tools.clone()),
             tool_result_reader: runtime.tool_result_reader.clone(),
             background_task_reader: runtime.capabilities.background_task_reader.clone(),

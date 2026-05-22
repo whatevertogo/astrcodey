@@ -126,6 +126,15 @@ impl Session {
         &self.caps
     }
 
+    /// 返回本 session 在存储层中的真实目录路径。
+    pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
+        self.store
+            .session_store_dir(&self.id)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// 订阅本 session 的事件 fan-out 通道。
     ///
     /// 同 sid 不同 Session 实例订阅的是同一份 EventFanout（在 runtime 上），
@@ -494,10 +503,12 @@ impl Session {
         } else {
             pre_state
         };
+        let session_store_dir = self.session_store_dir().await;
         let mut agent = TurnRunner::new(
             Arc::new(self.clone()),
             &session_state,
             Some(background_result_tx),
+            session_store_dir,
         )?;
 
         // ── Turn 执行 + 结束生命周期事件 ─────────────────────────────

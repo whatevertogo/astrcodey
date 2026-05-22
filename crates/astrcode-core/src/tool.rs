@@ -415,6 +415,12 @@ pub struct ToolCapabilities {
     pub model_id: Option<String>,
     /// 小模型标识，供子 agent 使用。
     pub small_model_id: Option<String>,
+    /// 当前 session 在存储层中的真实目录路径。
+    ///
+    /// 子 session 的真实目录可能在 `subagents/{extension}/` 下，
+    /// 无法从 session_id + working_dir 推断。工具需要写附属数据时
+    /// 应使用此路径，而非自行拼接。
+    pub session_store_dir: Option<std::path::PathBuf>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
     pub available_tools: Option<Vec<ToolDefinition>>,
     /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
