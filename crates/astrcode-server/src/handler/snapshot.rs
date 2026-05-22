@@ -41,15 +41,82 @@ pub(crate) fn session_snapshot(
 }
 
 /// 将 LLM 消息转换为传输层 DTO。
+///
+/// Compact summary 消息（synthetic user message）会被转换为 system 角色，
+/// 以便客户端能正确识别其为系统生成的上下文摘要。
 pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
+    let content = message
+        .content
+        .iter()
+        .map(content_to_text)
+        .collect::<Vec<_>>()
+        .join("");
+
+    // Compact summary 消息是 synthetic user message，但在客户端应显示为系统消息
+    let role = if is_compact_summary_message(&content) {
+        "system"
+    } else {
+        message.role.as_str()
+    };
+
     MessageDto {
-        role: message.role.as_str().to_string(),
-        content: message
-            .content
-            .iter()
-            .map(content_to_text)
-            .collect::<Vec<_>>()
-            .join(""),
+        role: role.to_string(),
+        content,
+    }
+}
+
+/// 检测消息是否是 compact summary synthetic message。
+fn is_compact_summary_message(content: &str) -> bool {
+    content.trim_start().starts_with("<compact_summary>")
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::llm::{LlmContent, LlmRole};
+
+    use super::*;
+
+    #[test]
+    fn compact_summary_message_converts_to_system_role() {
+        let compact_msg = LlmMessage {
+            role: LlmRole::User,
+            content: vec![LlmContent::Text {
+                text: "<compact_summary>\nSummary:\nTest summary\n</compact_summary>".into(),
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+
+        let dto = message_to_dto(&compact_msg);
+
+        assert_eq!(dto.role, "system");
+        assert!(dto.content.contains("<compact_summary>"));
+    }
+
+    #[test]
+    fn regular_user_message_preserves_user_role() {
+        let user_msg = LlmMessage {
+            role: LlmRole::User,
+            content: vec![LlmContent::Text {
+                text: "Hello, how are you?".into(),
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+
+        let dto = message_to_dto(&user_msg);
+
+        assert_eq!(dto.role, "user");
+        assert_eq!(dto.content, "Hello, how are you?");
+    }
+
+    #[test]
+    fn is_compact_summary_message_detects_marker() {
+        assert!(is_compact_summary_message("<compact_summary>\nContent"));
+        assert!(is_compact_summary_message("  <compact_summary>\nContent"));
+        assert!(is_compact_summary_message("\n<compact_summary>\nContent"));
+        assert!(!is_compact_summary_message("Regular message"));
+        assert!(!is_compact_summary_message("</compact_summary>"));
     }
 }
 
