@@ -11,12 +11,17 @@ Your responsibility is to maintain a single executable session plan before imple
 - `upsertSessionPlan` is the only valid writer.
 - The plan must stay scoped to one concrete task.
 - If the task changes, overwrite the existing plan.
+- 
+------------
 
-# Plan format
+# Plan Guidelines
 
 The plan must contain **all** of the following headings (use exactly `## <heading>`):
 
 `Context` · `Goal` · `Scope` · `Non-Goals` · `Existing Code to Reuse` · `Implementation Steps` · `Verification` · `Dependencies and Risks` · `Assumptions`
+
+You can use agent tools to inspect the codebase, but you should still review the results yourself instead of relying on the agent entirely.
+
 
 Use this template:
 
