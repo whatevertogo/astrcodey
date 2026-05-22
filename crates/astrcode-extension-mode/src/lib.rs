@@ -20,7 +20,7 @@ mod prompts;
 mod store;
 mod tools;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use astrcode_core::{
     extension::{
@@ -31,7 +31,6 @@ use astrcode_core::{
     llm::LlmMessage,
     tool::{ToolResult, tool_metadata},
 };
-use astrcode_support::hostpaths;
 use serde_json::json;
 
 pub use crate::catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec};
@@ -125,22 +124,16 @@ impl ToolHandler for ModeToolHandler {
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
-        working_dir: &str,
+        _working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let base = ctx
             .capabilities
             .session_store_dir
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                hostpaths::session_dir_for_project_path(
-                    &PathBuf::from(working_dir),
-                    ctx.session_id.as_str(),
-                )
-            });
-        let mode_root = store::mode_dir_from_base(&base);
-        let plan_dir = store::plan_dir_from_base(&base);
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let mode_root = store::mode_dir_from_base(Path::new(base));
+        let plan_dir = store::plan_dir_from_base(Path::new(base));
 
         match tool_name {
             SWITCH_MODE_TOOL_NAME => Ok(
@@ -176,14 +169,8 @@ impl PreToolUseHandler for ModePreToolUseHandler {
         let base = ctx
             .session_store_dir
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                hostpaths::session_dir_for_project_path(
-                    &PathBuf::from(&ctx.working_dir),
-                    &ctx.session_id,
-                )
-            });
-        let mode_root = store::mode_dir_from_base(&base);
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let mode_root = store::mode_dir_from_base(Path::new(base));
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
@@ -216,20 +203,14 @@ impl CommandHandler for ModeSlashCommandHandler {
         &self,
         _command_name: &str,
         arguments: &str,
-        working_dir: &str,
+        _working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         let base = ctx
             .session_store_dir
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                hostpaths::session_dir_for_project_path(
-                    &PathBuf::from(working_dir),
-                    &ctx.session_id,
-                )
-            });
-        let mode_root = store::mode_dir_from_base(&base);
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let mode_root = store::mode_dir_from_base(Path::new(base));
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         let target_mode = match arguments.trim() {
@@ -275,14 +256,8 @@ impl ProviderHandler for ModeProviderHandler {
         let base = ctx
             .session_store_dir
             .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                hostpaths::session_dir_for_project_path(
-                    &PathBuf::from(&ctx.working_dir),
-                    &ctx.session_id,
-                )
-            });
-        let mode_root = store::mode_dir_from_base(&base);
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let mode_root = store::mode_dir_from_base(Path::new(base));
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         if let Some(context) = state.pending_transition_context.take() {

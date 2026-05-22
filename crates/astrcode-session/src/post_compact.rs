@@ -18,9 +18,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     tool::{ToolDefinition, ToolOrigin},
 };
-use astrcode_support::hostpaths::{
-    is_path_within, resolve_path, session_plan_dir_for_project_path,
-};
+use astrcode_support::hostpaths::{is_path_within, resolve_path};
 
 const PLAN_NOTE_MAX_CHARS: usize = 40_000;
 const SKILLS_TOKEN_BUDGET: usize = 25_000;
@@ -28,6 +26,7 @@ const AGENT_NOTE_MAX_CHARS: usize = 20_000;
 const TOOL_NOTE_MAX_CHARS: usize = 16_000;
 const TOKEN_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn enrich_post_compact_context(
     compaction: &mut CompactResult,
     session_id: &str,
@@ -36,6 +35,7 @@ pub async fn enrich_post_compact_context(
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
     settings: &ContextSettings,
+    session_store_dir: Option<PathBuf>,
 ) {
     let source_messages = source_messages.to_vec();
     let retained_messages = compaction.retained_messages.clone();
@@ -44,7 +44,7 @@ pub async fn enrich_post_compact_context(
     let tools = tools.to_vec();
     let session_id_for_closure = session_id.to_string();
     let settings = settings.clone();
-
+    let session_store_dir_clone = session_store_dir.clone();
     let result = tokio::task::spawn_blocking({
         let settings = settings.clone();
         move || {
@@ -56,6 +56,7 @@ pub async fn enrich_post_compact_context(
                 system_prompt.as_deref(),
                 &tools,
                 &settings,
+                session_store_dir_clone,
             )
         }
     })
@@ -74,20 +75,22 @@ pub async fn enrich_post_compact_context(
     compaction.append_post_compact_context(files, notes, &settings);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_post_compact_context(
     source_messages: &[LlmMessage],
     retained_messages: &[LlmMessage],
     working_dir: &str,
-    session_id: &str,
+    _session_id: &str,
     system_prompt: Option<&str>,
     tools: &[ToolDefinition],
     settings: &ContextSettings,
+    session_store_dir: Option<PathBuf>,
 ) -> (Vec<PostCompactFile>, Vec<PostCompactNote>) {
     let working_dir = PathBuf::from(working_dir);
     let files = fresh_recent_read_files(source_messages, retained_messages, &working_dir, settings);
     let mut notes = Vec::new();
 
-    if let Some(note) = latest_plan_note(&working_dir, session_id) {
+    if let Some(note) = latest_plan_note(session_store_dir.as_deref()) {
         notes.push(note);
     }
     if let Some(note) = skills_note(system_prompt) {
@@ -127,8 +130,9 @@ fn fresh_read_file(working_dir: &Path, requested_path: &str) -> Option<PostCompa
     })
 }
 
-fn latest_plan_note(working_dir: &Path, session_id: &str) -> Option<PostCompactNote> {
-    let plans_dir = session_plan_dir_for_project_path(working_dir, session_id);
+fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote> {
+    let session_dir = session_store_dir?;
+    let plans_dir = session_dir.join("plan");
     let mut plans = fs::read_dir(&plans_dir)
         .ok()?
         .filter_map(Result::ok)
@@ -329,7 +333,6 @@ mod tests {
 
     use astrcode_context::token_budget::estimate_text_tokens;
     use astrcode_core::tool::ToolOrigin;
-    use astrcode_support::hostpaths;
     use serde_json::json;
 
     use super::*;
@@ -386,6 +389,7 @@ mod tests {
             None,
             &[],
             &ContextSettings::default(),
+            None,
         )
         .await;
 
@@ -402,7 +406,8 @@ mod tests {
         let home = temp.join("home");
         std::env::set_var("ASTRCODE_TEST_HOME", &home);
         let session_id = "session-post-compact-notes";
-        let plans = hostpaths::session_plan_dir_for_project_path(&temp, session_id);
+        let session_dir = temp.join("session-store");
+        let plans = session_dir.join("plan");
         fs::create_dir_all(&plans).unwrap();
         fs::write(plans.join("work.md"), "plan body").unwrap();
         let messages = vec![
@@ -444,6 +449,7 @@ mod tests {
             Some("# Skills\n\nskill body\n\n# Agents\n\nagent list"),
             &tools,
             &settings,
+            Some(session_dir),
         );
         compaction.append_post_compact_context(files, notes, &settings);
         std::env::remove_var("ASTRCODE_TEST_HOME");
@@ -487,7 +493,7 @@ mod tests {
         fs::create_dir_all(&project_plans).unwrap();
         fs::write(project_plans.join("work.md"), "project local plan").unwrap();
 
-        let note = latest_plan_note(&temp, "session-without-plan");
+        let note = latest_plan_note(Some(&temp));
 
         std::env::remove_var("ASTRCODE_TEST_HOME");
         assert!(note.is_none());

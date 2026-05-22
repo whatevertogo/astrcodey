@@ -465,6 +465,7 @@ impl TurnRunner {
             Some(&self.system_prompt),
             &visible_tools,
             settings,
+            self.shared.session_store_dir.clone(),
         )
         .await;
         let hook_ctx = CompactHookContext {

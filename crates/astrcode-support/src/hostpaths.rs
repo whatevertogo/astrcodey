@@ -52,24 +52,9 @@ pub fn session_dir(project_key: &str, session_id: &str) -> PathBuf {
     sessions_dir(project_key).join(session_id)
 }
 
-/// 获取某个会话的计划目录：`~/.astrcode/projects/<project_key>/sessions/<session>/plan/`。
-pub fn session_plan_dir(project_key: &str, session_id: &str) -> PathBuf {
-    session_dir(project_key, session_id).join("plan")
-}
-
 /// 根据真实项目路径获取当前可读 project key 的会话目录。
 pub fn sessions_dir_for_project_path(project_path: &Path) -> PathBuf {
     sessions_dir(&project_key_from_path(project_path))
-}
-
-/// 根据真实项目路径获取会话目录。
-pub fn session_dir_for_project_path(project_path: &Path, session_id: &str) -> PathBuf {
-    sessions_dir_for_project_path(project_path).join(session_id)
-}
-
-/// 根据真实项目路径获取某个会话的计划目录。
-pub fn session_plan_dir_for_project_path(project_path: &Path, session_id: &str) -> PathBuf {
-    session_dir_for_project_path(project_path, session_id).join("plan")
 }
 
 /// 获取运行时目录：`~/.astrcode/runtime/`。

@@ -141,6 +141,7 @@ impl CommandHandler {
                 });
             },
         };
+        let session_store_dir = session.session_store_dir().await;
         enrich_post_compact_context(
             &mut compaction,
             sid.as_str(),
@@ -149,6 +150,7 @@ impl CommandHandler {
             state.system_prompt.as_deref(),
             &tools,
             self.runtime.context_assembler.settings(),
+            session_store_dir,
         )
         .await;
 

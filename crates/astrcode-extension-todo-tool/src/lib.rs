@@ -10,7 +10,6 @@ use astrcode_core::{
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
-use astrcode_support::hostpaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -45,11 +44,6 @@ const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
-
-/// Compute session-local progress todo storage root.
-pub(crate) fn progress_store_root(session_id: &str, working_dir: &str) -> PathBuf {
-    hostpaths::session_dir_for_project_path(&PathBuf::from(working_dir), session_id).join("todos")
-}
 
 /// Compute todo storage root from a known session base directory.
 pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
@@ -90,16 +84,18 @@ impl ToolHandler for TodoWriteToolHandler {
         &self,
         tool_name: &str,
         arguments: Value,
-        working_dir: &str,
+        _working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let root = match ctx.capabilities.session_store_dir.as_deref() {
-            Some(base) => todo_dir_from_base(base),
-            None => progress_store_root(ctx.session_id.as_str(), working_dir),
-        };
+        let root = ctx
+            .capabilities
+            .session_store_dir
+            .as_deref()
+            .map(todo_dir_from_base)
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
         let store = ProgressListStore::new(root);
         Ok(match handle_todo_write(arguments, &store) {
             Ok(result) => result,
@@ -116,10 +112,11 @@ struct TodoReminderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for TodoReminderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = match ctx.session_store_dir.as_deref() {
-            Some(base) => todo_dir_from_base(base),
-            None => progress_store_root(&ctx.session_id, &ctx.working_dir),
-        };
+        let root = ctx
+            .session_store_dir
+            .as_deref()
+            .map(todo_dir_from_base)
+            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
         ProgressReminder::new(root)
             .before_provider_request()
             .map_err(ExtensionError::Internal)
@@ -132,10 +129,11 @@ struct TodoPostToolUseHandler;
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = match ctx.session_store_dir.as_deref() {
-                Some(base) => todo_dir_from_base(base),
-                None => progress_store_root(&ctx.session_id, &ctx.working_dir),
-            };
+            let root = ctx
+                .session_store_dir
+                .as_deref()
+                .map(todo_dir_from_base)
+                .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;
