@@ -121,10 +121,6 @@ fn todo_write_metadata()
              to keep track of multi-step progress that benefits from tracking.",
         )
         .caveat(
-            "Do not use for trivial one-step work, pure Q&A, or tasks that can be completed in \
-             roughly three straightforward actions.",
-        )
-        .caveat(
             "Keep exactly one item in `in_progress` at a time. Mark an item `in_progress` before \
              starting it, and mark it `completed` immediately after it is truly finished.",
         )
