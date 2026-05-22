@@ -103,7 +103,7 @@ fn task_tool_definition() -> &'static ToolDefinition {
                 "action": {
                     "type": "string",
                     "enum": ["list", "cancel"],
-                    "description": "list: show all tasks. cancel: stop one."
+                    "description": "Must Required.list: show all tasks. cancel: stop one."
                 },
                 "taskId": {
                     "type": "string",

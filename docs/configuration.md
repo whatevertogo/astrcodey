@@ -35,7 +35,7 @@ null in runtime is default
       "name": "openai",
       "providerKind": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "${OPENAI_API_KEY}",
+      "apiKey": "OPENAI_API_KEY",
       "models": [
         {
           "id": "gpt-4o",

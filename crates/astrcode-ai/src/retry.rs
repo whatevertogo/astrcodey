@@ -9,10 +9,16 @@ use std::time::Duration;
 ///
 /// 控制最大重试次数和基础退避延迟。
 pub struct RetryPolicy {
-    /// 最大重试次数
+    /// 最大重试次数（HTTP 状态码触发）
     pub max_retries: u32,
     /// 基础退避延迟（毫秒），实际延迟为 base × 2^(attempt-1) ± 抖动
     pub base_delay_ms: u64,
+    /// 传输层错误最大重试次数（连接重置、TLS 握手失败、DNS 临时错误等）。
+    ///
+    /// 这些错误不由 HTTP 状态码表示，是 reqwest 在无法取得响应时的底层错误。
+    /// 独立于 `max_retries`，因为传输层错误通常是偶发性的（尤其 TLS "unexpected EOF"），
+    /// 重试 1-2 次即可恢复，无需与 HTTP 级别重试共享计数。
+    pub max_transport_retries: u32,
 }
 
 impl Default for RetryPolicy {
@@ -20,6 +26,7 @@ impl Default for RetryPolicy {
         Self {
             max_retries: 2,
             base_delay_ms: 250,
+            max_transport_retries: 2,
         }
     }
 }
@@ -33,6 +40,14 @@ impl RetryPolicy {
             return false;
         }
         matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+    }
+
+    /// 判断传输层错误（TLS、连接重置、DNS 临时失败等）是否应该重试。
+    ///
+    /// 与 `should_retry` 使用独立的计数器，因为传输层错误通常是瞬态的，
+    /// 短暂重试即可恢复，不应消耗 HTTP 级别的重试配额。
+    pub fn should_retry_transport(&self, attempt: u32) -> bool {
+        attempt <= self.max_transport_retries
     }
 
     /// 根据尝试次数计算指数退避延迟，并加入 ±25% 抖动。
@@ -56,6 +71,7 @@ mod tests {
         let policy = RetryPolicy::default();
         assert_eq!(policy.max_retries, 2);
         assert_eq!(policy.base_delay_ms, 250);
+        assert_eq!(policy.max_transport_retries, 2);
     }
 
     #[test]
@@ -92,10 +108,31 @@ mod tests {
     }
 
     #[test]
+    fn should_retry_transport_within_limit() {
+        let policy = RetryPolicy::default();
+        assert!(policy.should_retry_transport(1));
+        assert!(policy.should_retry_transport(2));
+        assert!(!policy.should_retry_transport(3));
+        assert!(!policy.should_retry_transport(99));
+    }
+
+    #[test]
+    fn should_retry_transport_with_custom_limit() {
+        let policy = RetryPolicy {
+            max_transport_retries: 1,
+            ..RetryPolicy::default()
+        };
+        assert!(policy.should_retry_transport(1));
+        assert!(!policy.should_retry_transport(2));
+        assert!(!policy.should_retry_transport(3));
+    }
+
+    #[test]
     fn delay_grows_exponentially() {
         let policy = RetryPolicy {
             max_retries: 5,
             base_delay_ms: 100,
+            max_transport_retries: 0,
         };
         let d1 = policy.delay(1).as_millis();
         let d2 = policy.delay(2).as_millis();

@@ -50,11 +50,23 @@ pub async fn stream_with_retry(
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| transport_error("send request", &endpoint, e))?;
+        let response = match req.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if retry.should_retry_transport(attempt) {
+                    let delay = retry.delay(attempt);
+                    tracing::warn!(
+                        "LLM request failed with transport error (attempt {attempt}/{}), \
+                         retrying after {}ms: {e}",
+                        retry.max_transport_retries,
+                        delay.as_millis(),
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(transport_error("send request", &endpoint, e));
+            },
+        };
 
         let status = response.status();
         if status.is_success() {
@@ -100,11 +112,23 @@ pub async fn stream_with_event_type(
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| transport_error("send request", &endpoint, e))?;
+        let response = match req.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if retry.should_retry_transport(attempt) {
+                    let delay = retry.delay(attempt);
+                    tracing::warn!(
+                        "LLM request failed with transport error (attempt {attempt}/{}), \
+                         retrying after {}ms: {e}",
+                        retry.max_transport_retries,
+                        delay.as_millis(),
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(transport_error("send request", &endpoint, e));
+            },
+        };
 
         let status = response.status();
         if status.is_success() {
@@ -469,6 +493,7 @@ mod tests {
             RetryPolicy {
                 max_retries: 0,
                 base_delay_ms: 1,
+                max_transport_retries: 0,
             },
             tx,
             move |line, _| {

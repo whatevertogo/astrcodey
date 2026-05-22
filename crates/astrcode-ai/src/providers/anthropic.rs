@@ -170,6 +170,7 @@ impl LlmProvider for AnthropicProvider {
         let retry = RetryPolicy {
             max_retries: self.config.max_retries,
             base_delay_ms: self.config.retry_base_delay_ms,
+            max_transport_retries: self.config.max_retries,
         };
 
         tokio::spawn(async move {

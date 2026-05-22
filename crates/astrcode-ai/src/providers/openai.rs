@@ -625,11 +625,27 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             for (key, value) in &extra_headers {
                 req = req.header(key.as_str(), value.as_str());
             }
-            let response = req
+            let response = match req
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| transport_error("send request", &endpoint, e))?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if retry.should_retry_transport(attempt) {
+                        let delay = retry.delay(attempt);
+                        tracing::warn!(
+                            "LLM request failed with transport error (attempt {attempt}/{}), \
+                             retrying after {}ms: {e}",
+                            retry.max_transport_retries,
+                            delay.as_millis(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(transport_error("send request", &endpoint, e));
+                },
+            };
 
             let status = response.status();
             if status.is_success() {
@@ -742,6 +758,7 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
         let retry = RetryPolicy {
             max_retries: self.config.max_retries,
             base_delay_ms: self.config.retry_base_delay_ms,
+            max_transport_retries: self.config.max_retries,
         };
 
         tokio::spawn(async move {
