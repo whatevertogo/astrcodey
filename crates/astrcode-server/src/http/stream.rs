@@ -65,6 +65,7 @@ impl LiveStreamState {
             if let ConversationDeltaDto::PatchArguments {
                 block_id,
                 arguments,
+                ..
             } = delta
             {
                 self.tool_args.insert(block_id.clone(), arguments.clone());

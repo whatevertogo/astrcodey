@@ -235,6 +235,10 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         kind,
         blockId: requiredString(object, 'blockId'),
         arguments: requiredString(object, 'arguments'),
+        argumentsJson:
+          object.argumentsJson && typeof object.argumentsJson === 'object'
+            ? (object.argumentsJson as Record<string, unknown>)
+            : undefined,
       }
     case 'toolCallBackgrounded':
       return {

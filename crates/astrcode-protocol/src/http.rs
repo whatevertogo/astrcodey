@@ -336,6 +336,9 @@ pub enum ConversationDeltaDto {
     PatchArguments {
         block_id: String,
         arguments: String,
+        /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
     },
     ToolOutput {
         call_id: String,
@@ -570,9 +573,11 @@ mod tests {
             ConversationDeltaDto::PatchArguments {
                 block_id,
                 arguments,
+                arguments_json,
             } => {
                 assert_eq!(block_id, "tool-1");
                 assert_eq!(arguments, "Cargo.toml");
+                assert!(arguments_json.is_none());
             },
             other => panic!("unexpected fixture delta: {other:?}"),
         }

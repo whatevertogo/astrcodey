@@ -137,6 +137,7 @@ pub(in crate::http) fn event_to_deltas(event: &Event) -> Vec<ConversationDeltaDt
             vec![ConversationDeltaDto::PatchArguments {
                 block_id: call_id.to_string(),
                 arguments: args_text,
+                arguments_json: Some(arguments.clone()),
             }]
         },
 
@@ -252,10 +253,15 @@ mod tests {
             ConversationDeltaDto::PatchArguments {
                 block_id,
                 arguments,
+                arguments_json,
             } => {
                 assert_eq!(block_id, "tool-1");
                 assert_eq!(arguments, "Explore crate architecture (explorer)");
                 assert!(!arguments.contains("Read every module"));
+                assert!(arguments_json.is_some());
+                let json = arguments_json.as_ref().unwrap();
+                assert_eq!(json["description"], "Explore crate architecture");
+                assert_eq!(json["subagent_type"], "explorer");
             },
             other => panic!("unexpected delta: {other:?}"),
         }

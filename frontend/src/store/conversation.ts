@@ -436,7 +436,11 @@ export const useAppStore = create<ConversationState>((set, get) => ({
           const block = current.blocks[idx]
           if (block.kind !== 'toolCall') return {}
           const next = [...current.blocks]
-          next[idx] = { ...block, arguments: argumentsText }
+          next[idx] = {
+            ...block,
+            arguments: argumentsText,
+            ...(delta.argumentsJson ? { argumentsJson: delta.argumentsJson as Record<string, unknown> } : {}),
+          }
           return { blocks: next }
         })
         break

@@ -128,6 +128,7 @@ export type ConversationBlock =
       id: string
       name: string
       arguments: string
+      argumentsJson?: Record<string, unknown>
       text: string
       status: BlockStatus
       taskId?: string
@@ -182,7 +183,7 @@ export type ConversationDelta =
       delta: string
     }
   | { kind: 'thinkingDelta'; blockId: string; delta: string }
-  | { kind: 'patchArguments'; blockId: string; arguments: string }
+  | { kind: 'patchArguments'; blockId: string; arguments: string; argumentsJson?: Record<string, unknown> }
   | { kind: 'toolCallBackgrounded'; callId: string; taskId: string }
   | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
   | { kind: 'statusItemUpdate'; id: string; text: string }
