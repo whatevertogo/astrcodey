@@ -2,17 +2,17 @@
 
 ## Context
 
-**Current state:** <brief description of the existing codebase behavior and relevant code paths>
+**Current state:** <relevant existing behavior, where it lives, and why it matters>
 
-**Desired state:** <brief description of what should change and why>
+**Desired state:** <target behavior and why it should change>
 
 ## Goal
 
-<One sentence describing the concrete, measurable outcome of this plan.>
+<One sentence describing the measurable outcome of this plan.>
 
 ## Scope
 
-- <Bullet points of what this plan covers — specific modules, files, or behaviors>
+- <Specific modules, files, functions, or behaviors>
 
 ## Non-Goals
 
@@ -20,12 +20,12 @@
 
 ## Existing Code to Reuse
 
-- <Functions, modules, or patterns already in the codebase that should be leveraged instead of rewritten>
+- <Reusable functions, modules, or patterns>
 
 ## Dependencies and Risks
 
-- **Dependencies:** <external crates, APIs, or in-progress work this depends on, or "None">
-- **Risks:** <potential breakage points, migration concerns, or performance implications, or "None">
+- **Dependencies:** <external crates, APIs, or in-progress work, or "None">
+- **Risks:** <breakage points, migration concerns, or performance implications, or "None">
 
 ## Implementation Steps
 
@@ -33,23 +33,23 @@
 
 **Files:** `path/to/file.rs`
 
-<What this step does and why>
+<What changes here, why it comes first, and the concrete outcome>
 
-- <Concrete action, e.g.: Add `fn new_thing()` with signature `fn new_thing(input: &str) -> Result<Output>`>
-- <Concrete action, e.g.: Replace call sites in `mod_a` and `mod_b` to use `new_thing`>
+- <Concrete action, with the key file or symbol>
+- <Concrete action, with the key file or symbol>
 
 ### Step 2: <verb phrase describing the change>
 
 **Files:** `path/to/other.rs`
 
-<What this step does and why>
+<What changes here, why it depends on the previous step, and the concrete outcome>
 
-- <Concrete action>
+- <Concrete action, with the key file or symbol>
 
 ## Verification
 
-1. [ ] `cargo check` — compiles without errors or warnings
-2. [ ] `cargo test` — all existing and new tests pass
+1. [ ] <smallest relevant command> — proves the change works
+2. [ ] <targeted test or check> — covers the main risk
 3. [ ] Manual verification: <describe what to manually test if applicable, or remove this item>
 
 ## Assumptions
