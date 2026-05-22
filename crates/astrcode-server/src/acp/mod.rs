@@ -33,19 +33,9 @@ use crate::{
 /// error occurs.
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
     let event_tx = Arc::new(EventFanout::new());
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
-        runtime.event_store.clone(),
-        event_tx,
-    ));
-    {
-        let event_bus = Arc::clone(&event_bus);
-        runtime
-            .session_manager
-            .set_attach_hook(Arc::new(move |session| {
-                event_bus.attach(session);
-            }));
-    }
-    let command_handle = CommandHandle::spawn(Arc::clone(&runtime), Arc::clone(&event_bus));
+    let server_system =
+        crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let command_handle = server_system.handler;
 
     let result = Agent
         .builder()
@@ -90,12 +80,12 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         .on_receive_request(
             {
                 let command_handle = command_handle.clone();
-                let event_bus = Arc::clone(&event_bus);
+                let event_tx = Arc::clone(&event_tx);
 
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    match handle_prompt(req, &command_handle, &event_bus, &cx).await {
+                    match handle_prompt(req, &command_handle, &event_tx, &cx).await {
                         Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
                         Err(error) => responder.respond_with_error(error),
                     }
@@ -136,12 +126,12 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
 async fn handle_prompt(
     req: PromptRequest,
     command_handle: &CommandHandle,
-    event_bus: &Arc<crate::server_event_bus::ServerEventBus>,
+    event_tx: &Arc<EventFanout<ClientNotification>>,
     cx: &ConnectionTo<Client>,
 ) -> Result<StopReason, Error> {
     let session_id = SessionId::from(req.session_id.to_string());
     let text = prompt_to_text(&req.prompt)?;
-    let mut event_rx = event_bus.fanout().subscribe();
+    let mut event_rx = event_tx.subscribe();
 
     let (turn_id, mut completion_rx) = command_handle
         .submit_prompt_with_completion(session_id.clone(), text)
