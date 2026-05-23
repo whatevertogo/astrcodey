@@ -415,7 +415,11 @@ impl CommandHandler {
                 let _ = reply.send(result);
             },
             CommandMessage::AbortSession { session_id, reply } => {
-                let _ = reply.send(self.abort_session(&session_id).await);
+                let result = self.abort_session(&session_id).await;
+                if result.is_ok() {
+                    self.maybe_start_queued_turn(&session_id).await;
+                }
+                let _ = reply.send(result);
             },
             CommandMessage::ListCommandsForSession { session_id, reply } => {
                 let _ = reply.send(self.command_infos_for_session(&session_id).await);
@@ -427,9 +431,11 @@ impl CommandHandler {
                 completion,
             } => {
                 let sid = session_id.clone();
-                // registry 清理由 completion watcher 完成，此处只触发 queued input。
-                let _ = (turn_id, completion);
-                self.maybe_start_queued_turn(&sid).await;
+                let _ = turn_id;
+                // abort 完成时不 dispatch，已由 AbortSession handler 处理。
+                if !matches!(completion, TurnCompletion::Aborted) {
+                    self.maybe_start_queued_turn(&sid).await;
+                }
             },
             CommandMessage::SubmitInputWithCompletion {
                 session_id,

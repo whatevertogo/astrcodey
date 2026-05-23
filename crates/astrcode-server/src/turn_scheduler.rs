@@ -123,13 +123,33 @@ impl TurnScheduler {
     /// 1. 从 registry abort + remove
     /// 2. 清理 background tasks
     /// 3. 写终态事件
+    ///
+    /// 幂等性：多次调用同一 session 的 abort 是安全的，后续调用会静默成功。
     pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnError> {
+        // 快路径：registry 中有活跃 turn
         if let Some((turn_id, session)) = self.registry.abort_and_remove(session_id) {
             self.emit_turn_aborted(&turn_id, &session, session_id).await;
             return Ok(());
         }
 
-        // 慢路径：无 registry entry，尝试修复过期 phase
+        // 慢路径：无 registry entry，检查是否需要修复过期 phase
+        // 先读取当前状态，避免与正在进行的 abort 冲突
+        let session = match self.session_manager.open(session_id.clone()).await {
+            Ok(s) => s,
+            Err(_) => return Err(TurnError::SessionNotFound(session_id.to_string())),
+        };
+
+        let state = match session.read_model().await {
+            Ok(s) => s,
+            Err(e) => return Err(TurnError::Session(format!("read session: {e}"))),
+        };
+
+        // 如果已经是终态，直接返回成功（幂等性）
+        if matches!(state.phase, astrcode_core::event::Phase::Idle | astrcode_core::event::Phase::Error) {
+            return Ok(());
+        }
+
+        // 只有在确实有 stale 状态时才修复
         self.repair_stale(session_id).await
     }
 

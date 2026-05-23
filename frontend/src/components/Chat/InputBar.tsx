@@ -35,6 +35,10 @@ export default function InputBar() {
   const isBusy = isExecutionPhase(phase) || compactSubmitting
   const canSubmit = !!activeSessionId && !compactSubmitting
 
+  // Abort 防抖：防止快速多次点击
+  const abortDebounceRef = useRef<number | null>(null)
+  const abortInProgressRef = useRef(false)
+
   // ── slash command panel state ──
   const [slashTriggerVisible, setSlashTriggerVisible] = useState(false)
   const [slashQuery, setSlashQuery] = useState('')
@@ -214,6 +218,23 @@ export default function InputBar() {
     [submit, isComposing, slashTriggerVisible, closeSlashTrigger]
   )
 
+  // Abort 防抖处理：500ms 内只允许一次 abort 调用
+  const handleAbort = useCallback(() => {
+    if (abortInProgressRef.current) return
+
+    abortInProgressRef.current = true
+    abortCurrentTurn().finally(() => {
+      // 500ms 后重置，允许再次 abort
+      if (abortDebounceRef.current) {
+        clearTimeout(abortDebounceRef.current)
+      }
+      abortDebounceRef.current = window.setTimeout(() => {
+        abortInProgressRef.current = false
+        abortDebounceRef.current = null
+      }, 500)
+    })
+  }, [abortCurrentTurn])
+
   return (
     <div className="flex-shrink-0 bg-panel-bg px-[var(--chat-content-horizontal-padding)] pb-[18px] pt-4">
       <div className="mx-auto w-full max-w-[var(--chat-composer-max-width)] translate-x-[var(--chat-assistant-center-shift)]">
@@ -291,7 +312,7 @@ export default function InputBar() {
                       <button
                         className={composerInterruptButton}
                         type="button"
-                        onClick={() => void abortCurrentTurn()}
+                        onClick={handleAbort}
                         disabled={compactSubmitting}
                       >
                         {compactSubmitting ? (
