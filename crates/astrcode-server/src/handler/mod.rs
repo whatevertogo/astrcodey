@@ -70,7 +70,7 @@ pub(crate) use turn::TurnCompletion;
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
 ///
 /// 维护当前活跃会话和活跃回合的状态，确保同一时间只有一个回合在运行。
-pub struct CommandHandler {
+pub(crate) struct CommandHandler {
     runtime: Arc<ServerRuntime>,
     /// 当前活跃的会话 ID
     active_session_id: Option<SessionId>,

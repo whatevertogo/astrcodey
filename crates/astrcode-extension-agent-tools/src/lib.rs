@@ -97,7 +97,7 @@ const AGENT_TOOL_DESCRIPTION: &str =
     "Delegate a complex, multi-step task to a specialized subagent. Each subagent type has its \
      own tool set listed in [Agents].\nWhen NOT to use:\n- Reading 1-3 known files → use \
      `read`\n- Searching for a symbol or pattern → use `grep`/`find` directly\n- Anything \
-     achievable in 2-8 direct tool calls → do it yourself\nMultiple agents can run in parallel \
+     achievable in 2-6 direct tool calls → do it yourself\nMultiple agents can run in parallel \
      for independent subtasks. Set `waitForResult=false` to background a subagent; you will be \
      notified when it completes.";
 
@@ -390,17 +390,12 @@ fn enhance_agent_prompt(agent_body: &str, working_dir: &str) -> String {
     let os = std::env::consts::OS;
     let shell = astrcode_support::shell::resolve_shell().name;
     format!(
-        "{}\n\n\
-         ---\n\n\
-         Notes:\n\
-         - Agent threads always have their cwd reset between bash calls; \
-           please only use absolute file paths.\n\
-         - In your final response, share file paths (always absolute, never \
-           relative) that are relevant to the task. Include code snippets only \
-           when the exact text is load-bearing.\n\
-         - For clear communication with the user, avoid using emojis.\n\
-         - Do not use a colon before tool calls.\n\n\
-         Environment: working directory is {working_dir}, OS is {os}, shell is {shell}.",
+        "{}\n\n---\n\nNotes:\n- Agent threads always have their cwd reset between bash calls; \
+         please only use absolute file paths.\n- In your final response, share file paths (always \
+         absolute, never relative) that are relevant to the task. Include code snippets only when \
+         the exact text is load-bearing.\n- For clear communication with the user, avoid using \
+         emojis.\n- Do not use a colon before tool calls.\n\nEnvironment: working directory is \
+         {working_dir}, OS is {os}, shell is {shell}.",
         agent_body.trim(),
     )
 }

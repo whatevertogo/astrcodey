@@ -70,6 +70,33 @@ pub enum LlmContent {
     },
 }
 
+impl LlmContent {
+    /// 将内容转换为人类可读的纯文本展示。
+    ///
+    /// 这是有损转换——不可能完全还原原始渲染效果。
+    /// - `Text` / `ToolResult`：原样输出。
+    /// - `Image`：返回占位符 `[image]`。
+    /// - `ToolCall`：大多数工具调用只输出工具名；`upsertSessionPlan` 额外提取 arguments.content
+    ///   中的 plan 正文。
+    pub fn to_display_text(&self) -> String {
+        match self {
+            LlmContent::Text { text } => text.clone(),
+            LlmContent::Image { .. } => "[image]".into(),
+            LlmContent::ToolCall {
+                name, arguments, ..
+            } => match name.as_str() {
+                "upsertSessionPlan" => arguments
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default(),
+                _ => format!("tool call: {name}"),
+            },
+            LlmContent::ToolResult { content, .. } => content.clone(),
+        }
+    }
+}
+
 /// LLM 对话中的一条消息。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmMessage {

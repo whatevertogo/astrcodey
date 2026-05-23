@@ -81,10 +81,7 @@ pub(in crate::http) async fn conversation_snapshot(
     }
     match state.runtime.session_manager.read_model(&session_id).await {
         Ok(snapshot) => {
-            let streaming = state
-                .runtime
-                .session_manager
-                .streaming_snapshot(&session_id);
+            let streaming = state.event_bus.streaming_snapshot(&session_id);
             Json(conversation_to_dto(snapshot, streaming.as_ref())).into_response()
         },
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),

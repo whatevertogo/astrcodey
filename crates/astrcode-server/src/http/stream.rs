@@ -138,18 +138,20 @@ pub(in crate::http) async fn session_stream(
     };
     let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
     let replay_runtime = Arc::clone(&http_state.runtime);
+    let replay_event_bus = Arc::clone(&http_state.event_bus);
     let replay_session_id = session_id.clone();
     let replay_has_messages = has_messages;
     let replay_stream = stream::iter(missed_events)
         .then(move |event| {
             let runtime = Arc::clone(&replay_runtime);
+            let event_bus = Arc::clone(&replay_event_bus);
             let replay_sid = replay_session_id.clone();
             async move {
                 let mut deltas = event_to_replay_deltas(&event, replay_has_messages);
                 // 如果重放 AssistantMessageStarted 且该消息仍在流式传输，
                 // 补一个 PatchBlock 让客户端拿到已积累的文本。
                 if let EventPayload::AssistantMessageStarted { message_id } = &event.payload {
-                    if let Some(msg) = runtime.session_manager.streaming_snapshot(&replay_sid) {
+                    if let Some(msg) = event_bus.streaming_snapshot(&replay_sid) {
                         if msg.message_id == message_id.as_str() {
                             if !msg.text.is_empty() {
                                 deltas.push(ConversationDeltaDto::PatchBlock {

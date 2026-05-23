@@ -111,6 +111,13 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     shouldStickRef.current = distanceFromBottom <= 48
   }, [])
 
+  // User scroll-up gesture immediately breaks auto-stick
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY < 0) {
+      shouldStickRef.current = false
+    }
+  }, [])
+
   // Auto-scroll: stick to bottom when appropriate
   useEffect(() => {
     const shouldAutoScroll =
@@ -152,6 +159,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       ref={listRef}
       className="flex min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-panel-bg px-[var(--chat-content-horizontal-padding)] py-7"
       onScroll={updateStickiness}
+      onWheel={handleWheel}
     >
       {blocks.length === 0 && (
         <div

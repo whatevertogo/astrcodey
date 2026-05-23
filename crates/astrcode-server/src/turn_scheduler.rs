@@ -174,14 +174,22 @@ impl TurnScheduler {
             .lock()
             .cleanup_session(session_id);
 
-        let _ = session
+        if let Err(e) = session
             .emit_durable(
                 Some(turn_id),
                 EventPayload::TurnCompleted {
                     finish_reason: "aborted".into(),
                 },
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                session_id = %session_id,
+                turn_id = %turn_id,
+                error = %e,
+                "failed to write TurnCompleted during abort"
+            );
+        }
         session
             .emit_live(
                 Some(turn_id),

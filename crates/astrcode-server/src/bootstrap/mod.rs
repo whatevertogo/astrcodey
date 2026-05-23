@@ -144,7 +144,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 显式创建 session 时，工具快照会使用 session 自己的 working_dir。
     let cwd = opts
         .working_dir
-        .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // 4. 初始化事件存储。

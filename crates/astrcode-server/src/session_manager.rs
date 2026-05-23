@@ -226,18 +226,6 @@ impl SessionManager {
             .map_err(SessionManagerError::from)
     }
 
-    /// 返回当前 streaming 消息的瞬时快照。
-    ///
-    /// 仅在进程内有活跃 turn 时返回 `Some`；进程重启后丢失。
-    pub(crate) fn streaming_snapshot(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<crate::server_event_bus::StreamingSnapshot> {
-        self.event_bus
-            .get()
-            .and_then(|bus| bus.streaming_snapshot(session_id))
-    }
-
     pub(crate) async fn list_summaries(&self) -> Result<Vec<SessionSummary>, SessionManagerError> {
         self.event_store
             .list_session_summaries()

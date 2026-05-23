@@ -32,11 +32,11 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
                        implementation.\n\nEnter plan mode proactively when the task matches ANY \
                        of these:\n• Implementing a new feature\n• Multiple valid approaches \
                        exist and you need to pick one\n• The user wants you to plan\n• Planning \
-                       will be helpful for the task\n\nDo NOT enter plan mode for:\n• \
-                       Single-file fixes or small tweaks\n• Clear, well-scoped tasks with \
-                       obvious solutions\n• User explicitly said to just do it\n\nIn plan mode: \
-                       explore the codebase → write a plan with `upsertSessionPlan` → switch \
-                       back to code mode to implement.")
+                       will be helpful for the task\n You Want have a plan\n\nDo NOT enter plan \
+                       mode for:\n• Single-file fixes or small tweaks\n• Clear, well-scoped \
+                       tasks with obvious solutions\n• User explicitly said to just do it\n\nIn \
+                       plan mode: explore the codebase(use agents) → write a plan with \
+                       `upsertSessionPlan` → switch back to code mode to implement.")
             .into(),
         parameters: json!({
             "type": "object",
@@ -58,7 +58,7 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
 pub fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
-        description: "Create or update the session plan (plan mode only). Must include all \
+        description: "Create or update the session plan (plan mode only). Include all necessary \
                       headings: Context, Goal, Scope, Implementation Steps, Verification, \
                       Dependencies and Risks. Optional: Non-Goals, Existing Code to Reuse, \
                       Assumptions."
@@ -96,7 +96,11 @@ struct UpsertPlanArgs {
 /// Transition context messages for mode entry/exit.
 fn transition_context(from: &ModeId, to: &ModeId) -> Option<String> {
     match (from.as_str(), to.as_str()) {
-        ("code", "plan") => Some(crate::prompts::plan_entry_prompt().trim().to_string()),
+        ("code", "plan") => Some(format!(
+            "{}\n\n{}",
+            crate::prompts::plan_entry_prompt().trim(),
+            crate::prompts::plan_template().trim(),
+        )),
         ("plan", "code") => Some(crate::prompts::plan_exit_prompt().trim().to_string()),
         _ => None,
     }

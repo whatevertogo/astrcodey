@@ -234,7 +234,7 @@ fn visible_message_text(message: &LlmMessage) -> String {
         .iter()
         .filter_map(|content| match content {
             LlmContent::ToolCall { .. } => None,
-            other => Some(crate::handler::snapshot::content_to_text(other)),
+            other => Some(other.to_display_text()),
         })
         .collect::<Vec<_>>()
         .join("")
