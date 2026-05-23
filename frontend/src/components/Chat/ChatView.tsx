@@ -2,7 +2,6 @@ import { useAppStore } from '../../store/conversation'
 import MessageList from './MessageList'
 import InputBar from './InputBar'
 import TopBar from './TopBar'
-import BackgroundTaskPanel from './BackgroundTaskPanel'
 
 interface ChatViewProps {
   isSidebarOpen: boolean
@@ -20,7 +19,6 @@ export default function ChatView({
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-panel-bg">
       <TopBar isSidebarOpen={isSidebarOpen} onToggleSidebar={onToggleSidebar} />
       <MessageList blocks={blocks} sessionId={activeSessionId} />
-      <BackgroundTaskPanel />
       <InputBar />
     </div>
   )
