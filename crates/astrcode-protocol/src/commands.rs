@@ -252,7 +252,11 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(!json.contains("at_cursor"));
         let parsed: ClientCommand = serde_json::from_str(&json).unwrap();
-        if let ClientCommand::ForkSession { session_id, at_cursor } = parsed {
+        if let ClientCommand::ForkSession {
+            session_id,
+            at_cursor,
+        } = parsed
+        {
             assert_eq!(session_id, "s1");
             assert!(at_cursor.is_none());
         } else {

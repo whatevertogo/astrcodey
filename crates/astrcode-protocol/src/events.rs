@@ -3,7 +3,7 @@
 //! 定义服务器向连接的客户端推送的所有通知，
 //! 包括运行时事件、会话列表、UI 交互请求和错误信息。
 
-use astrcode_core::event::Event;
+use astrcode_core::event::{Event, Phase};
 use serde::{Deserialize, Serialize};
 
 /// 服务器推送给客户端的通知枚举。
@@ -125,10 +125,24 @@ impl From<astrcode_core::storage::AgentSessionStatus> for AgentSessionStatusDto 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSessionLinkDto {
     pub child_session_id: String,
-    pub agent_name: String,
-    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     #[serde(default)]
     pub status: AgentSessionStatusDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
 }
 
 /// 会话快照，用于客户端重连或状态恢复。

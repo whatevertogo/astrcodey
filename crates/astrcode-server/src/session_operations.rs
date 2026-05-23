@@ -147,10 +147,18 @@ impl SessionOperations for ServerSessionOperations {
             .submit(request.user_prompt.clone(), turn_id.clone())
             .await
             .map_err(|e| SessionApiError::Internal(format!("submit: {e}")))?;
+        self.session_manager.active_execution_index().register(
+            target_sid.clone(),
+            turn_id.clone(),
+            handle.abort_handle(),
+        );
 
         if request.wait_for_result {
             // 同步等待
             let result = handle.wait().await;
+            self.session_manager
+                .active_execution_index()
+                .remove_if_matches(&target_sid, &turn_id);
             match result {
                 Some(r) => match r.output {
                     Ok(out) => {
@@ -178,10 +186,14 @@ impl SessionOperations for ServerSessionOperations {
             let session_manager = Arc::clone(&self.session_manager);
             let watcher_caller_sid = caller_sid.clone();
             let watcher_target_sid = target_sid.clone();
+            let watcher_turn_id = turn_id.clone();
 
             tokio::spawn(async move {
                 let result = handle.wait().await;
                 let outcome = result.as_ref().and_then(|r| r.output.as_ref().ok());
+                session_manager
+                    .active_execution_index()
+                    .remove_if_matches(&watcher_target_sid, &watcher_turn_id);
 
                 // 写入 AgentSessionCompleted/Failed 到父 session
                 if let Ok(parent_session) = session_manager.open(watcher_caller_sid.clone()).await {

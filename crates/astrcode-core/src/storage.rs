@@ -265,6 +265,9 @@ pub enum AgentSessionStatus {
 pub struct AgentSessionLinkView {
     /// 子会话 ID。
     pub child_session_id: SessionId,
+    /// 触发此子会话的工具调用 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
     /// 子 Agent 名称（来自 RunSession 的 name）。
     pub agent_name: String,
     /// 子 Agent 任务描述（来自 RunSession 的 user_prompt）。
@@ -272,6 +275,21 @@ pub struct AgentSessionLinkView {
     /// 子会话运行状态。
     #[serde(default)]
     pub status: AgentSessionStatus,
+    /// 最终完成输出的 leaf Session ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_session_id: Option<SessionId>,
+    /// 子 Agent 完成摘要。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// 子 Agent 失败原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// live-only 阶段投影，持久快照允许为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
+    /// live-only 当前工具名，持久快照允许为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
 }
 
 /// 后台化工具调用在会话投影中的状态。

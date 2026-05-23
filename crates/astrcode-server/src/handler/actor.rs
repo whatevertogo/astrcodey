@@ -460,7 +460,7 @@ impl CommandHandler {
                 let _ = reply.send(self.submit_input_with_completion(session_id, text).await);
             },
             CommandMessage::RepairStaleTurn { session_id, reply } => {
-                let _ = reply.send(self.repair_stale_phase(&session_id).await);
+                let _ = reply.send(self.repair_stale_session(&session_id).await);
             },
             CommandMessage::ForkSession {
                 source_id,

@@ -63,20 +63,30 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             agent_name,
             task,
             tool_policy: _,
-            tool_call_id: _,
+            tool_call_id,
         } => {
             model.agent_sessions.push(AgentSessionLinkView {
                 child_session_id: child_session_id.clone(),
+                tool_call_id: Some(tool_call_id.clone()),
                 agent_name: agent_name.clone(),
                 task: task.clone(),
                 status: AgentSessionStatus::Running,
+                final_session_id: None,
+                summary: None,
+                error: None,
+                phase: None,
+                current_tool: None,
             });
         },
         EventPayload::AgentSessionCompleted {
-            child_session_id, ..
+            child_session_id,
+            final_session_id,
+            summary,
         }
         | EventPayload::AgentSessionFailed {
-            child_session_id, ..
+            child_session_id,
+            final_session_id,
+            error: summary,
         } => {
             if let Some(link) = model
                 .agent_sessions
@@ -88,6 +98,18 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     EventPayload::AgentSessionFailed { .. } => AgentSessionStatus::Failed,
                     _ => unreachable!(),
                 };
+                link.final_session_id = Some(final_session_id.clone());
+                match &event.payload {
+                    EventPayload::AgentSessionCompleted { .. } => {
+                        link.summary = Some(summary.clone());
+                        link.error = None;
+                    },
+                    EventPayload::AgentSessionFailed { .. } => {
+                        link.error = Some(summary.clone());
+                        link.summary = None;
+                    },
+                    _ => unreachable!(),
+                }
             }
         },
         EventPayload::SystemPromptConfigured {
@@ -423,6 +445,52 @@ mod tests {
                 LlmMessage::user("recent user"),
                 LlmMessage::user("after compact"),
             ]
+        );
+    }
+
+    #[test]
+    fn replay_projects_agent_session_link_details() {
+        let session_id = SessionId::from("parent-session");
+        let child_id = SessionId::from("child-session");
+        let events = vec![
+            event(
+                1,
+                &session_id,
+                EventPayload::AgentSessionSpawned {
+                    child_session_id: child_id.clone(),
+                    agent_name: "explorer".into(),
+                    task: "read the code".into(),
+                    tool_policy: None,
+                    tool_call_id: "tool-call-1".into(),
+                },
+            ),
+            event(
+                2,
+                &session_id,
+                EventPayload::AgentSessionCompleted {
+                    child_session_id: child_id,
+                    final_session_id: "leaf-session".into(),
+                    summary: "done".into(),
+                },
+            ),
+        ];
+
+        let model = replay(session_id, &events);
+        let link = &model.agent_sessions[0];
+
+        assert_eq!(
+            link.tool_call_id.as_ref().map(|id| id.as_str()),
+            Some("tool-call-1")
+        );
+        assert_eq!(
+            link.final_session_id.as_ref().map(|id| id.as_str()),
+            Some("leaf-session")
+        );
+        assert_eq!(link.summary.as_deref(), Some("done"));
+        assert!(link.error.is_none());
+        assert_eq!(
+            link.status,
+            astrcode_core::storage::AgentSessionStatus::Completed
         );
     }
 }

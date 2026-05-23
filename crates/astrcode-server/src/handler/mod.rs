@@ -415,11 +415,9 @@ impl CommandHandler {
         match self.runtime.session_manager.open(session_id.clone()).await {
             Ok(session) => {
                 self.event_bus.attach(&session);
-                if let Err(e) = self.repair_stale_phase(&session_id).await {
-                    if !matches!(e, HandlerError::NoActiveTurn) {
-                        self.send_error(-32603, &e.to_string());
-                        return;
-                    }
+                if let Err(e) = self.repair_stale_session(&session_id).await {
+                    self.send_error(-32603, &e.to_string());
+                    return;
                 }
                 let state = match self.runtime.session_manager.read_model(&session_id).await {
                     Ok(state) => state,

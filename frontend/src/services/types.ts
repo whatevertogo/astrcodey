@@ -96,9 +96,15 @@ export type AgentSessionStatus = 'running' | 'completed' | 'failed'
 
 export interface AgentSessionLink {
   childSessionId: string
-  agentName: string
-  task: string
+  toolCallId?: string
+  agentName?: string
+  task?: string
   status: AgentSessionStatus
+  finalSessionId?: string
+  summary?: string
+  error?: string
+  phase?: Phase
+  currentTool?: string
 }
 
 export interface ConversationCursor {

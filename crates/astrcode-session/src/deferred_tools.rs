@@ -150,18 +150,14 @@ mod tests {
     fn deferred_snapshot(name: &str, group: &str) -> ToolSnapshot {
         ToolSnapshot {
             definition: def(name),
-            prompt_metadata: Some(
-                ToolPromptMetadata::default().deferred_discovery_group(group),
-            ),
+            prompt_metadata: Some(ToolPromptMetadata::default().deferred_discovery_group(group)),
         }
     }
 
     fn gate_snapshot(name: &str, gate: &str) -> ToolSnapshot {
         ToolSnapshot {
             definition: def(name),
-            prompt_metadata: Some(
-                ToolPromptMetadata::default().deferred_discovery_gate(gate),
-            ),
+            prompt_metadata: Some(ToolPromptMetadata::default().deferred_discovery_gate(gate)),
         }
     }
 
@@ -175,7 +171,10 @@ mod tests {
 
     #[test]
     fn visible_indexes_deferred_tools_hidden_by_default() {
-        let tools = vec![plain_snapshot("read"), deferred_snapshot("mcp_tool", "group-a")];
+        let tools = vec![
+            plain_snapshot("read"),
+            deferred_snapshot("mcp_tool", "group-a"),
+        ];
         let active = HashSet::new();
         let indexes = provider_visible_tool_indexes(&tools, &active);
         assert_eq!(indexes, vec![0]);
@@ -183,7 +182,10 @@ mod tests {
 
     #[test]
     fn visible_indexes_deferred_tools_shown_when_activated() {
-        let tools = vec![plain_snapshot("read"), deferred_snapshot("mcp_tool", "group-a")];
+        let tools = vec![
+            plain_snapshot("read"),
+            deferred_snapshot("mcp_tool", "group-a"),
+        ];
         let mut active = HashSet::new();
         active.insert("mcp_tool".into());
         let indexes = provider_visible_tool_indexes(&tools, &active);

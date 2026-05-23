@@ -94,6 +94,34 @@ function upsertBlock(
   return next
 }
 
+function mergeAgentSession(
+  current: AgentSessionLink,
+  incoming: AgentSessionLink
+): AgentSessionLink {
+  const running = incoming.status === 'running'
+  const phaseProvided = incoming.phase !== undefined
+  const currentTool = running
+    ? phaseProvided
+      ? incoming.currentTool
+      : (incoming.currentTool ?? current.currentTool)
+    : undefined
+
+  return {
+    ...current,
+    ...incoming,
+    agentName: incoming.agentName?.trim()
+      ? incoming.agentName
+      : current.agentName,
+    task: incoming.task?.trim() ? incoming.task : current.task,
+    toolCallId: incoming.toolCallId ?? current.toolCallId,
+    finalSessionId: incoming.finalSessionId ?? current.finalSessionId,
+    summary: incoming.summary ?? current.summary,
+    error: incoming.error ?? current.error,
+    phase: running ? (incoming.phase ?? current.phase) : undefined,
+    currentTool,
+  }
+}
+
 function commandNoteBlock(message: string): ConversationBlock {
   return {
     kind: 'systemNote',
@@ -545,10 +573,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
             return { agentSessions: [...current.agentSessions, incoming] }
           }
           const next = [...current.agentSessions]
-          next[idx] = {
-            ...next[idx],
-            status: incoming.status,
-          }
+          next[idx] = mergeAgentSession(next[idx], incoming)
           return { agentSessions: next }
         })
         break

@@ -490,6 +490,76 @@ async fn stream_invalid_cursor_requests_rehydrate() {
 }
 
 #[tokio::test]
+async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let parent_id = create_session(app.clone(), &token).await;
+    let parent_sid = SessionId::from(parent_id.clone());
+    let child_sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&child_sid, ".", "mock-model", Some(&parent_sid), None, None)
+        .await
+        .unwrap();
+    runtime
+        .event_store
+        .append_event(Event::new(
+            parent_sid.clone(),
+            None,
+            EventPayload::AgentSessionSpawned {
+                child_session_id: child_sid.clone(),
+                agent_name: "explorer".into(),
+                task: "inspect code".into(),
+                tool_policy: None,
+                tool_call_id: "agent-call".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let parent_cursor = runtime
+        .event_store
+        .latest_cursor(&parent_sid)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{parent_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut child_event = Event::new(
+        child_sid.clone(),
+        None,
+        EventPayload::AssistantTextDelta {
+            message_id: "child-assistant".into(),
+            delta: "secret child text".into(),
+        },
+    );
+    child_event.seq = Some(99);
+    event_tx.send(ClientNotification::Event(child_event));
+
+    let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
+    assert!(body.contains(r#""kind":"agentSessionUpdated""#));
+    assert!(body.contains(&format!(r#""childSessionId":"{child_sid}""#)));
+    assert!(body.contains(r#""phase":"streaming""#));
+    assert!(body.contains(&format!(r#""value":"{parent_cursor}""#)));
+    assert!(!body.contains(r#""value":"99""#));
+    assert!(!body.contains("agentName"));
+    assert!(!body.contains("currentTool"));
+    assert!(!body.contains("secret child text"));
+    assert!(!body.contains("patchBlock"));
+}
+
+#[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm));
     let event_tx = Arc::new(EventFanout::new(1024));

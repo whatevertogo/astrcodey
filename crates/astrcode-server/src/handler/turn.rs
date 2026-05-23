@@ -1,6 +1,6 @@
 //! Turn 管理 — 回合生命周期、Agent 任务启停、后台任务清理。
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_core::{
     event::{EventPayload, Phase},
@@ -100,11 +100,7 @@ impl CommandHandler {
         // attach 是幂等的；此处保证 session 已经接入 event_bus 的 broadcast 桥。
         // 测试或外部直连 event_store 创建的 session 在此首次接入。
         self.event_bus.attach(&session);
-        if let Err(e) = self.repair_stale_phase(&sid).await {
-            if !matches!(e, HandlerError::NoActiveTurn) {
-                return Err(e);
-            }
-        }
+        self.repair_stale_session(&sid).await?;
 
         let turn_id = new_turn_id();
         let session_arc = Arc::new(session);
@@ -166,6 +162,47 @@ impl CommandHandler {
         // 快路径：内存中有活跃 Turn
         if let Some(active_turn) = self.active_turns.remove(session_id) {
             self.abort_active_turn_inner(active_turn).await;
+            return Ok(());
+        }
+
+        if let Some(turn_id) = self
+            .runtime
+            .session_manager
+            .active_execution_index()
+            .abort_and_remove(session_id)
+        {
+            let session = self
+                .runtime
+                .session_manager
+                .open(session_id.clone())
+                .await
+                .map_err(|e| {
+                    HandlerError::SessionNotFound(format!("Session {session_id} not found: {e}"))
+                })?;
+            self.event_bus.attach(&session);
+            session
+                .runtime()
+                .background_tasks()
+                .lock()
+                .cleanup_session(session_id);
+            session
+                .emit_durable(
+                    Some(&turn_id),
+                    EventPayload::TurnCompleted {
+                        finish_reason: "aborted".into(),
+                    },
+                )
+                .await
+                .map_err(|e| HandlerError::Other(format!("emit TurnCompleted on abort: {e}")))?;
+            session
+                .emit_live(
+                    Some(&turn_id),
+                    EventPayload::AgentRunCompleted {
+                        reason: "aborted".into(),
+                    },
+                )
+                .await;
+            self.event_bus.sync_durable_events(session_id).await;
             return Ok(());
         }
 
@@ -282,20 +319,20 @@ impl CommandHandler {
             return Ok(());
         }
 
-        let session = self
-            .runtime
-            .session_manager
-            .open(session_id.clone())
-            .await
-            .map_err(|e| {
-                HandlerError::SessionNotFound(format!("Session {session_id} not found: {e}"))
-            })?;
-        self.event_bus.attach(&session);
-        let state = session
-            .read_model()
-            .await
-            .map_err(|e| HandlerError::Other(format!("read session {session_id}: {e}")))?;
+        let (session, state) = self.open_repair_session(session_id).await?;
 
+        self.repair_stale_phase_for_state(session_id, &session, &state)
+            .await?;
+        self.event_bus.sync_durable_events(session_id).await;
+        Ok(())
+    }
+
+    async fn repair_stale_phase_for_state(
+        &self,
+        session_id: &SessionId,
+        session: &Session,
+        state: &SessionReadModel,
+    ) -> Result<(), HandlerError> {
         if matches!(state.phase, Phase::Idle | Phase::Error) {
             return Err(HandlerError::NoActiveTurn);
         }
@@ -307,7 +344,7 @@ impl CommandHandler {
         );
 
         // CallingTool 阶段可能有未完成的工具调用，需要先补写中断结果
-        for pending in pending_requested_tool_calls(&state) {
+        for pending in pending_requested_tool_calls(state) {
             session
                 .emit_durable(
                     None,
@@ -344,9 +381,130 @@ impl CommandHandler {
                 },
             )
             .await;
-        self.event_bus.sync_durable_events(session_id).await;
 
         Ok(())
+    }
+
+    /// 独立执行所有可从 durable state 修复的遗留运行状态。
+    pub(in crate::handler) async fn repair_stale_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), HandlerError> {
+        let (session, state) = self.open_repair_session(session_id).await?;
+        if !self.active_turns.contains_key(session_id) {
+            match self
+                .repair_stale_phase_for_state(session_id, &session, &state)
+                .await
+            {
+                Ok(()) | Err(HandlerError::NoActiveTurn) => {},
+                Err(error) => return Err(error),
+            }
+        }
+        self.repair_stale_background_tasks_for_state(session_id, &session, &state)
+            .await?;
+        self.repair_stale_runs_for_state(&session, &state).await?;
+        self.event_bus.sync_durable_events(session_id).await;
+        Ok(())
+    }
+
+    async fn repair_stale_background_tasks_for_state(
+        &self,
+        session_id: &SessionId,
+        session: &Session,
+        state: &SessionReadModel,
+    ) -> Result<(), HandlerError> {
+        let active_tasks: std::collections::HashSet<_> = session
+            .runtime()
+            .background_tasks()
+            .lock()
+            .list_active(session_id)
+            .into_iter()
+            .collect();
+
+        for (call_id, background) in &state.background_tool_calls {
+            if background.completed || active_tasks.contains(&background.task_id) {
+                continue;
+            }
+            let Some((tool_name, arguments_json)) = find_tool_call_history(state, call_id) else {
+                tracing::warn!(
+                    session_id = %session_id,
+                    call_id = %call_id,
+                    task_id = %background.task_id,
+                    "stale background task has no matching tool call history"
+                );
+                continue;
+            };
+            let result = interrupted_background_tool_result(call_id.as_str(), &background.task_id);
+            session
+                .emit_durable(
+                    None,
+                    EventPayload::ToolCallCompleted {
+                        call_id: call_id.clone(),
+                        tool_name,
+                        result,
+                        arguments: arguments_json.to_string(),
+                        arguments_json: Some(arguments_json),
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    HandlerError::Other(format!("emit stale background completion: {e}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn repair_stale_runs_for_state(
+        &self,
+        session: &Session,
+        state: &SessionReadModel,
+    ) -> Result<(), HandlerError> {
+        for link in state
+            .agent_sessions
+            .iter()
+            .filter(|link| link.status == astrcode_core::storage::AgentSessionStatus::Running)
+        {
+            if self
+                .runtime
+                .session_manager
+                .active_execution_index()
+                .has_active(&link.child_session_id)
+            {
+                continue;
+            }
+            session
+                .emit_durable(
+                    None,
+                    EventPayload::AgentSessionFailed {
+                        child_session_id: link.child_session_id.clone(),
+                        final_session_id: link.child_session_id.clone(),
+                        error: "interrupted".into(),
+                    },
+                )
+                .await
+                .map_err(|e| HandlerError::Other(format!("emit stale child failure: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn open_repair_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(Session, SessionReadModel), HandlerError> {
+        let session = self
+            .runtime
+            .session_manager
+            .open(session_id.clone())
+            .await
+            .map_err(|e| {
+                HandlerError::SessionNotFound(format!("Session {session_id} not found: {e}"))
+            })?;
+        self.event_bus.attach(&session);
+        let state = session
+            .read_model()
+            .await
+            .map_err(|e| HandlerError::Other(format!("read session {session_id}: {e}")))?;
+        Ok((session, state))
     }
 }
 
@@ -375,6 +533,28 @@ fn pending_requested_tool_calls(state: &SessionReadModel) -> Vec<PendingRequeste
     pending
 }
 
+fn find_tool_call_history(
+    state: &SessionReadModel,
+    target_call_id: &ToolCallId,
+) -> Option<(String, serde_json::Value)> {
+    state.messages.iter().find_map(|message| {
+        if message.role != LlmRole::Assistant {
+            return None;
+        }
+        message.content.iter().find_map(|content| {
+            let LlmContent::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } = content
+            else {
+                return None;
+            };
+            (call_id == target_call_id.as_str()).then(|| (name.clone(), arguments.clone()))
+        })
+    })
+}
+
 /// 创建中断状态的工具调用结果。
 fn interrupted_tool_result(call_id: &str) -> ToolResult {
     let content = "Tool execution interrupted before completion".to_string();
@@ -384,6 +564,20 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
         is_error: true,
         error: Some(content),
         metadata: Default::default(),
+        duration_ms: None,
+    }
+}
+
+fn interrupted_background_tool_result(call_id: &str, task_id: &BackgroundTaskId) -> ToolResult {
+    let content = "Background task interrupted before completion".to_string();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("task_id".into(), serde_json::json!(task_id.to_string()));
+    ToolResult {
+        call_id: call_id.to_string(),
+        content: content.clone(),
+        is_error: true,
+        error: Some(content),
+        metadata,
         duration_ms: None,
     }
 }

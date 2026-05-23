@@ -25,24 +25,24 @@ pub struct BackgroundTaskCompletion {
 
 impl BackgroundTaskCompletion {
     /// 从完成通知派生 `ToolCallCompleted` 和 `BackgroundTaskCompleted` 事件载荷。
-    ///
-    /// 消费 `self`，避免两个方法重复 clone `result`、`tool_name` 等字段。
-    pub fn into_events(self) -> (EventPayload, EventPayload) {
+    pub fn to_tool_call_completed_event(&self) -> EventPayload {
         let call_id = ToolCallId::from(self.result.call_id.clone());
-        let tool_call_completed = EventPayload::ToolCallCompleted {
-            call_id: call_id.clone(),
+        EventPayload::ToolCallCompleted {
+            call_id,
             tool_name: self.tool_name.clone(),
             result: self.result.clone(),
-            arguments: self.arguments,
-            arguments_json: self.arguments_json,
-        };
-        let background_task_completed = EventPayload::BackgroundTaskCompleted {
-            task_id: self.task_id,
-            call_id,
-            tool_name: self.tool_name,
-            result: self.result,
-        };
-        (tool_call_completed, background_task_completed)
+            arguments: self.arguments.clone(),
+            arguments_json: self.arguments_json.clone(),
+        }
+    }
+
+    pub fn to_background_task_completed_event(&self) -> EventPayload {
+        EventPayload::BackgroundTaskCompleted {
+            task_id: self.task_id.clone(),
+            call_id: ToolCallId::from(self.result.call_id.clone()),
+            tool_name: self.tool_name.clone(),
+            result: self.result.clone(),
+        }
     }
 }
 
@@ -198,9 +198,11 @@ pub fn spawn_background_forwarder(
             let session_id = completion.session_id.clone();
             let task_id_str = completion.task_id.to_string();
             let tool_name = completion.tool_name.clone();
-            let (tool_call_event, bg_event) = completion.into_events();
-            if let Err(e) = session.emit_durable(None, tool_call_event).await {
-                tracing::error!(session_id = %session.id(), error = %e, "background forwarder: persist tool_call_completed failed");
+            let tool_call_event = completion.to_tool_call_completed_event();
+            let bg_event = completion.to_background_task_completed_event();
+            if let Err(e) = session.emit_durable(None, tool_call_event.clone()).await {
+                tracing::warn!(session_id = %session.id(), error = %e, "background forwarder: persist tool_call_completed failed; sending live fallback");
+                session.emit_live(None, tool_call_event).await;
             }
             session.emit_live(None, bg_event).await;
 
@@ -244,7 +246,190 @@ pub fn backgrounded_placeholder_result(
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::{
+        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
+        event::Event,
+        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+        storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
+        tool::{ToolDefinition, ToolResult},
+        types::Cursor,
+    };
+    use astrcode_extensions::runner::ExtensionRunner;
+    use astrcode_storage::in_memory::InMemoryEventStore;
+
     use super::*;
+
+    struct NeverLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NeverLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            std::future::pending().await
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: 1024,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
+    struct FailToolCompletionStore {
+        inner: InMemoryEventStore,
+    }
+
+    impl FailToolCompletionStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryEventStore::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for FailToolCompletionStore {
+        async fn create_session(
+            &self,
+            session_id: &SessionId,
+            working_dir: &str,
+            model_id: &str,
+            parent_session_id: Option<&SessionId>,
+            tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
+            source_extension: Option<&str>,
+        ) -> Result<Event, StorageError> {
+            self.inner
+                .create_session(
+                    session_id,
+                    working_dir,
+                    model_id,
+                    parent_session_id,
+                    tool_policy,
+                    source_extension,
+                )
+                .await
+        }
+
+        async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
+            if matches!(event.payload, EventPayload::ToolCallCompleted { .. }) {
+                return Err(StorageError::Unsupported("forced append failure".into()));
+            }
+            self.inner.append_event(event).await
+        }
+
+        async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+            self.inner.replay_events(session_id).await
+        }
+
+        async fn session_read_model(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<SessionReadModel, StorageError> {
+            self.inner.session_read_model(session_id).await
+        }
+
+        async fn session_system_prompt(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<String>, StorageError> {
+            self.inner.session_system_prompt(session_id).await
+        }
+
+        async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+            self.inner.list_session_summaries().await
+        }
+
+        async fn latest_cursor(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<Cursor>, StorageError> {
+            self.inner.latest_cursor(session_id).await
+        }
+
+        async fn replay_from(
+            &self,
+            session_id: &SessionId,
+            cursor: &Cursor,
+        ) -> Result<Vec<Event>, StorageError> {
+            self.inner.replay_from(session_id, cursor).await
+        }
+
+        async fn checkpoint(
+            &self,
+            session_id: &SessionId,
+            cursor: &Cursor,
+        ) -> Result<(), StorageError> {
+            self.inner.checkpoint(session_id, cursor).await
+        }
+
+        async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+            self.inner.list_sessions().await
+        }
+
+        async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+            self.inner.delete_session(session_id).await
+        }
+    }
+
+    fn test_caps() -> Arc<crate::session_runtime_services::SessionRuntimeServices> {
+        let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm);
+        let extension_runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
+        let context_assembler = Arc::new(
+            astrcode_context::context_assembler::LlmContextAssembler::new(Default::default()),
+        );
+        Arc::new(
+            crate::session_runtime_services::SessionRuntimeServices::new(
+                Arc::clone(&llm),
+                llm,
+                extension_runner,
+                context_assembler,
+                EffectiveConfig {
+                    llm: LlmSettings {
+                        provider_kind: "mock".into(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        api_mode: OpenAiApiMode::ChatCompletions,
+                        model_id: "mock".into(),
+                        max_tokens: 1024,
+                        context_limit: 1024,
+                        connect_timeout_secs: 1,
+                        read_timeout_secs: 1,
+                        max_retries: 0,
+                        retry_base_delay_ms: 0,
+                        supports_prompt_cache_key: false,
+                        prompt_cache_retention: None,
+                        reasoning: false,
+                        reasoning_split: false,
+                    },
+                    small_llm: LlmSettings {
+                        provider_kind: "mock".into(),
+                        base_url: String::new(),
+                        api_key: String::new(),
+                        api_mode: OpenAiApiMode::ChatCompletions,
+                        model_id: "mock".into(),
+                        max_tokens: 1024,
+                        context_limit: 1024,
+                        connect_timeout_secs: 1,
+                        read_timeout_secs: 1,
+                        max_retries: 0,
+                        retry_base_delay_ms: 0,
+                        supports_prompt_cache_key: false,
+                        prompt_cache_retention: None,
+                        reasoning: false,
+                        reasoning_split: false,
+                    },
+                    context: Default::default(),
+                    agent: Default::default(),
+                    wasm: WasmSettings::default(),
+                    extensions: ExtensionSettings::default(),
+                },
+            ),
+        )
+    }
 
     fn fake_handles() -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
         let exec = tokio::spawn(async {});
@@ -323,6 +508,88 @@ mod tests {
         let active = mgr.list_active(&session_1);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0], BackgroundTaskId::from("t1"));
+    }
+
+    #[tokio::test]
+    async fn forwarder_sends_live_tool_completion_when_durable_write_fails() {
+        let store: Arc<dyn EventStore> = Arc::new(FailToolCompletionStore::new());
+        let session_id = SessionId::from("session-forwarder-fallback");
+        let runtime = Arc::new(crate::session_runtime::SessionRuntimeState::new(
+            Arc::new(NeverLlm),
+            Arc::new(NeverLlm),
+            "mock".into(),
+        ));
+        let session = Arc::new(
+            crate::session::Session::create_with_id(
+                Arc::clone(&store),
+                session_id.clone(),
+                ".",
+                "mock",
+                None,
+                None,
+                None,
+                runtime,
+                test_caps(),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut events = session.subscribe();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _forwarder = spawn_background_forwarder(rx, Arc::clone(&session), None);
+
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("task_id".into(), serde_json::json!("task-1"));
+        tx.send(BackgroundTaskCompletion {
+            session_id,
+            task_id: "task-1".into(),
+            tool_name: "shell".into(),
+            result: ToolResult {
+                call_id: "call-1".into(),
+                content: "done".into(),
+                is_error: false,
+                error: None,
+                metadata,
+                duration_ms: None,
+            },
+            arguments: "{}".into(),
+            arguments_json: Some(serde_json::json!({})),
+        })
+        .unwrap();
+
+        let mut saw_tool_completion = false;
+        let mut saw_background_completion = false;
+        for _ in 0..2 {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+                .await
+                .expect("fallback events should arrive")
+                .expect("session event channel should remain open");
+            match event.payload {
+                EventPayload::ToolCallCompleted { call_id, .. } => {
+                    saw_tool_completion = call_id.as_str() == "call-1";
+                },
+                EventPayload::BackgroundTaskCompleted { task_id, .. } => {
+                    saw_background_completion = task_id.as_str() == "task-1";
+                },
+                _ => {},
+            }
+        }
+
+        assert!(
+            saw_tool_completion,
+            "live ToolCallCompleted should finalize UI"
+        );
+        assert!(saw_background_completion);
+        assert_eq!(
+            store
+                .session_read_model(session.id())
+                .await
+                .unwrap()
+                .messages
+                .len(),
+            0,
+            "fallback is live-only when durable write fails"
+        );
     }
 
     #[tokio::test]

@@ -244,10 +244,7 @@ mod tests {
 
     #[test]
     fn provider_visible_filters_empty_system_messages() {
-        let messages = vec![
-            LlmMessage::user("hello"),
-            LlmMessage::system(""),
-        ];
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
         let visible = provider_visible_messages(messages);
         assert_eq!(visible.len(), 1);
         assert!(matches!(visible[0].role, astrcode_core::llm::LlmRole::User));
@@ -255,10 +252,7 @@ mod tests {
 
     #[test]
     fn provider_visible_keeps_non_empty() {
-        let messages = vec![
-            LlmMessage::user("hello"),
-            LlmMessage::assistant("world"),
-        ];
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
         let visible = provider_visible_messages(messages);
         assert_eq!(visible.len(), 2);
     }

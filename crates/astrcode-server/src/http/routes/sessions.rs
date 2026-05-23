@@ -346,9 +346,15 @@ fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotRespons
             .iter()
             .map(|link| HttpAgentSessionLinkDto {
                 child_session_id: link.child_session_id.to_string(),
-                agent_name: link.agent_name.clone(),
-                task: link.task.clone(),
+                tool_call_id: link.tool_call_id.as_ref().map(ToString::to_string),
+                agent_name: Some(link.agent_name.clone()),
+                task: Some(link.task.clone()),
                 status: link.status.into(),
+                final_session_id: link.final_session_id.as_ref().map(ToString::to_string),
+                summary: link.summary.clone(),
+                error: link.error.clone(),
+                phase: link.phase,
+                current_tool: link.current_tool.clone(),
             })
             .collect(),
     }

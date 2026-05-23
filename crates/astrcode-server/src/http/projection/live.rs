@@ -149,27 +149,38 @@ pub(in crate::http) fn event_to_deltas(
             agent_name,
             task,
             tool_policy: _,
-            tool_call_id: _,
+            tool_call_id,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: HttpAgentSessionLinkDto {
                 child_session_id: child_session_id.to_string(),
-                agent_name: agent_name.clone(),
-                task: task.clone(),
+                tool_call_id: Some(tool_call_id.to_string()),
+                agent_name: Some(agent_name.clone()),
+                task: Some(task.clone()),
                 status: astrcode_core::storage::AgentSessionStatus::Running.into(),
+                final_session_id: None,
+                summary: None,
+                error: None,
+                phase: Some(Phase::Thinking),
+                current_tool: None,
             },
         }],
 
         EventPayload::AgentSessionCompleted {
-            child_session_id, ..
+            child_session_id,
+            final_session_id,
+            summary,
         }
         | EventPayload::AgentSessionFailed {
-            child_session_id, ..
+            child_session_id,
+            final_session_id,
+            error: summary,
         } => {
             vec![ConversationDeltaDto::AgentSessionUpdated {
                 agent_session: HttpAgentSessionLinkDto {
                     child_session_id: child_session_id.to_string(),
-                    agent_name: String::new(),
-                    task: String::new(),
+                    tool_call_id: None,
+                    agent_name: None,
+                    task: None,
                     status: match &event.payload {
                         EventPayload::AgentSessionCompleted { .. } => {
                             astrcode_core::storage::AgentSessionStatus::Completed.into()
@@ -179,6 +190,13 @@ pub(in crate::http) fn event_to_deltas(
                         },
                         _ => unreachable!(),
                     },
+                    final_session_id: Some(final_session_id.to_string()),
+                    summary: matches!(&event.payload, EventPayload::AgentSessionCompleted { .. })
+                        .then(|| summary.clone()),
+                    error: matches!(&event.payload, EventPayload::AgentSessionFailed { .. })
+                        .then(|| summary.clone()),
+                    phase: None,
+                    current_tool: None,
                 },
             }]
         },

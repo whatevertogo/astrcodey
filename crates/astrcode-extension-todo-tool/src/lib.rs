@@ -1,6 +1,10 @@
 //! astrcode-extension-todo-tool — session-local progress todo list.
 
-use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use astrcode_core::{
     extension::{

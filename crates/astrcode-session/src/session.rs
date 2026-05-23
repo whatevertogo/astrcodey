@@ -128,11 +128,7 @@ impl Session {
 
     /// 返回本 session 在存储层中的真实目录路径。
     pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
-        self.store
-            .session_store_dir(&self.id)
-            .await
-            .ok()
-            .flatten()
+        self.store.session_store_dir(&self.id).await.ok().flatten()
     }
 
     /// 订阅本 session 的事件 fan-out 通道。

@@ -4,11 +4,12 @@ use astrcode_core::{
     event::{Event, EventPayload},
     extension::ExtensionEvent,
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
-    types::{Cursor, SessionId},
+    types::{Cursor, SessionId, TurnId},
 };
 use astrcode_session::{Session, SessionError, SessionRuntimeServices, SessionRuntimeState};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
+use tokio::task::AbortHandle;
 
 use crate::config_manager::ConfigManager;
 
@@ -35,6 +36,49 @@ pub(crate) struct ForkedSession {
     pub(crate) start_event: Event,
     #[allow(dead_code)]
     pub(crate) fork_event: Event,
+}
+
+#[derive(Clone)]
+struct ActiveExecutionEntry {
+    turn_id: TurnId,
+    abort_handle: AbortHandle,
+}
+
+#[derive(Default)]
+pub struct ActiveExecutionIndex {
+    entries: Mutex<HashMap<SessionId, ActiveExecutionEntry>>,
+}
+
+impl ActiveExecutionIndex {
+    pub fn register(&self, session_id: SessionId, turn_id: TurnId, abort_handle: AbortHandle) {
+        self.entries.lock().insert(
+            session_id,
+            ActiveExecutionEntry {
+                turn_id,
+                abort_handle,
+            },
+        );
+    }
+
+    pub fn remove_if_matches(&self, session_id: &SessionId, turn_id: &TurnId) {
+        let mut entries = self.entries.lock();
+        if entries
+            .get(session_id)
+            .is_some_and(|entry| &entry.turn_id == turn_id)
+        {
+            entries.remove(session_id);
+        }
+    }
+
+    pub fn abort_and_remove(&self, session_id: &SessionId) -> Option<TurnId> {
+        let entry = self.entries.lock().remove(session_id)?;
+        entry.abort_handle.abort();
+        Some(entry.turn_id)
+    }
+
+    pub fn has_active(&self, session_id: &SessionId) -> bool {
+        self.entries.lock().contains_key(session_id)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +108,7 @@ pub struct SessionManager {
     config: Arc<ConfigManager>,
     runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
     capabilities: Arc<SessionRuntimeServices>,
+    active_execution_index: ActiveExecutionIndex,
     /// 可选的 attach 回调：子会话注册 runtime 后自动把 session 接入 event_bus 广播。
     attach_hook: Mutex<Option<SessionAttachHook>>,
     /// 可选的 detach 回调：session 销毁后释放 event_bus 占位，让同 sid 重建时能重新 attach。
@@ -88,6 +133,7 @@ impl SessionManager {
             attach_hook: Mutex::new(None),
             detach_hook: Mutex::new(None),
             prompt_submit_hook: Mutex::new(None),
+            active_execution_index: ActiveExecutionIndex::default(),
         }
     }
 
@@ -108,6 +154,10 @@ impl SessionManager {
 
     pub(crate) fn config(&self) -> &Arc<ConfigManager> {
         &self.config
+    }
+
+    pub(crate) fn active_execution_index(&self) -> &ActiveExecutionIndex {
+        &self.active_execution_index
     }
 
     /// 设置 attach 回调。event_bus 创建后由调用方注入，子会话注册 runtime 时自动触发。
@@ -223,6 +273,7 @@ impl SessionManager {
         )
         .await?;
         self.event_store.delete_session(session_id).await?;
+        self.active_execution_index.abort_and_remove(session_id);
         // 释放 event_bus 的 sid 占位，让同 sid 重建时能重新 attach。
         if let Some(hook) = self.detach_hook.lock().as_ref() {
             hook(session_id);
@@ -298,6 +349,7 @@ impl SessionManager {
             .recycle_session(session_id)
             .await
             .map_err(SessionManagerError::from)?;
+        self.active_execution_index.abort_and_remove(session_id);
         // ephemeral 子会话回收后清理 runtime 占位，避免 HashMap 无限膨胀。
         // 同时释放 event_bus 的 sid 占位。
         if let Some(runtime) = self.runtime_states.lock().remove(session_id) {
@@ -450,6 +502,8 @@ mod tests {
         SystemPromptSnapshotInput, build_system_prompt_snapshot, build_tool_registry_snapshot,
     };
 
+    use super::ActiveExecutionIndex;
+
     struct StaticToolExtension {
         id: &'static str,
         tool_name: &'static str,
@@ -540,5 +594,22 @@ mod tests {
 
         assert_eq!(shell.origin, ToolOrigin::Extension);
         assert_eq!(shell.description, "first extension shell");
+    }
+
+    #[tokio::test]
+    async fn active_execution_index_removes_only_matching_turn() {
+        let index = ActiveExecutionIndex::default();
+        let session_id = astrcode_core::types::SessionId::from("session-1");
+        let turn_id = astrcode_core::types::TurnId::from("turn-1");
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .abort_handle();
+
+        index.register(session_id.clone(), turn_id.clone(), handle);
+        index.remove_if_matches(&session_id, &astrcode_core::types::TurnId::from("other"));
+        assert!(index.has_active(&session_id));
+        index.remove_if_matches(&session_id, &turn_id);
+        assert!(!index.has_active(&session_id));
     }
 }

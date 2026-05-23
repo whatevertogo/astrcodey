@@ -12,6 +12,12 @@ const PHASE_LABELS: Record<string, string> = {
   error: '错误',
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  running: '运行中',
+  completed: '已完成',
+  failed: '失败',
+}
+
 interface TopBarProps {
   isSidebarOpen: boolean
   onToggleSidebar: () => void
@@ -124,7 +130,7 @@ export default function TopBar({
                 <button
                   key={agent.childSessionId}
                   type="button"
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent-soft/10"
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent-soft/10"
                   role="menuitem"
                   onClick={() => {
                     switchSession(agent.childSessionId)
@@ -142,11 +148,35 @@ export default function TopBar({
                   >
                     ●
                   </span>
-                  <span className="font-medium text-text-primary">
-                    {agent.agentName}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-text-secondary">
-                    {agent.task}
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-medium text-text-primary">
+                        {agent.agentName || 'Subsession'}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-text-secondary">
+                        {agent.status === 'running' && agent.phase
+                          ? PHASE_LABELS[agent.phase]
+                          : STATUS_LABELS[agent.status]}
+                      </span>
+                    </span>
+                    <span className="block truncate text-text-secondary">
+                      {agent.task || ''}
+                    </span>
+                    {agent.status === 'running' && agent.currentTool && (
+                      <span className="block truncate text-[11px] text-text-secondary">
+                        {agent.currentTool}
+                      </span>
+                    )}
+                    {agent.status === 'completed' && agent.summary && (
+                      <span className="block truncate text-[11px] text-text-secondary">
+                        {agent.summary}
+                      </span>
+                    )}
+                    {agent.status === 'failed' && agent.error && (
+                      <span className="block truncate text-[11px] text-red-500">
+                        {agent.error}
+                      </span>
+                    )}
                   </span>
                 </button>
               ))}

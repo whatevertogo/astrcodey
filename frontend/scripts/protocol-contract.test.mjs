@@ -47,6 +47,50 @@ assert.equal(patchArguments.delta.kind, 'patchArguments')
 assert.equal(patchArguments.delta.blockId, 'tool-1')
 assert.equal(patchArguments.delta.arguments, 'Cargo.toml')
 
+const agentSession = decodeConversationStreamEnvelope({
+  sessionId: 'parent-session',
+  cursor: { value: '8' },
+  delta: {
+    kind: 'agentSessionUpdated',
+    agentSession: {
+      childSessionId: 'child-session',
+      toolCallId: 'tool-call-1',
+      agentName: 'explorer',
+      task: 'inspect code',
+      status: 'running',
+      finalSessionId: 'leaf-session',
+      summary: 'done',
+      error: 'interrupted',
+      phase: 'calling_tool',
+      currentTool: 'read',
+    },
+  },
+})
+assert.equal(agentSession.delta.kind, 'agentSessionUpdated')
+assert.equal(agentSession.delta.agentSession.toolCallId, 'tool-call-1')
+assert.equal(agentSession.delta.agentSession.finalSessionId, 'leaf-session')
+assert.equal(agentSession.delta.agentSession.summary, 'done')
+assert.equal(agentSession.delta.agentSession.error, 'interrupted')
+assert.equal(agentSession.delta.agentSession.phase, 'calling_tool')
+assert.equal(agentSession.delta.agentSession.currentTool, 'read')
+
+const sparseAgentSession = decodeConversationStreamEnvelope({
+  sessionId: 'parent-session',
+  cursor: { value: '9' },
+  delta: {
+    kind: 'agentSessionUpdated',
+    agentSession: {
+      childSessionId: 'child-session',
+      status: 'running',
+      phase: 'thinking',
+    },
+  },
+})
+assert.equal(sparseAgentSession.delta.kind, 'agentSessionUpdated')
+assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
+assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
+assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)
+
 assert.throws(
   () =>
     decodeConversationStreamEnvelope({

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs, future,
     path::{Path, PathBuf},
     sync::{
@@ -18,7 +19,7 @@ use astrcode_core::{
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
-    tool::ToolDefinition,
+    tool::{ToolDefinition, ToolResult},
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -1115,6 +1116,167 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             )
         })
     }));
+}
+
+#[tokio::test]
+async fn repair_stale_background_tasks_even_when_phase_is_idle() {
+    let runtime = test_runtime();
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock", None, None, None)
+        .await
+        .unwrap();
+    runtime
+        .event_store
+        .append_event(Event::new(
+            sid.clone(),
+            Some("turn-1".into()),
+            EventPayload::ToolCallRequested {
+                call_id: "call-bg".into(),
+                tool_name: "shell".into(),
+                arguments: serde_json::json!({ "command": "long-running" }),
+            },
+        ))
+        .await
+        .unwrap();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("task_id".into(), serde_json::json!("task-bg"));
+    metadata.insert("backgrounded".into(), serde_json::json!(true));
+    runtime
+        .event_store
+        .append_event(Event::new(
+            sid.clone(),
+            Some("turn-1".into()),
+            EventPayload::ToolCallCompleted {
+                call_id: "call-bg".into(),
+                tool_name: "shell".into(),
+                result: ToolResult {
+                    call_id: "call-bg".into(),
+                    content: "Task moved to background (task: task-bg).".into(),
+                    is_error: false,
+                    error: None,
+                    metadata,
+                    duration_ms: None,
+                },
+                arguments: "long-running".into(),
+                arguments_json: Some(serde_json::json!({ "command": "long-running" })),
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .event_store
+        .append_event(Event::new(
+            sid.clone(),
+            Some("turn-1".into()),
+            EventPayload::TurnCompleted {
+                finish_reason: "stop".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let stale_state = runtime.event_store.session_read_model(&sid).await.unwrap();
+    assert_eq!(stale_state.phase, Phase::Idle);
+    assert!(
+        !stale_state
+            .background_tool_calls
+            .get(&ToolCallId::from("call-bg"))
+            .unwrap()
+            .completed
+    );
+
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let handler = CommandHandler::new(
+        Arc::clone(&runtime),
+        test_event_bus(&runtime, event_tx),
+        actor_tx,
+    );
+
+    handler.repair_stale_session(&sid).await.unwrap();
+
+    let state = runtime.event_store.session_read_model(&sid).await.unwrap();
+    assert!(
+        state
+            .background_tool_calls
+            .get(&ToolCallId::from("call-bg"))
+            .unwrap()
+            .completed
+    );
+    assert!(state.messages.iter().any(|message| {
+        message.content.iter().any(|content| {
+            matches!(
+                content,
+                LlmContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error
+                } if tool_call_id == "call-bg"
+                    && *is_error
+                    && content.contains("Background task interrupted")
+            )
+        })
+    }));
+}
+
+#[tokio::test]
+async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
+    let runtime = test_runtime();
+    let parent_id = new_session_id();
+    let child_id = new_session_id();
+    runtime
+        .event_store
+        .create_session(&parent_id, ".", "mock", None, None, None)
+        .await
+        .unwrap();
+    runtime
+        .event_store
+        .create_session(&child_id, ".", "mock", Some(&parent_id), None, None)
+        .await
+        .unwrap();
+    runtime
+        .event_store
+        .append_event(Event::new(
+            parent_id.clone(),
+            None,
+            EventPayload::AgentSessionSpawned {
+                child_session_id: child_id.clone(),
+                agent_name: "explorer".into(),
+                task: "inspect".into(),
+                tool_policy: None,
+                tool_call_id: "agent-call".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let handler = CommandHandler::new(
+        Arc::clone(&runtime),
+        test_event_bus(&runtime, event_tx),
+        actor_tx,
+    );
+
+    handler.repair_stale_session(&parent_id).await.unwrap();
+
+    let state = runtime
+        .event_store
+        .session_read_model(&parent_id)
+        .await
+        .unwrap();
+    let link = state.agent_sessions.first().unwrap();
+    assert_eq!(
+        link.status,
+        astrcode_core::storage::AgentSessionStatus::Failed
+    );
+    assert_eq!(
+        link.final_session_id.as_ref().map(|id| id.as_str()),
+        Some(child_id.as_str())
+    );
+    assert_eq!(link.error.as_deref(), Some("interrupted"));
 }
 
 #[tokio::test]

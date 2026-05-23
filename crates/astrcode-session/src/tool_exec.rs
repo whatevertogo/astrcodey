@@ -154,10 +154,7 @@ fn resolve_effective_policy(
     declared: BackgroundPolicy,
     tool_input: &serde_json::Value,
 ) -> BackgroundPolicy {
-    match tool_input
-        .get("runInBackground")
-        .and_then(|v| v.as_bool())
-    {
+    match tool_input.get("runInBackground").and_then(|v| v.as_bool()) {
         // 显式请求后台化：立即转入后台（阈值 0）
         Some(true) => BackgroundPolicy::AutoAfter { threshold_secs: 0 },
         // 显式禁止后台化：视为 Never
@@ -543,34 +540,25 @@ mod tests {
     #[test]
     fn resolve_effective_policy_explicit_true() {
         let input = serde_json::json!({ "runInBackground": true });
-        let result = resolve_effective_policy(
-            BackgroundPolicy::AutoAfter { threshold_secs: 60 },
-            &input,
-        );
+        let result =
+            resolve_effective_policy(BackgroundPolicy::AutoAfter { threshold_secs: 60 }, &input);
         assert_eq!(result, BackgroundPolicy::AutoAfter { threshold_secs: 0 });
     }
 
     #[test]
     fn resolve_effective_policy_explicit_false() {
         let input = serde_json::json!({ "runInBackground": false });
-        let result = resolve_effective_policy(
-            BackgroundPolicy::AutoAfter { threshold_secs: 60 },
-            &input,
-        );
+        let result =
+            resolve_effective_policy(BackgroundPolicy::AutoAfter { threshold_secs: 60 }, &input);
         assert_eq!(result, BackgroundPolicy::Never);
     }
 
     #[test]
     fn resolve_effective_policy_missing_field_returns_declared() {
         let input = serde_json::json!({ "command": "echo hi" });
-        let result = resolve_effective_policy(
-            BackgroundPolicy::AutoAfter { threshold_secs: 60 },
-            &input,
-        );
-        assert_eq!(
-            result,
-            BackgroundPolicy::AutoAfter { threshold_secs: 60 }
-        );
+        let result =
+            resolve_effective_policy(BackgroundPolicy::AutoAfter { threshold_secs: 60 }, &input);
+        assert_eq!(result, BackgroundPolicy::AutoAfter { threshold_secs: 60 });
     }
 
     #[test]
@@ -583,14 +571,9 @@ mod tests {
     #[test]
     fn resolve_effective_policy_non_bool_is_none() {
         let input = serde_json::json!({ "runInBackground": "yes" });
-        let result = resolve_effective_policy(
-            BackgroundPolicy::AutoAfter { threshold_secs: 30 },
-            &input,
-        );
-        assert_eq!(
-            result,
-            BackgroundPolicy::AutoAfter { threshold_secs: 30 }
-        );
+        let result =
+            resolve_effective_policy(BackgroundPolicy::AutoAfter { threshold_secs: 30 }, &input);
+        assert_eq!(result, BackgroundPolicy::AutoAfter { threshold_secs: 30 });
     }
 
     #[test]
