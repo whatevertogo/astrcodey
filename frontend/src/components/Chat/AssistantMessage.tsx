@@ -162,7 +162,21 @@ const MarkdownContent = memo(function MarkdownContent({
 /** Streaming 时按换行边界分割：已稳定行走 ReactMarkdown，未完成尾巴纯文本。 */
 function StreamingMarkdown({ text }: { text: string }) {
   const lastNewline = text.lastIndexOf('\n')
-  if (lastNewline === -1) {
+  const hasNewline = lastNewline !== -1
+
+  const committed = hasNewline ? text.slice(0, lastNewline + 1) : ''
+  const tail = hasNewline ? text.slice(lastNewline + 1) : text
+
+  // Memoize by line count — MarkdownContent only re-renders when a new line
+  // is committed, not on every delta within the current line.
+  const committedLineCount = hasNewline ? committed.split('\n').length : 0
+  const cachedCommitted = React.useMemo(
+    () => committed,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [committedLineCount]
+  )
+
+  if (!hasNewline) {
     return (
       <>
         <span className="whitespace-pre-wrap break-words">{text}</span>
@@ -172,11 +186,10 @@ function StreamingMarkdown({ text }: { text: string }) {
       </>
     )
   }
-  const committed = text.slice(0, lastNewline + 1)
-  const tail = text.slice(lastNewline + 1)
+
   return (
     <>
-      <MarkdownContent text={committed} />
+      <MarkdownContent text={cachedCommitted} />
       <span className="whitespace-pre-wrap break-words">{tail}</span>
       <span className="ml-px inline-block animate-blink text-text-secondary motion-reduce:animate-none">
         ▋

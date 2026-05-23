@@ -145,7 +145,32 @@ pub(in crate::http) async fn session_stream(
             let runtime = Arc::clone(&replay_runtime);
             let replay_sid = replay_session_id.clone();
             async move {
-                let deltas = event_to_replay_deltas(&event, replay_has_messages);
+                let mut deltas = event_to_replay_deltas(&event, replay_has_messages);
+                // 如果重放 AssistantMessageStarted 且该消息仍在流式传输，
+                // 补一个 PatchBlock 让客户端拿到已积累的文本。
+                if let EventPayload::AssistantMessageStarted { message_id } = &event.payload {
+                    if let Some(msg) = runtime
+                        .session_manager
+                        .streaming_snapshot(&replay_sid)
+                    {
+                        if msg.message_id == message_id.as_str() {
+                            if !msg.text.is_empty() {
+                                deltas.push(ConversationDeltaDto::PatchBlock {
+                                    block_id: message_id.to_string(),
+                                    text_delta: msg.text,
+                                });
+                            }
+                            if let Some(reasoning) = msg.reasoning_content {
+                                if !reasoning.is_empty() {
+                                    deltas.push(ConversationDeltaDto::ThinkingDelta {
+                                        block_id: message_id.to_string(),
+                                        delta: reasoning,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 let cursor = event_cursor(&runtime, &event).await;
                 deltas
                     .into_iter()

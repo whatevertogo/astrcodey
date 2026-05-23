@@ -9,6 +9,7 @@ import type {
   ConversationDelta,
   SessionListItem,
   Phase,
+  ToolOutputStream,
 } from '../services/types'
 
 interface ConversationState {
@@ -134,66 +135,213 @@ function isCompactCommand(text: string): boolean {
   return /^\/compact(?:\s|$)/.test(text.trim())
 }
 
-function patchAssistantBlock(
-  blocks: ConversationBlock[],
-  blockId: string,
-  textDelta: string
-): ConversationBlock[] {
-  if (!blockId || !textDelta) return blocks
+// ── Delta coalescing: merge same-block deltas before applying ──
 
-  const idx = blocks.findIndex((block) => block.id === blockId)
-  if (idx === -1) {
-    return [
-      ...blocks,
-      {
-        kind: 'assistant',
-        id: blockId,
-        text: textDelta,
-        status: 'streaming',
-      },
-    ]
+type CoalescedDelta =
+  | { kind: 'patchBlock'; blockId: string; textDelta: string }
+  | { kind: 'thinkingDelta'; blockId: string; delta: string }
+  | {
+      kind: 'patchArguments'
+      blockId: string
+      arguments: string
+      argumentsJson?: Record<string, unknown>
+    }
+  | {
+      kind: 'toolOutput'
+      callId: string
+      parts: { stream: ToolOutputStream; delta: string }[]
+    }
+  | { kind: 'other'; delta: ConversationDelta }
+
+function coalesceDeltas(deltas: ConversationDelta[]): CoalescedDelta[] {
+  const textPatches = new Map<string, string>()
+  const thinkingPatches = new Map<string, string>()
+  const argPatches = new Map<
+    string,
+    { arguments: string; argumentsJson?: Record<string, unknown> }
+  >()
+  const toolOutputs = new Map<
+    string,
+    { stream: ToolOutputStream; delta: string }[]
+  >()
+  const others: CoalescedDelta[] = []
+
+  for (const delta of deltas) {
+    switch (delta.kind) {
+      case 'patchBlock': {
+        const existing = textPatches.get(delta.blockId)
+        textPatches.set(
+          delta.blockId,
+          existing ? existing + delta.textDelta : delta.textDelta
+        )
+        break
+      }
+      case 'thinkingDelta': {
+        const existing = thinkingPatches.get(delta.blockId)
+        thinkingPatches.set(
+          delta.blockId,
+          existing ? existing + delta.delta : delta.delta
+        )
+        break
+      }
+      case 'patchArguments': {
+        argPatches.set(delta.blockId, {
+          arguments: delta.arguments,
+          argumentsJson: delta.argumentsJson,
+        })
+        break
+      }
+      case 'toolOutput': {
+        const existing = toolOutputs.get(delta.callId)
+        if (existing) {
+          existing.push({ stream: delta.stream, delta: delta.delta })
+        } else {
+          toolOutputs.set(delta.callId, [
+            { stream: delta.stream, delta: delta.delta },
+          ])
+        }
+        break
+      }
+      default:
+        others.push({ kind: 'other', delta })
+    }
   }
 
-  const block = blocks[idx]
-  if (block.kind !== 'assistant' && block.kind !== 'toolCall') {
-    return blocks
-  }
+  const result: CoalescedDelta[] = []
 
-  const next = [...blocks]
-  next[idx] = { ...block, text: (block.text ?? '') + textDelta }
-  return next
+  for (const [blockId, textDelta] of textPatches) {
+    result.push({ kind: 'patchBlock', blockId, textDelta })
+  }
+  for (const [blockId, delta] of thinkingPatches) {
+    result.push({ kind: 'thinkingDelta', blockId, delta })
+  }
+  for (const [blockId, args] of argPatches) {
+    result.push({ kind: 'patchArguments', blockId, ...args })
+  }
+  for (const [callId, parts] of toolOutputs) {
+    result.push({ kind: 'toolOutput', callId, parts })
+  }
+  result.push(...others)
+
+  return result
 }
 
-function patchAssistantThinking(
+/** Apply all coalesced deltas to blocks in a single array pass. */
+function applyCoalescedDeltas(
   blocks: ConversationBlock[],
-  blockId: string,
-  delta: string
-): ConversationBlock[] {
-  if (!blockId || !delta) return blocks
+  coalesced: CoalescedDelta[],
+  queuedMessages: string[]
+): { blocks: ConversationBlock[]; queuedMessages: string[] } {
+  if (coalesced.length === 0) return { blocks, queuedMessages }
 
-  const idx = blocks.findIndex((block) => block.id === blockId)
-  if (idx === -1) {
-    return [
-      ...blocks,
-      {
-        kind: 'assistant',
-        id: blockId,
-        text: '',
-        reasoningContent: delta,
-        status: 'streaming',
-      },
-    ]
+  // Collect all index mutations, then apply once
+  const mutations = new Map<number, ConversationBlock>()
+  let needsNewBlocks = false
+
+  const findOrCreateIdx = (
+    blockId: string,
+    kind: 'assistant' | 'toolCall'
+  ): number => {
+    const idx = blocks.findIndex((b) => b.id === blockId)
+    if (idx !== -1) return idx
+    // Block not found — append a new one
+    const newBlock: ConversationBlock =
+      kind === 'assistant'
+        ? { kind: 'assistant', id: blockId, text: '', status: 'streaming' }
+        : {
+            kind: 'toolCall',
+            id: blockId,
+            name: '',
+            arguments: '',
+            text: '',
+            status: 'streaming',
+          }
+    mutations.set(blocks.length, newBlock)
+    needsNewBlocks = true
+    return blocks.length
   }
 
-  const block = blocks[idx]
-  if (block.kind !== 'assistant') return blocks
-
-  const next = [...blocks]
-  next[idx] = {
-    ...block,
-    reasoningContent: (block.reasoningContent ?? '') + delta,
+  for (const c of coalesced) {
+    switch (c.kind) {
+      case 'patchBlock': {
+        const idx = findOrCreateIdx(c.blockId, 'assistant')
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'assistant' && block.kind !== 'toolCall') break
+        mutations.set(idx, { ...block, text: (block.text ?? '') + c.textDelta })
+        needsNewBlocks = true
+        break
+      }
+      case 'thinkingDelta': {
+        const idx = findOrCreateIdx(c.blockId, 'assistant')
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'assistant') break
+        mutations.set(idx, {
+          ...block,
+          reasoningContent: (block.reasoningContent ?? '') + c.delta,
+        })
+        needsNewBlocks = true
+        break
+      }
+      case 'patchArguments': {
+        const idx = blocks.findIndex(
+          (b) => b.kind === 'toolCall' && b.id === c.blockId
+        )
+        if (idx === -1) break
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'toolCall') break
+        if (!c.arguments.trim()) break
+        mutations.set(idx, {
+          ...block,
+          arguments: c.arguments,
+          ...(c.argumentsJson ? { argumentsJson: c.argumentsJson } : {}),
+        })
+        needsNewBlocks = true
+        break
+      }
+      case 'toolOutput': {
+        const idx = blocks.findIndex(
+          (b) => b.kind === 'toolCall' && b.id === c.callId
+        )
+        if (idx === -1) break
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'toolCall') break
+        const output = c.parts
+          .map((p) => (p.stream === 'stderr' ? '\n[stderr] ' : '\n') + p.delta)
+          .join('')
+        mutations.set(idx, { ...block, text: block.text + output })
+        needsNewBlocks = true
+        break
+      }
+      case 'other': {
+        // Non-coalescable deltas need the full applyDelta logic
+        // They will be handled after the blocks mutation pass
+        break
+      }
+    }
   }
-  return next
+
+  // Build the new blocks array if any mutations occurred
+  let newBlocks = blocks
+  if (needsNewBlocks) {
+    if (mutations.has(blocks.length)) {
+      // New block was appended
+      newBlocks = [...blocks]
+      for (const [idx, block] of mutations) {
+        if (idx < blocks.length) {
+          newBlocks[idx] = block
+        } else {
+          newBlocks.push(block)
+        }
+      }
+    } else {
+      newBlocks = [...blocks]
+      for (const [idx, block] of mutations) {
+        newBlocks[idx] = block
+      }
+    }
+  }
+
+  return { blocks: newBlocks, queuedMessages }
 }
 
 export const useAppStore = create<ConversationState>((set, get) => ({
@@ -447,15 +595,33 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         }
         break
 
-      case 'patchBlock':
-        set((current) => ({
-          blocks: patchAssistantBlock(
-            current.blocks,
-            delta.blockId,
-            delta.textDelta
-          ),
-        }))
+      case 'patchBlock': {
+        const blockId = delta.blockId
+        const textDelta = delta.textDelta
+        if (!blockId || !textDelta) break
+        set((current) => {
+          const idx = current.blocks.findIndex((b) => b.id === blockId)
+          if (idx === -1) {
+            return {
+              blocks: [
+                ...current.blocks,
+                {
+                  kind: 'assistant',
+                  id: blockId,
+                  text: textDelta,
+                  status: 'streaming',
+                },
+              ],
+            }
+          }
+          const block = current.blocks[idx]
+          if (block.kind !== 'assistant' && block.kind !== 'toolCall') return {}
+          const next = [...current.blocks]
+          next[idx] = { ...block, text: (block.text ?? '') + textDelta }
+          return { blocks: next }
+        })
         break
+      }
 
       case 'finalizeBlock':
         set((current) => ({
@@ -472,15 +638,37 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         })
         break
 
-      case 'thinkingDelta':
-        set((current) => ({
-          blocks: patchAssistantThinking(
-            current.blocks,
-            delta.blockId,
-            delta.delta
-          ),
-        }))
+      case 'thinkingDelta': {
+        const blockId = delta.blockId
+        const thinkDelta = delta.delta
+        if (!blockId || !thinkDelta) break
+        set((current) => {
+          const idx = current.blocks.findIndex((b) => b.id === blockId)
+          if (idx === -1) {
+            return {
+              blocks: [
+                ...current.blocks,
+                {
+                  kind: 'assistant',
+                  id: blockId,
+                  text: '',
+                  reasoningContent: thinkDelta,
+                  status: 'streaming',
+                },
+              ],
+            }
+          }
+          const block = current.blocks[idx]
+          if (block.kind !== 'assistant') return {}
+          const next = [...current.blocks]
+          next[idx] = {
+            ...block,
+            reasoningContent: (block.reasoningContent ?? '') + thinkDelta,
+          }
+          return { blocks: next }
+        })
         break
+      }
 
       case 'patchArguments': {
         set((current) => {
@@ -626,16 +814,52 @@ function connectSse(
       timeoutId = null
     }
 
-    // Always commit cursor regardless of pending deltas.
-    if (latestCursor !== null) {
-      set({ cursor: latestCursor })
-      latestCursor = null
+    if (pendingDeltas.length === 0) {
+      // Still commit cursor even if no deltas
+      if (latestCursor !== null) {
+        set({ cursor: latestCursor })
+        latestCursor = null
+      }
+      return
     }
 
-    if (pendingDeltas.length === 0) return
-
     const deltas = pendingDeltas.splice(0)
-    for (const delta of deltas) {
+    const cursorUpdate = latestCursor !== null ? { cursor: latestCursor } : null
+    latestCursor = null
+
+    const coalesced = coalesceDeltas(deltas)
+
+    // Separate coalescable (text) deltas from "other" deltas
+    const textDeltas: CoalescedDelta[] = []
+    const otherDeltas: ConversationDelta[] = []
+    for (const c of coalesced) {
+      if (c.kind === 'other') {
+        otherDeltas.push(c.delta)
+      } else {
+        textDeltas.push(c)
+      }
+    }
+
+    // Apply text deltas in a single set() pass
+    if (textDeltas.length > 0) {
+      set((current) => {
+        const { blocks: newBlocks, queuedMessages } = applyCoalescedDeltas(
+          current.blocks,
+          textDeltas,
+          current.queuedMessages
+        )
+        return {
+          blocks: newBlocks,
+          queuedMessages,
+          ...(cursorUpdate ?? {}),
+        }
+      })
+    } else if (cursorUpdate) {
+      set(cursorUpdate)
+    }
+
+    // Apply non-coalescable deltas (appendBlock, finalizeBlock, etc.) individually
+    for (const delta of otherDeltas) {
       get().applyDelta(delta)
     }
   }

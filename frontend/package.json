@@ -20,6 +20,7 @@
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:contract"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.13.25",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-http": "^2.5.9",

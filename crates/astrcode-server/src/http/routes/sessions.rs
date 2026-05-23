@@ -9,10 +9,11 @@ use astrcode_protocol::{
     commands::ClientCommand,
     http::{
         CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
-        ConversationControlStateDto, ConversationCursorDto, ConversationSnapshotResponseDto,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto,
-        HttpAgentSessionLinkDto, PromptRequest, PromptSubmitResponse, SessionListItemDto,
-        SessionListResponseDto, SlashCommandListResponseDto,
+        ConversationBlockStatusDto, ConversationControlStateDto, ConversationCursorDto,
+        ConversationSnapshotResponseDto, CreateSessionRequest, CreateSessionResponseDto,
+        DeleteProjectResponseDto, HttpAgentSessionLinkDto, PromptRequest,
+        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
+        SlashCommandListResponseDto,
     },
 };
 use axum::{
@@ -25,6 +26,7 @@ use serde::Deserialize;
 
 use super::super::{HttpState, error_response, projection::blocks::messages_to_blocks};
 use crate::handler::{HandlerError, ManualCompactOutcome, PromptSubmission};
+use crate::server_event_bus::StreamingSnapshot;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +77,13 @@ pub(in crate::http) async fn conversation_snapshot(
         }
     }
     match state.runtime.session_manager.read_model(&session_id).await {
-        Ok(snapshot) => Json(conversation_to_dto(snapshot)).into_response(),
+        Ok(snapshot) => {
+            let streaming = state
+                .runtime
+                .session_manager
+                .streaming_snapshot(&session_id);
+            Json(conversation_to_dto(snapshot, streaming.as_ref())).into_response()
+        },
         Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
     }
 }
@@ -300,7 +308,10 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     }
 }
 
-fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotResponseDto {
+fn conversation_to_dto(
+    session: SessionReadModel,
+    streaming: Option<&StreamingSnapshot>,
+) -> ConversationSnapshotResponseDto {
     let can_submit_prompt = matches!(session.phase, Phase::Idle | Phase::Error);
     let title = session
         .first_user_message()
@@ -323,6 +334,18 @@ fn conversation_to_dto(session: SessionReadModel) -> ConversationSnapshotRespons
         &session.messages,
         &session.background_tool_calls,
     ));
+
+    // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
+    // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
+    // 需要从 runtime 的 live 投影补充，让重连客户端看到已流出的文本。
+    if let Some(msg) = streaming {
+        blocks.push(ConversationBlockDto::Assistant {
+            id: msg.message_id.clone(),
+            text: msg.text.clone(),
+            reasoning_content: msg.reasoning_content.clone(),
+            status: ConversationBlockStatusDto::Streaming,
+        });
+    }
 
     ConversationSnapshotResponseDto {
         session_id: session.session_id.to_string(),
@@ -386,7 +409,7 @@ mod tests {
         session.latest_seq = Some(9);
         session.messages.push(LlmMessage::user("hello"));
 
-        let dto = conversation_to_dto(session);
+        let dto = conversation_to_dto(session, None);
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);
@@ -410,7 +433,7 @@ mod tests {
             .messages
             .push(LlmMessage::tool("read", "tool-1", "file contents", false));
 
-        let dto = conversation_to_dto(session);
+        let dto = conversation_to_dto(session, None);
 
         assert_eq!(dto.blocks.len(), 1);
         match &dto.blocks[0] {
@@ -460,7 +483,7 @@ mod tests {
             },
         });
 
-        let dto = conversation_to_dto(session);
+        let dto = conversation_to_dto(session, None);
 
         // 顺序：CompactSummary → User → Assistant
         assert_eq!(dto.blocks.len(), 3);
@@ -505,7 +528,7 @@ mod tests {
             strategy: CompactStrategy::Auto,
         });
 
-        let dto = conversation_to_dto(session);
+        let dto = conversation_to_dto(session, None);
 
         // 顺序：CompactSummary(seq5) → CompactSummary(seq12) → User
         assert_eq!(dto.blocks.len(), 3);
@@ -552,7 +575,7 @@ mod tests {
             },
         );
 
-        let dto = conversation_to_dto(session);
+        let dto = conversation_to_dto(session, None);
 
         match &dto.blocks[0] {
             ConversationBlockDto::ToolCall {
