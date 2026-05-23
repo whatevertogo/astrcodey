@@ -78,30 +78,29 @@ pub struct SystemPromptSnapshotInput<'a> {
     pub prompt_files: PromptFiles,
 }
 
-/// 构建 system prompt 文本与指纹。
-///
-/// 调用方决定是否要把结果写成 `SystemPromptConfigured` 事件。
-pub async fn build_system_prompt_snapshot(
-    input: SystemPromptSnapshotInput<'_>,
-) -> Result<(String, String), ExtensionError> {
-    let SystemPromptSnapshotInput {
-        extension_runner,
-        session_id,
-        working_dir,
-        model_id,
-        tools,
-        extra_system_prompt,
-        tool_prompt_metadata,
-        prompt_files,
-    } = input;
+/// 扩展动态贡献的收集结果（extension blocks + merged tool metadata）。
+pub struct ExtensionPromptData {
+    pub extension_blocks: Vec<ExtensionPromptBlock>,
+    pub merged_tool_metadata: HashMap<String, ToolPromptMetadata>,
+}
 
+/// 收集扩展的 prompt 贡献（extension blocks + tool prompt metadata）。
+///
+/// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
+pub async fn collect_extension_prompt_data(
+    extension_runner: &ExtensionRunner,
+    session_id: &str,
+    working_dir: &str,
+    model_id: &str,
+    tools: &[ToolDefinition],
+    base_tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
+) -> Result<ExtensionPromptData, ExtensionError> {
     let prompt_ctx = PromptBuildContext {
         session_id: session_id.to_string(),
         working_dir: working_dir.to_string(),
         model: ModelSelection::simple(model_id),
         tools: tools.to_vec(),
     };
-
     let contributions = extension_runner
         .collect_prompt_contributions_typed(prompt_ctx)
         .await?;
@@ -131,30 +130,63 @@ pub async fn build_system_prompt_snapshot(
             content,
         });
     }
+
+    let mut merged_metadata = base_tool_prompt_metadata;
+    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata_typed().await);
+
+    Ok(ExtensionPromptData {
+        extension_blocks,
+        merged_tool_metadata: merged_metadata,
+    })
+}
+
+/// 构建 system prompt 文本与指纹。
+///
+/// 调用方决定是否要把结果写成 `SystemPromptConfigured` 事件。
+pub async fn build_system_prompt_snapshot(
+    input: SystemPromptSnapshotInput<'_>,
+) -> Result<(String, String), ExtensionError> {
+    let SystemPromptSnapshotInput {
+        extension_runner,
+        session_id,
+        working_dir,
+        model_id,
+        tools,
+        extra_system_prompt,
+        tool_prompt_metadata,
+        prompt_files,
+    } = input;
+
+    let ext_data = collect_extension_prompt_data(
+        extension_runner,
+        session_id,
+        working_dir,
+        model_id,
+        tools,
+        tool_prompt_metadata,
+    )
+    .await?;
+
     let extra_instructions = extra_system_prompt.and_then(|s| {
         let trimmed = s.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     });
 
-    let mut merged_metadata = tool_prompt_metadata;
-    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata_typed().await);
-
-    let input = SystemPromptInput {
+    let prompt_input = SystemPromptInput {
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
-        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         identity: prompt_files.identity,
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,
         tools: tools.to_vec(),
-        tool_prompt_metadata: merged_metadata,
-        extension_blocks,
+        tool_prompt_metadata: ext_data.merged_tool_metadata,
+        extension_blocks: ext_data.extension_blocks,
         extra_instructions,
     };
 
     let system_prompt = PromptEngine::new()
-        .assemble(input)
+        .assemble(prompt_input)
         .await
         .system_prompt
         .unwrap_or_default();

@@ -13,6 +13,7 @@ use crate::{
 };
 
 /// 单个 session 在当前进程内持有的瞬态状态。
+/// TODO: 这里全是石山以后解决
 ///
 /// 这里的状态随 session 生命周期存在，但不属于可持久化事实。
 ///
@@ -36,6 +37,9 @@ pub struct SessionRuntimeState {
     /// 都看到一致的裁剪后工具集（含 resume 路径）。
     tool_policy: Mutex<Option<ChildToolPolicy>>,
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
+    /// 缓存的稳定前缀文本及其指纹（Identity → ProjectRules）。
+    /// 首次构建后跨 turn 复用，compact 后清空触发全量重建。
+    cached_stable_prefix: Mutex<Option<(String, String)>>,
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_out: Arc<EventFanout<Event>>,
@@ -64,6 +68,7 @@ impl SessionRuntimeState {
                 3,
                 Duration::from_secs(60),
             )),
+            cached_stable_prefix: Mutex::new(None),
             event_out,
             llm: Mutex::new(llm),
             small_llm: Mutex::new(small_llm),
@@ -135,6 +140,19 @@ impl SessionRuntimeState {
         self.compact_circuit_breaker
             .lock()
             .reconfigure(threshold, cooldown);
+    }
+
+    pub fn cached_stable_prefix(&self) -> Option<(String, String)> {
+        self.cached_stable_prefix.lock().clone()
+    }
+
+    pub fn set_cached_stable_prefix(&self, text: String, fingerprint: String) {
+        *self.cached_stable_prefix.lock() = Some((text, fingerprint));
+    }
+
+    /// 清空缓存的稳定前缀，强制下一 turn 全量重建（compact 后调用）。
+    pub fn invalidate_stable_prefix_cache(&self) {
+        *self.cached_stable_prefix.lock() = None;
     }
 
     /// 订阅本 session 的事件流。

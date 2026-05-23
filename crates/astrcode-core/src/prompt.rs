@@ -5,8 +5,8 @@
 
 /// 系统提示词 section 的 KV 缓存分组。
 ///
-/// 静态前缀跨 session 复用（Identity → Communication），半静态随项目变化，
-/// 动态部分每次可能不同（工具摘要、扩展块等）。
+/// 稳定前缀（Identity → ProjectRules）跨 turn 复用，动态后缀
+/// （ToolSummary、Extension blocks、ExtraInstructions）每 turn 刷新。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptSectionGroup {
     /// Identity、System、TaskGuidelines、Communication — 跨 session 稳定。
@@ -52,7 +52,6 @@ pub struct SystemPromptInput {
     pub working_dir: String,
     pub os: String,
     pub shell: String,
-    pub date: String,
     pub identity: Option<String>,
     pub user_rules: Option<String>,
     /// 已加载的 project rules（AGENTS.md 内容）。

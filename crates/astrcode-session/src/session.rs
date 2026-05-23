@@ -11,13 +11,14 @@ use astrcode_core::{
     config::ModelSelection,
     event::{Event, EventPayload},
     extension::{ChildToolPolicy, ExtensionEvent, LifecycleContext},
+    prompt::SystemPromptInput,
     storage::{
         CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
         ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::*,
 };
-use astrcode_support::perf_snapshot;
+use astrcode_support::{hash::hex_fingerprint, perf_snapshot, shell::resolve_shell};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -382,20 +383,63 @@ impl Session {
             .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
             .collect();
 
-        let (text, fingerprint) = crate::session_setup::build_system_prompt_snapshot(
-            crate::session_setup::SystemPromptSnapshotInput {
-                extension_runner: caps.extension_runner(),
-                session_id: self.id.as_str(),
+        let (text, fingerprint) = {
+            let ext_data = crate::session_setup::collect_extension_prompt_data(
+                caps.extension_runner(),
+                self.id.as_str(),
                 working_dir,
-                model_id: &model_id,
-                tools: &tools,
-                extra_system_prompt: resolved_extra.as_deref(),
+                &model_id,
+                &tools,
                 tool_prompt_metadata,
-                prompt_files,
-            },
-        )
-        .await
-        .map_err(|e| SessionError::Other(format!("build system prompt: {e}")))?;
+            )
+            .await
+            .map_err(|e| SessionError::Other(format!("collect extension data: {e}")))?;
+
+            let prompt_input = SystemPromptInput {
+                working_dir: working_dir.to_string(),
+                os: std::env::consts::OS.into(),
+                shell: resolve_shell().name,
+                identity: prompt_files.identity,
+                user_rules: prompt_files.user_rules,
+                project_rules: prompt_files.project_rules,
+                tools,
+                tool_prompt_metadata: ext_data.merged_tool_metadata,
+                extension_blocks: ext_data.extension_blocks,
+                extra_instructions: resolved_extra.clone(),
+            };
+
+            // 检查是否命中稳定前缀缓存
+            let stable_fp =
+                astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
+            let cached = runtime.cached_stable_prefix();
+
+            match cached {
+                Some((cached_text, cached_fp)) if cached_fp == stable_fp => {
+                    // 缓存命中：只重建动态后缀
+                    let dynamic =
+                        astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
+                    let combined = if dynamic.is_empty() {
+                        cached_text
+                    } else {
+                        format!("{}\n\n{}", cached_text.trim(), dynamic.trim())
+                    };
+                    let fp = hex_fingerprint(combined.as_bytes());
+                    (combined, fp)
+                },
+                _ => {
+                    // 缓存未命中：全量重建并缓存稳定前缀
+                    let prompt = astrcode_context::prompt_engine::build_system_prompt(
+                        &prompt_input,
+                    );
+                    let fp = hex_fingerprint(prompt.as_bytes());
+                    let stable = astrcode_context::prompt_engine::build_stable_prefix(
+                        &prompt_input,
+                    );
+                    runtime.set_cached_stable_prefix(stable, stable_fp);
+                    (prompt, fp)
+                },
+            }
+        };
 
         if stored_fingerprint == Some(fingerprint.as_str()) {
             runtime.set_extra_system_prompt(resolved_extra);
@@ -699,6 +743,8 @@ impl Session {
             ))
             .await?,
         );
+        // compact 后 system prompt 全量重建，清空稳定前缀缓存确保下一 turn 使用新值。
+        self.runtime.invalidate_stable_prefix_cache();
         if let Some(cursor) = self.latest_cursor().await? {
             self.checkpoint(&cursor).await?;
         }

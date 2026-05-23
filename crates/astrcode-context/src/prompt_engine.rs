@@ -157,8 +157,6 @@ fn compute_fingerprint(input: &SystemPromptInput) -> String {
     key.push('\0');
     key.push_str(&input.shell);
     key.push('\0');
-    key.push_str(&input.date);
-    key.push('\0');
     if let Some(ref id) = input.identity {
         key.push_str(id);
     }
@@ -263,6 +261,82 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
         .join("\n\n")
 }
 
+/// 构建稳定前缀：Identity → ProjectRules（不含 date）。
+///
+/// 这些 section 在 session 生命周期内不变，跨 turn 复用 KV 缓存。
+pub fn build_stable_prefix(input: &SystemPromptInput) -> String {
+    let mut sections = stable_contributors()
+        .into_iter()
+        .flat_map(|contributor| contributor.contribute(input))
+        .filter(|section| !section.body.trim().is_empty())
+        .collect::<Vec<_>>();
+    sections.sort_by_key(|section| section.order);
+    sections
+        .into_iter()
+        .map(render_prompt_section)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 构建动态后缀：ToolSummary → ExtraInstructions。
+///
+/// 这些 section 每 turn 刷新（tools、extension 贡献可能变化）。
+pub fn build_dynamic_suffix(input: &SystemPromptInput) -> String {
+    let mut sections = dynamic_contributors()
+        .into_iter()
+        .flat_map(|contributor| contributor.contribute(input))
+        .filter(|section| !section.body.trim().is_empty())
+        .collect::<Vec<_>>();
+    sections.sort_by_key(|section| section.order);
+    sections
+        .into_iter()
+        .map(render_prompt_section)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 计算稳定前缀的指纹（仅含不变字段，不含 date/tools/extensions）。
+pub fn compute_stable_fingerprint(input: &SystemPromptInput) -> String {
+    let mut key = String::new();
+    key.push_str(&input.working_dir);
+    key.push('\0');
+    key.push_str(&input.os);
+    key.push('\0');
+    key.push_str(&input.shell);
+    key.push('\0');
+    if let Some(ref id) = input.identity {
+        key.push_str(id);
+    }
+    key.push('\0');
+    if let Some(ref rules) = input.user_rules {
+        key.push_str(rules);
+    }
+    key.push('\0');
+    if let Some(ref rules) = input.project_rules {
+        key.push_str(rules);
+    }
+    astrcode_support::hash::hex_fingerprint(key.as_bytes())
+}
+
+fn stable_contributors() -> [PromptContributor; 6] {
+    [
+        PromptContributor::Identity,
+        PromptContributor::System,
+        PromptContributor::TaskGuidelines,
+        PromptContributor::Communication,
+        PromptContributor::Environment,
+        PromptContributor::Rules,
+    ]
+}
+
+fn dynamic_contributors() -> [PromptContributor; 3] {
+    [
+        PromptContributor::ToolSummary,
+        PromptContributor::ExtensionPrompt,
+        PromptContributor::ExtraInstructions,
+    ]
+}
+
 fn default_contributors() -> [PromptContributor; 9] {
     [
         PromptContributor::Identity,
@@ -353,8 +427,8 @@ fn environment_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
         PromptSectionOrder::Environment,
         "Environment",
         format!(
-            "Working directory: {}\nOS: {}\nShell: {}\nDate: {}",
-            input.working_dir, input.os, input.shell, input.date
+            "Working directory: {}\nOS: {}\nShell: {}",
+            input.working_dir, input.os, input.shell
         ),
     )]
 }
@@ -790,9 +864,9 @@ const SECTION_GROUP_MAP: &[(&str, PromptSectionGroup)] = &[
     ("System", PromptSectionGroup::Static),
     ("Task Guidelines", PromptSectionGroup::Static),
     ("Communication", PromptSectionGroup::Static),
-    ("Environment", PromptSectionGroup::SemiStatic),
-    ("User Rules", PromptSectionGroup::SemiStatic),
-    ("Project Rules", PromptSectionGroup::SemiStatic),
+    ("Environment", PromptSectionGroup::Static),
+    ("User Rules", PromptSectionGroup::Static),
+    ("Project Rules", PromptSectionGroup::Static),
     ("Tool Summary", PromptSectionGroup::Dynamic),
     ("Additional Instructions", PromptSectionGroup::Dynamic),
 ];
@@ -949,7 +1023,6 @@ mod tests {
             working_dir: env!("CARGO_MANIFEST_DIR").to_string(),
             os: "windows".into(),
             shell: "powershell".into(),
-            date: "2026-04-28".into(),
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1000,7 +1073,6 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
-            date: "2026-04-29".into(),
             identity: Some("custom identity".into()),
             user_rules: Some("test rules".into()),
             project_rules: Some("project rules content".into()),
@@ -1096,7 +1168,6 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
-            date: "2026-04-29".into(),
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1127,7 +1198,6 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
-            date: "2026-04-29".into(),
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1163,7 +1233,6 @@ mod tests {
             working_dir: "/one".into(),
             os: "linux".into(),
             shell: "bash".into(),
-            date: "2026-04-29".into(),
             identity: Some("stable identity".into()),
             user_rules: Some("stable user rules".into()),
             project_rules: Some("stable project rules".into()),
