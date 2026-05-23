@@ -494,7 +494,7 @@ mod tests {
                 } else {
                     "echo before; sleep 10; echo after".into()
                 }
-            }
+            },
         }
     }
 
