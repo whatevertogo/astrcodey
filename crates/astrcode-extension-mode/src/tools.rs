@@ -29,14 +29,14 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
         description: ("Switch the agent running mode. Available modes:\n- \"code\" (default): \
                        full execution with all tools.\n- \"plan\": read-only planning mode — \
                        explore the codebase and produce a structured plan before \
-                       implementation.\n\nEnter plan mode proactively when the task matches ANY \
-                       of these:\n• Implementing a new feature\n• Multiple valid approaches \
+                       implementation.\n\nEnter plan mode when the task matches ANY of \
+                       these:\n• Implementing a new feature\n• Multiple valid approaches \
                        exist and you need to pick one\n• The user wants you to plan\n• Planning \
-                       will be helpful for the task\n You Want have a plan\n\nDo NOT enter plan \
-                       mode for:\n• Single-file fixes or small tweaks\n• Clear, well-scoped \
-                       tasks with obvious solutions\n• User explicitly said to just do it\n\nIn \
-                       plan mode: explore the codebase(use agents) → write a plan with \
-                       `upsertSessionPlan` → switch back to code mode to implement.")
+                       will be helpful for the task\n• Before a multi-step change, pause and \
+                       ask: am I guessing about scope, dependencies, or where the code lives? \
+                       If yes, plan first.\n\nIn plan mode: explore the codebase (use agents) \
+                       → write a plan with `upsertSessionPlan` → switch back to code mode to \
+                       implement.")
             .into(),
         parameters: json!({
             "type": "object",
