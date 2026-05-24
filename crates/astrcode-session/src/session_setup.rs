@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use astrcode_context::prompt_engine::{build_system_prompt, PromptFiles};
+use astrcode_context::prompt_engine::{PromptFiles, build_system_prompt};
 use astrcode_core::{
     config::ModelSelection,
     extension::{ChildToolPolicy, ExtensionError, PromptBuildContext},

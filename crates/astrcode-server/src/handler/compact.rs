@@ -68,10 +68,7 @@ impl CommandHandler {
             .await
             .map_err(HandlerError::SessionManager)?;
 
-        let state = session
-            .read_model()
-            .await
-            .map_err(HandlerError::Session)?;
+        let state = session.read_model().await.map_err(HandlerError::Session)?;
         // Session runtime 已持有当前 session 的工具表快照；空时按需刷新。
         let tool_registry = {
             let current = session.runtime().tool_registry();
@@ -210,10 +207,7 @@ impl CommandHandler {
             )
             .await;
 
-        let state = session
-            .read_model()
-            .await
-            .map_err(HandlerError::Session)?;
+        let state = session.read_model().await.map_err(HandlerError::Session)?;
         self.event_bus
             .send_notification(ClientNotification::SessionResumed {
                 session_id: sid.clone().into_string(),

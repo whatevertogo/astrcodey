@@ -81,9 +81,11 @@ pub fn spawn_server_system(
 
     // 注册 TurnScheduler 到 session 资源清理链
     // 确保 session delete/recycle 时清理待处理消息队列
-    runtime.session_manager.add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
-        scheduler: Arc::clone(&scheduler),
-    }));
+    runtime
+        .session_manager
+        .add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
+            scheduler: Arc::clone(&scheduler),
+        }));
 
     let handler = CommandHandle::spawn(
         Arc::clone(runtime),

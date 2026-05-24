@@ -84,7 +84,7 @@ impl ServerEventBus {
     /// ## 后台任务处理
     /// 当检测到 `BackgroundTaskCompleted` 事件时，会调用 TurnScheduler 的
     /// `notify_step` 方法，在当前 turn 的下一步继续处理。
-    /// 
+    ///
     /// 当检测到 `TurnCompleted` 事件时，会调用 `on_turn_completed` 检查并处理
     /// 队列中等待的 "下一 turn" 消息。
     pub fn attach(&self, session: &Session) {
@@ -107,8 +107,10 @@ impl ServerEventBus {
                 update_streaming(&state, &event.payload);
 
                 // 先判断是否需要异步处理（避免后续克隆 event）
-                let needs_task_step = matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. });
-                let needs_turn_completed = matches!(event.payload, EventPayload::TurnCompleted { .. });
+                let needs_task_step =
+                    matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. });
+                let needs_turn_completed =
+                    matches!(event.payload, EventPayload::TurnCompleted { .. });
 
                 // 发送 event（消耗所有权，避免克隆）
                 tx.send(ClientNotification::Event(event));

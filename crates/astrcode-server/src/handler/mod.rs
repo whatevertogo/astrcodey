@@ -352,15 +352,9 @@ impl CommandHandler {
             .await
             .map_err(|e| match e {
                 crate::turn_scheduler::TurnError::NoActiveTurn => HandlerError::NoActiveTurn,
-                crate::turn_scheduler::TurnError::Session(e) => {
-                    HandlerError::Session(e)
-                },
-                crate::turn_scheduler::TurnError::Turn(e) => {
-                    HandlerError::Turn(e)
-                },
-                crate::turn_scheduler::TurnError::EventEmit(e) => {
-                    HandlerError::Session(e)
-                },
+                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
+                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
+                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
                 other => HandlerError::InvalidRequest(other.to_string()),
             })?;
         Ok(())
@@ -397,7 +391,11 @@ impl CommandHandler {
         &self,
         sid: &SessionId,
     ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
-        let state = self.runtime.session_manager.read_model(sid).await
+        let state = self
+            .runtime
+            .session_manager
+            .read_model(sid)
+            .await
             .map_err(HandlerError::SessionManager)?;
         Ok(self.command_infos_for_working_dir(&state.working_dir).await)
     }
@@ -574,7 +572,11 @@ impl CommandHandler {
     /// 全局配置已更新，同步活跃 session 的 provider 和 model_id。
     async fn sync_active_session_provider(&self) -> Result<(), HandlerError> {
         if let Some(ref sid) = self.active_session_id {
-            let session = self.runtime.session_manager.open(sid.clone()).await
+            let session = self
+                .runtime
+                .session_manager
+                .open(sid.clone())
+                .await
                 .map_err(HandlerError::SessionManager)?;
             let caps = session.caps();
             session.runtime().set_llm(caps.llm());

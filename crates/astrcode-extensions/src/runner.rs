@@ -544,7 +544,10 @@ impl ExtensionRunner {
                     .on_config_changed(ExtensionConfig(new_config.clone()))
                     .await
                 {
-                    errors.push(format!("config changed handler failed for {}: {e}", record.id));
+                    errors.push(format!(
+                        "config changed handler failed for {}: {e}",
+                        record.id
+                    ));
                 }
             }
         }

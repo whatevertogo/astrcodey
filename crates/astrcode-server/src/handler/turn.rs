@@ -37,15 +37,9 @@ impl CommandHandler {
                 crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
                     HandlerError::SessionNotFound(msg)
                 },
-                crate::turn_scheduler::TurnError::Session(e) => {
-                    HandlerError::Session(e)
-                },
-                crate::turn_scheduler::TurnError::Turn(e) => {
-                    HandlerError::Turn(e)
-                },
-                crate::turn_scheduler::TurnError::EventEmit(e) => {
-                    HandlerError::Session(e)
-                },
+                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
+                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
+                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
                 crate::turn_scheduler::TurnError::SessionManager(e) => {
                     HandlerError::SessionManager(e)
                 },
@@ -111,15 +105,9 @@ impl CommandHandler {
                 crate::turn_scheduler::TurnError::SessionManager(err) => {
                     HandlerError::SessionManager(err)
                 },
-                crate::turn_scheduler::TurnError::Session(e) => {
-                    HandlerError::Session(e)
-                },
-                crate::turn_scheduler::TurnError::Turn(e) => {
-                    HandlerError::Turn(e)
-                },
-                crate::turn_scheduler::TurnError::EventEmit(e) => {
-                    HandlerError::Session(e)
-                },
+                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
+                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
+                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
                 other => HandlerError::InvalidRequest(other.to_string()),
             })
     }

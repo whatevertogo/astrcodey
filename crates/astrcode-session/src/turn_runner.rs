@@ -309,7 +309,8 @@ impl TurnRunner {
                     }
                     // 只在有实际内容（文本或思考）时才发送 AssistantMessageCompleted
                     // 避免 LLM 只有思考但立即调用工具时产生空消息块
-                    if message_started && (!visible_text.is_empty() || reasoning_content.is_some()) {
+                    if message_started && (!visible_text.is_empty() || reasoning_content.is_some())
+                    {
                         send_event(
                             event_tx.as_ref(),
                             EventPayload::AssistantMessageCompleted {

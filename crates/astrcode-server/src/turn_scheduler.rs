@@ -3,7 +3,10 @@
 //! 主会话和子会话共用同一条 submit/abort 路径。取代了之前分散在
 //! `CommandHandler.active_turns` 和 `SessionManager.ActiveExecutionIndex` 的两套编排。
 
-use std::{collections::{BTreeMap, HashMap, VecDeque}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::Arc,
+};
 
 use astrcode_core::{
     event::{EventPayload, Phase},
@@ -37,7 +40,10 @@ pub enum TurnError {
 }
 
 pub enum SubmitOutcome {
-    Started { turn_id: TurnId, handle: TurnHandle },
+    Started {
+        turn_id: TurnId,
+        handle: TurnHandle,
+    },
     Injected,
     /// 消息已入队，等待当前 turn 结束后处理
     Queued,
@@ -104,10 +110,13 @@ impl TurnScheduler {
         let combined_text = self.combine_with_pending(session_id.clone(), text);
 
         let turn_id = new_turn_id();
-        let handle = session.submit(combined_text, turn_id.clone()).await.map_err(|e| {
-            tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
-            TurnError::Turn(e)
-        })?;
+        let handle = session
+            .submit(combined_text, turn_id.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
+                TurnError::Turn(e)
+            })?;
 
         let session_arc = Arc::new(session);
         if !self.registry.register(
@@ -151,7 +160,10 @@ impl TurnScheduler {
         session_id: SessionId,
         source: &str,
     ) -> Result<SubmitOutcome, TurnError> {
-        let marker = format!(r#"<system type="background_completed" source="{}">"#, source);
+        let marker = format!(
+            r#"<system type="background_completed" source="{}">"#,
+            source
+        );
         self.submit_or_inject(session_id, marker).await
     }
 
@@ -177,20 +189,17 @@ impl TurnScheduler {
         // 当前有活跃 turn，消息入队
         let mut queues = self.pending_queues.lock();
         let queue = queues.entry(session_id.clone()).or_default();
-        queue.push_back(PendingMessage {
-            text,
-            marker: None,
-        });
-        
+        queue.push_back(PendingMessage { text, marker: None });
+
         let queue_len = queue.len();
         drop(queues); // 显式释放锁
-        
+
         tracing::info!(
             session_id = %session_id,
             queue_len = queue_len,
             "message queued for next turn"
         );
-        
+
         Ok(SubmitOutcome::Queued)
     }
 
@@ -212,7 +221,7 @@ impl TurnScheduler {
             .map(|m| m.text)
             .filter(|t| !t.is_empty())
             .collect();
-        
+
         // 添加当前消息
         if !current_text.is_empty() {
             parts.push(current_text);
@@ -239,7 +248,7 @@ impl TurnScheduler {
                 pending_count = queue_len,
                 "auto-submitting queued messages for next turn"
             );
-            
+
             // 启动新 turn 处理队列中的消息
             // submit 会自动合并队列中的消息
             if let Err(e) = self.submit(session_id.clone(), String::new()).await {
@@ -374,10 +383,7 @@ impl TurnScheduler {
             .await
             .map_err(|e| TurnError::SessionNotFound(format!("{session_id}: {e}")))?;
 
-        let state = session
-            .read_model()
-            .await
-            .map_err(TurnError::Session)?;
+        let state = session.read_model().await.map_err(TurnError::Session)?;
 
         // Phase repair
         match repair_stale_phase_for_state(session_id, &session, &state).await {
@@ -426,9 +432,7 @@ async fn repair_stale_phase_for_state(
                 },
             )
             .await
-            .map_err(|e| {
-                TurnError::EventEmit(e)
-            })?;
+            .map_err(TurnError::EventEmit)?;
     }
 
     session

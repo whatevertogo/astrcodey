@@ -59,7 +59,13 @@ pub async fn run(
         }
     }
 
-    let candidates = find_candidates(Arc::clone(&session_read), store, current_session_id, &config).await?;
+    let candidates = find_candidates(
+        Arc::clone(&session_read),
+        store,
+        current_session_id,
+        &config,
+    )
+    .await?;
     if candidates.is_empty() {
         return Ok(());
     }

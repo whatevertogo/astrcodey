@@ -34,8 +34,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::ClientCommand { command, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 创建新会话，返回会话 ID。
@@ -44,8 +43,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::CreateSession { working_dir, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 提交提示词，返回 Turn ID 和完成通知接收器。
@@ -62,8 +60,7 @@ impl CommandHandle {
                 reply,
             })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 向指定会话提交输入。
@@ -80,8 +77,7 @@ impl CommandHandle {
                 reply,
             })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 手动压缩指定会话。
@@ -98,8 +94,7 @@ impl CommandHandle {
                 reply,
             })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 中止指定会话的活跃 Turn。
@@ -108,8 +103,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::AbortSession { session_id, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 获取指定会话的可用命令列表。
@@ -121,8 +115,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::ListCommandsForSession { session_id, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 修复进程重启后残留的过期 turn phase。
@@ -134,8 +127,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::RepairStaleTurn { session_id, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// Fork 源会话，返回新 session ID。
@@ -152,8 +144,7 @@ impl CommandHandle {
                 reply,
             })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 删除指定工作目录下的所有会话，返回删除数量。
@@ -162,8 +153,7 @@ impl CommandHandle {
         self.tx
             .send(CommandMessage::DeleteProject { working_dir, reply })
             .map_err(|_| HandlerError::ActorUnavailable)?;
-        rx.await
-            .map_err(|_| HandlerError::ActorUnavailable)?
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 }
 

@@ -35,10 +35,7 @@ impl CommandHandler {
             .await
             .map_err(|e| HandlerError::SessionNotFound(e.to_string()))?;
 
-        let state = session
-            .read_model()
-            .await
-            .map_err(HandlerError::Session)?;
+        let state = session.read_model().await.map_err(HandlerError::Session)?;
 
         if state.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");

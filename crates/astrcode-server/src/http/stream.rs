@@ -373,15 +373,8 @@ async fn notification_to_sse_items(
             let Some(delta) = child_event_to_agent_update(state, &event) else {
                 return Vec::new();
             };
-            // 更新缓存的 cursor（如果有 seq）
-            if let Some(seq) = event.seq {
-                state.cached_cursor = Some(seq.to_string());
-            }
-            let cursor = if event.seq.is_some() {
-                get_or_fetch_cursor(state).await
-            } else {
-                state.cached_cursor.clone().unwrap_or_else(|| "0".to_string())
-            };
+            // 子事件的 seq 属于子会话，不能用来更新父会话的 cursor
+            let cursor = get_or_fetch_cursor(state).await;
             vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
                 session_id: state.session_id.to_string(),
                 cursor: ConversationCursorDto { value: cursor },

@@ -90,7 +90,9 @@ impl CommandHandler {
                 None
             } else {
                 Some(command.arguments.trim().parse::<usize>().map_err(|_| {
-                    HandlerError::InvalidRequest("compact expects an optional non-negative integer".into())
+                    HandlerError::InvalidRequest(
+                        "compact expects an optional non-negative integer".into(),
+                    )
                 })?)
             };
             return match self.compact_session(&sid, keep_recent_turns).await? {
@@ -112,7 +114,11 @@ impl CommandHandler {
         }
 
         // 扩展命令分发
-        let state = self.runtime.session_manager.read_model(&sid).await
+        let state = self
+            .runtime
+            .session_manager
+            .read_model(&sid)
+            .await
             .map_err(HandlerError::SessionManager)?;
         let cmd_ctx = astrcode_core::extension::CommandContext {
             session_id: sid.to_string(),

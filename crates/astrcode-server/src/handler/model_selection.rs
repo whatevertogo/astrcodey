@@ -172,10 +172,9 @@ impl ModelSelectionFlow {
             },
         }
 
-        candidate
-            .clone()
-            .into_effective()
-            .map_err(|error| HandlerError::InvalidRequest(format!("Invalid model selection: {error}")))?;
+        candidate.clone().into_effective().map_err(|error| {
+            HandlerError::InvalidRequest(format!("Invalid model selection: {error}"))
+        })?;
 
         // 先应用到内存，再持久化到磁盘。
         // 如果 save 失败，内存配置已经更新，下次进程启动会回退到磁盘旧值。
@@ -183,13 +182,17 @@ impl ModelSelectionFlow {
         // 前者只是新配置没落盘（用户下次重选即可），后者会导致内存和磁盘配置不一致。
         self.config_manager
             .apply_raw_config_and_rebuild(candidate.clone())
-            .map_err(|error| HandlerError::InvalidRequest(format!("Failed to apply config: {error}")))?;
+            .map_err(|error| {
+                HandlerError::InvalidRequest(format!("Failed to apply config: {error}"))
+            })?;
 
         self.config_manager
             .config_store()
             .save(&candidate)
             .await
-            .map_err(|error| HandlerError::InvalidRequest(format!("Failed to write config: {error}")))?;
+            .map_err(|error| {
+                HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
+            })?;
 
         Ok(())
     }
@@ -283,7 +286,9 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
 fn parse_select(response: UiResponseValue) -> Result<String, HandlerError> {
     match response {
         UiResponseValue::Select { selected } => Ok(selected),
-        _ => Err(HandlerError::InvalidRequest("Expected select response".into())),
+        _ => Err(HandlerError::InvalidRequest(
+            "Expected select response".into(),
+        )),
     }
 }
 

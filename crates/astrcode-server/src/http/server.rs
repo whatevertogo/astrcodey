@@ -1,9 +1,6 @@
 //! 服务器组装：路由注册、TCP 启动、`run.json` 写入。
 
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
@@ -41,7 +38,9 @@ impl From<getrandom::Error> for HttpServerError {
 }
 
 /// 尝试绑定端口，如果失败则尝试清理旧进程后重试。
-async fn bind_with_cleanup(addr: std::net::SocketAddr) -> Result<tokio::net::TcpListener, HttpServerError> {
+async fn bind_with_cleanup(
+    addr: std::net::SocketAddr,
+) -> Result<tokio::net::TcpListener, HttpServerError> {
     // 第一次尝试直接绑定
     match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => return Ok(listener),
@@ -73,12 +72,10 @@ async fn bind_with_cleanup(addr: std::net::SocketAddr) -> Result<tokio::net::Tcp
     }
 
     // 第二次尝试绑定
-    tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| {
-            tracing::error!("清理进程后仍无法绑定端口 {}: {}", addr, e);
-            HttpServerError::Io(e)
-        })
+    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        tracing::error!("清理进程后仍无法绑定端口 {}: {}", addr, e);
+        HttpServerError::Io(e)
+    })
 }
 
 /// Build an axum router for the HTTP/SSE API.
