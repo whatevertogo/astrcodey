@@ -292,14 +292,9 @@ async fn drain_pending_notifications(
     state: &mut LiveStreamState,
     items: &mut std::collections::VecDeque<SseItem>,
 ) {
-    loop {
-        match state.rx.try_recv() {
-            Ok(notification) => {
-                let more = notification_to_sse_items(state, notification).await;
-                items.extend(more);
-            },
-            Err(_) => break,
-        }
+    while let Ok(notification) = state.rx.try_recv() {
+        let more = notification_to_sse_items(state, notification).await;
+        items.extend(more);
     }
 }
 
