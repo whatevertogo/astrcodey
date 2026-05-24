@@ -45,6 +45,7 @@ astrcode/
 | `astrcode-extension-todo-tool` | 733 | 进度追踪 Todo 工具 |
 | `astrcode-extension-agent-tools` | 704 | 子 Agent 委派（Agent 工具）、Agent 发现（兼容 Claude Code 格式） |
 | `astrcode-extension-mcp` | 1.9k | MCP 协议客户端（stdio）、工具发现 |
+| `astrcode-extension-memory` | 1.8k | 项目作用域 Markdown 记忆存储，支持多项目隔离 |
 | `astrcode-bundled-extensions` | 39 | 可选扩展 crate 的组合根，通过 feature flag 控制启用 |
 
 ### Layer 3: Server (服务层)

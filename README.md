@@ -1,20 +1,29 @@
 # AstrCode
 
-**BE PI OR BETTER THAN PI**
-Inspired by Claude Code, Codex, OpenCode, and Pi — but built as a Rust-native
+**BE PI OR BETTER THAN PI**  
+*Inspired by Claude Code, Codex, OpenCode, and Pi — but built as a Rust-native*
 
-cli：
-<img width="1210" height="924" alt="image" src="https://github.com/user-attachments/assets/55259723-9bd7-4a1a-a74e-1e799ece2eed" />
-
-app：
-web：
-<img width="1252" height="960" alt="image" src="https://github.com/user-attachments/assets/af918c12-6fb7-4d72-b9ea-64133a2e2729" />
-
-
+| Interface | Preview |
+|-----------|---------|
+| **CLI (TUI)** | <img width="1210" height="924" alt="astrcode TUI screenshot" src="https://github.com/user-attachments/assets/55259723-9bd7-4a1a-a74e-1e799ece2eed" /> |
+| **Web / Desktop** | <img width="1252" height="960" alt="astrcode web frontend screenshot" src="https://github.com/user-attachments/assets/af918c12-6fb7-4d72-b9ea-64133a2e2729" /> |
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~55k lines of Rust across 21 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an extension/hook system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal UI, a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~55k lines of Rust across 21 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an extension/hook system (with native extension loading via FFI and WASM extension support), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal UI (TUI), a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Configuration (Recommended Before First Run)](#configuration-recommended-before-first-run)
+- [Quick Start](#quick-start)
+- [Architecture](#architecture)
+- [Crates](#crates)
+- [Key Design Decisions](#key-design-decisions)
+- [Running Modes](#running-modes)
+- [Distribution](#distribution)
+- [Acknowledgments](#acknowledgments)
+- [License](#license)
 
 ## Installation
 
@@ -34,7 +43,7 @@ See [Quick Start](#quick-start) below for building from source.
 
 ## Configuration (Recommended Before First Run)
 
-AstrCode requires LLM provider and API key configuration to function properly. It's recommended to complete the following configuration before the first run.
+AstrCode requires LLM provider and API key configuration to function properly. It is recommended to complete the following configuration before the first run.
 
 ### Configuration File Locations
 
@@ -88,7 +97,7 @@ Example `~/.astrcode/config.json`:
 }
 ```
 
-**API Key Note**: We recommend using `"apiKey": "env:VARIABLE_NAME"` to reference environment variables instead of writing keys directly in the configuration file.
+**API Key Note**: Use `"apiKey": "env:VARIABLE_NAME"` to reference environment variables instead of writing keys directly in the configuration file.
 
 Set the corresponding environment variables beforehand:
 
@@ -138,8 +147,6 @@ export ASTRCODE_ENABLE_PROJECT_MCP=1
 
 Extensions can be enabled or disabled via `~/.astrcode/config.json`. By default, all extensions are enabled except `memory`, which is disabled by default.
 
-Example extension configuration:
-
 ```json
 {
   "version": "1",
@@ -150,6 +157,17 @@ Example extension configuration:
 ```
 
 To enable the memory extension, add `"astrcode.memory": true` to `extensionStates`.
+
+### Built-in Extensions
+
+| Extension | Crate | Description |
+|---|---|---|
+| **Mode** | `astrcode-extension-mode` | Agent running mode switching (Code / Plan), with Exit Gate, plan artifact persistence, keybinding & status item registration |
+| **Skill** | `astrcode-extension-skill` | Slash-command skill discovery and dispatch |
+| **MCP** | `astrcode-extension-mcp` | MCP protocol client via stdio, tool discovery |
+| **Todo Tool** | `astrcode-extension-todo-tool` | Progress tracking todo list tool |
+| **Agent Tools** | `astrcode-extension-agent-tools` | Sub-agent delegation, agent discovery |
+| **Memory** | `astrcode-extension-memory` | Project-scoped markdown memory storage (disabled by default) |
 
 ## Quick Start
 
@@ -264,10 +282,11 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
    ┌─────────┴──┐  ┌────┴────────────┐
    │astrcode-   │  │ Extension crates │
    │ context    │  │ ├ mcp            │
-   │ Token budget│  │ ├ skill         │
-   │ Auto-compact│  │ ├ todo-tool     │
-   └────────────┘  │ ├ mode          │
-                   │ └ agent-tools   │
+   │ Token budget│  │ ├ skill          │
+   │ Auto-compact│  │ ├ todo-tool      │
+   └────────────┘  │ ├ mode           │
+                   │ ├ agent-tools    │
+                   │ └ memory         │
                    └─────────────────┘
         ┌─────────────────────────────┐
         │        Shared layer         │
@@ -288,7 +307,7 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 | `astrcode-storage` | 3.7k | JSONL event log, session snapshots, config persistence, file locking |
 | `astrcode-ai` | 3.6k | Multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), SSE streaming, retry |
 | `astrcode-context` | 3.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native extension loading (FFI), WASM extension runtime |
+| `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native FFI loading, WASM extension runtime |
 | `astrcode-extension-mcp` | 1.9k | MCP protocol client via stdio, tool discovery |
 | `astrcode-protocol` | 1.2k | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
 | `astrcode-extension-mode` | 1.2k | Agent running mode switching (Code / Plan), plan artifact, exit gate, keybinding & status item registration |
@@ -296,23 +315,24 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 | `astrcode-extension-skill` | 949 | Slash-command skill discovery and dispatch |
 | `astrcode-extension-todo-tool` | 733 | Progress tracking todo list tool |
 | `astrcode-extension-agent-tools` | 704 | Sub-agent delegation, agent discovery (Claude Code compatible format) |
+| `astrcode-extension-memory` | ~1.8k  | Project-scoped markdown memory storage |
 | `astrcode-support` | 682 | Path resolution, shell detection, text processing |
 | `astrcode-client` | 521 | Typed JSON-RPC client, transport, stream subscription |
 | `astrcode-log` | 353 | File rotation, stderr output, env-filter logging |
 | `astrcode-bundled-extensions` | 39 | Composition root for optional extension crates |
 
-**Total: ~55k lines across 20 Rust crates + Tauri shell, 203 source files.**
+**Total: ~57k lines across 20 Rust crates + Tauri shell, 203 source files.**
 
 ### Frontend & Desktop App
 
 | Component | Lines | Description |
 |---|---|---|
-| `frontend/` (React + TS) | ~4.8k | Web frontend — chat view, sidebar, session management, SSE streaming |
+| `frontend/` (React + TS) | ~4.8k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
 | `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
 
 The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
 
-The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides single-instance coordination (file-lock + TCP activation) and native file dialogs via `tauri-extension-dialog`.
+The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides single-instance coordination (file-lock + TCP activation) and native file dialogs via `tauri-plugin-dialog`.
 
 ## Key Design Decisions
 
@@ -346,6 +366,7 @@ When conversation history approaches 83.5% of the model's context limit, `astrco
 2. On LLM failure (network error, parse error, timeout), the system falls back to deterministic rule-based summarization
 3. Compact transcripts are persisted as snapshots for debugging
 4. Post-compact context restoration re-reads recent files and preserves agent/skill/tool state
+5. **Incremental compact** — when a summary already exists, new compaction merges new information rather than rewriting from scratch
 
 ### Tool Execution
 
@@ -355,7 +376,7 @@ Tools run in parallel batches (up to 5 concurrent). The pipeline:
 2. **Execute** — parallel batch via `JoinSet`, sequential tools flush the batch first
 3. **Commit** — dispatch `PostToolUse` hooks, persist large results, enforce message budget, emit events
 
-Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget.
+Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (find/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
 
 ### Extension System
 
@@ -368,6 +389,7 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 - **Native extension loading** — disk-loaded `.dll`/`.so` extensions via `libloading` + FFI, supporting global (`~/.astrcode/extensions/`) and project-level (`.astrcode/extensions/`) directories
 - **WASM extension runtime** — wasmtime-based sandboxed extension execution with a host-guest protocol for tool registration and event handling
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
+- **Lifecycle hooks** — `PreToolUse` / `PostToolUse`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `TurnStart` / `TurnEnd`, `UserPromptSubmit`
 
 ### ACP Adapter
 
@@ -378,11 +400,31 @@ The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Proto
 - Deterministic event flushing with completion oneshot for turn lifecycle
 - Designed for IDE extensions and editor integrations
 
+### Event-Sourcing Architecture
+
+AstrCode follows a session-first event-sourcing pattern:
+
+- **EventLog is the single source of truth** — all state changes are immutable, append-only events
+- **Session is a projection** — reconstructed by replaying from the event log; fork = replay from a specific sequence number
+- **Agent is stateless** — `TurnRunner` is discarded after each turn; state lives in the event log
+- **Recovery is replay** — if the agent crashes, the session is intact; simply re-project from the event log
+
+### Prompt Engineering
+
+System prompt assembly follows a pipeline pattern:
+
+```
+Identity → System → Task Guidelines → Communication → Environment
+→ User Rules → Project Rules → Tool Summary → Extension → Additional
+```
+
+Stable sections (Identity, System, Task Guidelines) come first to leverage prompt cache prefix matching. Users can customize via `~/.astrcode/IDENTITY.md` (identity override) and project-level `AGENTS.md` (project rules, searched upward from working directory).
+
 ## Running Modes
 
 | Mode | Command | Description |
 |---|---|---|
-| **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands |
+| **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands, status bar |
 | **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl`|
 | **Server** | `cargo run -- server [--addr 0.0.0.0:3847]` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
 | **ACP** | `cargo run -- acp` | ACP stdio adapter for IDE/editor integration |
@@ -417,11 +459,13 @@ The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Proto
 | `/help` or `/?` | Show command help |
 | `/quit` or `/q` | Exit astrcode |
 
-extension extensions can register additional slash commands and keybindings at runtime.
+Extensions can register additional slash commands and keybindings at runtime.
 
 ## Distribution
 
 Pre-built binaries are available for Linux, macOS, and Windows (x86_64 + aarch64) via GitHub Releases on every version tag. A weekly automated release pipeline publishes patch bumps every Monday.
+
+**NPM Package**: [`astrcode`](https://www.npmjs.com/package/astrcode)
 
 ## Acknowledgments
 
