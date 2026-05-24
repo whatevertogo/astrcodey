@@ -50,18 +50,7 @@ fn shutdown_sidecar(app_handle: &tauri::AppHandle) {
     let Some(state) = app_handle.try_state::<std::sync::Arc<commands::SidecarState>>() else {
         return;
     };
-    let pid = state.shutting_down();
-
-    // Windows 上 child.kill() 只杀目标进程，不杀子进程树；
-    // taskkill /T 按 PID 杀整棵进程树（shell 工具子进程等）。
-    #[cfg(target_os = "windows")]
-    if let Some(pid) = pid {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+    state.shutdown_blocking();
 }
 
 fn run() -> anyhow::Result<()> {

@@ -1,11 +1,20 @@
-use std::sync::Arc;
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+    time::Duration,
+};
 
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_shell::{ShellExt, process::CommandChild};
 
 const SIDECAR_NAME: &str = "astrcode-http-server";
 const SIDECAR_ADDR_ENV: &str = "ASTRCODE_HTTP_ADDR";
 const SIDECAR_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
+const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STARTUP_ATTEMPTS: usize = 200;
+const HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(700);
 
 /// sidecar 进程的运行时状态：port 和 child 绑定在同一个锁内，
 /// 避免单独操作 port / child 时出现竞态。
@@ -41,14 +50,23 @@ impl SidecarState {
         }
     }
 
-    pub fn shutting_down(&self) -> Option<u32> {
+    pub fn shutdown_blocking(&self) {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let port = guard.port;
+        let token = guard.token.clone();
+        let pid = guard.pid.take();
+        let child = guard.child.take();
         guard.port = 0;
         guard.token.clear();
-        if let Some(child) = guard.child.take() {
+        drop(guard);
+
+        if port > 0 && !token.is_empty() {
+            post_shutdown_blocking(port as u16, &token);
+        }
+        if let Some(child) = child {
             let _ = child.kill();
         }
-        guard.pid.take()
+        kill_process_tree(pid);
     }
 }
 
@@ -63,6 +81,44 @@ fn generate_auth_token() -> String {
         .collect()
 }
 
+async fn server_ready(client: &reqwest::Client, port: u16, token: &str) -> bool {
+    client
+        .get(format!("http://127.0.0.1:{port}/api/sessions"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
+}
+
+fn post_shutdown_blocking(port: u16, token: &str) {
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        SHUTDOWN_TIMEOUT,
+    ) else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(SHUTDOWN_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SHUTDOWN_TIMEOUT));
+    let request = format!(
+        "POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer \
+         {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(request.as_bytes());
+    let mut buf = [0u8; 256];
+    let _ = stream.read(&mut buf);
+}
+
+fn kill_process_tree(pid: Option<u32>) {
+    #[cfg(target_os = "windows")]
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 #[tauri::command]
 pub async fn start_server(
     app: tauri::AppHandle,
@@ -70,20 +126,23 @@ pub async fn start_server(
 ) -> Result<StartServerResponse, String> {
     let _startup_guard = state.startup.lock().await;
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(HEALTH_TIMEOUT)
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
-    // Hold inner lock through the entire check + cleanup + spawn sequence
-    // to prevent stop_server from racing between the steps.
-    let (port, mut rx) = {
+    let existing = {
+        let inner = lock_inner(&state);
+        (inner.port, inner.token.clone())
+    };
+    if existing.0 > 0 && server_ready(&client, existing.0 as u16, &existing.1).await {
+        tracing::info!("Reusing ready server on port {}", existing.0);
+        return Ok(StartServerResponse {
+            port: existing.0,
+            token: existing.1,
+        });
+    }
+    let (port, token, expected_pid, mut rx) = {
         let mut inner = lock_inner(&state);
-        if inner.port > 0 && inner.child.is_some() {
-            return Ok(StartServerResponse {
-                port: inner.port,
-                token: inner.token.clone(),
-            });
-        }
         if let Some(child) = inner.child.take() {
             let _ = child.kill();
         }
@@ -112,7 +171,7 @@ pub async fn start_server(
         inner.pid = Some(child.pid());
         inner.child = Some(child);
         // Release the inner lock before the health check loop.
-        (port, rx)
+        (port, inner.token.clone(), inner.pid.unwrap_or_default(), rx)
     };
 
     let sidecar_state = Arc::clone(&state);
@@ -129,19 +188,19 @@ pub async fn start_server(
                 CommandEvent::Terminated(status) => {
                     tracing::warn!("[sidecar] exited with status: {status:?}");
                     let mut inner = lock_inner(&sidecar_state);
-                    inner.port = 0;
-                    inner.token.clear();
-                    inner.pid = None;
-                    inner.child.take();
+                    if inner.pid == Some(expected_pid) {
+                        inner.pid = None;
+                        inner.child.take();
+                    }
                     break;
                 },
                 CommandEvent::Error(err) => {
                     tracing::error!("[sidecar error] {err}");
                     let mut inner = lock_inner(&sidecar_state);
-                    inner.port = 0;
-                    inner.token.clear();
-                    inner.pid = None;
-                    inner.child.take();
+                    if inner.pid == Some(expected_pid) {
+                        inner.pid = None;
+                        inner.child.take();
+                    }
                     break;
                 },
                 _ => {},
@@ -149,29 +208,17 @@ pub async fn start_server(
         }
     });
 
-    let health_url = format!("http://127.0.0.1:{port}/api/sessions");
-    for _ in 0..200 {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let still_tracked = {
+    for _ in 0..STARTUP_ATTEMPTS {
+        tokio::time::sleep(STARTUP_POLL_INTERVAL).await;
+        let still_current = {
             let inner = lock_inner(&state);
-            inner.port == port as i32 && inner.child.is_some()
+            inner.pid == Some(expected_pid) && inner.port == port as i32 && inner.token == token
         };
-        let token = {
-            let inner = lock_inner(&state);
-            inner.token.clone()
-        };
-        let ready = client
-            .get(&health_url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success());
-        if still_tracked && ready {
+        if !still_current {
+            return Err("Server startup was superseded by another request".to_string());
+        }
+        if server_ready(&client, port, &token).await {
             tracing::info!("Server ready on port {port}");
-            let token = {
-                let inner = lock_inner(&state);
-                inner.token.clone()
-            };
             return Ok(StartServerResponse {
                 port: port as i32,
                 token,
@@ -181,12 +228,19 @@ pub async fn start_server(
 
     {
         let mut inner = lock_inner(&state);
-        if let Some(child) = inner.child.take() {
+        let child = (inner.pid == Some(expected_pid))
+            .then(|| inner.child.take())
+            .flatten();
+        if inner.pid == Some(expected_pid) {
+            inner.pid = None;
+            inner.port = 0;
+            inner.token.clear();
+        }
+        if let Some(child) = child {
             let _ = child.kill();
         }
-        inner.port = 0;
-        inner.token.clear();
     }
+    kill_process_tree(Some(expected_pid));
 
     Err("Server did not become ready within 10s".to_string())
 }
@@ -205,7 +259,7 @@ pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), Stri
     // Try graceful shutdown via HTTP first
     if port > 0 {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
             .build()
             .map_err(|e| e.to_string())?;
         let _ = client
@@ -213,7 +267,7 @@ pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), Stri
             .bearer_auth(token)
             .send()
             .await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     // Force kill if still running
@@ -221,8 +275,11 @@ pub async fn stop_server(state: State<'_, Arc<SidecarState>>) -> Result<(), Stri
     if let Some(child) = inner.child.take() {
         let _ = child.kill();
     }
+    let pid = inner.pid.take();
     inner.port = 0;
     inner.token.clear();
+    drop(inner);
+    kill_process_tree(pid);
     Ok(())
 }
 
@@ -252,6 +309,11 @@ pub fn maximize_window(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn close_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.close().map_err(|e| e.to_string())
+pub fn close_window(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<SidecarState>>,
+) -> Result<(), String> {
+    state.shutdown_blocking();
+    window.app_handle().exit(0);
+    Ok(())
 }

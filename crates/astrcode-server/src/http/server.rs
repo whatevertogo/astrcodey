@@ -1,6 +1,6 @@
 //! 服务器组装：路由注册、TCP 启动、`run.json` 写入。
 
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc};
 
 use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
@@ -35,47 +35,6 @@ impl From<getrandom::Error> for HttpServerError {
     fn from(e: getrandom::Error) -> Self {
         HttpServerError::Auth(e)
     }
-}
-
-/// 尝试绑定端口，如果失败则尝试清理旧进程后重试。
-async fn bind_with_cleanup(
-    addr: std::net::SocketAddr,
-) -> Result<tokio::net::TcpListener, HttpServerError> {
-    // 第一次尝试直接绑定
-    match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => return Ok(listener),
-        Err(e) => {
-            tracing::warn!("首次绑定端口 {} 失败: {}", addr, e);
-        },
-    }
-
-    // 绑定失败，尝试清理旧进程
-    #[cfg(target_os = "windows")]
-    {
-        tracing::info!("尝试清理 astrcode-http-server 进程...");
-        let _ = tokio::process::Command::new("taskkill")
-            .args(["/F", "/IM", "astrcode-http-server.exe"])
-            .output()
-            .await;
-        // 等待端口释放
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        tracing::info!("尝试清理 astrcode-http-server 进程...");
-        let _ = tokio::process::Command::new("pkill")
-            .args(["-f", "astrcode-http-server"])
-            .output()
-            .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    // 第二次尝试绑定
-    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        tracing::error!("清理进程后仍无法绑定端口 {}: {}", addr, e);
-        HttpServerError::Io(e)
-    })
 }
 
 /// Build an axum router for the HTTP/SSE API.
@@ -167,8 +126,10 @@ pub async fn run_http_server(
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
-    // 尝试绑定端口，如果失败则自动清理旧进程
-    let listener = bind_with_cleanup(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
+        tracing::error!("failed to bind HTTP server at {addr}: {error}");
+        HttpServerError::Io(error)
+    })?;
     let local_addr = listener.local_addr()?;
     let local_port = local_addr.port();
     write_run_info(local_port, &auth_token);
@@ -180,7 +141,7 @@ pub async fn run_http_server(
             runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
-    remove_run_info();
+    remove_run_info_if_current(local_port, &auth_token);
     result?;
     Ok(())
 }
@@ -195,6 +156,10 @@ pub fn write_run_info(port: u16, auth_token: &str) {
         return;
     }
     let path = dir.join("run.json");
+    write_run_info_at(&path, port, auth_token);
+}
+
+fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
     let content = serde_json::json!({
         "port": port,
         "authToken": auth_token,
@@ -220,6 +185,26 @@ pub fn remove_run_info() {
     let _ = std::fs::remove_file(path);
 }
 
+fn remove_run_info_if_current(port: u16, auth_token: &str) {
+    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
+    remove_run_info_if_current_at(&path, port, auth_token);
+}
+
+fn remove_run_info_if_current_at(path: &Path, port: u16, auth_token: &str) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    let matches_current = value.get("port").and_then(serde_json::Value::as_u64)
+        == Some(port as u64)
+        && value.get("authToken").and_then(serde_json::Value::as_str) == Some(auth_token);
+    if matches_current {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn masked_token(token: &str) -> String {
     let chars: Vec<_> = token.chars().collect();
     if chars.len() <= 8 {
@@ -232,12 +217,38 @@ fn masked_token(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::masked_token;
+    use std::fs;
+
+    use super::{masked_token, remove_run_info_if_current_at, write_run_info_at};
 
     #[test]
     fn masked_token_handles_short_env_tokens() {
         assert_eq!(masked_token("abc"), "<redacted>");
         assert_eq!(masked_token("12345678"), "<redacted>");
         assert_eq!(masked_token("123456789"), "1234...6789");
+    }
+
+    #[test]
+    fn remove_run_info_only_removes_matching_server() {
+        let root = std::env::temp_dir().join(format!(
+            "astrcode-run-info-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("run.json");
+
+        write_run_info_at(&path, 1111, "old-token");
+        write_run_info_at(&path, 2222, "new-token");
+
+        remove_run_info_if_current_at(&path, 1111, "old-token");
+        assert!(path.exists());
+
+        remove_run_info_if_current_at(&path, 2222, "new-token");
+        assert!(!path.exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

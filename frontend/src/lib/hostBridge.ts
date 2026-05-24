@@ -38,14 +38,36 @@ function browserBridge(): HostBridge {
 let _bridge: HostBridge | null = null
 
 export function getHostBridge(): HostBridge {
-  if (!_bridge) {
-    const injectedDesktopFlag = Boolean(
-      window.__ASTRCODE_BOOTSTRAP__?.isDesktopHost
-    )
-    _bridge =
-      isTauriEnvironment() || injectedDesktopFlag
-        ? desktopBridge()
-        : browserBridge()
+  const shouldUseDesktop =
+    isTauriEnvironment() ||
+    Boolean(window.__ASTRCODE_BOOTSTRAP__?.isDesktopHost)
+
+  if (_bridge?.isDesktopHost) {
+    return _bridge
   }
+
+  if (_bridge && _bridge.isDesktopHost === shouldUseDesktop) {
+    return _bridge
+  }
+
+  if (_bridge && !_bridge.isDesktopHost && !shouldUseDesktop) {
+    return _bridge
+  }
+
+  _bridge = shouldUseDesktop ? desktopBridge() : browserBridge()
   return _bridge
+}
+
+export async function resolveHostBridge(): Promise<HostBridge> {
+  if (isTauriEnvironment()) {
+    return getHostBridge()
+  }
+
+  try {
+    await waitForTauriEnvironment(1000)
+  } catch {
+    // Browser/dev mode has no Tauri IPC; fall back to the regular bridge.
+  }
+
+  return getHostBridge()
 }

@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import * as api from '../services/api'
 import { consumeSseStream } from '../services/sse-stream'
-import { getHostBridge } from '../lib/hostBridge'
+import { resolveHostBridge } from '../lib/hostBridge'
 import type {
   AgentSessionLink,
   ConversationBlock,
@@ -46,6 +46,22 @@ interface ConversationState {
   submitPrompt: (text: string) => Promise<boolean>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: ConversationDelta) => void
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
 }
 
 function phaseFromControl(control: ConversationControlState | null): Phase {
@@ -367,13 +383,15 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   initServer: async () => {
     set({ connectionStatus: 'connecting', connectionError: null })
 
-    const bridge = getHostBridge()
+    const bridge = await resolveHostBridge()
 
     if (bridge.isDesktopHost) {
       try {
         const { invoke } = await import('@tauri-apps/api/core')
-        const result = await invoke<{ port: number; token?: string }>(
-          'start_server'
+        const result = await withTimeout(
+          invoke<{ port: number; token?: string }>('start_server'),
+          15_000,
+          '启动 AstrCode 服务超时，请关闭残留 astrcode-http-server 进程后重试'
         )
         api.setServerPort(result.port, result.token)
         set({ serverPort: result.port })
