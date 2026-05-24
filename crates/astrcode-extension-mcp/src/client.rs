@@ -217,6 +217,7 @@ impl StdioTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        hide_command_window(&mut command);
         if let Some(cwd) = &server.cwd {
             command.current_dir(cwd);
         }
@@ -332,6 +333,15 @@ impl StdioTransport {
         let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut self.stderr_task).await;
     }
 }
+
+#[cfg(windows)]
+fn hide_command_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_command_window(_: &mut Command) {}
 
 async fn initialize(
     transport: &mut StdioTransport,
