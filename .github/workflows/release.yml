@@ -239,7 +239,7 @@ jobs:
             if [ -f "$pkg_dir/package.json" ]; then
               echo "Publishing $(basename $pkg_dir)..."
               cd "$pkg_dir"
-              npm publish --access public || true
+              npm publish --access public
               cd -
             fi
           done
@@ -248,7 +248,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm-dist/@whatevertogo/astrcode
-          npm publish --access public || true
+          npm publish --access public
 
   # ── GitHub Release ────────────────────────────────────────────────
 
