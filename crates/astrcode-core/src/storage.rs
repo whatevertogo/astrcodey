@@ -1,8 +1,12 @@
 //! 会话存储 trait 定义。
 //!
 //! 本模块定义了会话事件持久化的核心抽象：
-//! - [`EventStore`] trait：事件存储的统一接口
+//! - [`EventReader`] trait：只读查询能力，满足接口隔离原则（ISP）
+//! - [`EventStore`] trait：完整读写能力，继承 `EventReader` 的所有读取方法
 //! - [`StorageError`]：存储操作错误类型
+//!
+//! 通过 trait upcasting（Rust 1.86+），`Arc<dyn EventStore>` 可直接转换为
+//! `Arc<dyn EventReader>` 传递给只读消费者，不泄漏写入能力。
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,35 +18,17 @@ use crate::{
     types::*,
 };
 
-/// 会话事件存储 trait。
+/// 会话存储的只读查询能力。
 ///
-/// 实现类负责持久化统一事件，并在事件进入 JSONL 日志时
-/// 分配递增的会话内序号。
+/// 从 [`EventStore`] 拆分出来，满足接口隔离原则（ISP）：
+/// 只需要查询会话状态的消费者（SSE 流、扩展、HTTP 列表接口等）
+/// 应依赖 `Arc<dyn EventReader>` 而非 `Arc<dyn EventStore>`。
+///
+/// 由于 `EventStore: EventReader` 建立了 supertrait 关系，
+/// `Arc<dyn EventStore>` 可通过 trait upcasting（Rust 1.86+）自动转换为
+/// `Arc<dyn EventReader>`，无需 newtype wrapper。
 #[async_trait::async_trait]
-pub trait EventStore: Send + Sync {
-    /// 创建新的会话事件日志，并写入初始的 SessionStarted 事件。
-    ///
-    /// - `session_id`：会话唯一标识
-    /// - `working_dir`：工作目录路径
-    /// - `model_id`：使用的模型标识
-    /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
-    /// - `tool_policy`：子会话工具集策略，根会话为 `None`
-    /// - `source_extension`：创建该子 session 的扩展 ID，根会话为 `None`
-    async fn create_session(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent_session_id: Option<&SessionId>,
-        tool_policy: Option<&crate::extension::ChildToolPolicy>,
-        source_extension: Option<&str>,
-    ) -> Result<Event, StorageError>;
-
-    /// 向会话的事件日志追加一个事件。
-    ///
-    /// 存储层会为事件分配递增序号。
-    async fn append_event(&self, event: Event) -> Result<Event, StorageError>;
-
+pub trait EventReader: Send + Sync {
     /// 从头开始重放会话的所有事件。
     async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError>;
 
@@ -74,12 +60,62 @@ pub trait EventStore: Send + Sync {
         cursor: &Cursor,
     ) -> Result<Vec<Event>, StorageError>;
 
+    /// 列出所有会话 ID。
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;
+
+    /// 读取当前 session 关联工具结果 artifact 路径的一段文本。
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError>;
+
+    /// 返回指定会话在存储层中的真实目录路径。
+    ///
+    /// 工具需要往 session 目录写入附属数据（todos、mode、plan 等）时，
+    /// 应通过此方法获取路径，而不是自行拼接——子 session 的真实目录
+    /// 可能在 `subagents/{extension}/` 下，无法从 session_id + working_dir 推断。
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, StorageError>;
+}
+
+/// 会话事件存储 trait。
+///
+/// 继承 [`EventReader`] 的所有只读方法，并添加写入和生命周期管理方法。
+/// 实现类负责持久化统一事件，并在事件进入 JSONL 日志时
+/// 分配递增的会话内序号。
+#[async_trait::async_trait]
+pub trait EventStore: EventReader + Send + Sync {
+    /// 创建新的会话事件日志，并写入初始的 SessionStarted 事件。
+    ///
+    /// - `session_id`：会话唯一标识
+    /// - `working_dir`：工作目录路径
+    /// - `model_id`：使用的模型标识
+    /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
+    /// - `tool_policy`：子会话工具集策略，根会话为 `None`
+    /// - `source_extension`：创建该子 session 的扩展 ID，根会话为 `None`
+    async fn create_session(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        model_id: &str,
+        parent_session_id: Option<&SessionId>,
+        tool_policy: Option<&crate::extension::ChildToolPolicy>,
+        source_extension: Option<&str>,
+    ) -> Result<Event, StorageError>;
+
+    /// 向会话的事件日志追加一个事件。
+    ///
+    /// 存储层会为事件分配递增序号。
+    async fn append_event(&self, event: Event) -> Result<Event, StorageError>;
+
     /// 在当前位置创建检查点快照。
     async fn checkpoint(&self, session_id: &SessionId, cursor: &Cursor)
     -> Result<(), StorageError>;
-
-    /// 列出所有会话 ID。
-    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;
 
     /// 从磁盘打开已有的会话，准备追加操作。
     ///
@@ -138,37 +174,11 @@ pub trait EventStore: Send + Sync {
         ))
     }
 
-    /// 读取当前 session 关联工具结果 artifact 路径的一段文本。
-    async fn read_tool_result_artifact_by_path(
-        &self,
-        _session_id: &SessionId,
-        _path: &str,
-        _char_offset: usize,
-        _max_chars: usize,
-    ) -> Result<ToolResultArtifactSlice, StorageError> {
-        Err(StorageError::Unsupported(
-            "tool result artifact storage is not supported".into(),
-        ))
-    }
-
     /// 将会话的 durable event log 强制 fsync 到磁盘。
     ///
     /// 默认空实现；文件系统实现延迟 `sync_all()` 到 turn 边界调用。
     async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
         Ok(())
-    }
-
-    /// 返回指定会话在存储层中的真实目录路径。
-    ///
-    /// 工具需要往 session 目录写入附属数据（todos、mode、plan 等）时，
-    /// 应通过此方法获取路径，而不是自行拼接——子 session 的真实目录
-    /// 可能在 `subagents/{extension}/` 下，无法从 session_id + working_dir 推断。
-    async fn session_store_dir(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        let _ = session_id;
-        Ok(None)
     }
 }
 

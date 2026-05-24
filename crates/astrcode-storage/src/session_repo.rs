@@ -12,8 +12,8 @@ use std::{
 use astrcode_core::{
     event::{Event, EventPayload},
     storage::{
-        CompactSnapshotInput, EventStore, SessionReadModel, SessionSummary, StorageError,
-        ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
+        CompactSnapshotInput, EventReader, EventStore, SessionReadModel, SessionSummary,
+        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
@@ -301,6 +301,127 @@ async fn restore_from_snapshot(
 }
 
 #[async_trait::async_trait]
+impl EventReader for FileSystemSessionRepository {
+    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        meta.log.replay_all().await
+    }
+
+    async fn session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReadModel, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let model = meta.projection.read().await.clone();
+        Ok(model)
+    }
+
+    async fn session_system_prompt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let prompt = meta.projection.read().await.system_prompt.clone();
+        Ok(prompt)
+    }
+
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        let session_ids = self.list_session_dirs().await?;
+        let sessions = self.sessions.read().await.clone();
+        let mut summaries = Vec::new();
+
+        for session_id in session_ids {
+            if let Some(meta) = sessions.get(&session_id) {
+                // 已打开的会话直接使用内存中的投影
+                let model = meta.projection.read().await.clone();
+                summaries.push(SessionSummary::from(model));
+            } else {
+                // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
+                if let Some(summary) = self.read_summary_from_first_event(&session_id).await? {
+                    summaries.push(summary);
+                }
+            }
+        }
+
+        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(summaries)
+    }
+
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        Ok(self
+            .session_read_model(session_id)
+            .await?
+            .latest_seq
+            .map(|seq| seq.to_string()))
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, StorageError> {
+        // session_id 验证由 get_or_open_meta 统一守卫
+        let meta = self.get_or_open_meta(session_id).await?;
+        let Ok(seq) = cursor.parse::<u64>() else {
+            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
+        };
+        meta.log.replay_after(seq).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        let mut ids: Vec<SessionId> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, meta)| !is_subagent_dir(&meta.dir))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for base_path in self.session_roots().await {
+            self.collect_session_ids_recursive(&base_path, &mut ids)
+                .await;
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+
+        let path = PathBuf::from(path);
+        let artifact_dir = meta.dir.join("tool-results");
+        if !hostpaths::is_path_within(&path, &artifact_dir) {
+            return Err(StorageError::InvalidId(
+                "tool result path is outside this session artifact directory".into(),
+            ));
+        }
+        if !path.exists() {
+            return Err(StorageError::NotFound(session_id.clone()));
+        }
+        let content = tokio::fs::read_to_string(&path).await?;
+        Ok(slice_tool_result(
+            &path.to_string_lossy(),
+            &content,
+            char_offset,
+            max_chars,
+        ))
+    }
+
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, StorageError> {
+        Ok(self.session_dir(session_id).await)
+    }
+}
+
+#[async_trait::async_trait]
 impl EventStore for FileSystemSessionRepository {
     async fn create_session(
         &self,
@@ -374,72 +495,6 @@ impl EventStore for FileSystemSessionRepository {
         Ok(stored)
     }
 
-    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        meta.log.replay_all().await
-    }
-
-    async fn session_read_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let model = meta.projection.read().await.clone();
-        Ok(model)
-    }
-
-    async fn session_system_prompt(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let prompt = meta.projection.read().await.system_prompt.clone();
-        Ok(prompt)
-    }
-
-    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-        let session_ids = self.list_session_dirs().await?;
-        let sessions = self.sessions.read().await.clone();
-        let mut summaries = Vec::new();
-
-        for session_id in session_ids {
-            if let Some(meta) = sessions.get(&session_id) {
-                // 已打开的会话直接使用内存中的投影
-                let model = meta.projection.read().await.clone();
-                summaries.push(SessionSummary::from(model));
-            } else {
-                // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
-                if let Some(summary) = self.read_summary_from_first_event(&session_id).await? {
-                    summaries.push(summary);
-                }
-            }
-        }
-
-        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-        Ok(summaries)
-    }
-
-    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
-        Ok(self
-            .session_read_model(session_id)
-            .await?
-            .latest_seq
-            .map(|seq| seq.to_string()))
-    }
-
-    async fn replay_from(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
-        // session_id 验证由 get_or_open_meta 统一守卫
-        let meta = self.get_or_open_meta(session_id).await?;
-        let Ok(seq) = cursor.parse::<u64>() else {
-            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
-        };
-        meta.log.replay_after(seq).await
-    }
-
     async fn checkpoint(
         &self,
         session_id: &SessionId,
@@ -463,23 +518,6 @@ impl EventStore for FileSystemSessionRepository {
     async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let _ = self.get_or_open_meta(session_id).await?;
         Ok(())
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-        let mut ids: Vec<SessionId> = self
-            .sessions
-            .read()
-            .await
-            .iter()
-            .filter(|(_, meta)| !is_subagent_dir(&meta.dir))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for base_path in self.session_roots().await {
-            self.collect_session_ids_recursive(&base_path, &mut ids)
-                .await;
-        }
-        ids.sort();
-        Ok(ids)
     }
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -636,44 +674,9 @@ impl EventStore for FileSystemSessionRepository {
         Ok(write_tool_result_file(&dir, &artifact)?)
     }
 
-    async fn read_tool_result_artifact_by_path(
-        &self,
-        session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
-    ) -> Result<ToolResultArtifactSlice, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-
-        let path = PathBuf::from(path);
-        let artifact_dir = meta.dir.join("tool-results");
-        if !hostpaths::is_path_within(&path, &artifact_dir) {
-            return Err(StorageError::InvalidId(
-                "tool result path is outside this session artifact directory".into(),
-            ));
-        }
-        if !path.exists() {
-            return Err(StorageError::NotFound(session_id.clone()));
-        }
-        let content = tokio::fs::read_to_string(&path).await?;
-        Ok(slice_tool_result(
-            &path.to_string_lossy(),
-            &content,
-            char_offset,
-            max_chars,
-        ))
-    }
-
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         meta.log.force_sync()
-    }
-
-    async fn session_store_dir(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        Ok(self.session_dir(session_id).await)
     }
 }
 

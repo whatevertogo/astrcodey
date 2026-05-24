@@ -92,14 +92,14 @@ impl ModelSelectionController {
         value: UiResponseValue,
     ) -> Result<ClientNotification, HandlerError> {
         let Some(step) = self.pending.take() else {
-            return Err(HandlerError::Other(format!(
+            return Err(HandlerError::InvalidRequest(format!(
                 "No pending UI request: {request_id}"
             )));
         };
 
         if step.request_id() != request_id {
             self.pending = Some(step);
-            return Err(HandlerError::Other(format!(
+            return Err(HandlerError::InvalidRequest(format!(
                 "Unexpected UI response request ID: {request_id}"
             )));
         }
@@ -175,7 +175,7 @@ impl ModelSelectionFlow {
         candidate
             .clone()
             .into_effective()
-            .map_err(|error| HandlerError::Other(format!("Invalid model selection: {error}")))?;
+            .map_err(|error| HandlerError::InvalidRequest(format!("Invalid model selection: {error}")))?;
 
         // 先应用到内存，再持久化到磁盘。
         // 如果 save 失败，内存配置已经更新，下次进程启动会回退到磁盘旧值。
@@ -183,13 +183,13 @@ impl ModelSelectionFlow {
         // 前者只是新配置没落盘（用户下次重选即可），后者会导致内存和磁盘配置不一致。
         self.config_manager
             .apply_raw_config_and_rebuild(candidate.clone())
-            .map_err(|error| HandlerError::Other(format!("Failed to apply config: {error}")))?;
+            .map_err(|error| HandlerError::InvalidRequest(format!("Failed to apply config: {error}")))?;
 
         self.config_manager
             .config_store()
             .save(&candidate)
             .await
-            .map_err(|error| HandlerError::Other(format!("Failed to write config: {error}")))?;
+            .map_err(|error| HandlerError::InvalidRequest(format!("Failed to write config: {error}")))?;
 
         Ok(())
     }
@@ -221,7 +221,7 @@ impl ModelSelectionFlow {
             .collect();
 
         if models.is_empty() {
-            return Err(HandlerError::Other("No models configured".into()));
+            return Err(HandlerError::InvalidRequest("No models configured".into()));
         }
 
         let active_model = match target {
@@ -258,12 +258,12 @@ impl ModelSelectionFlow {
 
 fn parse_model_option(selected: &str) -> Result<(String, String), HandlerError> {
     let Some((profile, model)) = selected.split_once('/') else {
-        return Err(HandlerError::Other(format!(
+        return Err(HandlerError::InvalidRequest(format!(
             "Invalid model selection: {selected}"
         )));
     };
     if profile.is_empty() || model.is_empty() {
-        return Err(HandlerError::Other(format!(
+        return Err(HandlerError::InvalidRequest(format!(
             "Invalid model selection: {selected}"
         )));
     }
@@ -274,7 +274,7 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
     match parse_select(response)?.as_str() {
         MAIN_OPTION => Ok(ModelTarget::Main),
         SMALL_OPTION => Ok(ModelTarget::Small),
-        selected => Err(HandlerError::Other(format!(
+        selected => Err(HandlerError::InvalidRequest(format!(
             "Invalid model target selection: {selected}"
         ))),
     }
@@ -283,7 +283,7 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
 fn parse_select(response: UiResponseValue) -> Result<String, HandlerError> {
     match response {
         UiResponseValue::Select { selected } => Ok(selected),
-        _ => Err(HandlerError::Other("Expected select response".into())),
+        _ => Err(HandlerError::InvalidRequest("Expected select response".into())),
     }
 }
 
@@ -296,7 +296,7 @@ fn validate_profile_model(
         .profiles
         .iter()
         .find(|candidate| candidate.name == profile)
-        .ok_or_else(|| HandlerError::Other(format!("Profile not found: {profile}")))?;
+        .ok_or_else(|| HandlerError::InvalidRequest(format!("Profile not found: {profile}")))?;
 
     if profile_config
         .models
@@ -305,7 +305,7 @@ fn validate_profile_model(
     {
         Ok(())
     } else {
-        Err(HandlerError::Other(format!(
+        Err(HandlerError::InvalidRequest(format!(
             "Model not found in profile {profile}: {model}"
         )))
     }

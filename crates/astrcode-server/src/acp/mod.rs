@@ -310,7 +310,13 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
         | HandlerError::CompactBlocked
         | HandlerError::CompactionSkipped(_)
         | HandlerError::SessionManager(_)
-        | HandlerError::Other(_) => Error::internal_error().data(error.to_string()),
+        | HandlerError::Session(_)
+        | HandlerError::Turn(_)
+        | HandlerError::Compact(_)
+        | HandlerError::Llm(_)
+        | HandlerError::Extension(_)
+        | HandlerError::ActorUnavailable
+        | HandlerError::InvalidRequest(_) => Error::internal_error().data(error.to_string()),
     }
 }
 

@@ -36,6 +36,7 @@ pub struct SessionRuntimeState {
     /// `refresh_tools` 在每次重建工具表时读取此字段，保证子 session 的所有 turn
     /// 都看到一致的裁剪后工具集（含 resume 路径）。
     tool_policy: Mutex<Option<ChildToolPolicy>>,
+    /// 熔断器需要 &mut self 的状态转换（Open→HalfOpen）。
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 缓存的稳定前缀文本及其指纹（Identity → ProjectRules）。
     /// 首次构建后跨 turn 复用，compact 后清空触发全量重建。

@@ -64,6 +64,8 @@ struct LiveStreamState {
     leaf_child_sessions: HashMap<SessionId, SessionId>,
     /// 子会话最近 live 阶段，用于避免重复投影。
     last_child_phase: HashMap<SessionId, Phase>,
+    /// 缓存的最新 cursor，用于 live-only 事件（避免每次查询存储）。
+    cached_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +207,7 @@ pub(in crate::http) async fn session_stream(
             pending: std::collections::VecDeque::new(),
             has_messages,
             drained: false,
+            cached_cursor: None,
             child_sessions,
             leaf_child_sessions,
             last_child_phase,
@@ -335,11 +338,24 @@ async fn notification_to_sse_items(
                 state.has_messages = true;
             }
             update_child_tracking_from_parent_event(state, &event);
+
+            // 更新缓存的 cursor（如果有 seq）
+            if let Some(seq) = event.seq {
+                state.cached_cursor = Some(seq.to_string());
+            }
+
             let deltas = event_to_deltas(&event, state.has_messages);
             if deltas.is_empty() {
                 return Vec::new();
             }
-            let cursor = event_cursor(&state.runtime, &event).await;
+
+            // 使用缓存的 cursor（live-only 事件）或事件的 seq
+            let cursor = if let Some(seq) = event.seq {
+                seq.to_string()
+            } else {
+                get_or_fetch_cursor(state).await
+            };
+
             deltas
                 .into_iter()
                 .map(|delta| {
@@ -357,7 +373,15 @@ async fn notification_to_sse_items(
             let Some(delta) = child_event_to_agent_update(state, &event) else {
                 return Vec::new();
             };
-            let cursor = state_cursor(&state.runtime, &state.session_id).await;
+            // 更新缓存的 cursor（如果有 seq）
+            if let Some(seq) = event.seq {
+                state.cached_cursor = Some(seq.to_string());
+            }
+            let cursor = if event.seq.is_some() {
+                get_or_fetch_cursor(state).await
+            } else {
+                state.cached_cursor.clone().unwrap_or_else(|| "0".to_string())
+            };
             vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
                 session_id: state.session_id.to_string(),
                 cursor: ConversationCursorDto { value: cursor },
@@ -365,7 +389,7 @@ async fn notification_to_sse_items(
             }))]
         },
         ClientNotification::StatusItemUpdate { id, text } => {
-            let cursor = state_cursor(&state.runtime, &state.session_id).await;
+            let cursor = get_or_fetch_cursor(state).await;
             vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
                 session_id: state.session_id.to_string(),
                 cursor: ConversationCursorDto { value: cursor },
@@ -373,7 +397,7 @@ async fn notification_to_sse_items(
             }))]
         },
         ClientNotification::ExtensionRegistryChanged => {
-            let cursor = state_cursor(&state.runtime, &state.session_id).await;
+            let cursor = get_or_fetch_cursor(state).await;
             vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
                 session_id: state.session_id.to_string(),
                 cursor: ConversationCursorDto { value: cursor },
@@ -381,6 +405,17 @@ async fn notification_to_sse_items(
             }))]
         },
         _ => Vec::new(),
+    }
+}
+
+/// 获取 cursor：优先使用缓存，缓存缺失时查询存储。
+async fn get_or_fetch_cursor(state: &mut LiveStreamState) -> String {
+    if let Some(ref cursor) = state.cached_cursor {
+        cursor.clone()
+    } else {
+        let cursor = state_cursor(&state.runtime, &state.session_id).await;
+        state.cached_cursor = Some(cursor.clone());
+        cursor
     }
 }
 

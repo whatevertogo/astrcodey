@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::{ExtensionError, SessionReadSource},
+    extension::ExtensionError,
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    storage::{SessionReadModel, SessionSummary},
+    storage::{EventReader, SessionReadModel, SessionSummary},
 };
 use chrono::{DateTime, Duration, Local, Utc};
 
@@ -46,7 +46,7 @@ struct Candidate {
 
 pub async fn run(
     store: &MemoryStore,
-    session_read: &dyn SessionReadSource,
+    session_read: Arc<dyn EventReader>,
     small_llm: &dyn LlmProvider,
     current_session_id: &str,
 ) -> Result<(), ExtensionError> {
@@ -59,12 +59,12 @@ pub async fn run(
         }
     }
 
-    let candidates = find_candidates(session_read, store, current_session_id, &config).await?;
+    let candidates = find_candidates(Arc::clone(&session_read), store, current_session_id, &config).await?;
     if candidates.is_empty() {
         return Ok(());
     }
 
-    let extractions = extract(session_read, small_llm, &candidates).await?;
+    let extractions = extract(Arc::clone(&session_read), small_llm, &candidates).await?;
 
     if extractions.is_empty() {
         return Ok(());
@@ -77,7 +77,7 @@ pub async fn run(
 // ─── Candidate Selection ────────────────────────────────────────────────
 
 async fn find_candidates(
-    session_read: &dyn SessionReadSource,
+    session_read: Arc<dyn EventReader>,
     store: &MemoryStore,
     current_session_id: &str,
     config: &PipelineConfig,
@@ -129,7 +129,7 @@ async fn find_candidates(
 // ─── Phase 1: Extraction ────────────────────────────────────────────────
 
 async fn extract(
-    session_read: &dyn SessionReadSource,
+    session_read: Arc<dyn EventReader>,
     small_llm: &dyn LlmProvider,
     candidates: &[Candidate],
 ) -> Result<Vec<(Candidate, Phase1Output)>, ExtensionError> {
@@ -137,7 +137,7 @@ async fn extract(
     for candidate in candidates {
         let session_id = &candidate.summary.session_id;
         let read_model = session_read
-            .read_session_model(session_id)
+            .session_read_model(session_id)
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 

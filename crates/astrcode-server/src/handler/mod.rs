@@ -61,8 +61,22 @@ pub enum HandlerError {
     CompactionSkipped(String),
     #[error(transparent)]
     SessionManager(#[from] SessionManagerError),
-    #[error("{0}")]
-    Other(String),
+    #[error(transparent)]
+    Session(astrcode_session::SessionError),
+    #[error(transparent)]
+    Turn(astrcode_session::turn_context::TurnError),
+    #[error(transparent)]
+    Compact(astrcode_context::compaction::CompactError),
+    #[error("LLM error: {0}")]
+    Llm(#[source] astrcode_core::llm::LlmError),
+    #[error(transparent)]
+    Extension(astrcode_core::extension::ExtensionError),
+    /// Command actor 通道已关闭，服务不可用。
+    #[error("Command actor is unavailable")]
+    ActorUnavailable,
+    /// 验证失败或状态不满足前置条件。
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 pub(crate) use turn::TurnCompletion;
@@ -280,7 +294,7 @@ impl CommandHandler {
             Err(error) => {
                 tracing::error!(working_dir = %working_dir, error = %error, "create session failed");
                 self.send_error(-32603, &error.to_string());
-                return Err(error.into());
+                return Err(HandlerError::SessionManager(error));
             },
         };
         let sid = created.session.id().clone();
@@ -297,7 +311,7 @@ impl CommandHandler {
             Err(e) => {
                 tracing::error!(session_id = %sid, error = %e, "session prompt init failed");
                 self.send_error(-32603, &e.to_string());
-                Err(HandlerError::Other(e.to_string()))
+                Err(HandlerError::Session(e))
             },
         }
     }
@@ -338,10 +352,16 @@ impl CommandHandler {
             .await
             .map_err(|e| match e {
                 crate::turn_scheduler::TurnError::NoActiveTurn => HandlerError::NoActiveTurn,
-                crate::turn_scheduler::TurnError::EventEmit(msg) => {
-                    HandlerError::Other(format!("event emit error: {msg}"))
+                crate::turn_scheduler::TurnError::Session(e) => {
+                    HandlerError::Session(e)
                 },
-                other => HandlerError::Other(other.to_string()),
+                crate::turn_scheduler::TurnError::Turn(e) => {
+                    HandlerError::Turn(e)
+                },
+                crate::turn_scheduler::TurnError::EventEmit(e) => {
+                    HandlerError::Session(e)
+                },
+                other => HandlerError::InvalidRequest(other.to_string()),
             })?;
         Ok(())
     }
@@ -377,7 +397,8 @@ impl CommandHandler {
         &self,
         sid: &SessionId,
     ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
-        let state = self.runtime.session_manager.read_model(sid).await?;
+        let state = self.runtime.session_manager.read_model(sid).await
+            .map_err(HandlerError::SessionManager)?;
         Ok(self.command_infos_for_working_dir(&state.working_dir).await)
     }
 
@@ -474,7 +495,7 @@ impl CommandHandler {
             .session_manager
             .fork(&source_id, at_cursor.as_ref())
             .await
-            .map_err(|e| HandlerError::Other(format!("fork session: {e}")))?;
+            .map_err(HandlerError::SessionManager)?;
 
         let new_sid = forked.session.id().clone();
         self.active_session_id = Some(new_sid.clone());
@@ -497,7 +518,7 @@ impl CommandHandler {
             .session_manager
             .read_model(&new_sid)
             .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            .map_err(HandlerError::SessionManager)?;
         let snapshot = session_snapshot(&state);
         self.event_bus
             .send_notification(ClientNotification::SessionResumed {
@@ -520,7 +541,7 @@ impl CommandHandler {
             .session_manager
             .list_summaries()
             .await
-            .map_err(|e| HandlerError::Other(format!("list sessions: {e}")))?;
+            .map_err(HandlerError::SessionManager)?;
 
         let matching: Vec<_> = summaries
             .into_iter()
@@ -553,7 +574,8 @@ impl CommandHandler {
     /// 全局配置已更新，同步活跃 session 的 provider 和 model_id。
     async fn sync_active_session_provider(&self) -> Result<(), HandlerError> {
         if let Some(ref sid) = self.active_session_id {
-            let session = self.runtime.session_manager.open(sid.clone()).await?;
+            let session = self.runtime.session_manager.open(sid.clone()).await
+                .map_err(HandlerError::SessionManager)?;
             let caps = session.caps();
             session.runtime().set_llm(caps.llm());
             session.runtime().set_small_llm(caps.small_llm());
@@ -568,7 +590,7 @@ impl CommandHandler {
     async fn set_model(&mut self, model_id: String) -> Result<(), HandlerError> {
         let notification = match self.model_selection.set_main_model(&model_id).await {
             Ok(notification) => notification,
-            Err(HandlerError::Other(message))
+            Err(HandlerError::InvalidRequest(message))
                 if message.starts_with("Invalid model selection:") =>
             {
                 self.send_error(

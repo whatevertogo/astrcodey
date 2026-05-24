@@ -12,7 +12,7 @@ use astrcode_core::{
     tool::ToolResult,
     types::*,
 };
-use astrcode_session::{Session, turn_handle::TurnHandle};
+use astrcode_session::{Session, SessionError, turn_handle::TurnHandle};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -26,12 +26,14 @@ pub enum TurnError {
     NoActiveTurn,
     #[error("Session not found: {0}")]
     SessionNotFound(String),
-    #[error("Session manager error: {0}")]
+    #[error(transparent)]
     SessionManager(#[from] crate::session_manager::SessionManagerError),
-    #[error("Session error: {0}")]
-    Session(String),
-    #[error("Event emit failed: {0}")]
-    EventEmit(String),
+    #[error(transparent)]
+    Session(SessionError),
+    #[error(transparent)]
+    Turn(#[from] astrcode_session::turn_context::TurnError),
+    #[error("event emit failed")]
+    EventEmit(#[source] SessionError),
 }
 
 pub enum SubmitOutcome {
@@ -104,7 +106,7 @@ impl TurnScheduler {
         let turn_id = new_turn_id();
         let handle = session.submit(combined_text, turn_id.clone()).await.map_err(|e| {
             tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
-            TurnError::Session(format!("submit: {e}"))
+            TurnError::Turn(e)
         })?;
 
         let session_arc = Arc::new(session);
@@ -273,7 +275,7 @@ impl TurnScheduler {
 
         let state = match session.read_model().await {
             Ok(s) => s,
-            Err(e) => return Err(TurnError::Session(format!("read session: {e}"))),
+            Err(e) => return Err(TurnError::Session(e)),
         };
 
         // 如果已经是终态，直接返回成功（幂等性）
@@ -355,7 +357,7 @@ impl TurnScheduler {
                 EventPayload::UserMessage { message_id, text },
             )
             .await
-            .map_err(|e| TurnError::EventEmit(format!("inject message: {e}")))?;
+            .map_err(TurnError::EventEmit)?;
         Ok(())
     }
 
@@ -375,7 +377,7 @@ impl TurnScheduler {
         let state = session
             .read_model()
             .await
-            .map_err(|e| TurnError::Session(format!("read session {session_id}: {e}")))?;
+            .map_err(TurnError::Session)?;
 
         // Phase repair
         match repair_stale_phase_for_state(session_id, &session, &state).await {
@@ -425,7 +427,7 @@ async fn repair_stale_phase_for_state(
             )
             .await
             .map_err(|e| {
-                TurnError::EventEmit(format!("emit ToolCallCompleted during repair: {e}"))
+                TurnError::EventEmit(e)
             })?;
     }
 
@@ -437,7 +439,7 @@ async fn repair_stale_phase_for_state(
             },
         )
         .await
-        .map_err(|e| TurnError::EventEmit(format!("emit TurnCompleted during repair: {e}")))?;
+        .map_err(TurnError::EventEmit)?;
     session
         .emit_live(
             None,
@@ -489,7 +491,7 @@ async fn repair_stale_background_tasks_for_state(
                 },
             )
             .await
-            .map_err(|e| TurnError::EventEmit(format!("emit stale background completion: {e}")))?;
+            .map_err(TurnError::EventEmit)?;
     }
     Ok(())
 }
@@ -517,7 +519,7 @@ async fn repair_stale_runs_for_state(
                 },
             )
             .await
-            .map_err(|e| TurnError::EventEmit(format!("emit stale child failure: {e}")))?;
+            .map_err(TurnError::EventEmit)?;
     }
     Ok(())
 }

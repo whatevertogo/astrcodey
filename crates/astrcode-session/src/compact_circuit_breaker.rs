@@ -83,6 +83,18 @@ impl CompactCircuitBreaker {
         self.half_open_attempt_in_flight = false;
     }
 
+    /// 记录一次自动压缩成功。
+    ///
+    /// 压缩成功后进入冷却期（Open 状态），防止短时间内重复压缩。
+    /// 这是避免"压缩后立即又触发压缩"的关键机制。
+    pub fn record_compact_success(&mut self) {
+        self.consecutive_llm_failures = 0;
+        self.state = CircuitState::Open {
+            until: Instant::now() + self.cooldown,
+        };
+        self.half_open_attempt_in_flight = false;
+    }
+
     /// 半开状态下是否允许新的试探调用。
     ///
     /// 如果已经有一次试探调用在进行中，则拒绝后续请求。
@@ -131,5 +143,63 @@ mod tests {
 
         breaker.record_success();
         assert!(breaker.should_attempt());
+    }
+
+    #[test]
+    fn record_compact_success_enters_cooldown() {
+        let mut breaker = CompactCircuitBreaker::new(2, Duration::from_millis(50));
+
+        // 初始状态允许压缩
+        assert!(breaker.should_attempt());
+
+        // 压缩成功后进入冷却期
+        breaker.record_compact_success();
+        assert!(!breaker.should_attempt());
+
+        // 冷却期内仍然不允许
+        thread::sleep(Duration::from_millis(20));
+        assert!(!breaker.should_attempt());
+
+        // 冷却期结束后允许（HalfOpen 状态）
+        thread::sleep(Duration::from_millis(40));
+        assert!(breaker.should_attempt());
+
+        // HalfOpen 状态只允许一次
+        assert!(!breaker.should_attempt());
+
+        // 成功后恢复为 Closed
+        breaker.record_success();
+        assert!(breaker.should_attempt());
+    }
+
+    #[test]
+    fn record_compact_success_resets_failure_count() {
+        let mut breaker = CompactCircuitBreaker::new(2, Duration::from_millis(50));
+
+        // 累积失败次数
+        breaker.record_llm_failure();
+        breaker.record_llm_failure();
+        assert!(!breaker.should_attempt()); // 断路器已打开
+
+        // 压缩成功后重置失败计数并进入冷却期
+        breaker.record_compact_success();
+
+        // 等待冷却期结束
+        thread::sleep(Duration::from_millis(60));
+
+        // 现在应该允许尝试（HalfOpen 状态）
+        assert!(breaker.should_attempt());
+        // HalfOpen 状态只允许一次尝试
+        assert!(!breaker.should_attempt());
+
+        // 成功后恢复为 Closed
+        breaker.record_success();
+        assert!(breaker.should_attempt());
+
+        // 再次失败不会立即打开断路器（因为计数已重置）
+        breaker.record_llm_failure();
+        assert!(breaker.should_attempt());
+        breaker.record_llm_failure();
+        assert!(!breaker.should_attempt()); // 现在才打开
     }
 }

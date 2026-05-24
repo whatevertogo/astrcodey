@@ -21,9 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::ModelSelection,
     llm::LlmProvider,
-    storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
+    storage::{EventReader, EventStore},
     tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
-    types::SessionId,
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
@@ -252,7 +251,10 @@ impl ExtensionTasks {
 /// 只注入给 trusted bundled extension，不暴露给 untrusted source（disk/wasm）。
 pub struct ExtensionHostServices {
     /// 可信内置扩展可用的只读会话投影数据源。
-    pub session_read: Arc<dyn SessionReadSource>,
+    ///
+    /// 由 `Arc<dyn EventStore>` 通过 trait upcasting 转换而来
+    /// （Rust 1.86+，`EventStore: EventReader` 建立 supertrait 关系）。
+    pub session_read: Arc<dyn EventReader>,
     /// 小模型 provider，用于记忆提取。
     pub small_llm: Option<Arc<dyn LlmProvider>>,
 }
@@ -260,58 +262,11 @@ pub struct ExtensionHostServices {
 impl ExtensionHostServices {
     pub fn new(event_store: Arc<dyn EventStore>, small_llm: Option<Arc<dyn LlmProvider>>) -> Self {
         Self {
-            session_read: session_read_from_event_store(event_store),
+            // Arc<dyn EventStore> → Arc<dyn EventReader> 由 trait upcasting 自动完成。
+            session_read: event_store,
             small_llm,
         }
     }
-}
-
-/// 供 trusted extension 使用的最小会话读取能力。
-#[async_trait::async_trait]
-pub trait SessionReadSource: Send + Sync {
-    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
-    async fn read_session_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError>;
-}
-
-#[async_trait::async_trait]
-impl SessionReadSource for dyn EventStore {
-    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-        EventStore::list_session_summaries(self).await
-    }
-
-    async fn read_session_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        EventStore::session_read_model(self, session_id).await
-    }
-}
-
-/// 将 `Arc<dyn EventStore>` 包装为 `Arc<dyn SessionReadSource>`。
-///
-/// Rust stable 不支持 `Arc<dyn EventStore> → Arc<dyn SessionReadSource>` 的
-/// trait upcasting，因此需要一个薄的 newtype wrapper。
-fn session_read_from_event_store(event_store: Arc<dyn EventStore>) -> Arc<dyn SessionReadSource> {
-    struct Wrapper(Arc<dyn EventStore>);
-
-    #[async_trait::async_trait]
-    impl SessionReadSource for Wrapper {
-        async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-            self.0.list_session_summaries().await
-        }
-
-        async fn read_session_model(
-            &self,
-            session_id: &SessionId,
-        ) -> Result<SessionReadModel, StorageError> {
-            self.0.session_read_model(session_id).await
-        }
-    }
-
-    Arc::new(Wrapper(event_store))
 }
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────

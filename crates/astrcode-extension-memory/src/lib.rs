@@ -17,9 +17,10 @@ use std::sync::Arc;
 use astrcode_core::{
     extension::{
         Extension, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionTasks, HookMode,
-        Registrar, SessionReadSource, StopReason,
+        Registrar, StopReason,
     },
     llm::LlmProvider,
+    storage::EventReader,
 };
 use handlers::{
     MemoryCommandHandler, MemoryDeleteHandler, MemoryRecallHandler, MemorySaveHandler,
@@ -34,7 +35,7 @@ use store::MemoryStorePool;
 /// `small_llm` 为 None 时返回错误，提示用户配置小模型。
 pub fn extension(
     small_llm: Option<Arc<dyn LlmProvider>>,
-    session_read: Arc<dyn SessionReadSource>,
+    session_read: Arc<dyn EventReader>,
 ) -> Result<Arc<dyn Extension>, ExtensionError> {
     let small_llm = small_llm.ok_or_else(|| {
         ExtensionError::Internal(
@@ -57,7 +58,7 @@ pub fn extension(
 struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
     small_llm: Arc<dyn LlmProvider>,
-    session_read: Arc<dyn SessionReadSource>,
+    session_read: Arc<dyn EventReader>,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
     tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }

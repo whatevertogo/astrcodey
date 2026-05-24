@@ -33,12 +33,12 @@ impl CommandHandler {
             .session_manager
             .open(sid.clone())
             .await
-            .map_err(|e| HandlerError::SessionNotFound(format!("{e}")))?;
+            .map_err(|e| HandlerError::SessionNotFound(e.to_string()))?;
 
         let state = session
             .read_model()
             .await
-            .map_err(|e| HandlerError::Other(format!("read session: {e}")))?;
+            .map_err(HandlerError::Session)?;
 
         if state.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");
@@ -58,11 +58,11 @@ impl CommandHandler {
         let rx = llm
             .generate(messages, vec![])
             .await
-            .map_err(|e| HandlerError::Other(format!("recap LLM call: {e}")))?;
+            .map_err(HandlerError::Llm)?;
 
         let text = collect_llm_text(rx)
             .await
-            .map_err(|e| HandlerError::Other(format!("recap LLM stream: {e}")))?;
+            .map_err(HandlerError::InvalidRequest)?;
 
         // 持久化
         session
@@ -74,7 +74,7 @@ impl CommandHandler {
                 },
             )
             .await
-            .map_err(|e| HandlerError::Other(format!("persist recap: {e}")))?;
+            .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
         let lifecycle_ctx = astrcode_core::extension::LifecycleContext {

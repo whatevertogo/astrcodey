@@ -238,7 +238,7 @@ mod tests {
         config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
         event::Event,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
+        storage::{EventReader, EventStore, SessionReadModel, SessionSummary, StorageError},
         tool::{ToolDefinition, ToolResult},
         types::Cursor,
     };
@@ -280,35 +280,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl EventStore for FailToolCompletionStore {
-        async fn create_session(
-            &self,
-            session_id: &SessionId,
-            working_dir: &str,
-            model_id: &str,
-            parent_session_id: Option<&SessionId>,
-            tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
-            source_extension: Option<&str>,
-        ) -> Result<Event, StorageError> {
-            self.inner
-                .create_session(
-                    session_id,
-                    working_dir,
-                    model_id,
-                    parent_session_id,
-                    tool_policy,
-                    source_extension,
-                )
-                .await
-        }
-
-        async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
-            if matches!(event.payload, EventPayload::ToolCallCompleted { .. }) {
-                return Err(StorageError::Unsupported("forced append failure".into()));
-            }
-            self.inner.append_event(event).await
-        }
-
+    impl EventReader for FailToolCompletionStore {
         async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
             self.inner.replay_events(session_id).await
         }
@@ -346,16 +318,66 @@ mod tests {
             self.inner.replay_from(session_id, cursor).await
         }
 
+        async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+            self.inner.list_sessions().await
+        }
+
+        async fn read_tool_result_artifact_by_path(
+            &self,
+            session_id: &SessionId,
+            path: &str,
+            char_offset: usize,
+            max_chars: usize,
+        ) -> Result<astrcode_core::storage::ToolResultArtifactSlice, StorageError> {
+            self.inner
+                .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+                .await
+        }
+
+        async fn session_store_dir(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<Option<std::path::PathBuf>, StorageError> {
+            self.inner.session_store_dir(session_id).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventStore for FailToolCompletionStore {
+        async fn create_session(
+            &self,
+            session_id: &SessionId,
+            working_dir: &str,
+            model_id: &str,
+            parent_session_id: Option<&SessionId>,
+            tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
+            source_extension: Option<&str>,
+        ) -> Result<Event, StorageError> {
+            self.inner
+                .create_session(
+                    session_id,
+                    working_dir,
+                    model_id,
+                    parent_session_id,
+                    tool_policy,
+                    source_extension,
+                )
+                .await
+        }
+
+        async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
+            if matches!(event.payload, EventPayload::ToolCallCompleted { .. }) {
+                return Err(StorageError::Unsupported("forced append failure".into()));
+            }
+            self.inner.append_event(event).await
+        }
+
         async fn checkpoint(
             &self,
             session_id: &SessionId,
             cursor: &Cursor,
         ) -> Result<(), StorageError> {
             self.inner.checkpoint(session_id, cursor).await
-        }
-
-        async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-            self.inner.list_sessions().await
         }
 
         async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {

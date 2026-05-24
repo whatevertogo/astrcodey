@@ -66,12 +66,12 @@ impl CommandHandler {
             .session_manager
             .open(sid.clone())
             .await
-            .map_err(|e| HandlerError::Other(format!("open session {sid}: {e}")))?;
+            .map_err(HandlerError::SessionManager)?;
 
         let state = session
             .read_model()
             .await
-            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
+            .map_err(HandlerError::Session)?;
         // Session runtime 已持有当前 session 的工具表快照；空时按需刷新。
         let tool_registry = {
             let current = session.runtime().tool_registry();
@@ -95,7 +95,7 @@ impl CommandHandler {
             match collect_compact_instructions(&self.runtime.extension_runner, hook_ctx).await {
                 Ok(instructions) => instructions,
                 Err(error) => {
-                    return Err(HandlerError::Other(format!("Compaction failed: {error}")));
+                    return Err(HandlerError::Extension(error));
                 },
             };
 
@@ -111,9 +111,7 @@ impl CommandHandler {
         {
             Ok(path) => path,
             Err(error) => {
-                return Err(HandlerError::Other(format!(
-                    "Compaction failed: could not write transcript snapshot: {error}"
-                )));
+                return Err(HandlerError::Session(error));
             },
         };
         let render_options = CompactSummaryRenderOptions {
@@ -157,11 +155,11 @@ impl CommandHandler {
         if let Err(error) =
             dispatch_post_compact(&self.runtime.extension_runner, hook_ctx, &compaction).await
         {
-            return Err(HandlerError::Other(format!("Compaction failed: {error}")));
+            return Err(HandlerError::Extension(error));
         }
 
         let system_prompt = state.system_prompt.clone().ok_or_else(|| {
-            HandlerError::Other("Cannot compact session without system prompt".into())
+            HandlerError::InvalidRequest("Cannot compact session without system prompt".into())
         })?;
 
         // Manual compact has no agent loop, so emit CompactionStarted here.
@@ -174,7 +172,7 @@ impl CommandHandler {
         let base_event_seq = session
             .latest_cursor()
             .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?
+            .map_err(HandlerError::Session)?
             .and_then(|c| match c.parse::<u64>() {
                 Ok(seq) => Some(seq),
                 Err(_) => {
@@ -194,7 +192,10 @@ impl CommandHandler {
             CompactStrategy::Manual { keep_recent_turns },
         )
         .await
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        .map_err(|e| match e {
+            astrcode_session::compact::PersistCompactError::Session(e) => HandlerError::Session(e),
+            other => HandlerError::InvalidRequest(other.to_string()),
+        })?;
 
         // persist_compact_result 已通过 session.append_event → runtime.fanout 发送事件，
         // 无需在此再次 broadcast_event（避免双发）
@@ -212,7 +213,7 @@ impl CommandHandler {
         let state = session
             .read_model()
             .await
-            .map_err(|e| HandlerError::Other(format!("read session {sid}: {e}")))?;
+            .map_err(HandlerError::Session)?;
         self.event_bus
             .send_notification(ClientNotification::SessionResumed {
                 session_id: sid.clone().into_string(),

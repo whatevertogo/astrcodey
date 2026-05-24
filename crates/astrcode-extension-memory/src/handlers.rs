@@ -6,9 +6,10 @@ use astrcode_core::{
     extension::{
         CommandContext, ExtensionCommandResult, ExtensionError, ExtensionTasks, HookResult,
         LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, SessionReadSource, SlashCommand, ToolHandler,
+        PromptContributions, SlashCommand, ToolHandler,
     },
     llm::LlmProvider,
+    storage::EventReader,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use parking_lot::Mutex;
@@ -381,7 +382,7 @@ impl MemoryPipelineCoordinator {
 
 pub(crate) struct MemorySessionStartHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub session_read: Arc<dyn SessionReadSource>,
+    pub session_read: Arc<dyn EventReader>,
     pub small_llm: Arc<dyn LlmProvider>,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
@@ -417,8 +418,8 @@ impl LifecycleHandler for MemorySessionStartHandler {
             loop {
                 let run = crate::pipeline::run(
                     &store,
-                    session_read.as_ref(),
-                    small_llm.as_ref(),
+                    Arc::clone(&session_read),
+                    &*small_llm,
                     &current_session_id,
                 );
 

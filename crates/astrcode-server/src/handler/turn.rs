@@ -37,16 +37,19 @@ impl CommandHandler {
                 crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
                     HandlerError::SessionNotFound(msg)
                 },
-                crate::turn_scheduler::TurnError::Session(msg) => {
-                    HandlerError::Other(format!("session error: {msg}"))
+                crate::turn_scheduler::TurnError::Session(e) => {
+                    HandlerError::Session(e)
                 },
-                crate::turn_scheduler::TurnError::EventEmit(msg) => {
-                    HandlerError::Other(format!("event emit error: {msg}"))
+                crate::turn_scheduler::TurnError::Turn(e) => {
+                    HandlerError::Turn(e)
+                },
+                crate::turn_scheduler::TurnError::EventEmit(e) => {
+                    HandlerError::Session(e)
                 },
                 crate::turn_scheduler::TurnError::SessionManager(e) => {
                     HandlerError::SessionManager(e)
                 },
-                other => HandlerError::Other(other.to_string()),
+                other => HandlerError::InvalidRequest(other.to_string()),
             })?;
 
         let scheduler = Arc::clone(&self.scheduler);
@@ -79,7 +82,7 @@ impl CommandHandler {
                 self.send_error(40400, "No active turn");
                 Err(HandlerError::NoActiveTurn)
             },
-            Err(e) => Err(HandlerError::Other(e.to_string())),
+            Err(e) => Err(HandlerError::InvalidRequest(e.to_string())),
         }
     }
 
@@ -108,13 +111,16 @@ impl CommandHandler {
                 crate::turn_scheduler::TurnError::SessionManager(err) => {
                     HandlerError::SessionManager(err)
                 },
-                crate::turn_scheduler::TurnError::Session(msg) => {
-                    HandlerError::Other(format!("session error: {msg}"))
+                crate::turn_scheduler::TurnError::Session(e) => {
+                    HandlerError::Session(e)
                 },
-                crate::turn_scheduler::TurnError::EventEmit(msg) => {
-                    HandlerError::Other(format!("event emit error: {msg}"))
+                crate::turn_scheduler::TurnError::Turn(e) => {
+                    HandlerError::Turn(e)
                 },
-                other => HandlerError::Other(other.to_string()),
+                crate::turn_scheduler::TurnError::EventEmit(e) => {
+                    HandlerError::Session(e)
+                },
+                other => HandlerError::InvalidRequest(other.to_string()),
             })
     }
 
