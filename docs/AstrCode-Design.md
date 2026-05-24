@@ -1,6 +1,6 @@
 # AstrCode 设计概述
 
-Rust 实现的 AI coding agent，~60k 行（Rust ~55k + TypeScript ~4.8k），21 crates，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~73k 行（Rust ~66k + TypeScript ~6.7k），21 crates，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -235,10 +235,10 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 | 指标 | 数值 |
 |------|------|
-| Rust 代码行数 | ~55k |
-| TypeScript/TSX 代码行数 | ~4.8k |
+| Rust 代码行数 | ~66k（含测试） |
+| TypeScript/TSX 代码行数 | ~6.7k |
 | Crates 数量 | 21（含 Tauri shell） |
-| Rust 源文件数量 | 203 |
+| Rust 源文件数量 | 217 |
 | 内置工具数量 | 9 |
 | 扩展 crate 数量 | 7 |
 
