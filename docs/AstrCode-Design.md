@@ -198,7 +198,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ---
 
-## 7. Eval 框架
+## 7. Eval 框架（未实现复杂eval tasks）
 
 `astrcode-eval` 提供自动化评测能力，用于量化 Agent 在不同任务上的表现：
 
