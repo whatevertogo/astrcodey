@@ -126,7 +126,7 @@ pub async fn run_http_server(
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
-    // 先创建 socket 并设置 SO_REUSEADDR，避免异常退出后端口被占用
+    // 设置 SO_REUSEADDR 避免异常退出后端口被占用
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,
@@ -135,10 +135,11 @@ pub async fn run_http_server(
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
-    socket.set_nodelay(true)?;
     socket.bind(&addr.into())?;
-    socket.listen(1024)?;
-    let listener = tokio::net::TcpListener::from_std(socket.into())?;
+    socket.listen(128)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    std_listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
     let local_addr = listener.local_addr()?;
     let local_port = local_addr.port();
     write_run_info(local_port, &auth_token);
