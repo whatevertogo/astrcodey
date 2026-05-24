@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-extension-memory"
-version = "0.1.4"
+version = "0.1.7"
 edition = "2021"
 description = "Codex-style markdown memory extension"
 

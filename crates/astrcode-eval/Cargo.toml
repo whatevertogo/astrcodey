@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-eval"
-version = "0.1.4"
+version = "0.1.7"
 edition = "2021"
 description = "Agent task evaluation framework: benchmark runner, scoring judge, metrics collection, and report generation"
 
