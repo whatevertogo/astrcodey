@@ -81,6 +81,16 @@ pub(in crate::http) async fn set_enabled(
         );
     }
 
+    // 通知扩展配置已变更
+    let config_errors = state
+        .runtime
+        .config_manager
+        .notify_extensions_config_changed()
+        .await;
+    for error in &config_errors {
+        tracing::warn!("extension config notify error: {error}");
+    }
+
     let reload_errors = state.runtime.reload_extensions().await;
     state
         .event_bus

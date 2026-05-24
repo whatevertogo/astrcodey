@@ -41,6 +41,8 @@ pub trait Extension: Send + Sync {
     fn register(&self, _reg: &mut Registrar) {}
 
     /// 扩展进入运行态。默认 no-op。
+    ///
+    /// 在此处通过 `ctx.config.deserialize::<T>()` 读取用户配置。
     async fn start(&self, _ctx: ExtensionCtx) -> Result<(), ExtensionError> {
         Ok(())
     }
@@ -49,17 +51,63 @@ pub trait Extension: Send + Sync {
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
         Ok(())
     }
+
+    /// 扩展配置发生热更新时调用。
+    ///
+    /// 当用户修改 `config.json` 中的 `extensions.<id>` 并触发重载时，
+    /// 运行器会调用此方法通知扩展更新内部状态。
+    /// 默认 no-op（兼容不支持热更新的扩展）。
+    async fn on_config_changed(&self, _config: ExtensionConfig) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+}
+
+/// 扩展专有配置的包装类型。
+///
+/// 包装用户 `config.json` 中 `extensions.<id>` 下的任意 JSON，
+/// 扩展在 `start()` 或 `on_config_changed()` 时通过 `deserialize::<T>()` 获取。
+#[derive(Clone, Debug, Default)]
+pub struct ExtensionConfig(pub serde_json::Value);
+
+impl ExtensionConfig {
+    /// 将配置反序列化为具体类型。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// #[derive(Deserialize)]
+    /// struct MyConfig { timeout: u64, retry: bool }
+    /// let cfg: MyConfig = ctx.config.deserialize()?;
+    /// ```
+    pub fn deserialize<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_value(self.0.clone())
+    }
+
+    /// 如果配置为空对象 `{}` 则返回 `true`。
+    pub fn is_empty(&self) -> bool {
+        self.0.as_object().is_some_and(|o| o.is_empty())
+    }
 }
 
 /// 插件运行态上下文。
 #[derive(Clone)]
 pub struct ExtensionCtx {
     tasks: ExtensionTasks,
+    /// 扩展专有配置。用户配置文件中 `extensions.<id>` 对应的 JSON 值。
+    /// 若用户未配置该扩展，则为空对象 `{}`。
+    pub config: ExtensionConfig,
 }
 
 impl ExtensionCtx {
     pub fn new(tasks: ExtensionTasks) -> Self {
-        Self { tasks }
+        Self {
+            tasks,
+            config: ExtensionConfig::default(),
+        }
+    }
+
+    pub fn with_config(tasks: ExtensionTasks, config: ExtensionConfig) -> Self {
+        Self { tasks, config }
     }
 
     pub fn tasks(&self) -> &ExtensionTasks {

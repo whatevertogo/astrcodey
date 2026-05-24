@@ -6,7 +6,7 @@
 //! - Advisory: 结果仅记录日志，不强制执行
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, RwLock as StdRwLock},
     time::Duration,
 };
@@ -41,12 +41,18 @@ pub struct ExtensionRunner {
     extension_tasks: RwLock<HashMap<String, ExtensionTasks>>,
     /// 钩子执行超时时间
     timeout: Duration,
+    /// 扩展专有配置映射。key 为扩展 id，value 为用户配置的 JSON。
+    /// 通过 `update_extension_configs()` 替换，支持热更新。
+    /// 使用 parking_lot::RwLock 以便在同步上下文中替换（不需要 async）。
+    extension_configs: parking_lot::RwLock<BTreeMap<String, serde_json::Value>>,
 }
 
 /// 从 `register()` 调用中收集的扩展能力记录。
 struct ExtensionRecord {
     id: String,
     reg: Registrar,
+    /// 注册时的配置快照，用于 diff 检测热更新。
+    config: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +368,7 @@ impl ExtensionRunner {
             session_ops: Arc::new(StdRwLock::new(None)),
             extension_tasks: RwLock::new(HashMap::new()),
             timeout,
+            extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -386,7 +393,17 @@ impl ExtensionRunner {
         }
 
         let tasks = ExtensionTasks::new(id.clone());
-        ext.start(ExtensionCtx::new(tasks.clone())).await?;
+
+        // 查找该扩展的专有配置，回退到空对象
+        let ext_config = self
+            .extension_configs
+            .read()
+            .get(&id)
+            .cloned()
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+        let ctx = ExtensionCtx::with_config(tasks.clone(), ExtensionConfig(ext_config.clone()));
+        ext.start(ctx).await?;
 
         self.extensions.write().await.push(ext);
         self.extension_tasks.write().await.insert(id.clone(), tasks);
@@ -396,6 +413,7 @@ impl ExtensionRunner {
             records.push(ExtensionRecord {
                 id: id.clone(),
                 reg,
+                config: ext_config,
             });
             log_handler_dispatch_order(&records);
             let new_index = Arc::new(build_handler_index(&records));
@@ -481,6 +499,57 @@ impl ExtensionRunner {
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
     pub fn session_ops_ref(&self) -> Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>> {
         Arc::clone(&self.session_ops)
+    }
+
+    /// 原子替换所有扩展的专有配置映射。
+    ///
+    /// 新注册的扩展将使用新配置；已注册的扩展需调用
+    /// [`notify_config_changed`] 来更新运行态实例。
+    pub fn update_extension_configs(&self, configs: BTreeMap<String, serde_json::Value>) {
+        *self.extension_configs.write() = configs;
+    }
+
+    /// 通知所有已注册扩展其配置已变更。
+    ///
+    /// 将当前 `extension_configs` 与各 `ExtensionRecord` 中保存的快照做 diff，
+    /// 仅在有变化时调用 `ext.on_config_changed()`。
+    /// 返回每个扩展的 notify 结果（仅记录错误，不中断）。
+    pub async fn notify_config_changed(&self) -> Vec<String> {
+        let current_configs = self.extension_configs.read().clone();
+        let records = self.records.read().await;
+        let mut errors = Vec::new();
+
+        for record in records.iter() {
+            let new_config = current_configs
+                .get(&record.id)
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            // 只在配置真正变化时通知
+            if record.config == new_config {
+                continue;
+            }
+
+            // 在 extension 列表中查找对应的 Arc
+            let ext = {
+                let extensions = self.extensions.read().await;
+                extensions
+                    .iter()
+                    .find(|e| e.id() == record.id)
+                    .map(Arc::clone)
+            };
+
+            if let Some(ext) = ext {
+                if let Err(e) = ext
+                    .on_config_changed(ExtensionConfig(new_config.clone()))
+                    .await
+                {
+                    errors.push(format!("config changed handler failed for {}: {e}", record.id));
+                }
+            }
+        }
+
+        errors
     }
 
     pub async fn count(&self) -> usize {

@@ -5,6 +5,8 @@
 //! - [`resolve_api_key()`]：解析 API 密钥（支持环境变量引用）
 //! - [`merge_overlay()`]：合并项目级覆盖配置
 
+use std::collections::BTreeMap;
+
 use crate::config::{effective::*, raw::*};
 
 /// 配置解析过程中可能发生的错误。
@@ -186,6 +188,7 @@ impl Config {
             },
             extensions: ExtensionSettings {
                 extension_states: self.runtime.extension_states.unwrap_or_default(),
+                extension_configs: self.extensions.unwrap_or_default(),
             },
         })
     }
@@ -239,8 +242,12 @@ pub fn merge_overlay(mut base: Config, overlay: ConfigOverlay) -> Config {
     if let Some(m) = overlay.active_small_model {
         base.active_small_model = Some(m);
     }
-    if let Some(profiles) = overlay.profiles {
-        base.profiles = profiles;
+    if let Some(extensions) = overlay.extensions {
+        // 同 key 覆盖，异 key 保留
+        let base_extensions = base.extensions.get_or_insert_with(BTreeMap::new);
+        for (k, v) in extensions {
+            base_extensions.insert(k, v);
+        }
     }
     base
 }

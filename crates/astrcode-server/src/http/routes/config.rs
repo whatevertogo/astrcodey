@@ -87,6 +87,16 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
             format!("Reloaded config is invalid: {error}"),
         );
     }
+    // 通知扩展配置已变更（针对已运行扩展的配置热更新）
+    let config_errors = state
+        .runtime
+        .config_manager
+        .notify_extensions_config_changed()
+        .await;
+    for error in &config_errors {
+        tracing::warn!("extension config notify error: {error}");
+    }
+    // 重载扩展（处理启用/禁用状态变化）
     let reload_errors = state.runtime.reload_extensions().await;
     state
         .event_bus
@@ -149,6 +159,16 @@ pub(in crate::http) async fn update_active_selection(
         .apply_raw_config_and_rebuild(candidate)
     {
         tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
+    }
+
+    // 通知扩展配置已变更（如果有扩展配置变化）
+    let config_errors = state
+        .runtime
+        .config_manager
+        .notify_extensions_config_changed()
+        .await;
+    for error in &config_errors {
+        tracing::warn!("extension config notify error: {error}");
     }
 
     Json(UpdateActiveSelectionResponseDto {

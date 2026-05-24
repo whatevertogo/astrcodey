@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::PromptCacheRetention;
 
+/// 扩展配置的原始 JSON 值类型。
+/// 用户可在 `config.json` 的 `extensions.<id>` 下写入任意 JSON，
+/// 由扩展在 `start()` 时自行反序列化为具体类型。
+pub type ExtensionRawConfig = serde_json::Value;
+
 // ─── 顶层 Config ────────────────────────────────────────────────────────
 
 /// 顶层配置结构，对应配置文件的完整 JSON。
@@ -36,6 +41,17 @@ pub struct Config {
     /// 可用的 LLM 配置文件列表。
     #[serde(default = "super::defaults::default_profiles")]
     pub profiles: Vec<Profile>,
+    /// 扩展专有配置。key 为扩展 id（如 `"astrcode.mcp"`），value 为任意 JSON。
+    ///
+    /// 通过此字段，用户可在配置文件中统一管理各扩展的参数，无需扩展各自从额外文件读取。
+    /// 扩展在 `start(ctx)` 时通过 `ctx.config.deserialize::<T>()` 获取。
+    ///
+    /// 例：
+    /// ```json
+    /// { "astrcode.memory": { "maxContexts": 10, "autoExtract": true } }
+    /// ```
+    #[serde(default)]
+    pub extensions: Option<BTreeMap<String, ExtensionRawConfig>>,
 }
 
 impl Default for Config {
@@ -48,6 +64,7 @@ impl Default for Config {
             active_small_model: None,
             runtime: RuntimeSection::default(),
             profiles: super::defaults::default_profiles(),
+            extensions: None,
         }
     }
 }
@@ -193,6 +210,9 @@ pub struct ConfigOverlay {
     pub active_small_model: Option<String>,
     /// 覆盖配置文件列表。
     pub profiles: Option<Vec<Profile>>,
+    /// 覆盖扩展专有配置。同 key 覆盖，异 key 保留。
+    #[serde(default)]
+    pub extensions: Option<BTreeMap<String, ExtensionRawConfig>>,
 }
 
 // ─── Selection Types ─────────────────────────────────────────────────────

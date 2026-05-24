@@ -165,4 +165,9 @@ impl Default for WasmSettings {
 pub struct ExtensionSettings {
     /// 扩展启停覆盖。key 为扩展 id，value=false 表示禁用。
     pub extension_states: BTreeMap<String, bool>,
+    /// 扩展专有配置。key 为扩展 id，value 为任意 JSON。
+    ///
+    /// 解析自 `Config::extensions`，所有默认值已填充。
+    /// 扩展在 `start()` 时通过 `ExtensionCtx::config` 获取本段。
+    pub extension_configs: BTreeMap<String, serde_json::Value>,
 }

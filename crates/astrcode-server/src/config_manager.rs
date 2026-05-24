@@ -15,6 +15,7 @@ use astrcode_core::{
     config::{Config, ConfigStore, EffectiveConfig, LlmSettings},
     llm::{LlmClientConfig, LlmProvider},
 };
+use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::SessionRuntimeServices;
 use parking_lot::{RwLock, RwLockReadGuard};
 
@@ -25,6 +26,8 @@ pub struct ConfigManager {
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
     capabilities: Arc<SessionRuntimeServices>,
+    /// 扩展运行器，用于在配置变更时推送扩展配置热更新。
+    extension_runner: Arc<ExtensionRunner>,
 }
 
 fn build_provider_from_settings(settings: &LlmSettings) -> Arc<dyn LlmProvider> {
@@ -66,7 +69,7 @@ impl ConfigManager {
         let capabilities = Arc::new(SessionRuntimeServices::new(
             build_provider_from_settings(&effective.llm),
             build_provider_from_settings(&effective.small_llm),
-            extension_runner,
+            extension_runner.clone(),
             context_assembler,
             effective,
         ));
@@ -74,6 +77,7 @@ impl ConfigManager {
             config_store,
             raw_config: RwLock::new(raw_config),
             capabilities: Arc::clone(&capabilities),
+            extension_runner,
         };
         (manager, capabilities)
     }
@@ -84,10 +88,12 @@ impl ConfigManager {
         raw_config: Config,
         capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
+        let extension_runner = capabilities.extension_runner().clone();
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
             capabilities,
+            extension_runner,
         }
     }
 
@@ -139,6 +145,10 @@ impl ConfigManager {
         config: Config,
     ) -> Result<(), astrcode_core::config::ResolveError> {
         let new_effective = config.clone().into_effective()?;
+        let changed = {
+            let old_effective = self.read_effective();
+            old_effective.extensions.extension_configs != new_effective.extensions.extension_configs
+        };
         {
             let mut guard = self.raw_config.write();
             *guard = config;
@@ -147,6 +157,27 @@ impl ConfigManager {
         if let Err(e) = self.rebuild_provider_from_effective() {
             tracing::warn!("provider rebuild after config update failed: {e}");
         }
+        if changed {
+            // 原子替换运行器中的配置映射（同步），后续由调用方异步通知扩展
+            let effective = self.read_effective();
+            let configs: std::collections::BTreeMap<_, _> = effective
+                .extensions
+                .extension_configs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            self.extension_runner.update_extension_configs(configs);
+        }
         Ok(())
+    }
+
+    /// 在配置热更新后，异步通知所有受影响的扩展。
+    ///
+    /// 应在 `apply_raw_config_and_rebuild` 之后调用（通常在 HTTP handler 的 async 上下文中）。
+    pub async fn notify_extensions_config_changed(&self) -> Vec<String> {
+        if self.extension_runner.count().await == 0 {
+            return Vec::new();
+        }
+        self.extension_runner.notify_config_changed().await
     }
 }

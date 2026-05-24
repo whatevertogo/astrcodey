@@ -3,7 +3,7 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
@@ -302,6 +302,16 @@ async fn load_extensions_into_runner(
     host_services: Option<Arc<ExtensionHostServices>>,
 ) -> Vec<String> {
     let effective = capabilities.read_effective();
+
+    // 先将扩展配置注入运行器，这样 register 时可查到
+    let configs: BTreeMap<_, _> = effective
+        .extensions
+        .extension_configs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    runner.update_extension_configs(configs);
+
     let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
         effective.extensions.extension_states.clone(),
         host_services,
