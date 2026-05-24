@@ -28,9 +28,11 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: ("Switch agent mode: \"code\" (default, full execution) or \"plan\" \
                        (read-only planning).\n\nEnter plan mode for: new features, ambiguous \
-                       scope, or multi-step changes.\n\nSet `requireApproval: true` when the \
-                       user explicitly asked for a plan. The plan will then require user review \
-                       before implementation. Default: false (proceed directly after planning).")
+                       scope, or multi-step changes.Must switch plan mode when user asks for a \
+                       plan\n\n
+                       Set `requireApproval: true` when the user explicitly asked for a plan. The \
+                       plan will then require user review before implementation. Default: false \
+                       (proceed directly after planning).")
             .into(),
         parameters: json!({
             "type": "object",
