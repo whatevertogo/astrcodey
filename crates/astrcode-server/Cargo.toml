@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-server"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Backend server: session manager, agent loop, JSON-RPC handler, config service"
 

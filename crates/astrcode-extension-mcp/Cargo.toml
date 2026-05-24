@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-extension-mcp"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 description = "Stdio MCP tool extension"
 
