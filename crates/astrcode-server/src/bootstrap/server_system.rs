@@ -46,6 +46,14 @@ pub fn spawn_server_system(
         Arc::clone(&registry),
     ));
 
+    // 绑定 scheduler 到 event_bus，用于后台任务完成后触发继续处理
+    // 使用 tokio::spawn 是因为 bind_scheduler 是 async 的
+    let scheduler_for_bind = Arc::clone(&scheduler);
+    let event_bus_for_bind = Arc::clone(&event_bus);
+    tokio::spawn(async move {
+        event_bus_for_bind.bind_scheduler(scheduler_for_bind).await;
+    });
+
     // 绑定子会话操作能力到扩展运行时
     runtime
         .extension_runner

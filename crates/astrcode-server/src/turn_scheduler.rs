@@ -118,6 +118,25 @@ impl TurnScheduler {
         }
     }
 
+    /// 通知后台任务已完成，触发 agent 继续处理。
+    ///
+    /// ## 设计说明
+    /// 此方法语义上专门用于"后台任务完成"场景，内部复用 `submit_or_inject` 的
+    /// 路由逻辑：如果 turn 活跃则 inject，否则启动新 turn。
+    ///
+    /// 使用 XML 风格的标记 `<runtime_event type="background_completed" source="...">`
+    /// 让 LLM 区分这是系统通知而非真实用户输入，同时便于前端解析和过滤展示。
+    ///
+    /// ## 调用时机
+    /// 应在 `BackgroundTaskCompleted` 事件发送后调用，由外部事件处理器触发。
+    pub async fn notify_completion(&self, session_id: SessionId) -> Result<SubmitOutcome, TurnError> {
+        // XML 格式标记，携带事件类型和来源信息
+        // - type: 事件类型，固定为 "background_completed"
+        // TODO :source: 来源标识，未来可扩展（如 "compact" 表示 compact 触发）
+        const MARKER: &str = r#"<system type="background_completed">"#;
+        self.submit_or_inject(session_id, MARKER.to_string()).await
+    }
+
     /// 中止活跃 turn。
     ///
     /// 1. 从 registry abort + remove

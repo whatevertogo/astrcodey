@@ -24,6 +24,8 @@ use astrcode_session::Session;
 use astrcode_support::event_fanout::EventFanout;
 use parking_lot::Mutex;
 
+use crate::turn_scheduler::TurnScheduler;
+
 /// Streaming 消息的瞬时快照，供 HTTP 层构建重连响应。
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -41,6 +43,9 @@ pub struct ServerEventBus {
     /// per-session 的 streaming 状态，由 forwarder 从 live 事件流维护。
     /// 外层 Mutex 保护 HashMap 结构；内层 Arc<Mutex> 让 forwarder 无需竞争整个 map。
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
+    /// TurnScheduler 引用，用于后台任务完成后触发继续处理。
+    /// 使用 OnceCell 避免构造时的循环依赖问题。
+    scheduler: tokio::sync::OnceCell<Arc<TurnScheduler>>,
 }
 
 impl ServerEventBus {
@@ -49,7 +54,14 @@ impl ServerEventBus {
             tx,
             attached: Mutex::new(HashSet::new()),
             streaming: Mutex::new(HashMap::new()),
+            scheduler: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// 绑定 TurnScheduler，用于后台任务完成后触发继续处理。
+    /// 此方法应在 Server 构造完成后调用，解决构造时的循环依赖问题。
+    pub async fn bind_scheduler(&self, scheduler: Arc<TurnScheduler>) {
+        let _ = self.scheduler.set(scheduler);
     }
 
     /// 返回内部 fan-out 通道的引用。
@@ -68,6 +80,12 @@ impl ServerEventBus {
     /// 创建一个长生命周期的 forwarder task，session 的 sender drop
     /// 时 task 自然结束。Session 删除（registry 移除）后调用方应调 `detach`
     /// 释放 sid 占位，否则后续同 sid 重建的 session 不会被重新 attach。
+    ///
+    /// ## 后台任务处理
+    /// 当检测到 `BackgroundTaskCompleted` 事件时，会调用 TurnScheduler 的
+    /// `notify_completion` 方法，触发 agent 继续处理。注入的消息使用 XML 格式：
+    /// `<runtime_event type="background_completed" source="task">`，
+    /// 便于 LLM 识别和前端过滤展示。
     pub fn attach(&self, session: &Session) {
         let session_id = session.id().clone();
         if !self.attached.lock().insert(session_id.clone()) {
@@ -75,14 +93,28 @@ impl ServerEventBus {
         }
         let mut rx = session.subscribe();
         let tx = Arc::clone(&self.tx);
+        let scheduler = self.scheduler.get().cloned();
         let state = Arc::clone(
             self.streaming
                 .lock()
-                .entry(session_id)
+                .entry(session_id.clone())
                 .or_insert_with(|| Arc::new(StreamingState::new(None))),
         );
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                // 处理后台任务完成事件，触发继续处理
+                if matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. }) {
+                    if let Some(ref scheduler) = scheduler {
+                        if let Err(e) = scheduler.notify_completion(session_id.clone()).await {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %e,
+                                "failed to notify background completion"
+                            );
+                        }
+                    }
+                }
+                
                 update_streaming(&state, &event.payload);
                 tx.send(ClientNotification::Event(event));
             }
