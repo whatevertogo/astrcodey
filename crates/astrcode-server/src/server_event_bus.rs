@@ -83,9 +83,10 @@ impl ServerEventBus {
     ///
     /// ## 后台任务处理
     /// 当检测到 `BackgroundTaskCompleted` 事件时，会调用 TurnScheduler 的
-    /// `notify_completion` 方法，触发 agent 继续处理。注入的消息使用 XML 格式：
-    /// `<runtime_event type="background_completed" source="task">`，
-    /// 便于 LLM 识别和前端过滤展示。
+    /// `notify_step` 方法，在当前 turn 的下一步继续处理。
+    /// 
+    /// 当检测到 `TurnCompleted` 事件时，会调用 `on_turn_completed` 检查并处理
+    /// 队列中等待的 "下一 turn" 消息。
     pub fn attach(&self, session: &Session) {
         let session_id = session.id().clone();
         if !self.attached.lock().insert(session_id.clone()) {
@@ -105,13 +106,21 @@ impl ServerEventBus {
                 // 处理后台任务完成事件，触发继续处理
                 if matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. }) {
                     if let Some(ref scheduler) = scheduler {
-                        if let Err(e) = scheduler.notify_completion(session_id.clone()).await {
+                        // 使用 notify_step 路径：立即在当前 turn 下一步处理
+                        if let Err(e) = scheduler.notify_step(session_id.clone(), "task").await {
                             tracing::warn!(
                                 session_id = %session_id,
                                 error = %e,
-                                "failed to notify background completion"
+                                "failed to notify background completion (step path)"
                             );
                         }
+                    }
+                }
+                
+                // 处理 turn 完成事件，检查是否有队列中的待处理消息
+                if matches!(event.payload, EventPayload::TurnCompleted { .. }) {
+                    if let Some(ref scheduler) = scheduler {
+                        scheduler.on_turn_completed(&session_id).await;
                     }
                 }
                 
