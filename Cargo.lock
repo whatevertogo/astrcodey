@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-desktop"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "dirs",
