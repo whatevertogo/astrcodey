@@ -1,6 +1,9 @@
 //! 服务器组装：路由注册、TCP 启动、`run.json` 写入。
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
@@ -35,6 +38,47 @@ impl From<getrandom::Error> for HttpServerError {
     fn from(e: getrandom::Error) -> Self {
         HttpServerError::Auth(e)
     }
+}
+
+/// 尝试绑定端口，如果失败则尝试清理旧进程后重试。
+async fn bind_with_cleanup(addr: std::net::SocketAddr) -> Result<tokio::net::TcpListener, HttpServerError> {
+    // 第一次尝试直接绑定
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => return Ok(listener),
+        Err(e) => {
+            tracing::warn!("首次绑定端口 {} 失败: {}", addr, e);
+        },
+    }
+
+    // 绑定失败，尝试清理旧进程
+    #[cfg(target_os = "windows")]
+    {
+        tracing::info!("尝试清理 astrcode-http-server 进程...");
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/F", "/IM", "astrcode-http-server.exe"])
+            .output()
+            .await;
+        // 等待端口释放
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        tracing::info!("尝试清理 astrcode-http-server 进程...");
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-f", "astrcode-http-server"])
+            .output()
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // 第二次尝试绑定
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| {
+            tracing::error!("清理进程后仍无法绑定端口 {}: {}", addr, e);
+            HttpServerError::Io(e)
+        })
 }
 
 /// Build an axum router for the HTTP/SSE API.
@@ -126,20 +170,8 @@ pub async fn run_http_server(
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
-    // 设置 SO_REUSEADDR 避免异常退出后端口被占用
-    let socket = socket2::Socket::new(
-        socket2::Domain::for_address(addr),
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    socket.set_reuse_address(true)?;
-    #[cfg(unix)]
-    socket.set_reuse_port(true)?;
-    socket.bind(&addr.into())?;
-    socket.listen(128)?;
-    let std_listener: std::net::TcpListener = socket.into();
-    std_listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(std_listener)?;
+    // 尝试绑定端口，如果失败则自动清理旧进程
+    let listener = bind_with_cleanup(addr).await?;
     let local_addr = listener.local_addr()?;
     let local_port = local_addr.port();
     write_run_info(local_port, &auth_token);

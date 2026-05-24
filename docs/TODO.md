@@ -6,11 +6,8 @@
 
 ## 高优先级
 
-  
 
 ## 中优先级
-
-- [ ] ACP 协议完善
 
 
 ## 较低优先级
@@ -27,6 +24,9 @@
 - [ ] 引入 fd、rg、sed、cat 等外部依赖
   - [ ] 添加可选配置让 agent 系统优先使用终端指令而非内置工具，并抽离内置工具为插件并隐藏
   - [ ] 工具执行策略配置（builtin / external / auto）
+
+- [ ] ACP 协议完善
+
 
 - [ ] AgentTeam插件
   -[ ] AgentSendTool

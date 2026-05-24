@@ -43,7 +43,6 @@ futures-util = { workspace = true }
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
 getrandom = "0.3"
-socket2 = "0.5"
 agent-client-protocol = "0.11"
 
 [dev-dependencies]

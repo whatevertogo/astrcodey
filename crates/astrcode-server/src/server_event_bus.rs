@@ -103,29 +103,38 @@ impl ServerEventBus {
         );
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                // 处理后台任务完成事件，触发继续处理
+                // 先发送事件给前端，避免后续操作延迟通知
+                update_streaming(&state, &event.payload);
+                tx.send(ClientNotification::Event(event.clone()));
+
+                // 处理后台任务完成事件，触发继续处理（异步，不阻塞事件发送）
                 if matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. }) {
                     if let Some(ref scheduler) = scheduler {
-                        // 使用 notify_step 路径：立即在当前 turn 下一步处理
-                        if let Err(e) = scheduler.notify_step(session_id.clone(), "task").await {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                error = %e,
-                                "failed to notify background completion (step path)"
-                            );
-                        }
+                        let scheduler = Arc::clone(scheduler);
+                        let sid = session_id.clone();
+                        // 使用 spawn 避免阻塞事件发送
+                        tokio::spawn(async move {
+                            if let Err(e) = scheduler.notify_step(sid.clone(), "task").await {
+                                tracing::warn!(
+                                    session_id = %sid,
+                                    error = %e,
+                                    "failed to notify background completion (step path)"
+                                );
+                            }
+                        });
                     }
                 }
-                
+
                 // 处理 turn 完成事件，检查是否有队列中的待处理消息
                 if matches!(event.payload, EventPayload::TurnCompleted { .. }) {
                     if let Some(ref scheduler) = scheduler {
-                        scheduler.on_turn_completed(&session_id).await;
+                        let scheduler = Arc::clone(scheduler);
+                        let sid = session_id.clone();
+                        tokio::spawn(async move {
+                            scheduler.on_turn_completed(&sid).await;
+                        });
                     }
                 }
-                
-                update_streaming(&state, &event.payload);
-                tx.send(ClientNotification::Event(event));
             }
         });
     }
