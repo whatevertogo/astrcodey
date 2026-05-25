@@ -127,27 +127,6 @@ struct CompactionStageMeta {
 }
 
 impl TurnRunner {
-    /// 创建一个新的 TurnRunner 实例。
-    ///
-    /// `session_state` 由调用方提前读取并传入，避免重复 I/O。
-    pub fn new(
-        session: Arc<Session>,
-        session_state: &astrcode_core::storage::SessionReadModel,
-        background_result_tx: Option<
-            mpsc::UnboundedSender<crate::background::BackgroundTaskCompletion>,
-        >,
-        session_store_dir: Option<std::path::PathBuf>,
-    ) -> Result<Self, TurnError> {
-        let llm = session.runtime().llm();
-        Self::new_with_llm(
-            session,
-            session_state,
-            background_result_tx,
-            session_store_dir,
-            llm,
-        )
-    }
-
     pub(crate) fn new_with_llm(
         session: Arc<Session>,
         session_state: &astrcode_core::storage::SessionReadModel,

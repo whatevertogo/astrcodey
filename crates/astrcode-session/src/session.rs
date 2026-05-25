@@ -415,7 +415,7 @@ impl Session {
         let stable_fingerprint =
             astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
 
-        match self.runtime.cached_stable_prefix() {
+        let (text, fingerprint) = match self.runtime.cached_stable_prefix() {
             Some((cached_text, cached_fingerprint)) if cached_fingerprint == stable_fingerprint => {
                 let dynamic = astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
                 let text = if dynamic.is_empty() {
@@ -424,16 +424,18 @@ impl Session {
                     format!("{}\n\n{}", cached_text.trim(), dynamic.trim())
                 };
                 let fingerprint = hex_fingerprint(text.as_bytes());
-                return Ok((text, fingerprint));
+                (text, fingerprint)
             },
-            _ => {},
-        }
-
-        let text = astrcode_context::prompt_engine::build_system_prompt(&prompt_input);
-        let fingerprint = hex_fingerprint(text.as_bytes());
-        let stable_prefix = astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
-        self.runtime
-            .set_cached_stable_prefix(stable_prefix, stable_fingerprint);
+            _ => {
+                let text = astrcode_context::prompt_engine::build_system_prompt(&prompt_input);
+                let fingerprint = hex_fingerprint(text.as_bytes());
+                let stable_prefix =
+                    astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
+                self.runtime
+                    .set_cached_stable_prefix(stable_prefix, stable_fingerprint);
+                (text, fingerprint)
+            },
+        };
         Ok((text, fingerprint))
     }
 
@@ -489,7 +491,7 @@ impl Session {
 
     async fn prepare_turn_runner(&self) -> Result<TurnRunner, TurnError> {
         let model = self.runtime.model_binding();
-        if let Err(e) = self.update_model_id(&model.model_id).await {
+        if let Err(e) = self.update_model_id(model.model_id()).await {
             tracing::warn!(session_id = %self.id, error = %e, "failed to update session model_id");
         }
 
@@ -510,7 +512,7 @@ impl Session {
                 None,
                 stored_fingerprint.as_deref(),
                 Some(&pre_state),
-                &model.model_id,
+                model.model_id(),
             )
             .await
         {
@@ -539,7 +541,7 @@ impl Session {
             &session_state,
             Some(background_result_tx),
             session_store_dir,
-            model.llm,
+            Arc::clone(model.llm()),
         )
     }
 

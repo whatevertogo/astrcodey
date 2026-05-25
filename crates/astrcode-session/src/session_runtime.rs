@@ -19,9 +19,23 @@ use crate::{
 /// 当前 session 使用的模型绑定；一次替换同时切换 provider 与模型标识。
 #[derive(Clone)]
 pub struct SessionModelBinding {
-    pub llm: Arc<dyn LlmProvider>,
-    pub small_llm: Arc<dyn LlmProvider>,
-    pub model_id: String,
+    pub(crate) llm: Arc<dyn LlmProvider>,
+    pub(crate) small_llm: Arc<dyn LlmProvider>,
+    pub(crate) model_id: String,
+}
+
+impl SessionModelBinding {
+    pub fn llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.llm
+    }
+
+    pub fn small_llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.small_llm
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
 }
 
 /// 执行工具所需的进程内资源。
@@ -293,11 +307,11 @@ mod tests {
         Arc::new(TaggedLlm { tag })
     }
 
-    fn assert_consistent_binding(binding: SessionModelBinding) {
-        let tag: usize = binding.model_id.parse().unwrap();
-        assert_eq!(binding.llm.model_limits().max_input_tokens, tag);
+    fn assert_consistent_binding(binding: &SessionModelBinding) {
+        let tag: usize = binding.model_id().parse().unwrap();
+        assert_eq!(binding.llm().model_limits().max_input_tokens, tag);
         assert_eq!(
-            binding.small_llm.model_limits().max_input_tokens,
+            binding.small_llm().model_limits().max_input_tokens,
             tag + 1000
         );
     }
@@ -318,7 +332,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             reader_start.wait();
             loop {
-                assert_consistent_binding(reader_runtime.model_binding());
+                assert_consistent_binding(&reader_runtime.model_binding());
                 if !reader_running.load(Ordering::Relaxed) {
                     break;
                 }
@@ -331,6 +345,6 @@ mod tests {
         }
         running.store(false, Ordering::Relaxed);
         reader.join().unwrap();
-        assert_consistent_binding(runtime.model_binding());
+        assert_consistent_binding(&runtime.model_binding());
     }
 }

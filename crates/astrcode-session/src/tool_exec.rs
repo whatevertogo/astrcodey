@@ -513,7 +513,7 @@ async fn background_tool_call(
 /// 进程内文件观察存储，用于 read/edit 工具的 read-before-edit 守卫。
 ///
 /// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
-/// 生命周期与 session 一致（由 `TurnRunner::new` 创建，随 `TurnRunner` 销毁）。
+/// 生命周期与 session 一致（由 `TurnRunner` 创建，随 `TurnRunner` 销毁）。
 #[derive(Default)]
 pub struct InMemoryFileObservationStore {
     observations: Mutex<std::collections::HashMap<String, FileObservation>>,
