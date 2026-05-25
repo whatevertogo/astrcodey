@@ -20,7 +20,10 @@ mod prompts;
 mod store;
 mod tools;
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use astrcode_core::{
     extension::{
@@ -41,6 +44,12 @@ use crate::{
         switch_mode_tool_definition, upsert_plan_tool_definition,
     },
 };
+
+fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<&Path, ExtensionError> {
+    session_store_dir
+        .as_deref()
+        .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))
+}
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(ModeExtension {
@@ -127,13 +136,9 @@ impl ToolHandler for ModeToolHandler {
         _working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
-        let base = ctx
-            .capabilities
-            .session_store_dir
-            .as_deref()
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
-        let mode_root = store::mode_dir_from_base(Path::new(base));
-        let plan_dir = store::plan_dir_from_base(Path::new(base));
+        let base = require_session_base(&ctx.capabilities.session_store_dir)?;
+        let mode_root = store::mode_dir_from_base(base);
+        let plan_dir = store::plan_dir_from_base(base);
 
         match tool_name {
             SWITCH_MODE_TOOL_NAME => Ok(
@@ -166,11 +171,8 @@ struct ModePreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let base = ctx
-            .session_store_dir
-            .as_deref()
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
-        let mode_root = store::mode_dir_from_base(Path::new(base));
+        let base = require_session_base(&ctx.session_store_dir)?;
+        let mode_root = store::mode_dir_from_base(base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
@@ -206,11 +208,8 @@ impl CommandHandler for ModeSlashCommandHandler {
         _working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let base = ctx
-            .session_store_dir
-            .as_deref()
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
-        let mode_root = store::mode_dir_from_base(Path::new(base));
+        let base = require_session_base(&ctx.session_store_dir)?;
+        let mode_root = store::mode_dir_from_base(base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         let target_mode = match arguments.trim() {
@@ -256,11 +255,8 @@ impl CommandHandler for ModeSlashCommandHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for ModeProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let base = ctx
-            .session_store_dir
-            .as_deref()
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
-        let mode_root = store::mode_dir_from_base(Path::new(base));
+        let base = require_session_base(&ctx.session_store_dir)?;
+        let mode_root = store::mode_dir_from_base(base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         if let Some(context) = state.pending_transition_context.take() {
