@@ -7,9 +7,10 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    capability::{
+        ConversationView, EventQueryCap, LlmInvokerCap, PromptRole, SessionSummaryView,
+    },
     extension::ExtensionError,
-    llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    storage::{EventReader, SessionReadModel, SessionSummary},
 };
 use chrono::{DateTime, Duration, Local, Utc};
 
@@ -38,7 +39,7 @@ impl Default for PipelineConfig {
 
 #[derive(Clone)]
 struct Candidate {
-    summary: SessionSummary,
+    summary: SessionSummaryView,
     updated_at: DateTime<Utc>,
 }
 
@@ -46,8 +47,8 @@ struct Candidate {
 
 pub async fn run(
     store: &MemoryStore,
-    session_read: Arc<dyn EventReader>,
-    small_llm: &dyn LlmProvider,
+    event_query: Arc<EventQueryCap>,
+    llm_invoker: Arc<LlmInvokerCap>,
     current_session_id: &str,
 ) -> Result<(), ExtensionError> {
     let config = PipelineConfig::default();
@@ -59,18 +60,12 @@ pub async fn run(
         }
     }
 
-    let candidates = find_candidates(
-        Arc::clone(&session_read),
-        store,
-        current_session_id,
-        &config,
-    )
-    .await?;
+    let candidates = find_candidates(event_query.clone(), store, current_session_id, &config).await?;
     if candidates.is_empty() {
         return Ok(());
     }
 
-    let extractions = extract(Arc::clone(&session_read), small_llm, &candidates).await?;
+    let extractions = extract(event_query, llm_invoker, &candidates).await?;
 
     if extractions.is_empty() {
         return Ok(());
@@ -83,12 +78,12 @@ pub async fn run(
 // ─── Candidate Selection ────────────────────────────────────────────────
 
 async fn find_candidates(
-    session_read: Arc<dyn EventReader>,
+    event_query: Arc<EventQueryCap>,
     store: &MemoryStore,
     current_session_id: &str,
     config: &PipelineConfig,
 ) -> Result<Vec<Candidate>, ExtensionError> {
-    let summaries = session_read
+    let summaries = event_query
         .list_session_summaries()
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -100,7 +95,7 @@ async fn find_candidates(
     let mut candidates: Vec<Candidate> = summaries
         .into_iter()
         .filter_map(|s| {
-            if s.session_id.as_ref() == current_session_id {
+            if s.session_id == current_session_id {
                 return None;
             }
             if s.parent_session_id.is_some() {
@@ -109,10 +104,11 @@ async fn find_candidates(
             if s.source_extension.is_some() {
                 return None;
             }
-            if processed.get(s.session_id.as_ref()) == Some(&s.updated_at) {
+            let updated_at_str = s.updated_at.as_ref()?;
+            if processed.get(&s.session_id) == Some(updated_at_str) {
                 return None;
             }
-            let updated = DateTime::parse_from_rfc3339(&s.updated_at).ok()?;
+            let updated = DateTime::parse_from_rfc3339(updated_at_str).ok()?;
             let updated_utc = updated.with_timezone(&Utc);
             let idle_enough = updated_utc < cutoff;
             let has_enough_content = s.first_user_message.as_ref().is_some_and(|m| m.len() >= 50);
@@ -135,19 +131,19 @@ async fn find_candidates(
 // ─── Phase 1: Extraction ────────────────────────────────────────────────
 
 async fn extract(
-    session_read: Arc<dyn EventReader>,
-    small_llm: &dyn LlmProvider,
+    event_query: Arc<EventQueryCap>,
+    llm_invoker: Arc<LlmInvokerCap>,
     candidates: &[Candidate],
 ) -> Result<Vec<(Candidate, Phase1Output)>, ExtensionError> {
     let mut results = Vec::new();
     for candidate in candidates {
         let session_id = &candidate.summary.session_id;
-        let read_model = session_read
-            .session_read_model(session_id)
+        let conversation_view = event_query
+            .read_conversation(session_id)
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        let conversation = extract_conversation(&read_model);
+        let conversation = extract_conversation(&conversation_view);
         if conversation.is_empty() {
             results.push((
                 candidate.clone(),
@@ -160,21 +156,12 @@ async fn extract(
 
         let current_date = Local::now().format("%Y-%m-%d").to_string();
         let prompt = pipeline_prompts::phase1_user_prompt(&conversation, &current_date);
-        let messages = vec![LlmMessage {
-            role: astrcode_core::llm::LlmRole::User,
-            content: vec![LlmContent::Text {
-                text: format!("{}\n\n{}", pipeline_prompts::PHASE1_SYSTEM, prompt),
-            }],
-            name: None,
-            reasoning_content: None,
-        }];
 
-        let rx = small_llm
-            .generate(messages, vec![])
+        let text = llm_invoker
+            .invoke_complete(pipeline_prompts::PHASE1_SYSTEM.to_string(), prompt)
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        let text = collect_stream_text(rx).await;
         match parse_phase1_output(&text) {
             Ok(output) if output.memories.is_empty() => {
                 results.push((candidate.clone(), output));
@@ -194,33 +181,24 @@ async fn extract(
     Ok(results)
 }
 
-fn extract_conversation(model: &SessionReadModel) -> String {
+fn extract_conversation(view: &ConversationView) -> String {
     // Collect all text turns first, then apply middle truncation.
     const MAX_BYTES: usize = 4000; // ~1000 tokens at 4 bytes/token
     const MAX_TURNS: usize = 30;
 
-    let turns: Vec<String> = model
-        .messages
+    let turns: Vec<String> = view
+        .turns
         .iter()
-        .filter_map(|msg| {
-            let role = match msg.role {
-                astrcode_core::llm::LlmRole::User => "User",
-                astrcode_core::llm::LlmRole::Assistant => "Assistant",
-                _ => return None,
+        .filter_map(|turn| {
+            let role = match turn.role {
+                PromptRole::User => "User",
+                PromptRole::Assistant => "Assistant",
+                PromptRole::System => return None,
             };
-            let text: String = msg
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    LlmContent::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.is_empty() {
+            if turn.text.is_empty() {
                 None
             } else {
-                Some(format!("{role}: {text}"))
+                Some(format!("{role}: {}", turn.text))
             }
         })
         .take(MAX_TURNS)
@@ -290,8 +268,8 @@ fn write_contexts(
     let processed: Vec<ProcessedSession> = extractions
         .iter()
         .map(|(c, _)| ProcessedSession {
-            session_id: c.summary.session_id.as_ref().to_string(),
-            updated_at: c.summary.updated_at.clone(),
+            session_id: c.summary.session_id.clone(),
+            updated_at: c.summary.updated_at.clone().unwrap_or_default(),
         })
         .collect();
 
@@ -305,7 +283,7 @@ fn write_contexts(
                 .map(|m| format!("- [{}] {}", m.category, m.content))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let filename = format!("{}.md", candidate.summary.session_id.as_ref());
+            let filename = format!("{}.md", candidate.summary.session_id);
             let content = format!(
                 "# Session {}\n\n## Extracted Memories\n{}",
                 candidate.summary.session_id, memories
@@ -321,26 +299,12 @@ fn write_contexts(
     Ok(())
 }
 
-// ─── Stream Helper ──────────────────────────────────────────────────────
-
-async fn collect_stream_text(mut rx: tokio::sync::mpsc::UnboundedReceiver<LlmEvent>) -> String {
-    let mut text = String::new();
-    while let Some(event) = rx.recv().await {
-        match event {
-            LlmEvent::ContentDelta { delta } => text.push_str(&delta),
-            LlmEvent::Done { .. } => break,
-            _ => {},
-        }
-    }
-    text
-}
-
 // ─── TurnEnd Incremental Extraction ────────────────────────────────────
 
 /// TurnEnd 增量提取：读取已有记忆 → 召回历史上下文 → 小模型提取 → 写入 contexts/。
 pub async fn extract_turn(
     store: Arc<MemoryStore>,
-    small_llm: &dyn LlmProvider,
+    llm_invoker: &LlmInvokerCap,
     session_id: &str,
     user_message: &str,
     assistant_message: &str,
@@ -363,19 +327,11 @@ pub async fn extract_turn(
         &Local::now().format("%Y-%m-%d").to_string(),
     );
 
-    let messages = vec![LlmMessage {
-        role: LlmRole::User,
-        content: vec![LlmContent::Text { text: prompt }],
-        name: None,
-        reasoning_content: None,
-    }];
-
-    let rx = small_llm
-        .generate(messages, vec![])
+    let text = llm_invoker
+        .invoke_complete(pipeline_prompts::PHASE1_SYSTEM.to_string(), prompt)
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-    let text = collect_stream_text(rx).await;
     let output = parse_phase1_output(&text)?;
 
     if output.memories.is_empty() {

@@ -127,15 +127,17 @@ impl ToolPipeline {
                 continue;
             }
 
+            #[allow(deprecated)]
             let pre_ctx = PreToolUseContext {
                 session_id: self.shared.session_id.to_string(),
                 working_dir: self.shared.working_dir.clone(),
-                model: self.shared.model_selection(),
+                model: self.shared.model_info(),
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
                 extension_event_sink: None,
                 session_store_dir: self.shared.session_store_dir.clone(),
+                capabilities: self.shared.capabilities.clone(),
             };
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
@@ -410,16 +412,18 @@ impl ToolPipeline {
                     result.error = Some(result.content.clone());
                 }
 
+                #[allow(deprecated)]
                 let post_ctx = PostToolUseContext {
                     session_id: self.shared.session_id.to_string(),
                     working_dir: self.shared.working_dir.clone(),
-                    model: self.shared.model_selection(),
+                    model: self.shared.model_info(),
                     tool_name: call.name.clone(),
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
                     is_error: result.is_error,
                     extension_event_sink: None,
                     session_store_dir: self.shared.session_store_dir.clone(),
+                    capabilities: self.shared.capabilities.clone(),
                 };
 
                 match self.extension_runner.emit_post_tool_use(post_ctx).await? {
@@ -442,7 +446,7 @@ impl ToolPipeline {
                     let fail_ctx = astrcode_core::extension::PostToolUseFailureContext {
                         session_id: self.shared.session_id.to_string(),
                         working_dir: self.shared.working_dir.clone(),
-                        model: self.shared.model_selection(),
+                        model: self.shared.model_info(),
                         tool_name: call.name.clone(),
                         tool_input: call.tool_input.clone(),
                         error: result

@@ -79,18 +79,7 @@ pub fn bundled_extensions(
     }
     #[cfg(feature = "memory")]
     if is_enabled(extension_states, "astrcode.memory") {
-        match host_services {
-            Some(hs) => {
-                match astrcode_extension_memory::extension(
-                    hs.small_llm.clone(),
-                    hs.session_read.clone(),
-                ) {
-                    Ok(ext) => extensions.push(ext),
-                    Err(e) => errors.push(format!("astrcode.memory failed to load: {e}")),
-                }
-            },
-            None => errors.push("astrcode.memory requires ExtensionHostServices".to_string()),
-        }
+        extensions.push(astrcode_extension_memory::extension());
     }
 
     extensions

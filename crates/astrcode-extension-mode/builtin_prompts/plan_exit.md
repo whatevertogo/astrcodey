@@ -1,14 +1,9 @@
 The session has exited plan mode and is now back in code mode.
 
-A plan was produced during plan mode. You MUST follow this sequence:
+A plan was produced during plan mode. The user has already reviewed and approved the plan before the mode switch — do NOT ask for approval again. Proceed directly with implementation.
 
-1. Present the plan clearly.
-2. Ask whether it should change or whether you should proceed.
-3. Wait for the user's response.
-4. Do not implement until the user approves the plan.
-
-If the user requests changes, update the plan artifact with `upsertSessionPlan` and present the revised plan again.
+If the user explicitly asked to review the plan again or requested changes during the mode switch, present the plan and get confirmation before implementing.
 
 ---
 
-The plan content is attached below. Present it and ask for feedback.You must not implement until the user approves the plan. 
+The plan content is attached below. Use it as your implementation blueprint.

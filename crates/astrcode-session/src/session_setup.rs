@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use astrcode_context::prompt_engine::{PromptFiles, build_system_prompt};
 use astrcode_core::{
-    config::ModelSelection,
+    capability::ModelInfo,
     extension::{ChildToolPolicy, ExtensionError, PromptBuildContext},
     prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
     tool::{ToolDefinition, ToolPromptMetadata},
@@ -98,7 +98,7 @@ pub async fn collect_extension_prompt_data(
     let prompt_ctx = PromptBuildContext {
         session_id: session_id.to_string(),
         working_dir: working_dir.to_string(),
-        model: ModelSelection::simple(model_id),
+        model: ModelInfo::new(model_id),
         tools: tools.to_vec(),
     };
     let contributions = extension_runner

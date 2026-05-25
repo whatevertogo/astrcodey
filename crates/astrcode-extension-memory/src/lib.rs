@@ -15,50 +15,40 @@ mod store;
 use std::sync::Arc;
 
 use astrcode_core::{
+    capability::{EventQueryCap, LlmInvokerCap},
     extension::{
         Extension, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionTasks, HookMode,
         Registrar, StopReason,
     },
-    llm::LlmProvider,
-    storage::EventReader,
 };
 use handlers::{
     MemoryCommandHandler, MemoryDeleteHandler, MemoryRecallHandler, MemorySaveHandler,
     MemorySessionStartHandler, MemoryTurnEndHandler,
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use store::MemoryStorePool;
 
 /// 返回记忆扩展。
 ///
-/// 需要 `small_llm` 用于记忆提取和增量召回。
-/// `small_llm` 为 None 时返回错误，提示用户配置小模型。
-pub fn extension(
-    small_llm: Option<Arc<dyn LlmProvider>>,
-    session_read: Arc<dyn EventReader>,
-) -> Result<Arc<dyn Extension>, ExtensionError> {
-    let small_llm = small_llm.ok_or_else(|| {
-        ExtensionError::Internal(
-            "Memory extension requires a small LLM provider. Please configure a small model (e.g. \
-             via runtime.small_llm) to enable memory."
-                .to_string(),
-        )
-    })?;
-
+/// 能力（LlmInvokerCap、EventQueryCap）在 `start()` 中从 `ExtensionCtx` 获取，
+/// 未配置时返回错误。
+pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
-    Ok(Arc::new(MemoryExtension {
+    let llm_invoker: Arc<RwLock<Option<Arc<LlmInvokerCap>>>> = Arc::new(RwLock::new(None));
+    let event_query: Arc<RwLock<Option<Arc<EventQueryCap>>>> = Arc::new(RwLock::new(None));
+    Arc::new(MemoryExtension {
         store_pool,
-        small_llm,
-        session_read,
+        llm_invoker,
+        event_query,
         pipeline: Arc::new(handlers::MemoryPipelineCoordinator::default()),
         tasks: Arc::new(Mutex::new(None)),
-    }))
+    })
 }
 
 struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
-    small_llm: Arc<dyn LlmProvider>,
-    session_read: Arc<dyn EventReader>,
+    llm_invoker: Arc<RwLock<Option<Arc<LlmInvokerCap>>>>,
+    event_query: Arc<RwLock<Option<Arc<EventQueryCap>>>>,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
     tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
@@ -70,17 +60,36 @@ impl Extension for MemoryExtension {
     }
 
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+        let llm = ctx.get_capability::<LlmInvokerCap>().ok_or_else(|| {
+            ExtensionError::Internal(
+                "Memory extension requires LlmInvokerCap. Please configure a small model \
+                 (e.g. via runtime.small_llm) to enable memory."
+                    .to_string(),
+            )
+        })?;
+        let eq = ctx.get_capability::<EventQueryCap>().ok_or_else(|| {
+            ExtensionError::Internal(
+                "Memory extension requires EventQueryCap.".to_string(),
+            )
+        })?;
+        *self.llm_invoker.write() = Some(llm);
+        *self.event_query.write() = Some(eq);
         *self.tasks.lock() = Some(ctx.tasks().clone());
         Ok(())
     }
 
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        *self.llm_invoker.write() = None;
+        *self.event_query.write() = None;
         *self.tasks.lock() = None;
         self.pipeline.reset();
         Ok(())
     }
 
     fn register(&self, reg: &mut Registrar) {
+        reg.require_capability::<LlmInvokerCap>();
+        reg.require_capability::<EventQueryCap>();
+
         reg.extension_data_dir();
         reg.extension_event("memory.created").register();
         reg.extension_event("memory.deleted").register();
@@ -109,8 +118,8 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemorySessionStartHandler {
                 store_pool: self.store_pool.clone(),
-                session_read: self.session_read.clone(),
-                small_llm: self.small_llm.clone(),
+                event_query: self.event_query.clone(),
+                llm_invoker: self.llm_invoker.clone(),
                 pipeline: self.pipeline.clone(),
                 tasks: self.tasks.clone(),
             }),
@@ -121,7 +130,7 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemoryTurnEndHandler {
                 store_pool: self.store_pool.clone(),
-                small_llm: self.small_llm.clone(),
+                llm_invoker: self.llm_invoker.clone(),
                 tasks: self.tasks.clone(),
                 extract_state: Default::default(),
             }),

@@ -13,6 +13,7 @@ use astrcode_context::{
     prompt_engine::system_messages_from_prompt,
 };
 use astrcode_core::{
+    capability::CapabilityRegistry,
     event::{Event, EventPayload},
     extension::{CompactStrategy, CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole},
@@ -142,6 +143,7 @@ impl TurnRunner {
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
             session_store_dir: session_store_dir.clone(),
+            capabilities: CapabilityRegistry::new(),
         };
         let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
         let initial_history = session_state.provider_messages();
@@ -399,6 +401,20 @@ impl TurnRunner {
             custom_instructions,
         };
         let should_auto_compact = context_assembler.should_auto_compact(&input);
+        let llm_allowed = self.should_attempt_llm_compact(CompactTrigger::AutoThreshold);
+        if should_auto_compact {
+            let snapshot = context_assembler.prompt_snapshot(&input);
+            tracing::info!(
+                session_id = %self.shared.session_id,
+                context_tokens = snapshot.context_tokens,
+                threshold_tokens = snapshot.threshold_tokens,
+                max_input_tokens = snapshot.max_input_tokens,
+                should_auto_compact = true,
+                llm_allowed,
+                compact_skipped = !llm_allowed,
+                "auto-compact decision"
+            );
+        }
         let base_event_seq = if should_auto_compact {
             Some(self.read_base_event_seq().await?)
         } else {
@@ -409,8 +425,7 @@ impl TurnRunner {
             .prepare_messages_with_llm(
                 input,
                 PrepareMessagesOptions {
-                    allow_auto_compact: should_auto_compact
-                        && self.should_attempt_llm_compact(CompactTrigger::AutoThreshold),
+                    allow_auto_compact: should_auto_compact && llm_allowed,
                     force_compact: false,
                     keep_recent_turns: context_assembler.settings().compact_keep_recent_turns,
                 },
@@ -772,10 +787,13 @@ impl TurnRunner {
                     .await?;
                 Err(TurnError::Internal(reason))
             },
-            ProviderResult::ReplaceMessages { messages } => Ok(provider_visible_messages(messages)),
+            ProviderResult::ReplaceMessages { messages } => {
+                let llm_msgs: Vec<LlmMessage> = messages.into_iter().map(LlmMessage::from).collect();
+                Ok(provider_visible_messages(llm_msgs))
+            },
             ProviderResult::AppendMessages { messages } => {
                 let mut combined = send_messages;
-                combined.extend(messages);
+                combined.extend(messages.into_iter().map(LlmMessage::from));
                 Ok(provider_visible_messages(combined))
             },
             ProviderResult::Allow => Ok(send_messages),

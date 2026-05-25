@@ -21,17 +21,17 @@ mod store;
 mod tools;
 
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
 use astrcode_core::{
+    capability::{PromptMessage, SessionStorageCap},
     extension::{
         CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
         HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
         ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
     },
-    llm::LlmMessage,
     tool::{ToolResult, tool_metadata},
 };
 use serde_json::json;
@@ -45,10 +45,40 @@ use crate::{
     },
 };
 
-fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<&Path, ExtensionError> {
-    session_store_dir
-        .as_deref()
-        .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))
+fn session_store_dir_from_cap<T: HasCapabilities>(ctx: &T) -> Result<PathBuf, ExtensionError> {
+    let cap = ctx.get_capability::<SessionStorageCap>().ok_or_else(|| {
+        ExtensionError::Internal("SessionStorageCap not available".into())
+    })?;
+    Ok(cap.session_store_dir())
+}
+
+/// Internal helper trait for contexts that expose `get_capability()`.
+trait HasCapabilities {
+    fn get_capability<T: astrcode_core::capability::Capability>(&self) -> Option<std::sync::Arc<T>>;
+}
+
+impl HasCapabilities for astrcode_core::tool::ToolExecutionContext {
+    fn get_capability<T: astrcode_core::capability::Capability>(&self) -> Option<std::sync::Arc<T>> {
+        astrcode_core::tool::ToolExecutionContext::get_capability(self)
+    }
+}
+
+impl HasCapabilities for PreToolUseContext {
+    fn get_capability<T: astrcode_core::capability::Capability>(&self) -> Option<std::sync::Arc<T>> {
+        PreToolUseContext::get_capability(self)
+    }
+}
+
+impl HasCapabilities for ProviderContext {
+    fn get_capability<T: astrcode_core::capability::Capability>(&self) -> Option<std::sync::Arc<T>> {
+        ProviderContext::get_capability(self)
+    }
+}
+
+impl HasCapabilities for CommandContext {
+    fn get_capability<T: astrcode_core::capability::Capability>(&self) -> Option<std::sync::Arc<T>> {
+        CommandContext::get_capability(self)
+    }
 }
 
 pub fn extension() -> Arc<dyn Extension> {
@@ -69,6 +99,7 @@ impl Extension for ModeExtension {
 
     fn register(&self, reg: &mut Registrar) {
         let catalog = self.catalog.clone();
+        reg.require_capability::<SessionStorageCap>();
         reg.tool(
             switch_mode_tool_definition(),
             Arc::new(ModeToolHandler {
@@ -136,9 +167,9 @@ impl ToolHandler for ModeToolHandler {
         _working_dir: &str,
         ctx: &astrcode_core::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
-        let base = require_session_base(&ctx.capabilities.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
-        let plan_dir = store::plan_dir_from_base(base);
+        let base = session_store_dir_from_cap(ctx)?;
+        let mode_root = store::mode_dir_from_base(&base);
+        let plan_dir = store::plan_dir_from_base(&base);
 
         match tool_name {
             SWITCH_MODE_TOOL_NAME => Ok(
@@ -171,8 +202,8 @@ struct ModePreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let base = session_store_dir_from_cap(&ctx)?;
+        let mode_root = store::mode_dir_from_base(&base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
@@ -208,8 +239,8 @@ impl CommandHandler for ModeSlashCommandHandler {
         _working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let base = session_store_dir_from_cap(ctx)?;
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         let target_mode = match arguments.trim() {
@@ -255,14 +286,14 @@ impl CommandHandler for ModeSlashCommandHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for ModeProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let base = session_store_dir_from_cap(&ctx)?;
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         if let Some(context) = state.pending_transition_context.take() {
             store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
             return Ok(ProviderResult::AppendMessages {
-                messages: vec![LlmMessage::user(context)],
+                messages: vec![PromptMessage::user(context)],
             });
         }
 

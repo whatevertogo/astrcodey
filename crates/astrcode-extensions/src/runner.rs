@@ -47,6 +47,10 @@ pub struct ExtensionRunner {
     extension_configs: parking_lot::RwLock<BTreeMap<String, serde_json::Value>>,
     /// 扩展 `start()` 阶段发送自定义事件的宿主通道。
     startup_event_tx: parking_lot::RwLock<Option<mpsc::UnboundedSender<EventPayload>>>,
+    /// 全局能力注册表。在 `register_with_startup_working_dir` 中注入到 `ExtensionCtx`。
+    /// bundled extensions 获得 Tier 3 能力（LlmInvokerCap, EventQueryCap 等），
+    /// local extensions 只获得 Tier 1/2 能力。
+    capabilities: parking_lot::RwLock<astrcode_core::capability::CapabilityRegistry>,
 }
 
 /// 从 `register()` 调用中收集的扩展能力记录。
@@ -55,6 +59,10 @@ struct ExtensionRecord {
     reg: Registrar,
     /// 注册时的配置快照，用于 diff 检测热更新。
     config: serde_json::Value,
+    /// 扩展声明的能力需求。用于运行时校验和调试。
+    /// TODO: Phase 5+ 校验逻辑将读取此字段。
+    #[allow(dead_code)]
+    required_capabilities: Vec<std::any::TypeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +412,7 @@ impl ExtensionRunner {
             timeout,
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
             startup_event_tx: parking_lot::RwLock::new(None),
+            capabilities: parking_lot::RwLock::new(astrcode_core::capability::CapabilityRegistry::new()),
         }
     }
 
@@ -450,23 +459,27 @@ impl ExtensionRunner {
             self.startup_event_tx.read().as_ref().and_then(|tx| {
                 bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
             });
-        let ctx = ExtensionCtx::with_startup_services(
+        let mut ctx = ExtensionCtx::with_startup_services(
             tasks.clone(),
             ExtensionConfig(ext_config.clone()),
             startup_working_dir.map(str::to_string),
             event_sink,
         );
+        // 注入全局能力注册表中的能力到扩展上下文
+        *ctx.capabilities_mut() = self.capabilities.read().clone();
         ext.start(ctx).await?;
 
         self.extensions.write().await.push(ext);
         self.extension_tasks.write().await.insert(id.clone(), tasks);
 
         if !reg.is_empty() {
+            let required_caps = reg.required_capabilities().to_vec();
             let mut records = self.records.write().await;
             records.push(ExtensionRecord {
                 id: id.clone(),
                 reg,
                 config: ext_config,
+                required_capabilities: required_caps,
             });
             log_handler_dispatch_order(&records);
             let new_index = Arc::new(build_handler_index(&records));
@@ -547,6 +560,14 @@ impl ExtensionRunner {
     /// 绑定会话原子操作能力。
     pub fn bind_session_ops(&self, ops: Arc<dyn SessionOperations>) {
         *self.session_ops.write().unwrap_or_else(|e| e.into_inner()) = Some(ops);
+    }
+
+    /// 注册全局能力。所有通过此 runner 注册的扩展都能通过
+    /// `ExtensionCtx::get_capability()` 获取已注册的能力。
+    ///
+    /// Tier 3 (Trusted-only) 能力只应在 bundled extensions 启动前注册。
+    pub fn bind_capability<T: astrcode_core::capability::Capability>(&self, cap: Arc<T>) {
+        self.capabilities.write().register(cap);
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。

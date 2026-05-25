@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
+    capability::{EventQueryCap, LlmInvokerCap},
     config::ConfigStore, extension::ExtensionHostServices, lifecycle::SessionResourceCleanup,
     storage::EventStore,
 };
@@ -198,6 +199,19 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&event_store),
         Some(capabilities.small_llm()),
     ));
+
+    // 绑定 Tier 3 (Trusted-only) 能力到 runner。
+    // Bundled extensions 通过 ExtensionCtx::get_capability() 获取。
+    {
+        let event_query = Arc::new(crate::capability::ServerEventQuery::new(
+            Arc::clone(&event_store) as Arc<dyn EventStore>,
+        ));
+        extension_runner.bind_capability(Arc::new(EventQueryCap::new(event_query.clone())));
+
+        let invoker = Arc::new(crate::capability::ServerLlmInvoker::new(capabilities.small_llm()));
+        extension_runner.bind_capability(Arc::new(LlmInvokerCap::new(invoker)));
+    }
+
     let load_errors =
         load_extensions_into_runner(&extension_runner, &capabilities, &cwd, Some(host_services))
             .await;
@@ -278,6 +292,18 @@ impl ServerRuntime {
     /// 按当前配置重载扩展集合，并让已打开 session 的工具快照在下一次 turn 重建。
     pub async fn reload_extensions(&self) -> Vec<String> {
         let small_llm = self.capabilities.small_llm();
+
+        // 重新绑定 Tier 3 能力
+        {
+            let event_query = Arc::new(crate::capability::ServerEventQuery::new(
+                Arc::clone(&self.event_store) as Arc<dyn EventStore>,
+            ));
+            self.extension_runner.bind_capability(Arc::new(EventQueryCap::new(event_query.clone())));
+
+            let invoker = Arc::new(crate::capability::ServerLlmInvoker::new(small_llm.clone()));
+            self.extension_runner.bind_capability(Arc::new(LlmInvokerCap::new(invoker)));
+        }
+
         let host_services = Arc::new(ExtensionHostServices::new(
             Arc::clone(&self.event_store),
             Some(small_llm),

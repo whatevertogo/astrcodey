@@ -15,7 +15,12 @@ use std::{collections::BTreeMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{event::EventPayload, storage::ToolResultArtifactReader, types::SessionId};
+use crate::{
+    capability::{Capability, CapabilityRegistry},
+    event::EventPayload,
+    storage::ToolResultArtifactReader,
+    types::SessionId,
+};
 
 // Re-export BackgroundTaskReader from astrcode-tools via a forward declaration.
 // The actual trait lives in astrcode-tools::task_tool, but ToolExecutionContext
@@ -430,9 +435,12 @@ pub struct ToolCapabilities {
     /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
     /// 会话原子操作能力（仅子 agent 工具需要）。
+    /// TODO: 迁移到 capabilities 注册表后删除此字段。
     pub session_ops: Option<Arc<dyn SessionOperations>>,
     /// 插件事件发射器（仅插件注册的工具会有值）。
     pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
+    /// 能力注册表。扩展通过 `ctx.get_capability::<T>()` 获取注入的能力。
+    pub capabilities: CapabilityRegistry,
 }
 
 /// 每次工具调用时传递的上下文。
@@ -452,6 +460,13 @@ pub struct ToolExecutionContext {
     pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
     /// 按需注入的会话能力。
     pub capabilities: ToolCapabilities,
+}
+
+impl ToolExecutionContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.capabilities.get::<T>()
+    }
 }
 
 /// Build a metadata map from key-value pairs.
@@ -512,6 +527,7 @@ impl std::fmt::Debug for ToolCapabilities {
                 "background_task_reader",
                 &self.background_task_reader.as_ref().map(|_| "<bg_reader>"),
             )
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }

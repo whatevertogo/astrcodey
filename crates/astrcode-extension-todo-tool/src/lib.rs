@@ -7,6 +7,7 @@ use std::{
 };
 
 use astrcode_core::{
+    capability::{PromptMessage, SessionStorageCap},
     extension::{
         Extension, ExtensionError, HookMode, PostToolUseContext, PostToolUseHandler,
         PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
@@ -71,6 +72,7 @@ impl Extension for TodoToolExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
+        reg.require_capability::<SessionStorageCap>();
         reg.tool(todo_write_tool_definition(), Arc::new(TodoWriteToolHandler));
         reg.tool_metadata(todo_write_metadata());
         reg.on_provider(
@@ -97,12 +99,10 @@ impl ToolHandler for TodoWriteToolHandler {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let root = ctx
-            .capabilities
-            .session_store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let cap = ctx.get_capability::<SessionStorageCap>().ok_or_else(|| {
+            ExtensionError::Internal("SessionStorageCap not available".into())
+        })?;
+        let root = todo_dir_from_base(&cap.session_store_dir());
         let store = ProgressListStore::new(root);
         Ok(match handle_todo_write(arguments, &store) {
             Ok(result) => result,
@@ -119,11 +119,10 @@ struct TodoReminderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for TodoReminderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let cap = ctx.get_capability::<SessionStorageCap>().ok_or_else(|| {
+            ExtensionError::Internal("SessionStorageCap not available".into())
+        })?;
+        let root = todo_dir_from_base(&cap.session_store_dir());
         ProgressReminder::new(root)
             .before_provider_request()
             .map_err(ExtensionError::Internal)
@@ -136,11 +135,10 @@ struct TodoPostToolUseHandler;
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = ctx
-                .session_store_dir
-                .as_deref()
-                .map(todo_dir_from_base)
-                .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+            let cap = ctx.get_capability::<SessionStorageCap>().ok_or_else(|| {
+                ExtensionError::Internal("SessionStorageCap not available".into())
+            })?;
+            let root = todo_dir_from_base(&cap.session_store_dir());
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;
@@ -341,7 +339,7 @@ impl ProgressReminder {
         let result = if should_remind {
             state.assistant_cycles_since_reminder = 0;
             ProviderResult::AppendMessages {
-                messages: vec![astrcode_core::llm::LlmMessage::user(reminder_message(
+                messages: vec![PromptMessage::user(reminder_message(
                     &items,
                 ))],
             }
@@ -643,7 +641,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage};
+    use astrcode_core::capability::PromptMessage;
 
     use super::*;
 
@@ -674,12 +672,8 @@ mod tests {
         root
     }
 
-    fn text_exists(messages: &[LlmMessage], needle: &str) -> bool {
-        messages.iter().any(|message| {
-            message.content.iter().any(
-                |content| matches!(content, LlmContent::Text { text } if text.contains(needle)),
-            )
-        })
+    fn text_exists(messages: &[PromptMessage], needle: &str) -> bool {
+        messages.iter().any(|message| message.text.contains(needle))
     }
 
     #[test]

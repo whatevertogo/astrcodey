@@ -1,0 +1,8 @@
+[package]
+name = "astrcode-extension-api"
+version = "0.2.2"
+edition = "2021"
+description = "Stable API surface for AstrCode extensions — extensions depend on this, not astrcode-core"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }

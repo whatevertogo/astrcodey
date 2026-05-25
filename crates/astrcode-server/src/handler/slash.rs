@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use astrcode_core::{
-    config::ModelSelection,
+    capability::ModelInfo,
     extension::{ExtensionCommandResult, ExtensionError},
 };
 
@@ -123,7 +123,7 @@ impl CommandHandler {
         let cmd_ctx = astrcode_core::extension::CommandContext {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
-            model: ModelSelection::simple(
+            model: ModelInfo::new(
                 self.runtime
                     .config_manager
                     .read_effective()
@@ -131,6 +131,8 @@ impl CommandHandler {
                     .model_id
                     .clone(),
             ),
+            capabilities: astrcode_core::capability::CapabilityRegistry::new(),
+            #[allow(deprecated)]
             session_store_dir: self
                 .runtime
                 .session_manager

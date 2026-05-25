@@ -21,6 +21,7 @@
 //! 下游 crate 应使用完整模块路径导入，如 `use astrcode_core::event::EventPayload`，
 //! 而非依赖 crate root 的 glob re-export。
 
+pub mod capability;
 pub mod config;
 pub mod event;
 pub mod extension;

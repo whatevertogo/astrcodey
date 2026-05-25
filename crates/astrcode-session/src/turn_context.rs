@@ -1,7 +1,7 @@
 //! Turn 基础设施 — 信号类型、共享上下文、错误类型。
 
 use astrcode_core::{
-    config::ModelSelection,
+    capability::{CapabilityRegistry, ModelInfo, PromptMessage},
     event::EventPayload,
     extension::{ExchangeSummary, ExtensionEvent, LifecycleContext, ProviderContext},
     llm::LlmMessage,
@@ -53,6 +53,7 @@ pub struct SharedTurnContext {
     pub working_dir: String,
     pub model_id: String,
     pub session_store_dir: Option<std::path::PathBuf>,
+    pub capabilities: CapabilityRegistry,
 }
 
 impl SharedTurnContext {
@@ -61,9 +62,10 @@ impl SharedTurnContext {
         LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
+            model: self.model_info(),
             extension_event_sink: None,
             last_exchange: None,
+            capabilities: self.capabilities.clone(),
         }
     }
 
@@ -76,12 +78,13 @@ impl SharedTurnContext {
         LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
+            model: self.model_info(),
             extension_event_sink: None,
             last_exchange: Some(ExchangeSummary {
                 user_message,
                 assistant_message,
             }),
+            capabilities: self.capabilities.clone(),
         }
     }
 
@@ -90,15 +93,17 @@ impl SharedTurnContext {
         ProviderContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
-            messages,
+            model: ModelInfo::new(&self.model_id),
+            messages: messages.iter().map(PromptMessage::from).collect(),
+            capabilities: self.capabilities.clone(),
+            #[allow(deprecated)]
             session_store_dir: self.session_store_dir.clone(),
         }
     }
 
-    /// 构造各 tool hook ctx 共用的 `ModelSelection`。
-    pub fn model_selection(&self) -> ModelSelection {
-        ModelSelection::simple(self.model_id.clone())
+    /// 构造各 tool hook ctx 共用的 `ModelInfo`。
+    pub fn model_info(&self) -> ModelInfo {
+        ModelInfo::new(&self.model_id)
     }
 }
 

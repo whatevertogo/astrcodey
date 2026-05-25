@@ -11,6 +11,7 @@ use std::{
 };
 
 use astrcode_core::{
+    capability::{SessionOpsCap, SmallModelIdCap},
     extension::{
         ChildToolPolicy, Extension, ExtensionError, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolHandler,
@@ -52,6 +53,8 @@ impl Extension for AgentToolsExtension {
                 shared: shared.clone(),
             }),
         );
+        reg.require_capability::<SessionOpsCap>();
+        reg.require_capability::<SmallModelIdCap>();
     }
 }
 
@@ -219,9 +222,10 @@ impl ToolHandler for AgentToolHandler {
         };
 
         // TODO: 允许插件页面为每个 agent 单独选择模型
-        let model_for_child = ctx
-            .capabilities
-            .small_model_id
+        let small_model_id = ctx
+            .get_capability::<SmallModelIdCap>()
+            .map(|cap| cap.small_model_id());
+        let model_for_child = small_model_id
             .as_deref()
             .or(matched.model.as_deref())
             .unwrap_or("inherit");
@@ -231,10 +235,10 @@ impl ToolHandler for AgentToolHandler {
         let render_json = serde_json::to_value(&render)
             .map_err(|e| ExtensionError::Internal(format!("serialize render: {e}")))?;
 
-        // 获取 session_ops
+        // 获取 session_ops 能力
         let session_ops =
-            ctx.capabilities.session_ops.as_ref().ok_or_else(|| {
-                ExtensionError::Internal("session operations not available".into())
+            ctx.get_capability::<SessionOpsCap>().ok_or_else(|| {
+                ExtensionError::Internal("session operations capability not available".into())
             })?;
 
         // 1. 创建子会话

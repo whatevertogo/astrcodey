@@ -100,6 +100,9 @@ pub(in crate::http) fn event_to_deltas(
         EventPayload::TurnStarted
         | EventPayload::AgentRunStarted
         | EventPayload::CompactionStarted
+        | EventPayload::CompactionCompleted { .. }
+        | EventPayload::CompactionSkipped { .. }
+        | EventPayload::CompactionFailed { .. }
         | EventPayload::BackgroundTaskCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_phase(projected_phase(&event.payload), has_messages),
@@ -231,6 +234,9 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::ToolCallCompleted { .. }
         | EventPayload::ToolCallBackgrounded { .. } => Phase::CallingTool,
         EventPayload::CompactionStarted => Phase::Compacting,
+        EventPayload::CompactionCompleted { .. }
+        | EventPayload::CompactionSkipped { .. }
+        | EventPayload::CompactionFailed { .. } => Phase::Thinking,
         EventPayload::ErrorOccurred { .. } => Phase::Error,
         _ => Phase::Idle,
     }

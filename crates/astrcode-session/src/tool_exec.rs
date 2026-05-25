@@ -5,6 +5,7 @@
 use std::{sync::Arc, time::Instant};
 
 use astrcode_core::{
+    capability::{CapabilityRegistry, SessionOpsCap},
     event::EventPayload,
     storage::ToolResultArtifactReader,
     tool::{
@@ -198,6 +199,12 @@ async fn execute_tool_call_blocking(
     let tool_event_tx = tool_event_bridge
         .as_ref()
         .map(|(tool_tx, _)| tool_tx.clone());
+
+    let mut caps_registry = CapabilityRegistry::new();
+    if let Some(ref ops) = runtime.capabilities.session_ops {
+        caps_registry.register(Arc::new(SessionOpsCap::from_session_ops(Arc::clone(ops))));
+    }
+
     let tool_ctx = ToolExecutionContext {
         session_id: runtime.session_id,
         working_dir: runtime.working_dir,
@@ -213,6 +220,7 @@ async fn execute_tool_call_blocking(
             file_observation_store: runtime.capabilities.file_observation_store,
             session_ops: runtime.capabilities.session_ops,
             extension_event_sink: None,
+            capabilities: caps_registry,
         },
     };
 
@@ -278,6 +286,11 @@ async fn execute_tool_call_with_background(
         tool_tx
     });
 
+    let mut caps_registry = CapabilityRegistry::new();
+    if let Some(ref ops) = runtime.capabilities.session_ops {
+        caps_registry.register(Arc::new(SessionOpsCap::from_session_ops(Arc::clone(ops))));
+    }
+
     let tool_ctx = ToolExecutionContext {
         session_id: runtime.session_id.clone(),
         working_dir: runtime.working_dir.clone(),
@@ -293,6 +306,7 @@ async fn execute_tool_call_with_background(
             file_observation_store: runtime.capabilities.file_observation_store.clone(),
             session_ops: runtime.capabilities.session_ops.clone(),
             extension_event_sink: None,
+            capabilities: caps_registry,
         },
     };
 

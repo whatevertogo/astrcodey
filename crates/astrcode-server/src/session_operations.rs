@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    capability::{SessionOpsCap, SessionOpsInner},
     event::{EventPayload, Phase},
     tool::{
         CreateSessionRequest, SessionApiError, SessionHandle, SessionOperations, SessionStatus,
@@ -465,4 +466,53 @@ impl ServerSessionOperations {
 
 fn one_line_summary(text: &str) -> String {
     astrcode_support::text::compact_inline(text, 159)
+}
+
+// ─── SessionOpsInner Capability Implementation ────────────────────────
+
+/// 将已有的 `SessionOperations` 实现适配为 `SessionOpsInner` 能力接口。
+///
+/// `SessionOpsInner` 是能力注入系统的接口（4 个方法），
+/// `SessionOperations` 是旧接口（7 个方法）。新接口的方法签名完全兼容，
+/// 直接委托即可。
+#[async_trait::async_trait]
+impl SessionOpsInner for ServerSessionOperations {
+    async fn create_session(
+        &self,
+        parent_session_id: &str,
+        request: CreateSessionRequest,
+    ) -> Result<SessionHandle, SessionApiError> {
+        SessionOperations::create_session(self, parent_session_id, request).await
+    }
+
+    async fn submit_turn(
+        &self,
+        caller_session_id: &str,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResult, SessionApiError> {
+        SessionOperations::submit_turn(self, caller_session_id, request).await
+    }
+
+    async fn recycle_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<(), SessionApiError> {
+        SessionOperations::recycle_session(self, caller_session_id, target_session_id).await
+    }
+
+    async fn query_session(
+        &self,
+        caller_session_id: &str,
+        target_session_id: &str,
+    ) -> Result<SessionStatus, SessionApiError> {
+        SessionOperations::query_session(self, caller_session_id, target_session_id).await
+    }
+}
+
+impl ServerSessionOperations {
+    /// 将自身包装为 `SessionOpsCap` 能力，供注入到 `CapabilityRegistry`。
+    pub fn as_capability(self: &Arc<Self>) -> Arc<SessionOpsCap> {
+        Arc::new(SessionOpsCap::new(self.clone()))
+    }
 }

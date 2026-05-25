@@ -8,6 +8,7 @@
 //! - [`Registrar`]：扩展注册能力的构建器
 //! - 类型化的处理器 trait 和上下文结构体
 
+use std::any::TypeId;
 use std::{
     future::Future,
     sync::{Arc, Mutex},
@@ -19,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::ModelSelection,
+    capability::Capability,
     llm::LlmProvider,
     storage::{EventReader, EventStore},
     tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
@@ -106,6 +107,8 @@ pub struct ExtensionCtx {
     startup_working_dir: Option<String>,
     /// 启动阶段可用的扩展事件发送端；由宿主显式绑定。
     event_sink: Option<Arc<dyn ExtensionEventSink>>,
+    /// 能力注册表。扩展通过 `get_capability::<T>()` 获取注入的能力。
+    capabilities: crate::capability::CapabilityRegistry,
 }
 
 impl ExtensionCtx {
@@ -115,6 +118,7 @@ impl ExtensionCtx {
             config: ExtensionConfig::default(),
             startup_working_dir: None,
             event_sink: None,
+            capabilities: crate::capability::CapabilityRegistry::new(),
         }
     }
 
@@ -141,6 +145,7 @@ impl ExtensionCtx {
             config,
             startup_working_dir,
             event_sink,
+            capabilities: crate::capability::CapabilityRegistry::new(),
         }
     }
 
@@ -156,6 +161,16 @@ impl ExtensionCtx {
     /// 返回启动阶段由宿主绑定的扩展事件发送端。
     pub fn event_sink(&self) -> Option<&Arc<dyn ExtensionEventSink>> {
         self.event_sink.as_ref()
+    }
+
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
+
+    /// 返回能力注册表的可变引用，供宿主注入能力。
+    pub fn capabilities_mut(&mut self) -> &mut crate::capability::CapabilityRegistry {
+        &mut self.capabilities
     }
 
     pub fn shutdown(&self) -> CancellationToken {
@@ -735,10 +750,10 @@ pub enum ProviderResult {
         reason: String,
     },
     ReplaceMessages {
-        messages: Vec<crate::llm::LlmMessage>,
+        messages: Vec<crate::capability::PromptMessage>,
     },
     AppendMessages {
-        messages: Vec<crate::llm::LlmMessage>,
+        messages: Vec<crate::capability::PromptMessage>,
     },
 }
 
@@ -757,7 +772,7 @@ pub enum CompactResult {
 pub struct PostToolUseFailureContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub error: String,
@@ -769,14 +784,26 @@ pub struct PostToolUseFailureContext {
 pub struct PreToolUseContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub available_tools: Vec<ToolDefinition>,
     /// 插件事件发射器（仅插件钩子会有值）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
+    /// 能力注册表，用于获取 SessionStorageCap 等 per-session 能力。
+    pub capabilities: crate::capability::CapabilityRegistry,
     /// session 在存储层的真实目录路径。
+    ///
+    /// 已废弃：使用 `capabilities.get_capability::<SessionStorageCap>()` 代替。
+    #[deprecated(note = "Use capabilities.get_capability::<SessionStorageCap>() instead")]
     pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+impl PreToolUseContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
 }
 
 impl std::fmt::Debug for PreToolUseContext {
@@ -797,15 +824,27 @@ impl std::fmt::Debug for PreToolUseContext {
 pub struct PostToolUseContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,
     pub is_error: bool,
     /// 插件事件发射器（仅插件钩子会有值）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
+    /// 能力注册表，用于获取 SessionStorageCap 等 per-session 能力。
+    pub capabilities: crate::capability::CapabilityRegistry,
     /// session 在存储层的真实目录路径。
+    ///
+    /// 已废弃：使用 `capabilities.get_capability::<SessionStorageCap>()` 代替。
+    #[deprecated(note = "Use capabilities.get_capability::<SessionStorageCap>() instead")]
     pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+impl PostToolUseContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
 }
 
 impl std::fmt::Debug for PostToolUseContext {
@@ -827,10 +866,22 @@ impl std::fmt::Debug for PostToolUseContext {
 pub struct ProviderContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
-    pub messages: Vec<crate::llm::LlmMessage>,
+    pub model: crate::capability::ModelInfo,
+    pub messages: Vec<crate::capability::PromptMessage>,
+    /// 能力注册表，用于获取 SessionStorageCap 等 per-session 能力。
+    pub capabilities: crate::capability::CapabilityRegistry,
     /// session 在存储层的真实目录路径。
+    ///
+    /// 已废弃：使用 `capabilities.get_capability::<SessionStorageCap>()` 代替。
+    #[deprecated(note = "Use capabilities.get_capability::<SessionStorageCap>() instead")]
     pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+impl ProviderContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
 }
 
 /// PromptBuild 钩子上下文。
@@ -838,7 +889,7 @@ pub struct ProviderContext {
 pub struct PromptBuildContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     pub tools: Vec<ToolDefinition>,
 }
 
@@ -847,7 +898,7 @@ pub struct PromptBuildContext {
 pub struct CompactContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     pub trigger: CompactTrigger,
     pub message_count: usize,
     pub pre_tokens: Option<usize>,
@@ -867,11 +918,20 @@ pub struct ExchangeSummary {
 pub struct LifecycleContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
     /// 插件事件发射器（仅插件钩子会有值）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// 仅 TurnEnd 事件填充：当轮最后一条 user 和 assistant 消息文本。
     pub last_exchange: Option<ExchangeSummary>,
+    /// 能力注册表，用于获取 LlmInvokerCap、EventQueryCap 等能力。
+    pub capabilities: crate::capability::CapabilityRegistry,
+}
+
+impl LifecycleContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
 }
 
 impl std::fmt::Debug for LifecycleContext {
@@ -892,9 +952,21 @@ impl std::fmt::Debug for LifecycleContext {
 pub struct CommandContext {
     pub session_id: String,
     pub working_dir: String,
-    pub model: ModelSelection,
+    pub model: crate::capability::ModelInfo,
+    /// 能力注册表，用于获取 SessionStorageCap 等 per-session 能力。
+    pub capabilities: crate::capability::CapabilityRegistry,
     /// session 在存储层的真实目录路径。
+    ///
+    /// 已废弃：使用 `capabilities.get_capability::<SessionStorageCap>()` 代替。
+    #[deprecated(note = "Use capabilities.get_capability::<SessionStorageCap>() instead")]
     pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+impl CommandContext {
+    /// 按类型获取注入的能力。
+    pub fn get_capability<T: crate::capability::Capability>(&self) -> Option<Arc<T>> {
+        self.capabilities.get::<T>()
+    }
 }
 
 // ─── Handler Traits ──────────────────────────────────────────────
@@ -1027,6 +1099,8 @@ pub struct Registrar {
     )>,
     extension_event_decls: Vec<ExtensionEventDecl>,
     needs_extension_data_dir: bool,
+    /// 扩展声明的能力需求。运行时在 start() 前校验——缺少必需能力则记录警告。
+    required_capabilities: Vec<TypeId>,
 }
 
 impl Registrar {
@@ -1048,6 +1122,7 @@ impl Registrar {
             lifecycle: Vec::new(),
             extension_event_decls: Vec::new(),
             needs_extension_data_dir: false,
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -1166,6 +1241,24 @@ impl Registrar {
     /// 注册后由 runtime 自动创建目录。插件通过 `hostpaths::extension_data_dir()` 获取路径。
     pub fn extension_data_dir(&mut self) {
         self.needs_extension_data_dir = true;
+    }
+
+    /// 声明扩展需要指定能力。运行时在 `start()` 前校验——缺少必需能力则记录警告。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// fn register(&self, reg: &mut Registrar) {
+    ///     reg.require_capability::<SessionOpsCap>();
+    /// }
+    /// ```
+    pub fn require_capability<T: Capability>(&mut self) {
+        self.required_capabilities.push(TypeId::of::<T>());
+    }
+
+    /// 返回扩展声明的全部能力需求。
+    pub fn required_capabilities(&self) -> &[TypeId] {
+        &self.required_capabilities
     }
 
     /// 声明插件可发出的事件类型，返回构建器。

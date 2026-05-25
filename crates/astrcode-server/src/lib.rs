@@ -5,6 +5,7 @@
 
 pub mod acp;
 pub mod bootstrap;
+pub mod capability;
 pub mod handler;
 pub mod http;
 pub mod transport;

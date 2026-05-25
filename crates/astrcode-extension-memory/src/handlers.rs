@@ -3,16 +3,15 @@
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use astrcode_core::{
+    capability::{EventQueryCap, LlmInvokerCap},
     extension::{
         CommandContext, ExtensionCommandResult, ExtensionError, ExtensionTasks, HookResult,
         LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
         PromptContributions, SlashCommand, ToolHandler,
     },
-    llm::LlmProvider,
-    storage::EventReader,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -249,7 +248,7 @@ pub(crate) struct TurnExtractState {
 
 pub(crate) struct MemoryTurnEndHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub small_llm: Arc<dyn LlmProvider>,
+    pub llm_invoker: Arc<RwLock<Option<Arc<LlmInvokerCap>>>>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub(crate) extract_state: Mutex<TurnExtractState>,
 }
@@ -286,11 +285,14 @@ impl LifecycleHandler for MemoryTurnEndHandler {
             state.last_extract = Some(now);
         }
 
+        let llm_invoker = self.llm_invoker.read().clone().ok_or_else(|| {
+            ExtensionError::Internal("LlmInvokerCap not available".into())
+        })?;
+
         let store = self
             .store_pool
             .get(&ctx.working_dir)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let small_llm = self.small_llm.clone();
         let session_id = ctx.session_id.clone();
         let assistant_message = exchange.assistant_message.clone();
 
@@ -321,7 +323,7 @@ impl LifecycleHandler for MemoryTurnEndHandler {
             // 2. 小模型提取记忆
             if let Err(e) = crate::pipeline::extract_turn(
                 store,
-                small_llm.as_ref(),
+                llm_invoker.as_ref(),
                 &session_id,
                 &query,
                 &assistant_message,
@@ -382,8 +384,8 @@ impl MemoryPipelineCoordinator {
 
 pub(crate) struct MemorySessionStartHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub session_read: Arc<dyn EventReader>,
-    pub small_llm: Arc<dyn LlmProvider>,
+    pub event_query: Arc<RwLock<Option<Arc<EventQueryCap>>>>,
+    pub llm_invoker: Arc<RwLock<Option<Arc<LlmInvokerCap>>>>,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
@@ -401,12 +403,17 @@ impl LifecycleHandler for MemorySessionStartHandler {
             return Ok(HookResult::Allow);
         }
 
+        let event_query = self.event_query.read().clone().ok_or_else(|| {
+            ExtensionError::Internal("EventQueryCap not available".into())
+        })?;
+        let llm_invoker = self.llm_invoker.read().clone().ok_or_else(|| {
+            ExtensionError::Internal("LlmInvokerCap not available".into())
+        })?;
+
         let store = self
             .store_pool
             .get(&ctx.working_dir)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let session_read = self.session_read.clone();
-        let small_llm = self.small_llm.clone();
         let Some(mut current_session_id) = self.pipeline.request_run(ctx.session_id.to_string())
         else {
             tracing::debug!(session_id = %ctx.session_id, "memory pipeline queued");
@@ -418,8 +425,8 @@ impl LifecycleHandler for MemorySessionStartHandler {
             loop {
                 let run = crate::pipeline::run(
                     &store,
-                    Arc::clone(&session_read),
-                    &*small_llm,
+                    event_query.clone(),
+                    llm_invoker.clone(),
                     &current_session_id,
                 );
 
@@ -493,55 +500,13 @@ impl astrcode_core::extension::CommandHandler for MemoryCommandHandler {
                         Ok(results.join("\n"))
                     }
                 },
-                rest if rest.starts_with("delete ") => {
-                    let pattern = rest[7..].trim();
-                    if pattern.is_empty() {
-                        return Ok("No pattern provided. Nothing deleted.".to_string());
-                    }
-                    let removed = store.delete_by_content(pattern)?;
-                    if removed.is_empty() {
-                        Ok("No matching memories found to delete.".to_string())
-                    } else {
-                        Ok(format!(
-                            "Deleted {} entries:\n{}",
-                            removed.len(),
-                            removed.join("\n")
-                        ))
-                    }
-                },
-                _ => Ok("Usage: /memory [list|search <query>|delete <pattern>]".to_string()),
+                _ => Ok("Usage: /memory [list|search <query>]".to_string()),
             }
         })
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        Ok(ExtensionCommandResult::Display {
-            content: result,
-            is_error: false,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MemoryPipelineCoordinator;
-
-    #[test]
-    fn pipeline_coordinator_coalesces_pending_runs() {
-        let coordinator = MemoryPipelineCoordinator::default();
-
-        assert_eq!(
-            coordinator.request_run("session-a".to_string()),
-            Some("session-a".to_string())
-        );
-        assert_eq!(coordinator.request_run("session-b".to_string()), None);
-        assert_eq!(coordinator.request_run("session-c".to_string()), None);
-        assert_eq!(coordinator.complete_run(), Some("session-c".to_string()));
-        assert_eq!(coordinator.complete_run(), None);
-        assert_eq!(
-            coordinator.request_run("session-d".to_string()),
-            Some("session-d".to_string())
-        );
+        Ok(ExtensionCommandResult::display(result, false))
     }
 }

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    config::ModelSelection,
+    capability::{CapabilityRegistry, ModelInfo},
     event::{Event, EventPayload},
     extension::{ChildToolPolicy, ExtensionEvent, LifecycleContext},
     prompt::SystemPromptInput,
@@ -190,9 +190,10 @@ impl Session {
                 LifecycleContext {
                     session_id: session_id.to_string(),
                     working_dir: model.working_dir.clone(),
-                    model: ModelSelection::simple(model.model_id.clone()),
+                    model: ModelInfo::new(&model.model_id),
                     extension_event_sink: None,
                     last_exchange: None,
+                    capabilities: CapabilityRegistry::new(),
                 },
             )
             .await?;

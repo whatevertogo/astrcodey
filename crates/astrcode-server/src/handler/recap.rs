@@ -77,9 +77,10 @@ impl CommandHandler {
         let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.model_id.clone()),
+            model: astrcode_core::capability::ModelInfo::new(&state.model_id),
             extension_event_sink: None,
             last_exchange: None,
+            capabilities: astrcode_core::capability::CapabilityRegistry::new(),
         };
         if let Err(e) = self
             .runtime

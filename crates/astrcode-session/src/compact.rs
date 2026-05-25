@@ -4,7 +4,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use astrcode_context::compaction::{CompactError, CompactResult};
 use astrcode_core::{
-    config::ModelSelection,
+    capability::ModelInfo,
     event::Event,
     extension::{
         CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactStrategy,
@@ -38,7 +38,7 @@ pub async fn collect_compact_instructions(
     let ctx = CompactContext {
         session_id: input.session_id.to_string(),
         working_dir: input.working_dir.to_string(),
-        model: ModelSelection::simple(input.model_id),
+        model: ModelInfo::new(input.model_id),
         trigger: input.trigger,
         message_count: input.message_count,
         pre_tokens: None,
@@ -68,7 +68,7 @@ pub async fn dispatch_post_compact(
     let ctx = CompactContext {
         session_id: input.session_id.to_string(),
         working_dir: input.working_dir.to_string(),
-        model: ModelSelection::simple(input.model_id),
+        model: ModelInfo::new(input.model_id),
         trigger: input.trigger,
         message_count: input.message_count,
         pre_tokens: Some(compaction.pre_tokens),
