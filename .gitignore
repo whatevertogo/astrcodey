@@ -47,4 +47,4 @@ Desktop.ini
 .codex/
 .agents/
 
-s6r-guest/
+target/

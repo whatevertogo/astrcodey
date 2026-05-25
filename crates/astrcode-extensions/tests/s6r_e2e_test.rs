@@ -187,7 +187,7 @@ async fn e2e_command_demo_returns_display() {
     ext.register(&mut reg);
     let (_, handler) = &reg.commands()[0];
 
-    use astrcode_extension_sdk::extension::{CommandContext};
+    use astrcode_extension_sdk::extension::CommandContext;
 
     let ctx = CommandContext {
         session_id: "e2e-session".into(),
