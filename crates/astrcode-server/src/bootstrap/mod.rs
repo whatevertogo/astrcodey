@@ -11,6 +11,7 @@ use astrcode_core::{
     storage::EventStore,
 };
 use astrcode_extensions::{
+    build_small_llm_invoker,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
 };
@@ -322,6 +323,7 @@ async fn load_extensions_into_runner(
                 fuel: effective.wasm.fuel,
                 memory_bytes: effective.wasm.memory_bytes,
             },
+            invoker: Some(build_small_llm_invoker(capabilities.small_llm())),
         },
         &[&bundled_source, &disk_source],
     )

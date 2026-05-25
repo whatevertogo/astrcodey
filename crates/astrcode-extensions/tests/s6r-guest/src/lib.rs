@@ -3,6 +3,7 @@
 //! 注册能力：
 //! - tool `greet`：接收 `{ "name": "..." }`，返回 `"hello, {name}!"`
 //! - tool `add`：接收 `{ "a": i64, "b": i64 }`，返回 `"a + b = {result}"`
+//! - tool `ask_llm`：调用 `host_invoke("small_llm.chat", ...)`，返回 LLM 响应
 //! - hook `pre_tool_use` (blocking)：阻止包含 `rm -rf` 的 bash 命令
 //! - command `/demo`：返回 display 消息
 
@@ -18,6 +19,7 @@ struct Manifest {
     s6r: &'static str,
     id: &'static str,
     version: &'static str,
+    capabilities: Vec<&'static str>,
     tools: Vec<ManifestTool>,
     commands: Vec<ManifestCommand>,
     hooks: Vec<ManifestHook>,
@@ -106,6 +108,42 @@ impl CallResponse {
     }
 }
 
+// ─── host import: host_invoke ────────────────────────────────────────────
+
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn host_invoke(
+        cap_ptr: i32,
+        cap_len: i32,
+        input_ptr: i32,
+        input_len: i32,
+    ) -> i64;
+}
+
+fn call_host_invoke(cap: &str, input: &str) -> Option<String> {
+    let cap_bytes = cap.as_bytes();
+    let input_bytes = input.as_bytes();
+    let packed = unsafe {
+        host_invoke(
+            cap_bytes.as_ptr() as i32,
+            cap_bytes.len() as i32,
+            input_bytes.as_ptr() as i32,
+            input_bytes.len() as i32,
+        )
+    };
+    if packed == 0 {
+        return None;
+    }
+    let resp_ptr = ((packed >> 32) & 0xFFFF_FFFF) as u32;
+    let resp_len = (packed & 0xFFFF_FFFF) as u32;
+    let resp = unsafe {
+        let slice = std::slice::from_raw_parts(resp_ptr as *const u8, resp_len as usize);
+        String::from_utf8_lossy(slice).into_owned()
+    };
+    dealloc(resp_ptr as i32, resp_len as i32);
+    Some(resp)
+}
+
 // ─── 内存管理 ──────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -143,6 +181,7 @@ pub extern "C" fn extension_manifest() -> i64 {
         s6r: S6R_VERSION,
         id: "s6r-guest-demo",
         version: "0.1.0",
+        capabilities: vec!["small_model"],
         tools: vec![
             ManifestTool {
                 name: "greet",
@@ -163,6 +202,15 @@ pub extern "C" fn extension_manifest() -> i64 {
                         "b": { "type": "integer" }
                     },
                     "required": ["a", "b"]
+                }),
+            },
+            ManifestTool {
+                name: "ask_llm",
+                description: "Ask the host small LLM a question",
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "prompt": { "type": "string" } },
+                    "required": ["prompt"]
                 }),
             },
         ],
@@ -222,6 +270,33 @@ fn handle_tool(id: String, name: String, input: Value) -> CallResponse {
                 "ok",
                 serde_json::json!({ "content": format!("{} + {} = {}", a, b, a + b) }),
             )
+        }
+        "ask_llm" => {
+            let prompt = args["prompt"].as_str().unwrap_or("");
+            let input = serde_json::json!({
+                "messages": [{ "role": "user", "content": prompt }],
+                "max_tokens": 256
+            })
+            .to_string();
+            match call_host_invoke("small_llm.chat", &input) {
+                Some(resp_json) => {
+                    let resp: Value = serde_json::from_str(&resp_json).unwrap_or_default();
+                    if resp["ok"].as_bool().unwrap_or(false) {
+                        let content = resp["output"]["content"]
+                            .as_str()
+                            .unwrap_or("(no content)");
+                        CallResponse::with_effect(
+                            id,
+                            "ok",
+                            serde_json::json!({ "content": content.to_string() }),
+                        )
+                    } else {
+                        let err = resp["error"].as_str().unwrap_or("unknown error");
+                        CallResponse::err(id, err.to_string())
+                    }
+                },
+                None => CallResponse::err(id, "host_invoke returned null".to_string()),
+            }
         }
         _ => CallResponse::err(id, format!("unknown tool: {name}")),
     }

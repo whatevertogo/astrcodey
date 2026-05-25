@@ -108,7 +108,7 @@ fn escape_wat_bytes(bytes: &[u8]) -> String {
 fn load_wasm(bytes: &[u8]) -> Arc<WasmExtension> {
     let mut tmp = NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut tmp, bytes).unwrap();
-    WasmExtension::load(tmp.path(), 10_000_000, 64 * 1024 * 1024).unwrap()
+    WasmExtension::load(tmp.path(), 10_000_000, 64 * 1024 * 1024, None).unwrap()
 }
 
 fn tool_execution_ctx() -> ToolExecutionContext {
@@ -369,7 +369,7 @@ async fn s6r_wrong_protocol_version_rejected() {
 
     let mut tmp = NamedTempFile::new().unwrap();
     std::io::Write::write_all(&mut tmp, &bytes).unwrap();
-    let result = WasmExtension::load(tmp.path(), 10_000_000, 64 * 1024 * 1024);
+    let result = WasmExtension::load(tmp.path(), 10_000_000, 64 * 1024 * 1024, None);
     let err = result.err().expect("should reject unknown s6r version");
     assert!(err.contains("unsupported s6r version"), "error was: {err}");
 }

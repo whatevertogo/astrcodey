@@ -1,18 +1,33 @@
 //! WASM 扩展协议 — 宿主状态、内存读写、host import 注册。
 //!
-//! s6r 协议下宿主提供 WASI 支持（`wasi_snapshot_preview1`）和两个自定义 import：
-//! `host_log` 和 `host_emit`。
+//! s6r 协议下宿主提供 WASI 支持（`wasi_snapshot_preview1`）和三个自定义 import：
+//! `host_log`、`host_emit`、`host_invoke`。
 //! 工具/命令/hook 注册改由 guest 的 `extension_manifest()` 以 JSON 完成，
 //! 不再需要 `host_register_tool` / `host_register_command` / `host_subscribe` /
 //! `host_set_response` 等命令式副作用 import。
 
+use std::sync::Arc;
+
+use astrcode_core::extension::ExtensionCapability;
 use wasmtime::{Caller, Linker, ResourceLimiter};
 use wasmtime_wasi::WasiCtxBuilder;
+
+use crate::host_invoke;
 
 // ─── WASM resource limits ────────────────────────────────────────────────
 
 const DEFAULT_WASM_FUEL: u64 = 10_000_000;
 const DEFAULT_WASM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+
+// ─── HostInvoker ─────────────────────────────────────────────────────────
+
+/// 宿主能力的同步调用接口。
+///
+/// 签名：`(capability_name, input_json) -> response_json`
+///
+/// 实现者负责将异步能力包装为同步（通过 `Handle::block_on`）。
+/// 调用发生在 `spawn_blocking` 线程上，可以安全地 block。
+pub type HostInvoker = Arc<dyn Fn(&str, &str) -> String + Send + Sync>;
 
 // ─── Host State ──────────────────────────────────────────────────────────
 
@@ -27,6 +42,10 @@ pub struct HostState {
     pub memory_limit: usize,
     /// WASI preview1 上下文，支持 wasm32-wasip1 编译的 guest 插件。
     wasi_ctx: wasmtime_wasi::p1::WasiP1Ctx,
+    /// 全局宿主能力后端（由 server 注入）。`extension_manifest` 完成前为 None。
+    pub invoker: Option<HostInvoker>,
+    /// manifest 声明的能力；与 `ExtensionRunner` 的 per-extension `allows` 同源。
+    pub declared_capabilities: Vec<ExtensionCapability>,
 }
 
 impl HostState {
@@ -35,6 +54,8 @@ impl HostState {
             fuel_budget: DEFAULT_WASM_FUEL,
             memory_limit: DEFAULT_WASM_MEMORY_BYTES,
             wasi_ctx: WasiCtxBuilder::new().build_p1(),
+            invoker: None,
+            declared_capabilities: Vec::new(),
         }
     }
 
@@ -42,6 +63,16 @@ impl HostState {
         self.fuel_budget = fuel;
         self.memory_limit = memory_bytes;
         self
+    }
+
+    /// `extension_manifest` 成功后绑定声明与宿主后端。
+    pub fn finish_manifest(
+        &mut self,
+        declared: Vec<ExtensionCapability>,
+        invoker: Option<HostInvoker>,
+    ) {
+        self.declared_capabilities = declared;
+        self.invoker = invoker;
     }
 }
 
@@ -164,14 +195,77 @@ fn host_log(mut caller: Caller<'_, HostState>, level: i32, msg_ptr: i32, msg_len
     }
 }
 
+// ─── Host import: host_invoke ──────────────────────────────────────────────
+
+/// guest 调用宿主能力的统一入口。
+///
+/// ABI: `host_invoke(cap_ptr, cap_len, input_ptr, input_len) -> i64`
+/// 返回 packed i64 `(resp_ptr << 32 | resp_len)` 指向 guest 内存中的 ResultMsg JSON。
+/// 返回 0 表示能力不存在或内部错误。
+fn host_invoke(
+    mut caller: Caller<'_, HostState>,
+    cap_ptr: i32,
+    cap_len: i32,
+    input_ptr: i32,
+    input_len: i32,
+) -> i64 {
+    let cap = read_caller_string(&mut caller, cap_ptr as u32, cap_len as u32);
+    let input = read_caller_string(&mut caller, input_ptr as u32, input_len as u32);
+
+    let resp_json = {
+        let state = caller.data();
+        match host_invoke::authorize(&cap, &state.declared_capabilities) {
+            Err(msg) => host_invoke::err(msg),
+            Ok(()) => {
+                let Some(invoker) = state.invoker.as_ref() else {
+                    tracing::debug!(target: "wasm_ext", cap, "host_invoke: no backend configured");
+                    return 0;
+                };
+                invoker(&cap, &input)
+            },
+        }
+    };
+    let resp_bytes = resp_json.as_bytes();
+    let resp_len = resp_bytes.len();
+
+    let Some(alloc_export) = caller.get_export("alloc").and_then(|e| e.into_func()) else {
+        tracing::warn!(target: "wasm_ext", "host_invoke: guest missing alloc export");
+        return 0;
+    };
+    let Ok(typed_alloc) = alloc_export.typed::<i32, i32>(&caller) else {
+        tracing::warn!(target: "wasm_ext", "host_invoke: alloc has wrong type");
+        return 0;
+    };
+    let ptr = match typed_alloc.call(&mut caller, resp_len as i32) {
+        Ok(p) => p as u32,
+        Err(e) => {
+            tracing::warn!(target: "wasm_ext", "host_invoke: guest alloc failed: {e}");
+            return 0;
+        },
+    };
+
+    let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        tracing::warn!(target: "wasm_ext", "host_invoke: guest missing memory export");
+        return 0;
+    };
+    let start = ptr as usize;
+    let end = start + resp_len;
+    if end > mem.data(&caller).len() {
+        tracing::warn!(target: "wasm_ext", "host_invoke: response out of bounds");
+        return 0;
+    }
+    mem.data_mut(&mut caller)[start..end].copy_from_slice(resp_bytes);
+
+    ((ptr as i64) << 32) | (resp_len as i64)
+}
+
 // ─── Linker builder ──────────────────────────────────────────────────────
 
-/// 创建 s6r Linker：注册 WASI 支持和自定义 `host_log` / `host_emit`。
+/// 创建 s6r Linker：注册 WASI 支持和自定义 `host_log` / `host_emit` / `host_invoke`。
 pub fn create_linker(engine: &wasmtime::Engine) -> Result<Linker<HostState>, String> {
     let mut linker = Linker::new(engine);
 
     // WASI preview1 支持 — wasm32-wasip1 编译的 guest 需要
-    // TODO: 更优雅的方式注册 WASI
     wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut HostState| &mut state.wasi_ctx)
         .map_err(|e| format!("add wasi to linker: {e}"))?;
 
@@ -181,6 +275,9 @@ pub fn create_linker(engine: &wasmtime::Engine) -> Result<Linker<HostState>, Str
     linker
         .func_wrap("env", "host_emit", host_emit_stub)
         .map_err(|e| format!("register host_emit: {e}"))?;
+    linker
+        .func_wrap("env", "host_invoke", host_invoke)
+        .map_err(|e| format!("register host_invoke: {e}"))?;
     Ok(linker)
 }
 

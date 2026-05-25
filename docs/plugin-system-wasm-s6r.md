@@ -579,9 +579,16 @@ fn handle_command(id: &str, name: &str, _input: &serde_json::Value) -> CallRespo
 
 ---
 
-## 十一、不做的事（边界）
+## 十一、host_invoke（v1）
 
-- **不引入 host 能力回调**（DB/LLM/platform）：留待将来，届时在 `host_invoke` import 上扩展
-- **不引入 IPC/STDIO 传输**：WASM 足够，IPC 是 Phase N
+已实现（见 [`host-invoke-plan.md`](./host-invoke-plan.md)）：
+
+- 第三个 host import：`env.host_invoke(cap, input) -> i64`
+- 响应 JSON：`{ "ok": true, "output": {...} }` / `{ "ok": false, "error": "..." }`
+- v1 能力：`small_llm.chat`（须 manifest 声明 `small_model`；`HostState::declared_capabilities` + `host_invoke::authorize` 校验）
+
+## 十二、不做的事（边界）
+
+- **不引入 s5r 全协议 / IPC/STDIO 传输**：WASM + MCP 已覆盖 AstrCode 需求
 - **不改 `Registrar` 和各 Handler trait**：宿主侧保持不变，只改 wasm_ext.rs 对它们的桥接方式
 - **不加 proc macro**：当前 guest 手写两个入口即可，macro 是后续优化

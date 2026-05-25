@@ -15,6 +15,7 @@ use astrcode_extension_sdk::extension::{Extension, StopReason};
 use astrcode_support::hostpaths;
 
 use crate::runner::ExtensionRunner;
+use crate::wasm_api::HostInvoker;
 
 /// 从磁盘加载所有扩展的结果。
 #[derive(Default)]
@@ -35,6 +36,9 @@ pub struct WasmLimits {
 pub struct ExtensionLoadContext {
     pub working_dir: Option<String>,
     pub wasm_limits: WasmLimits,
+    /// 宿主能力调用器，注入到 WASM 扩展的 `host_invoke` 回调。
+    /// 传 `None` 则 guest 调用 `host_invoke` 时直接返回 0。
+    pub invoker: Option<HostInvoker>,
 }
 
 /// A source of extensions that can contribute to one [`ExtensionRunner`].
@@ -128,7 +132,7 @@ impl DiskExtensionSource {
 impl ExtensionSource for DiskExtensionSource {
     async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
         let mut result =
-            ExtensionLoader::load_all(ctx.working_dir.as_deref(), &ctx.wasm_limits).await;
+            ExtensionLoader::load_all(ctx.working_dir.as_deref(), &ctx.wasm_limits, ctx.invoker.clone()).await;
         result.extensions.retain(|extension| {
             self.extension_states
                 .get(extension.id())
@@ -153,14 +157,18 @@ impl ExtensionLoader {
     ///
     /// # 返回
     /// 包含已加载扩展和错误信息的结果
-    pub async fn load_all(working_dir: Option<&str>, limits: &WasmLimits) -> LoadExtensionsResult {
+    pub async fn load_all(
+        working_dir: Option<&str>,
+        limits: &WasmLimits,
+        invoker: Option<HostInvoker>,
+    ) -> LoadExtensionsResult {
         let mut extensions: Vec<Arc<dyn Extension>> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
         // 全局扩展: ~/.astrcode/extensions/
         let global_dir = hostpaths::extensions_dir();
         if global_dir.exists() {
-            let (exts, errs) = Self::load_from_dir(&global_dir, limits).await;
+            let (exts, errs) = Self::load_from_dir(&global_dir, limits, &invoker).await;
             extensions.extend(exts);
             errors.extend(errs);
         }
@@ -169,7 +177,8 @@ impl ExtensionLoader {
         if let Some(wd) = working_dir {
             let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
             if project_dir.exists() {
-                let (project_exts, project_errs) = Self::load_from_dir(&project_dir, limits).await;
+                let (project_exts, project_errs) =
+                    Self::load_from_dir(&project_dir, limits, &invoker).await;
                 // 项目扩展在分发顺序中排在前面
                 extensions.splice(0..0, project_exts);
                 errors.extend(project_errs);
@@ -185,6 +194,7 @@ impl ExtensionLoader {
     async fn load_from_dir(
         dir: &Path,
         limits: &WasmLimits,
+        invoker: &Option<HostInvoker>,
     ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
         let mut extensions = Vec::new();
         let mut errors = Vec::new();
@@ -198,7 +208,7 @@ impl ExtensionLoader {
         };
 
         for path in paths {
-            match Self::load_extension(&path, limits).await {
+            match Self::load_extension(&path, limits, invoker.clone()).await {
                 Ok(ext) => extensions.push(ext),
                 Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
@@ -241,6 +251,7 @@ impl ExtensionLoader {
     async fn load_extension(
         ext_dir: &Path,
         limits: &WasmLimits,
+        invoker: Option<HostInvoker>,
     ) -> Result<Arc<dyn Extension>, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes = tokio::fs::read(&manifest_path)
@@ -261,7 +272,7 @@ impl ExtensionLoader {
         }
 
         let lib_path = ext_dir.join(&library);
-        crate::wasm_ext::WasmExtension::load(&lib_path, limits.fuel, limits.memory_bytes)
+        crate::wasm_ext::WasmExtension::load(&lib_path, limits.fuel, limits.memory_bytes, invoker)
             .map(|ext| ext as Arc<dyn Extension>)
             .map_err(|e| format!("load wasm {}: {e}", lib_path.display()))
     }

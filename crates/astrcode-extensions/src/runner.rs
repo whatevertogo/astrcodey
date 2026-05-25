@@ -211,6 +211,7 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
     let mut lc: Vec<PrioritizedEventHandler<ExtensionEvent, dyn LifecycleHandler>> = Vec::new();
     let mut tool_metadata = std::collections::HashMap::new();
+    #[allow(clippy::type_complexity)]
     let mut static_tools: Vec<(
         ToolDefinition,
         Arc<dyn ToolHandler>,

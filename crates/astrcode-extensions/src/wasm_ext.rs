@@ -41,6 +41,8 @@ use serde_json::json;
 
 use crate::wasm_api::{self, HostState};
 
+pub use crate::wasm_api::HostInvoker;
+
 // ─── 请求 ID 生成 ────────────────────────────────────────────────────────
 
 fn new_req_id() -> String {
@@ -178,10 +180,14 @@ impl WasmExtension {
     ///
     /// `id` 和 `capabilities` 从 guest 的 `extension_manifest()` 返回值中读取，
     /// 不再由调用方传入。
+    ///
+    /// `invoker` 为 `host_invoke` 提供宿主能力调用接口。
+    /// 传 `None` 则 guest 调用 `host_invoke` 时直接返回 0。
     pub fn load(
         path: &std::path::Path,
         fuel: u64,
         memory_bytes: usize,
+        invoker: Option<HostInvoker>,
     ) -> Result<Arc<Self>, String> {
         // ── wasmtime 初始化 ──────────────────────────────────────────────
         let mut config = wasmtime::Config::new();
@@ -193,6 +199,7 @@ impl WasmExtension {
 
         let linker = wasm_api::create_linker(&engine)?;
 
+        // manifest 阶段不注入 invoker，避免未声明能力在 manifest 内被调用。
         let host_state = HostState::new().with_limits(fuel, memory_bytes);
         let mut store = wasmtime::Store::new(&engine, host_state);
         store.limiter(|s: &mut HostState| -> &mut dyn wasmtime::ResourceLimiter { s });
@@ -249,6 +256,10 @@ impl WasmExtension {
             .iter()
             .filter_map(|c| parse_capability(c))
             .collect();
+
+        store
+            .data_mut()
+            .finish_manifest(capabilities.clone(), invoker);
 
         // ── 从 manifest 构建注册信息 ─────────────────────────────────────
         let tools: Vec<ToolDefinition> = manifest
@@ -393,7 +404,7 @@ impl Extension for WasmExtension {
                     );
                 },
                 other => {
-                    let on = event_to_name(&other).to_string();
+                    let on = event_to_name(other).to_string();
                     reg.on_event(
                         other.clone(),
                         *mode,

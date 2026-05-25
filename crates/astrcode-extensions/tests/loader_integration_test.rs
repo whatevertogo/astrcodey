@@ -13,7 +13,7 @@ async fn loader_returns_empty_result_when_no_extensions_dir() {
         fuel: 10_000_000,
         memory_bytes: 64 * 1024 * 1024,
     };
-    let result = ExtensionLoader::load_all(Some("/nonexistent/path"), &limits).await;
+    let result = ExtensionLoader::load_all(Some("/nonexistent/path"), &limits, None).await;
     // 不应报错 — 仅返回空列表
     assert!(result.extensions.is_empty());
     assert!(result.errors.is_empty());
@@ -26,7 +26,7 @@ async fn loader_returns_empty_result_for_none_working_dir() {
         fuel: 10_000_000,
         memory_bytes: 64 * 1024 * 1024,
     };
-    let result = ExtensionLoader::load_all(None, &limits).await;
+    let result = ExtensionLoader::load_all(None, &limits, None).await;
     // 全局目录可能存在也可能不存在，但不应崩溃
     // 当 working_dir 为 None 时跳过项目目录扫描
     assert!(result.errors.is_empty());

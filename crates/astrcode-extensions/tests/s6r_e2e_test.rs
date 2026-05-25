@@ -13,6 +13,7 @@ use astrcode_extension_sdk::{
     extension::{Extension, HookMode, PreToolUseContext, PreToolUseResult, Registrar},
     tool::ToolExecutionContext,
 };
+use astrcode_extensions::wasm_api::HostInvoker;
 use astrcode_extensions::wasm_ext::WasmExtension;
 
 /// guest 插件的 WASM 文件路径（由 cargo build --target wasm32-wasip1 生成）。
@@ -29,7 +30,7 @@ fn guest_wasm_path() -> std::path::PathBuf {
 fn load_guest() -> Arc<WasmExtension> {
     let wasm_path = guest_wasm_path();
     assert!(wasm_path.exists(), "guest WASM not found at {:?}", wasm_path);
-    WasmExtension::load(&wasm_path, 10_000_000, 64 * 1024 * 1024).unwrap()
+    WasmExtension::load(&wasm_path, 10_000_000, 64 * 1024 * 1024, None).unwrap()
 }
 
 fn tool_ctx() -> ToolExecutionContext {
@@ -66,10 +67,11 @@ async fn e2e_manifest_registers_tools_and_hooks() {
     ext.register(&mut reg);
 
     let tools = reg.tools();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 3);
     let names: Vec<_> = tools.iter().map(|(d, _)| d.name.as_str()).collect();
     assert!(names.contains(&"greet"), "greet tool not found: {names:?}");
     assert!(names.contains(&"add"), "add tool not found: {names:?}");
+    assert!(names.contains(&"ask_llm"), "ask_llm tool not found: {names:?}");
 
     let hooks = reg.pre_tool_use();
     assert_eq!(hooks.len(), 1);
@@ -206,4 +208,75 @@ async fn e2e_command_demo_returns_display() {
         }
         other => panic!("expected Display, got {other:?}"),
     }
+}
+
+// ─── host_invoke E2E 测试 ────────────────────────────────────────────────
+
+fn load_guest_with_invoker(invoker: Option<HostInvoker>) -> Arc<WasmExtension> {
+    let wasm_path = guest_wasm_path();
+    assert!(wasm_path.exists(), "guest WASM not found at {:?}", wasm_path);
+    WasmExtension::load(&wasm_path, 10_000_000, 64 * 1024 * 1024, invoker).unwrap()
+}
+
+fn mock_invoker() -> HostInvoker {
+    Arc::new(|cap: &str, input: &str| -> String {
+        match cap {
+            "small_llm.chat" => {
+                let _req: serde_json::Value =
+                    serde_json::from_str(input).unwrap_or_default();
+                serde_json::json!({
+                    "ok": true,
+                    "output": { "content": "mock-llm-response", "model": "mock-model" }
+                })
+                .to_string()
+            },
+            _ => serde_json::json!({
+                "ok": false,
+                "error": format!("unknown capability: {cap}")
+            })
+            .to_string(),
+        }
+    })
+}
+
+#[tokio::test]
+async fn e2e_ask_llm_calls_host_invoke() {
+    let ext = load_guest_with_invoker(Some(mock_invoker()));
+    let mut reg = Registrar::new();
+    ext.register(&mut reg);
+    let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ask_llm").unwrap();
+
+    let result = handler
+        .execute(
+            "ask_llm",
+            serde_json::json!({ "prompt": "hello" }),
+            "/tmp",
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "is_error: {}, content: {}", result.is_error, result.content);
+    assert_eq!(result.content, "mock-llm-response");
+}
+
+#[tokio::test]
+async fn e2e_ask_llm_without_invoker_returns_error() {
+    let ext = load_guest_with_invoker(None);
+    let mut reg = Registrar::new();
+    ext.register(&mut reg);
+    let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ask_llm").unwrap();
+
+    let result = handler
+        .execute(
+            "ask_llm",
+            serde_json::json!({ "prompt": "hello" }),
+            "/tmp",
+            &tool_ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_error);
+    assert!(result.content.contains("host_invoke returned null"));
 }

@@ -1,5 +1,10 @@
 # AstrCode 插件系统设计规范 v1.0
 
+> **⚠️ AstrCode 产品说明**  
+> 本文档描述的是 **AstrBot 起源的 s5r 双向插件平台**（`platform.*`、IPC STDIO、`plugin_init` 等），  
+> **不是** 当前 AstrCode coding agent 的实现规范。  
+> **请以 [`extension-system.md`](./extension-system.md) + [`plugin-system-wasm-s6r.md`](./plugin-system-wasm-s6r.md) + [`host-invoke-plan.md`](./host-invoke-plan.md) 为准。**
+
 > **适用读者**：实现本系统的 agent 或开发者。本文档是可执行规范，所有类型、帧格式、ABI
 > 均可直接作为实现依据。
 
