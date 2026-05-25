@@ -30,12 +30,12 @@ AstrCode is a full-stack AI coding assistant built from scratch in ~55k lines of
 ### NPM Package
 
 ```bash
-npm install -g astrcode
+npm i @whatevertogo/astrcode
 ```
 
-The `astrcode` npm package (v0.1.4) provides pre-built binaries for Linux, macOS, and Windows (x64 + arm64). After installation, the `astrcode` command will be available globally.
+The `@whatevertogo/astrcode` npm package provides pre-built binaries for Linux, macOS, and Windows (x64 + arm64). After installation, the `astrcode` command will be available globally.
 
-**Package**: [`astrcode`](https://www.npmjs.com/package/astrcode)
+**Package**: [`@whatevertogo/astrcode`](https://www.npmjs.com/package/@whatevertogo/astrcode)
 
 ### Build from Source
 
@@ -164,7 +164,7 @@ To enable the memory extension, add `"astrcode.memory": true` to `extensionState
 |---|---|---|
 | **Mode** | `astrcode-extension-mode` | Agent running mode switching (Code / Plan), with Exit Gate, plan artifact persistence, keybinding & status item registration |
 | **Skill** | `astrcode-extension-skill` | Slash-command skill discovery and dispatch |
-| **MCP** | `astrcode-extension-mcp` | MCP protocol client via stdio, tool discovery |
+| **MCP** | `astrcode-extension-mcp` | MCP protocol client with persistent process pool, background pre-warm, inflight merge |
 | **Todo Tool** | `astrcode-extension-todo-tool` | Progress tracking todo list tool |
 | **Agent Tools** | `astrcode-extension-agent-tools` | Sub-agent delegation, agent discovery |
 | **Memory** | `astrcode-extension-memory` | Project-scoped markdown memory storage (disabled by default) |
@@ -308,7 +308,7 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 | `astrcode-ai` | 3.6k | Multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), SSE streaming, retry |
 | `astrcode-context` | 3.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
 | `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native FFI loading, WASM extension runtime |
-| `astrcode-extension-mcp` | 1.9k | MCP protocol client via stdio, tool discovery |
+| `astrcode-extension-mcp` | ~2.4k | MCP protocol client — persistent process pool, background pre-warm, inflight merge, health check |
 | `astrcode-protocol` | 1.2k | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
 | `astrcode-extension-mode` | 1.2k | Agent running mode switching (Code / Plan), plan artifact, exit gate, keybinding & status item registration |
 | `astrcode-eval` | 1.1k | Eval framework — HTTP server control, event log metrics, structured reporting |
