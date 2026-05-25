@@ -3,6 +3,7 @@
 //! 负责 Session 生命周期、Turn 执行、工具管线、事件发射和 compact。
 
 pub mod background;
+pub mod child_turn;
 pub mod compact;
 pub(crate) mod compact_circuit_breaker;
 pub(crate) mod deferred_tools;

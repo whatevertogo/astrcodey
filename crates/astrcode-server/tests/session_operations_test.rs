@@ -243,6 +243,11 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
     // 给后台任务完成
     tokio::time::sleep(Duration::from_millis(500)).await;
 
+    // 触发 process_child_completions 消费已完成的 guard
+    // — 这会通过 submit_or_inject 将 notify_parent_on_complete 消息写入父 session
+    ops.scheduler.process_child_completions(&parent_id).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     // 父 session 应有 AgentSessionCompleted
     let parent_model = store.session_read_model(&parent_id).await.unwrap();
     assert_eq!(parent_model.agent_sessions.len(), 1);

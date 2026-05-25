@@ -22,6 +22,7 @@ use astrcode_support::{hash::hex_fingerprint, perf_snapshot, shell::resolve_shel
 use tokio::sync::mpsc;
 
 use crate::{
+    child_turn::ChildTurnGuard,
     payload::{compact_boundary_payload, session_continued_from_compaction_payload},
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
@@ -669,6 +670,14 @@ impl Session {
         ))
         .await?;
         Ok(child)
+    }
+
+    /// 消费已完成子 turn 的信号并返回已完成的 guards。
+    ///
+    /// 终态事件已由 `ChildTurnGuard` 后台任务写入，本方法只负责收集
+    /// 并移除已完成的 guard。返回的 guards 供 server 层处理回收和通知。
+    pub fn drain_completed_guards(&self) -> Vec<Arc<ChildTurnGuard>> {
+        self.runtime.drain_completed()
     }
 }
 

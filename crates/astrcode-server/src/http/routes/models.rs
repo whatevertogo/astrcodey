@@ -14,7 +14,7 @@ use axum::{
 use super::super::HttpState;
 
 pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager.read_raw_config();
+    let raw = state.runtime.config_manager.raw_config_snapshot();
     let eff = state.runtime.config_manager.read_effective();
     Json(CurrentModelResponseDto {
         profile_name: raw.active_profile.clone(),
@@ -25,7 +25,7 @@ pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -
 }
 
 pub(in crate::http) async fn list_models(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager.read_raw_config();
+    let raw = state.runtime.config_manager.raw_config_snapshot();
     let models: Vec<AvailableModelDto> = raw
         .profiles
         .iter()
@@ -68,7 +68,7 @@ pub(in crate::http) async fn test_model(State(state): State<HttpState>) -> Respo
 
 pub(in crate::http) async fn get_small_current_model(State(state): State<HttpState>) -> Response {
     let eff = state.runtime.config_manager.read_effective();
-    let raw = state.runtime.config_manager.read_raw_config();
+    let raw = state.runtime.config_manager.raw_config_snapshot();
     let (profile_name, model) = match (&raw.active_small_profile, &raw.active_small_model) {
         (Some(p), Some(_)) => (p.clone(), &eff.small_llm),
         _ => (raw.active_profile.clone(), &eff.small_llm),

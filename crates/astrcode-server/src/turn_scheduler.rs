@@ -6,20 +6,28 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
+    time::Duration,
 };
 
 use astrcode_core::{
-    event::{Event, EventPayload, Phase},
+    event::{EventPayload, Phase},
     llm::{LlmContent, LlmRole},
-    storage::{AgentSessionStatus, SessionReadModel},
+    storage::SessionReadModel,
     tool::ToolResult,
     types::*,
 };
-use astrcode_session::{Session, SessionError, turn_handle::TurnHandle};
+use astrcode_session::{
+    Session, SessionError,
+    child_turn::{ChildCleanup, ChildOutcome},
+    turn_handle::TurnHandle,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 
-use crate::{session_manager::SessionManager, turn_registry::TurnRegistry};
+use crate::{
+    session_manager::SessionManager, session_operations::ServerSessionOperations,
+    turn_registry::TurnRegistry,
+};
 
 #[derive(Debug, Error)]
 pub enum TurnError {
@@ -160,6 +168,9 @@ impl TurnScheduler {
         session_id: SessionId,
         source: &str,
     ) -> Result<SubmitOutcome, TurnError> {
+        // 先处理已完成的子 agent——LLM 在下一步就能看到子 agent 完成结果
+        self.process_child_completions(&session_id).await;
+
         let marker = format!(
             r#"<system type="background_completed" source="{}">"#,
             source
@@ -236,6 +247,9 @@ impl TurnScheduler {
     /// 通知当前 turn 已完成，检查并处理队列中的待处理消息
     /// 此方法应在 TurnCompleted 事件处理后调用
     pub async fn on_turn_completed(&self, session_id: &SessionId) {
+        // 处理已完成的子 agent（recycle + notify）
+        self.process_child_completions(session_id).await;
+
         // 检查队列
         let queue_len = {
             let queues = self.pending_queues.lock();
@@ -355,96 +369,136 @@ impl TurnScheduler {
 
     /// 级联停止并回收所有运行中的子（Agent）会话。
     ///
-    /// 深度优先遍历：先停止并回收最深层的子孙会话，再逐层向上。
-    /// 每个子会话的操作序列：
-    /// 1. 递归级联到子会话的子会话
-    /// 2. 停止子会话的活跃 turn（如果有）
-    /// 3. 回收子会话的持久化存储与进程内资源
-    /// 4. 向父会话写入 AgentSessionFailed + AgentSessionRecycled 事件
+    /// 深度优先：先 abort 所有孙子 turn，再 abort 子 turn，再统一等待。
+    /// 事件写入由 `finalize_aborted_children` 统一处理——唯一一处写终态事件。
     async fn cascade_abort_children(&self, parent_sid: &SessionId) {
-        // ── Phase 1: 遍历收集所有需要停止的子会话 ──
-        // 使用显式栈替代递归，避免 async 递归的 Pin 装箱。
-        // to_abort: (child_sid, parent_sid)
-        let mut to_abort: Vec<(SessionId, SessionId)> = Vec::new();
-        let mut stack: Vec<SessionId> = vec![parent_sid.clone()];
+        let guards = self
+            .collect_guards_deep(parent_sid, Duration::from_secs(10))
+            .await;
+        if guards.is_empty() {
+            return;
+        }
+        self.finalize_aborted_children(&guards).await;
+    }
 
+    /// 显式栈遍历所有子孙 session，abort 每个 session 的直接子 turn。
+    ///
+    /// 不做递归——用栈模拟 DFS，深度无限制。
+    /// 返回的 guards 按深度优先排列：grandchildren → children。
+    async fn collect_guards_deep(
+        &self,
+        root_sid: &SessionId,
+        timeout: Duration,
+    ) -> Vec<Arc<astrcode_session::child_turn::ChildTurnGuard>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut all_guards: Vec<Arc<astrcode_session::child_turn::ChildTurnGuard>> = Vec::new();
+        let mut stack: Vec<SessionId> = vec![root_sid.clone()];
+
+        // Phase 1: DFS 遍历，abort 所有层级的子 turn
         while let Some(sid) = stack.pop() {
-            let state = match self.session_manager.read_model(&sid).await {
+            let session = match self.session_manager.open(sid).await {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-
-            for link in &state.agent_sessions {
-                if link.status == AgentSessionStatus::Running {
-                    let child_sid = link.child_session_id.clone();
-                    to_abort.push((child_sid.clone(), sid.clone()));
-                    stack.push(child_sid);
-                }
+            let guards = session.runtime().abort_all_direct();
+            if guards.is_empty() {
+                continue;
             }
+            for guard in &guards {
+                stack.push(guard.child_session_id().clone());
+            }
+            all_guards.extend(guards);
         }
 
-        if to_abort.is_empty() {
-            return;
-        }
-
-        // ── Phase 2: 反序处理（深层子会话优先于浅层）──
-        // DFS push 的顺序是 root → child → grandchild，
-        // 反转后得到 grandchild → child → root，确保"先子后父"的拓扑顺序。
-        for (child_sid, parent_sid) in to_abort.into_iter().rev() {
-            // 2a. 停止活跃 turn + 清理 pending queue
-            self.cleanup(&child_sid).await;
-
-            // 2b. 回收子会话的持久化存储与进程内资源
-            if let Err(e) = self.session_manager.recycle_session(&child_sid).await {
+        // Phase 2: 统一等待所有 guard 完成（含超时）。先叶子后根。
+        for guard in all_guards.iter().rev() {
+            let result = tokio::time::timeout_at(deadline, guard.outcome()).await;
+            if result.is_err() {
                 tracing::warn!(
-                    session_id = %child_sid,
-                    error = %e,
-                    "cascade abort: failed to recycle child session; continuing to write fail events"
+                    child_session_id = %guard.child_session_id(),
+                    timeout_ms = timeout.as_millis(),
+                    "cascade abort: child turn timed out"
                 );
+                // 写入 TimedOut 确保后续 outcome() 调用立即返回（如 finalize_aborted_children）
+                guard.force_timeout();
             }
+        }
 
-            // 2c. 向父会话写入 AgentSessionFailed
-            if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
-                if let Err(e) = parent_session
-                    .append_event(Event::new(
-                        parent_sid.clone(),
-                        None,
-                        EventPayload::AgentSessionFailed {
-                            child_session_id: child_sid.clone(),
-                            final_session_id: child_sid.clone(),
-                            error: "aborted".into(),
-                        },
-                    ))
+        all_guards
+    }
+
+    /// 统一写所有被 abort 的子 session 的终态事件。
+    async fn finalize_aborted_children(
+        &self,
+        guards: &[Arc<astrcode_session::child_turn::ChildTurnGuard>],
+    ) {
+        let session_manager = &self.session_manager;
+        let scheduler = self;
+
+        // 反转：先处理深层（grandchildren），再浅层（children）
+        for guard in guards.iter().rev() {
+            let child_sid = guard.child_session_id();
+            let parent_sid = guard.parent_session_id();
+
+            let error = match guard.outcome().await {
+                ChildOutcome::TimedOut => "abort timed out",
+                _ => "aborted",
+            };
+            ServerSessionOperations::write_agent_failed(
+                session_manager,
+                parent_sid,
+                child_sid,
+                error,
+            )
+            .await;
+            ServerSessionOperations::recycle_child(
+                session_manager,
+                scheduler,
+                parent_sid,
+                child_sid,
+            )
+            .await;
+        }
+    }
+
+    /// 处理父 session 中已完成的子 turn：回收、通知。
+    ///
+    /// 终态事件已由 guard 后台任务写入。本方法只处理 cleanup + notify。
+    /// 幂等。无已完成子 turn 时为空操作。
+    pub async fn process_child_completions(&self, parent_sid: &SessionId) {
+        let parent_session = match self.session_manager.open(parent_sid.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(%parent_sid, error = %e, "process_child_completions: failed to open parent");
+                return;
+            },
+        };
+        let completed = parent_session.drain_completed_guards();
+        for guard in completed {
+            if guard.cleanup() == ChildCleanup::Recycle {
+                ServerSessionOperations::recycle_child(
+                    &self.session_manager,
+                    self,
+                    guard.parent_session_id(),
+                    guard.child_session_id(),
+                )
+                .await;
+            } else {
+                // 非回收策略：仅清理 registry entry（已完成 turn 无需 abort）
+                self.registry().remove(guard.child_session_id());
+            }
+            if let Some(notify_text) = guard.notify_text() {
+                if let Err(e) = self
+                    .submit_or_inject(guard.parent_session_id().clone(), notify_text.to_string())
                     .await
                 {
                     tracing::warn!(
-                        parent_sid = %parent_sid,
-                        child_sid = %child_sid,
+                        parent_session_id = %guard.parent_session_id(),
+                        child_session_id = %guard.child_session_id(),
                         error = %e,
-                        "cascade abort: failed to write AgentSessionFailed"
+                        "child completion notification dropped"
                     );
                 }
-
-                // 2d. 向父会话写入 AgentSessionRecycled
-                if let Err(e) = parent_session
-                    .append_event(Event::new(
-                        parent_sid.clone(),
-                        None,
-                        EventPayload::AgentSessionRecycled {
-                            child_session_id: child_sid.clone(),
-                        },
-                    ))
-                    .await
-                {
-                    tracing::warn!(
-                        parent_sid = %parent_sid,
-                        child_sid = %child_sid,
-                        error = %e,
-                        "cascade abort: failed to write AgentSessionRecycled"
-                    );
-                }
-
-                self.session_manager.sync_durable_events(&parent_sid).await;
             }
         }
     }

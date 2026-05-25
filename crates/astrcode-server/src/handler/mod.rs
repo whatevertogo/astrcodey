@@ -165,6 +165,8 @@ impl CommandHandler {
 
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
+                // abort 会级联停止子 agent session 并写入终态事件，确保 cleanup 前子树已清。
+                let _ = self.scheduler.abort(&session_id).await;
                 self.scheduler.cleanup(&session_id).await;
                 match self.runtime.session_manager.delete(&session_id).await {
                     Ok(()) => {

@@ -2,13 +2,17 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, tool::FileObservationStore,
+    types::SessionId,
 };
 use astrcode_support::event_fanout::EventFanout;
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
+use tokio::sync::mpsc;
 
 use crate::{
-    background::BackgroundTaskManager, compact_circuit_breaker::CompactCircuitBreaker,
+    background::BackgroundTaskManager,
+    child_turn::{ChildTurnGuard, ChildTurnManager},
+    compact_circuit_breaker::CompactCircuitBreaker,
     tool_exec::InMemoryFileObservationStore,
 };
 
@@ -25,6 +29,7 @@ use crate::{
 /// 注意：直接通过 `Session::create_with_id` 而绕过 `SessionRuntimeRegistry` 创建的 session
 /// 会得到独立 runtime，订阅者不会跨实例可见——这是给 `spawn_child` 这类「我就是要新 runtime」
 /// 的场景用的。SessionManager 走 registry 路径。
+/// Warning: 不推荐在这里放置非共享的进程内状态的内容
 pub struct SessionRuntimeState {
     file_observation_store: Arc<dyn FileObservationStore>,
     tool_registry: Mutex<Arc<ToolRegistry>>,
@@ -50,6 +55,11 @@ pub struct SessionRuntimeState {
     small_llm: Mutex<Arc<dyn LlmProvider>>,
     /// 当前 session 使用的模型 ID，与 llm provider 对应。
     model_id: Mutex<String>,
+    /// 当前 session 派生的子 agent turn 管理器。
+    child_turn_manager: ChildTurnManager,
+    /// 子 agent 完成时向此通道发送 parent session_id。
+    completed_tx: mpsc::UnboundedSender<SessionId>,
+    completed_rx: Mutex<mpsc::UnboundedReceiver<SessionId>>,
 }
 
 impl SessionRuntimeState {
@@ -59,6 +69,7 @@ impl SessionRuntimeState {
         model_id: String,
     ) -> Self {
         let event_out = Arc::new(EventFanout::new(1024));
+        let (completed_tx, completed_rx) = mpsc::unbounded_channel();
         Self {
             file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
             tool_registry: Mutex::new(Arc::new(ToolRegistry::new())),
@@ -74,6 +85,9 @@ impl SessionRuntimeState {
             llm: Mutex::new(llm),
             small_llm: Mutex::new(small_llm),
             model_id: Mutex::new(model_id),
+            child_turn_manager: ChildTurnManager::new(),
+            completed_tx,
+            completed_rx: Mutex::new(completed_rx),
         }
     }
 
@@ -164,5 +178,42 @@ impl SessionRuntimeState {
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
         self.event_out.send(event);
+    }
+
+    // ── 子 agent 管理 ──────────────────────────────────────────
+
+    pub fn child_turn_manager(&self) -> &ChildTurnManager {
+        &self.child_turn_manager
+    }
+
+    pub fn completed_tx(&self) -> mpsc::UnboundedSender<SessionId> {
+        self.completed_tx.clone()
+    }
+
+    /// 消费完成信号通道并收集已完成的子 turn guard。非阻塞。
+    pub fn drain_completed(&self) -> Vec<Arc<ChildTurnGuard>> {
+        let mut rx = self.completed_rx.lock();
+        while rx.try_recv().is_ok() {}
+        self.child_turn_manager.collect_completed()
+    }
+
+    /// 主清理路径：同步 abort 所有子 turn 并等完成。
+    /// 调用方需在持有 `SessionManager` 时级联递归孙子。
+    pub fn abort_all_direct(&self) -> Vec<Arc<ChildTurnGuard>> {
+        self.child_turn_manager.abort_all_direct()
+    }
+}
+
+// ── 兜底清理 ───────────────────────────────────────────────────
+
+impl Drop for SessionRuntimeState {
+    fn drop(&mut self) {
+        let guards = self.child_turn_manager.abort_all_direct();
+        if !guards.is_empty() {
+            tracing::warn!(
+                count = guards.len(),
+                "SessionRuntimeState dropped without prior cleanup; child turns force-aborted"
+            );
+        }
     }
 }

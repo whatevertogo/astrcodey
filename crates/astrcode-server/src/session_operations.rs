@@ -13,12 +13,11 @@ use astrcode_core::{
     },
     types::{SessionId, new_message_id},
 };
+use astrcode_session::child_turn::{ChildCleanup, ChildTurnConfig, ChildTurnGuard};
 
 use crate::{session_manager::SessionManager, turn_scheduler::TurnScheduler};
 
 /// 服务端 SessionOperations 实现。
-///
-/// 每个方法是一个原子操作，不包含 agent 编排逻辑。
 pub struct ServerSessionOperations {
     pub session_manager: Arc<SessionManager>,
     pub scheduler: Arc<TurnScheduler>,
@@ -129,7 +128,6 @@ impl SessionOperations for ServerSessionOperations {
 
         self.verify_access(&caller_sid, &target_sid).await?;
 
-        // 确保子 session runtime 就绪
         let session = self
             .session_manager
             .open(target_sid.clone())
@@ -139,17 +137,16 @@ impl SessionOperations for ServerSessionOperations {
             return Err(SessionApiError::Internal(format!("runtime init: {e}")));
         }
 
-        // 通过 scheduler submit——统一走 TurnRegistry
         let (turn_id, handle) = self
             .scheduler
             .submit(target_sid.clone(), request.user_prompt.clone())
             .await
             .map_err(|e| SessionApiError::Internal(format!("submit: {e}")))?;
 
-        // 统一 registry 清理：无论同步等待还是异步 watcher，都在 turn 完成后移除 registry entry
+        // registry entry 在同步等待路径由本方法移除，异步路径由 guard 后台任务处理。
         let registry = Arc::clone(self.scheduler.registry());
 
-        if request.wait_for_result {
+        let result = if request.wait_for_result {
             // 同步等待
             let result = handle.wait().await;
             self.scheduler.sync_durable_events(&target_sid).await;
@@ -157,124 +154,76 @@ impl SessionOperations for ServerSessionOperations {
             match result {
                 Some(r) => match r.output {
                     Ok(out) => {
-                        self.emit_agent_completed(&caller_sid, &target_sid, &out.text)
-                            .await;
+                        Self::write_agent_completed(
+                            &self.session_manager,
+                            &caller_sid,
+                            &target_sid,
+                            &out.text,
+                        )
+                        .await;
                         Ok(SubmitTurnResult::Completed { content: out.text })
                     },
                     Err(e) => {
-                        self.emit_agent_failed(&caller_sid, &target_sid, &e.to_string())
-                            .await;
+                        Self::write_agent_failed(
+                            &self.session_manager,
+                            &caller_sid,
+                            &target_sid,
+                            &e.to_string(),
+                        )
+                        .await;
                         Err(SessionApiError::Internal(format!("turn error: {e}")))
                     },
                 },
                 None => {
-                    self.emit_agent_failed(&caller_sid, &target_sid, "turn task panicked")
-                        .await;
+                    Self::write_agent_failed(
+                        &self.session_manager,
+                        &caller_sid,
+                        &target_sid,
+                        "turn task panicked",
+                    )
+                    .await;
                     Err(SessionApiError::Internal("turn task panicked".into()))
                 },
             }
         } else {
-            // 异步：spawn watcher 处理完成后逻辑
-            let notify_parent = request.notify_parent_on_complete.clone();
-            let recycle_on_complete = request.recycle_on_complete;
-            let scheduler = Arc::clone(&self.scheduler);
-            let session_manager = Arc::clone(&self.session_manager);
-            let watcher_caller_sid = caller_sid.clone();
-            let watcher_target_sid = target_sid.clone();
-            let watcher_turn_id = turn_id.clone();
+            // 异步：ChildTurnGuard 后台任务写终态事件 + 发 completed_tx 信号。
+            // recycle 和 notify 由 process_child_completions 三入口统一消费。
+            let cleanup = if request.recycle_on_complete {
+                ChildCleanup::Recycle
+            } else {
+                ChildCleanup::Keep
+            };
+            let config = ChildTurnConfig {
+                child_session_id: target_sid.clone(),
+                parent_session_id: caller_sid.clone(),
+                cleanup,
+                notify_on_complete: request.notify_parent_on_complete.clone(),
+            };
 
-            tokio::spawn(async move {
-                let result = handle.wait().await;
-                let outcome = result.as_ref().and_then(|r| r.output.as_ref().ok());
-                scheduler.sync_durable_events(&watcher_target_sid).await;
-                registry.remove_if_matches(&watcher_target_sid, &watcher_turn_id);
-
-                // 写入 AgentSessionCompleted/Failed 到父 session
-                if let Ok(parent_session) = session_manager.open(watcher_caller_sid.clone()).await {
-                    match outcome {
-                        Some(out) => {
-                            if let Err(e) = parent_session
-                                .append_event(astrcode_core::event::Event::new(
-                                    watcher_caller_sid.clone(),
-                                    None,
-                                    EventPayload::AgentSessionCompleted {
-                                        child_session_id: watcher_target_sid.clone(),
-                                        final_session_id: watcher_target_sid.clone(),
-                                        summary: one_line_summary(&out.text),
-                                    },
-                                ))
-                                .await
-                            {
-                                tracing::warn!(
-                                    parent_session_id = %watcher_caller_sid,
-                                    child_session_id = %watcher_target_sid,
-                                    error = %e,
-                                    "failed to append AgentSessionCompleted event"
-                                );
-                            }
-                        },
-                        None => {
-                            let error_msg = result
-                                .as_ref()
-                                .and_then(|r| r.output.as_ref().err())
-                                .map(|e| e.to_string())
-                                .unwrap_or_else(|| "turn task panicked".into());
-                            if let Err(e) = parent_session
-                                .append_event(astrcode_core::event::Event::new(
-                                    watcher_caller_sid.clone(),
-                                    None,
-                                    EventPayload::AgentSessionFailed {
-                                        child_session_id: watcher_target_sid.clone(),
-                                        final_session_id: watcher_target_sid.clone(),
-                                        error: error_msg,
-                                    },
-                                ))
-                                .await
-                            {
-                                tracing::warn!(
-                                    parent_session_id = %watcher_caller_sid,
-                                    child_session_id = %watcher_target_sid,
-                                    error = %e,
-                                    "failed to append AgentSessionFailed event"
-                                );
-                            }
-                        },
-                    }
-                    scheduler.sync_durable_events(&watcher_caller_sid).await;
-
-                    // 回收 ephemeral session（在 notify 之前，确保 Recycled 事件紧跟
-                    // Completed/Failed）
-                    if recycle_on_complete {
-                        Self::recycle_and_notify(
-                            &session_manager,
-                            &scheduler,
-                            &watcher_caller_sid,
-                            &watcher_target_sid,
-                        )
-                        .await;
-                    }
-
-                    // 通知父 session：通过 scheduler.submit_or_inject 启动新 turn
-                    if let Some(notify_text) = notify_parent {
-                        if let Err(e) = scheduler
-                            .submit_or_inject(watcher_caller_sid.clone(), notify_text)
-                            .await
-                        {
-                            tracing::warn!(
-                                parent_session_id = %watcher_caller_sid,
-                                error = %e,
-                                "child agent completion notification dropped",
-                            );
-                        }
-                    }
-                }
-            });
+            let parent_session = self
+                .session_manager
+                .open(caller_sid.clone())
+                .await
+                .map_err(|e| SessionApiError::Internal(format!("open parent: {e}")))?;
+            let parent_session = Arc::new(parent_session);
+            let completed_tx = parent_session.runtime().completed_tx();
+            let guard =
+                ChildTurnGuard::spawn(handle, config, Arc::clone(&parent_session), completed_tx);
+            parent_session
+                .runtime()
+                .child_turn_manager()
+                .register(Arc::new(guard));
 
             Ok(SubmitTurnResult::Backgrounded {
                 task_id: turn_id.into_string(),
                 session_id: target_sid.into_string(),
             })
-        }
+        };
+
+        // 处理本 turn 期间其他已完成的子 agent（非本次提交的 target）
+        self.scheduler.process_child_completions(&caller_sid).await;
+
+        result
     }
 
     async fn query_session(
@@ -311,9 +260,9 @@ impl SessionOperations for ServerSessionOperations {
 
         self.verify_access(&caller_sid, &target_sid).await?;
 
-        Self::recycle_and_notify(
+        Self::recycle_child(
             &self.session_manager,
-            &self.scheduler,
+            self.scheduler.as_ref(),
             &caller_sid,
             &target_sid,
         )
@@ -332,6 +281,9 @@ impl SessionOperations for ServerSessionOperations {
 
         self.verify_access(&caller_sid, &target_sid).await?;
 
+        if let Err(e) = self.scheduler.abort(&target_sid).await {
+            tracing::warn!(%target_sid, error = %e, "abort failed before session delete");
+        }
         self.scheduler.cleanup(&target_sid).await;
         self.session_manager
             .delete(&target_sid)
@@ -413,13 +365,13 @@ impl ServerSessionOperations {
     }
 
     /// 向父 session 写入 AgentSessionCompleted 事件。
-    async fn emit_agent_completed(
-        &self,
+    pub(crate) async fn write_agent_completed(
+        session_manager: &Arc<SessionManager>,
         parent_sid: &SessionId,
         child_sid: &SessionId,
         summary: &str,
     ) {
-        if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
+        if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
             if let Err(e) = parent_session
                 .append_event(astrcode_core::event::Event::new(
                     parent_sid.clone(),
@@ -443,8 +395,13 @@ impl ServerSessionOperations {
     }
 
     /// 向父 session 写入 AgentSessionFailed 事件。
-    async fn emit_agent_failed(&self, parent_sid: &SessionId, child_sid: &SessionId, error: &str) {
-        if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
+    pub(crate) async fn write_agent_failed(
+        session_manager: &Arc<SessionManager>,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+        error: &str,
+    ) {
+        if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
             if let Err(e) = parent_session
                 .append_event(astrcode_core::event::Event::new(
                     parent_sid.clone(),
@@ -468,9 +425,9 @@ impl ServerSessionOperations {
     }
 
     /// 回收子会话并向父会话写入 AgentSessionRecycled 事件。
-    async fn recycle_and_notify(
+    pub(crate) async fn recycle_child(
         session_manager: &Arc<SessionManager>,
-        scheduler: &Arc<TurnScheduler>,
+        scheduler: &TurnScheduler,
         parent_sid: &SessionId,
         child_sid: &SessionId,
     ) {

@@ -77,6 +77,11 @@ impl TurnRegistry {
         Some((entry.turn_id, entry.session))
     }
 
+    /// 仅移除（不 abort）。用于已完成的 turn 清理。
+    pub fn remove(&self, session_id: &SessionId) {
+        self.entries.lock().remove(session_id);
+    }
+
     pub fn has_active(&self, session_id: &SessionId) -> bool {
         self.entries.lock().contains_key(session_id)
     }
