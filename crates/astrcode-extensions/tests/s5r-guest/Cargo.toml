@@ -1,9 +1,8 @@
 [package]
-name = "s6r-guest-demo"
+name = "s5r-guest-demo"
 version = "0.1.0"
 edition = "2021"
 
-# 不加入 workspace，避免影响主项目编译
 [workspace]
 
 [dependencies]

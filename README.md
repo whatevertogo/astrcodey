@@ -395,12 +395,12 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 
 - **Extension trait** — each extension declares hook subscriptions, contributes tools and slash commands, handles lifecycle events
 - **Extension SDK** — bundled extensions and extension authors depend on `astrcode-extension-sdk` rather than coupling to host-internal `astrcode-core`
-- **Capability declarations** — extensions request host access through `Extension::capabilities()` or WASM `extension.json.capabilities`; the runtime only injects declared capabilities such as `session_state`, `session_control`, `small_model`, `session_history`, and `emit_events`
+- **Capability declarations** — bundled extensions use `Extension::capabilities()`; WASM extensions declare `requested_capabilities` during the s5r handshake; the runtime authorizes `astrcode.*` invokes via `HostRouter`
 - **Namespaced session state** — session-scoped extension state is stored under `<session>/extension_data/<extension-id>/`, keeping the session root owned by the host
 - **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only)
 - **Keybinding registration** — extensions register keyboard shortcuts (e.g. `Shift+Tab` for mode toggle) via `Registrar::keybinding()`
 - **Status bar items** — extensions contribute status bar entries (e.g. current mode indicator) with runtime updates via `StatusItemUpdate` notifications
-- **WASM extension runtime** — wasmtime-based sandboxed extension execution with a host-guest protocol for tool registration and event handling
+- **WASM extension runtime** — wasmtime sandbox + **s5r symmetric peer** (`peer_exchange`, `handler.invoke`, `astrcode.*`); disk extensions require `protocol.s5r: "1.0"` in `extension.json`. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
 - **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
 - **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)

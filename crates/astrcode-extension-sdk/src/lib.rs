@@ -45,7 +45,7 @@ pub mod types {
 
 pub mod builder;
 pub mod manifest;
-pub mod s6r;
+pub mod s5r;
 pub mod session;
 pub mod wasm_abi;
 

@@ -16,10 +16,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 parking_lot = { workspace = true }
+tokio-util = { workspace = true }
 wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime"] }
 wasmtime-wasi = "43"
 
 [dev-dependencies]
+astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
 wasm-encoder = "0.245"
 wat = "1"
 tempfile = { workspace = true }

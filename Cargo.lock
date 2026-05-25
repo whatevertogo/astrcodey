@@ -425,6 +425,7 @@ version = "0.2.2"
 dependencies = [
  "astrcode-core",
  "astrcode-extension-sdk",
+ "astrcode-storage",
  "astrcode-support",
  "async-trait",
  "dirs",
@@ -434,6 +435,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "wasm-encoder 0.245.1",
  "wasmtime",

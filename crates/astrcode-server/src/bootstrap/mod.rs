@@ -11,7 +11,7 @@ use astrcode_core::{
     storage::EventStore,
 };
 use astrcode_extensions::{
-    build_small_llm_invoker,
+    build_host_router,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
     runner::ExtensionRunner,
 };
@@ -186,8 +186,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&event_store),
         Some(capabilities.small_llm()),
     ));
-    extension_runner.bind_host_services(host_services);
-    let load_errors = load_extensions_into_runner(&extension_runner, &capabilities, &cwd).await;
+    extension_runner.bind_host_services(Arc::clone(&host_services));
+    let load_errors =
+        load_extensions_into_runner(&extension_runner, &capabilities, &host_services, &cwd).await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
     }
@@ -254,10 +255,12 @@ impl ServerRuntime {
             Arc::clone(self.event_store()),
             Some(small_llm),
         ));
-        self.extension_runner().bind_host_services(host_services);
+        self.extension_runner()
+            .bind_host_services(Arc::clone(&host_services));
         let load_errors = load_extensions_into_runner(
             self.extension_runner(),
             self.capabilities(),
+            &host_services,
             self.startup_working_dir(),
         )
         .await;
@@ -270,6 +273,7 @@ impl ServerRuntime {
 async fn load_extensions_into_runner(
     runner: &Arc<ExtensionRunner>,
     capabilities: &SessionRuntimeServices,
+    host_services: &Arc<ExtensionHostServices>,
     cwd: &std::path::Path,
 ) -> Vec<String> {
     let effective = capabilities.read_effective();
@@ -295,7 +299,10 @@ async fn load_extensions_into_runner(
                 fuel: effective.wasm.fuel,
                 memory_bytes: effective.wasm.memory_bytes,
             },
-            invoker: Some(build_small_llm_invoker(capabilities.small_llm())),
+            host_router: Some(build_host_router(
+                Arc::clone(host_services),
+                Some(cwd.to_string_lossy().to_string()),
+            )),
         },
         &[&bundled_source, &disk_source],
     )

@@ -435,8 +435,8 @@ pub enum ExtensionEvent {
 
 /// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
 ///
-/// **当前 loader 行为（s6r）**：仅 **`library`**（WASM 相对路径）为必填且参与加载；
-/// 扩展的真实 `id`、能力、工具与 hook 均由 guest 的 `extension_manifest()` 返回。
+/// **当前 loader 行为（s5r）**：`protocol.s5r`（须为 `"1.0"`）与 **`library`**（WASM 相对路径）为必填；
+/// 扩展的真实 `id`、能力、工具与 hook 均由 guest 的 `extension_init` 握手返回。
 /// 本结构中的 `id` / `name` / `capabilities` 等字段可被 serde 解析，供 UI、诊断或
 /// 未来校验使用，但**不会**替代 WASM manifest。磁盘路径仅支持 `.wasm`，无 native dlopen。
 #[derive(Debug, Clone, Serialize, Deserialize)]

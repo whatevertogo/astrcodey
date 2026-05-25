@@ -14,7 +14,7 @@ use std::{
 use astrcode_extension_sdk::extension::{Extension, StopReason};
 use astrcode_support::hostpaths;
 
-use crate::{runner::ExtensionRunner, wasm_api::HostInvoker};
+use crate::{host_router::HostRouter, runner::ExtensionRunner};
 
 /// 从磁盘加载所有扩展的结果。
 #[derive(Default)]
@@ -35,9 +35,8 @@ pub struct WasmLimits {
 pub struct ExtensionLoadContext {
     pub working_dir: Option<String>,
     pub wasm_limits: WasmLimits,
-    /// 宿主能力调用器，注入到 WASM 扩展的 `host_invoke` 回调。
-    /// 传 `None` 则 guest 调用 `host_invoke` 时直接返回 0。
-    pub invoker: Option<HostInvoker>,
+    /// s5r 宿主能力路由；WASM 扩展加载时必需。
+    pub host_router: Option<Arc<HostRouter>>,
 }
 
 /// A source of extensions that can contribute to one [`ExtensionRunner`].
@@ -133,7 +132,7 @@ impl ExtensionSource for DiskExtensionSource {
         let mut result = ExtensionLoader::load_all(
             ctx.working_dir.as_deref(),
             &ctx.wasm_limits,
-            ctx.invoker.clone(),
+            ctx.host_router.clone(),
         )
         .await;
         result.extensions.retain(|extension| {
@@ -163,7 +162,7 @@ impl ExtensionLoader {
     pub async fn load_all(
         working_dir: Option<&str>,
         limits: &WasmLimits,
-        invoker: Option<HostInvoker>,
+        host_router: Option<Arc<HostRouter>>,
     ) -> LoadExtensionsResult {
         let mut extensions: Vec<Arc<dyn Extension>> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
@@ -171,7 +170,7 @@ impl ExtensionLoader {
         // 全局扩展: ~/.astrcode/extensions/
         let global_dir = hostpaths::extensions_dir();
         if global_dir.exists() {
-            let (exts, errs) = Self::load_from_dir(&global_dir, limits, &invoker).await;
+            let (exts, errs) = Self::load_from_dir(&global_dir, limits, &host_router).await;
             extensions.extend(exts);
             errors.extend(errs);
         }
@@ -181,7 +180,7 @@ impl ExtensionLoader {
             let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
             if project_dir.exists() {
                 let (project_exts, project_errs) =
-                    Self::load_from_dir(&project_dir, limits, &invoker).await;
+                    Self::load_from_dir(&project_dir, limits, &host_router).await;
                 // 项目扩展在分发顺序中排在前面
                 extensions.splice(0..0, project_exts);
                 errors.extend(project_errs);
@@ -197,7 +196,7 @@ impl ExtensionLoader {
     async fn load_from_dir(
         dir: &Path,
         limits: &WasmLimits,
-        invoker: &Option<HostInvoker>,
+        host_router: &Option<Arc<HostRouter>>,
     ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
         let mut extensions = Vec::new();
         let mut errors = Vec::new();
@@ -211,7 +210,7 @@ impl ExtensionLoader {
         };
 
         for path in paths {
-            match Self::load_extension(&path, limits, invoker.clone()).await {
+            match Self::load_extension(&path, limits, host_router.clone()).await {
                 Ok(ext) => extensions.push(ext),
                 Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
@@ -249,12 +248,12 @@ impl ExtensionLoader {
 
     /// 加载单个扩展：读取 extension.json 获取 library 路径，加载 WASM 模块。
     ///
-    /// s6r 协议下 `id` 和 `capabilities` 由 WASM 模块的 `extension_manifest()` 返回，
-    /// `extension.json` 只需要 `library` 字段。
+    /// s5r 协议下 `id` 与能力由 `extension_init` 握手返回；
+    /// `extension.json` 须声明 `protocol.s5r` 与 `library`。
     async fn load_extension(
         ext_dir: &Path,
         limits: &WasmLimits,
-        invoker: Option<HostInvoker>,
+        host_router: Option<Arc<HostRouter>>,
     ) -> Result<Arc<dyn Extension>, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes = tokio::fs::read(&manifest_path)
@@ -262,6 +261,17 @@ impl ExtensionLoader {
             .map_err(|e| format!("read manifest: {e}"))?;
         let entry: serde_json::Value =
             serde_json::from_slice(&manifest_bytes).map_err(|e| format!("parse manifest: {e}"))?;
+        let protocol = entry
+            .get("protocol")
+            .and_then(|p| p.get("s5r"))
+            .and_then(|v| v.as_str());
+        if protocol != Some("1.0") {
+            return Err(format!(
+                "{}: extension.json must set protocol.s5r to \"1.0\" (s6r is no longer supported)",
+                ext_dir.display()
+            ));
+        }
+
         let library = entry["library"].as_str().unwrap_or("").trim().to_string();
         if library.is_empty() {
             return Err(format!(
@@ -270,8 +280,16 @@ impl ExtensionLoader {
             ));
         }
 
+        let router = host_router
+            .ok_or("ExtensionLoadContext.host_router is required for WASM extensions")?;
+
         let lib_path = ext_dir.join(&library);
-        crate::wasm_ext::WasmExtension::load(&lib_path, limits.fuel, limits.memory_bytes, invoker)
+        crate::wasm_ext::WasmExtension::load(
+            &lib_path,
+            limits.fuel,
+            limits.memory_bytes,
+            router,
+        )
             .map(|ext| ext as Arc<dyn Extension>)
             .map_err(|e| format!("load wasm {}: {e}", lib_path.display()))
     }

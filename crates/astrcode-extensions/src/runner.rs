@@ -122,7 +122,7 @@ impl ExtensionEventSink for BoundExtensionEventSink {
         schema_version: u32,
         payload: serde_json::Value,
     ) -> Result<(), ExtensionError> {
-        crate::host_emit::emit_for_sink(
+        crate::host_router::emit_for_sink(
             &self.extension_id,
             &self.declarations,
             &self.event_tx,

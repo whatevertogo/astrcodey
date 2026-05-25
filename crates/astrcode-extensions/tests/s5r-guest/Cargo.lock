@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "s6r-guest-demo"
+name = "s5r-guest-demo"
 version = "0.1.0"
 dependencies = [
  "serde",
