@@ -40,7 +40,7 @@ pub(in crate::http) async fn set_enabled(
     State(state): State<HttpState>,
     Json(request): Json<SetExtensionEnabledRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config_manager.read_raw_config().clone();
+    let mut candidate = state.runtime.config_manager.raw_config_snapshot();
     let extension_states = candidate
         .runtime
         .extension_states

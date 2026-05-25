@@ -158,7 +158,7 @@ impl ModelSelectionFlow {
         profile: &str,
         model: &str,
     ) -> Result<(), HandlerError> {
-        let mut candidate = self.config_manager.read_raw_config().clone();
+        let mut candidate = self.config_manager.raw_config_snapshot();
         validate_profile_model(&candidate, profile, model)?;
 
         match target {
@@ -211,7 +211,7 @@ impl ModelSelectionFlow {
     }
 
     fn model_request(&self, target: ModelTarget) -> Result<ClientNotification, HandlerError> {
-        let config = self.config_manager.read_raw_config();
+        let config = self.config_manager.raw_config_snapshot();
         let models: Vec<String> = config
             .profiles
             .iter()

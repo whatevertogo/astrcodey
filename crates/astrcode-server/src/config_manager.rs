@@ -17,7 +17,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::SessionRuntimeServices;
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::RwLock;
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
@@ -105,8 +105,8 @@ impl ConfigManager {
         self.capabilities.read_effective()
     }
 
-    pub fn read_raw_config(&self) -> RwLockReadGuard<'_, Config> {
-        self.raw_config.read()
+    pub fn raw_config_snapshot(&self) -> Config {
+        self.raw_config.read().clone()
     }
 
     pub fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
@@ -127,7 +127,7 @@ impl ConfigManager {
         self.capabilities.swap_llm(provider);
     }
 
-    pub fn rebuild_provider_from_effective(&self) -> Result<(), String> {
+    pub fn rebuild_provider_from_effective(&self) {
         let (new_llm, new_small) = {
             let effective = self.read_effective();
             (
@@ -137,7 +137,6 @@ impl ConfigManager {
         };
         self.capabilities.swap_llm(new_llm);
         self.capabilities.swap_small_llm(new_small);
-        Ok(())
     }
 
     pub fn apply_raw_config_and_rebuild(
@@ -154,9 +153,7 @@ impl ConfigManager {
             *guard = config;
         }
         self.capabilities.update_effective(new_effective);
-        if let Err(e) = self.rebuild_provider_from_effective() {
-            tracing::warn!("provider rebuild after config update failed: {e}");
-        }
+        self.rebuild_provider_from_effective();
         if changed {
             // 原子替换运行器中的配置映射（同步），后续由调用方异步通知扩展
             let effective = self.read_effective();

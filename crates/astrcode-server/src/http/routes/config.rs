@@ -14,7 +14,7 @@ use axum::{
 use super::super::{HttpState, error_response};
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager.read_raw_config();
+    let raw = state.runtime.config_manager.raw_config_snapshot();
     let config_path = state
         .runtime
         .config_manager
@@ -118,7 +118,7 @@ pub(in crate::http) async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config_manager.read_raw_config().clone();
+    let mut candidate = state.runtime.config_manager.raw_config_snapshot();
     candidate.active_profile = request.active_profile;
     candidate.active_model = request.active_model;
 
