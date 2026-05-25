@@ -1,6 +1,6 @@
 {
   "name": "@whatevertogo/astrcode",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "AI-powered coding assistant CLI",
   "license": "MIT",
   "repository": {
@@ -28,11 +28,11 @@
     "arm64"
   ],
   "optionalDependencies": {
-    "@whatevertogo/astrcode-linux-x64": "0.2.2",
-    "@whatevertogo/astrcode-linux-arm64": "0.2.2",
-    "@whatevertogo/astrcode-darwin-x64": "0.2.2",
-    "@whatevertogo/astrcode-darwin-arm64": "0.2.2",
-    "@whatevertogo/astrcode-win32-x64": "0.2.2",
-    "@whatevertogo/astrcode-win32-arm64": "0.2.2"
+    "@whatevertogo/astrcode-linux-x64": "0.2.3",
+    "@whatevertogo/astrcode-linux-arm64": "0.2.3",
+    "@whatevertogo/astrcode-darwin-x64": "0.2.3",
+    "@whatevertogo/astrcode-darwin-arm64": "0.2.3",
+    "@whatevertogo/astrcode-win32-x64": "0.2.3",
+    "@whatevertogo/astrcode-win32-arm64": "0.2.3"
   }
 }

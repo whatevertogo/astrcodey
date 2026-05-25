@@ -1,6 +1,6 @@
 [package]
 name = "astrcode-context"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "LLM context window management: token estimation and summary compaction"
 
