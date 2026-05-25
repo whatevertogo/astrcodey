@@ -22,11 +22,25 @@ use astrcode_support::{hash::hex_fingerprint, perf_snapshot, shell::resolve_shel
 use tokio::sync::mpsc;
 
 use crate::{
+    background::{BackgroundTaskCompletion, spawn_background_forwarder},
     child_turn::ChildTurnGuard,
-    payload::{compact_boundary_payload, session_continued_from_compaction_payload},
+    payload::{
+        compact_boundary_payload, session_continued_from_compaction_payload,
+        system_prompt_configured_payload,
+    },
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
+    turn_context::TurnError,
+    turn_handle::TurnHandle,
+    turn_runner::{RunTurnResult, TurnRunner, run_turn},
 };
+
+fn normalize_extra_system_prompt(extra_system_prompt: Option<&str>) -> Option<String> {
+    extra_system_prompt.and_then(|prompt| {
+        let trimmed = prompt.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
 
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
@@ -308,8 +322,15 @@ impl Session {
         extra_system_prompt: Option<&str>,
         stored_fingerprint: Option<&str>,
     ) -> Result<bool, SessionError> {
-        self.refresh_prompt_with_state(working_dir, extra_system_prompt, stored_fingerprint, None)
-            .await
+        let model_id = self.runtime.model_id();
+        self.refresh_prompt_with_state(
+            working_dir,
+            extra_system_prompt,
+            stored_fingerprint,
+            None,
+            &model_id,
+        )
+        .await
     }
 
     /// 初始化当前 session 的运行时工具快照与 system prompt。
@@ -331,128 +352,117 @@ impl Session {
         Ok(())
     }
 
-    /// `refresh_prompt` 的内部版本，调用方可传入已读取的 `SessionReadModel` 避免内部
-    /// 在 `extra=None` 路径再读一次 projection。`Session::submit` 走这个入口。
+    /// 解析调用方指定或已有的 extra prompt。
     ///
-    /// 错误处理：`extra=None` 且 runtime/cached_state 都没有值时需要从 store 拉
-    /// projection；如果存储层报错，本函数 **必须** 把错误向上传，而不是把 extra
-    /// 视为 None 继续——否则一次瞬时存储抖动会被记成「extra 真的没了」并写入新的
-    /// `SystemPromptConfigured` 事件覆盖原值。
+    /// `extra=None` 且 runtime/cached_state 都没有值时必须从 store 读取并传播错误；
+    /// 否则一次存储抖动可能被误记成「extra 已清空」。
+    async fn resolve_extra_system_prompt(
+        &self,
+        extra_system_prompt: Option<&str>,
+        cached_state: Option<&SessionReadModel>,
+    ) -> Result<Option<String>, SessionError> {
+        if extra_system_prompt.is_some() {
+            return Ok(normalize_extra_system_prompt(extra_system_prompt));
+        }
+        if let Some(extra) = self.runtime.extra_system_prompt() {
+            return Ok(Some(extra));
+        }
+        Ok(match cached_state {
+            Some(state) => state.extra_system_prompt.clone(),
+            None => self.read_model().await?.extra_system_prompt,
+        })
+    }
+
+    async fn build_cached_system_prompt(
+        &self,
+        working_dir: &str,
+        model_id: &str,
+        resolved_extra: Option<&str>,
+    ) -> Result<(String, String), SessionError> {
+        let prompt_files =
+            astrcode_context::prompt_engine::load_system_prompt_files(working_dir).await;
+        let tools_with_meta = self
+            .runtime
+            .tool_registry()
+            .list_definitions_with_prompt_metadata();
+        let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
+        let tool_prompt_metadata = tools_with_meta
+            .into_iter()
+            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
+            .collect();
+        let ext_data = crate::session_setup::collect_extension_prompt_data(
+            self.caps.extension_runner(),
+            self.id.as_str(),
+            working_dir,
+            model_id,
+            &tools,
+            tool_prompt_metadata,
+        )
+        .await
+        .map_err(|e| SessionError::Other(format!("collect extension data: {e}")))?;
+        let prompt_input = SystemPromptInput {
+            working_dir: working_dir.to_string(),
+            os: std::env::consts::OS.into(),
+            shell: resolve_shell().name,
+            identity: prompt_files.identity,
+            user_rules: prompt_files.user_rules,
+            project_rules: prompt_files.project_rules,
+            tools,
+            tool_prompt_metadata: ext_data.merged_tool_metadata,
+            extension_blocks: ext_data.extension_blocks,
+            extra_instructions: resolved_extra.map(str::to_string),
+        };
+        let stable_fingerprint =
+            astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
+
+        match self.runtime.cached_stable_prefix() {
+            Some((cached_text, cached_fingerprint)) if cached_fingerprint == stable_fingerprint => {
+                let dynamic = astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
+                let text = if dynamic.is_empty() {
+                    cached_text
+                } else {
+                    format!("{}\n\n{}", cached_text.trim(), dynamic.trim())
+                };
+                let fingerprint = hex_fingerprint(text.as_bytes());
+                return Ok((text, fingerprint));
+            },
+            _ => {},
+        }
+
+        let text = astrcode_context::prompt_engine::build_system_prompt(&prompt_input);
+        let fingerprint = hex_fingerprint(text.as_bytes());
+        let stable_prefix = astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
+        self.runtime
+            .set_cached_stable_prefix(stable_prefix, stable_fingerprint);
+        Ok((text, fingerprint))
+    }
+
+    /// `refresh_prompt` 的内部版本；调用方可复用已读取的状态和模型绑定，
+    /// 避免 turn 初始化期间重新观察到另一套配置。
     pub(crate) async fn refresh_prompt_with_state(
         &self,
         working_dir: &str,
         extra_system_prompt: Option<&str>,
         stored_fingerprint: Option<&str>,
         cached_state: Option<&SessionReadModel>,
+        model_id: &str,
     ) -> Result<bool, SessionError> {
-        let caps = &self.caps;
-        let runtime = &self.runtime;
-
-        // 入口规范化：trim 后空串视为 None。后续整段按 Option<String> 处理，
-        // 避免「Some("") vs None」的语义漂移和重复规范化。
-        let explicit_extra: Option<String> = extra_system_prompt.and_then(|s| {
-            let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-
-        // None 语义 = 保留：先看 runtime，再看 projection。Some(_) 直接采用。
-        // 注意 explicit_extra 用 `is_some()` 区分而非 unwrap_or_else，因为调用方
-        // 显式传 Some("") 表示「清空 extra」（已 trim 成 None），需走 None 分支
-        // 之外的「显式」路径——但这里 trim 后两者等价，所以直接复用。
-        let resolved_extra: Option<String> = if extra_system_prompt.is_some() {
-            // 调用方显式指定（含 Some("") → None 表示清空）
-            explicit_extra
-        } else {
-            match runtime.extra_system_prompt() {
-                Some(s) => Some(s),
-                None => match cached_state {
-                    Some(state) => state.extra_system_prompt.clone(),
-                    // 关键：read_model 错误必须传播，不能 unwrap_or_default 默默吞掉
-                    None => self.read_model().await?.extra_system_prompt,
-                },
-            }
-        };
-
-        let model_id = runtime.model_id();
-        let prompt_files =
-            astrcode_context::prompt_engine::load_system_prompt_files(working_dir).await;
-        let registry = runtime.tool_registry();
-        let tools_with_meta = registry.list_definitions_with_prompt_metadata();
-        let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
-        let tool_prompt_metadata = tools_with_meta
-            .into_iter()
-            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
-            .collect();
-
-        let (text, fingerprint) = {
-            let ext_data = crate::session_setup::collect_extension_prompt_data(
-                caps.extension_runner(),
-                self.id.as_str(),
-                working_dir,
-                &model_id,
-                &tools,
-                tool_prompt_metadata,
-            )
-            .await
-            .map_err(|e| SessionError::Other(format!("collect extension data: {e}")))?;
-
-            let prompt_input = SystemPromptInput {
-                working_dir: working_dir.to_string(),
-                os: std::env::consts::OS.into(),
-                shell: resolve_shell().name,
-                identity: prompt_files.identity,
-                user_rules: prompt_files.user_rules,
-                project_rules: prompt_files.project_rules,
-                tools,
-                tool_prompt_metadata: ext_data.merged_tool_metadata,
-                extension_blocks: ext_data.extension_blocks,
-                extra_instructions: resolved_extra.clone(),
-            };
-
-            // 检查是否命中稳定前缀缓存
-            let stable_fp =
-                astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
-            let cached = runtime.cached_stable_prefix();
-
-            match cached {
-                Some((cached_text, cached_fp)) if cached_fp == stable_fp => {
-                    // 缓存命中：只重建动态后缀
-                    let dynamic =
-                        astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
-                    let combined = if dynamic.is_empty() {
-                        cached_text
-                    } else {
-                        format!("{}\n\n{}", cached_text.trim(), dynamic.trim())
-                    };
-                    let fp = hex_fingerprint(combined.as_bytes());
-                    (combined, fp)
-                },
-                _ => {
-                    // 缓存未命中：全量重建并缓存稳定前缀
-                    let prompt =
-                        astrcode_context::prompt_engine::build_system_prompt(&prompt_input);
-                    let fp = hex_fingerprint(prompt.as_bytes());
-                    let stable =
-                        astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
-                    runtime.set_cached_stable_prefix(stable, stable_fp);
-                    (prompt, fp)
-                },
-            }
-        };
+        let resolved_extra = self
+            .resolve_extra_system_prompt(extra_system_prompt, cached_state)
+            .await?;
+        let (text, fingerprint) = self
+            .build_cached_system_prompt(working_dir, model_id, resolved_extra.as_deref())
+            .await?;
 
         if stored_fingerprint == Some(fingerprint.as_str()) {
-            runtime.set_extra_system_prompt(resolved_extra);
+            self.runtime.set_extra_system_prompt(resolved_extra);
             return Ok(false);
         }
 
-        runtime.set_extra_system_prompt(resolved_extra.clone());
+        self.runtime.set_extra_system_prompt(resolved_extra.clone());
         self.emit_durable(
             None,
-            EventPayload::SystemPromptConfigured {
-                text,
-                fingerprint,
-                extra_system_prompt: resolved_extra,
-            },
+            system_prompt_configured_payload(text, fingerprint, resolved_extra),
         )
         .await?;
         Ok(true)
@@ -460,51 +470,26 @@ impl Session {
 
     // ─── Turn 入口 ────────────────────────────────────────────────────
 
-    /// 提交用户输入开始一轮 turn，返回运行句柄。
-    ///
-    /// 内部完成：刷新工具表（如未填充）、刷新 system prompt（如缺失）、
-    /// 装配 `TurnRunner`、起后台任务监听后台工具结果，最后 spawn agent task。
-    ///
-    /// 事件通过 store + runtime 广播分发；订阅者通过 `Session::subscribe` 或
-    /// `ServerEventBus::attach` 接收。
-    ///
-    /// 调用方负责持有 `TurnHandle` 直到完成或主动 abort；handle 析构会让 task 自然继续。
-    pub async fn submit(
-        &self,
-        text: String,
-        turn_id: TurnId,
-    ) -> Result<crate::turn_handle::TurnHandle, crate::turn_context::TurnError> {
-        use crate::{
-            background::{BackgroundTaskCompletion, spawn_background_forwarder},
-            turn_context::TurnError,
-            turn_handle::TurnHandle,
-            turn_runner::{TurnRunner, run_turn},
-        };
-
-        // ── Turn 开始生命周期事件 ────────────────────────────────────
-        self.emit_durable(Some(&turn_id), EventPayload::TurnStarted)
+    async fn emit_turn_start_events(&self, text: &str, turn_id: &TurnId) {
+        self.emit_durable(Some(turn_id), EventPayload::TurnStarted)
             .await
             .ok();
         self.emit_durable(
-            Some(&turn_id),
+            Some(turn_id),
             EventPayload::UserMessage {
                 message_id: new_message_id(),
-                text: text.clone(),
+                text: text.to_string(),
             },
         )
         .await
         .ok();
-        self.emit_live(Some(&turn_id), EventPayload::AgentRunStarted)
+        self.emit_live(Some(turn_id), EventPayload::AgentRunStarted)
             .await;
+    }
 
-        // ── Runtime 准备 ────────────────────────────────────────────
-        // TODO: model_id 存在双写——runtime.model_id() 是"即时生效"缓存，
-        // ModelIdChanged 事件是"持久化事实"，两者在两次 turn 之间可能不一致。
-        // 根本解法：submit 从 caps.read_effective() 读 model_id 而非 runtime，
-        // 但需要同步调整 refresh_prompt 和 TurnRunner::new 的读取来源。
-        // 或者增加事件？
-        let model_id = self.runtime.model_id();
-        if let Err(e) = self.update_model_id(&model_id).await {
+    async fn prepare_turn_runner(&self) -> Result<TurnRunner, TurnError> {
+        let model = self.runtime.model_binding();
+        if let Err(e) = self.update_model_id(&model.model_id).await {
             tracing::warn!(session_id = %self.id, error = %e, "failed to update session model_id");
         }
 
@@ -525,6 +510,7 @@ impl Session {
                 None,
                 stored_fingerprint.as_deref(),
                 Some(&pre_state),
+                &model.model_id,
             )
             .await
         {
@@ -548,61 +534,88 @@ impl Session {
             pre_state
         };
         let session_store_dir = self.session_store_dir().await;
-        let mut agent = TurnRunner::new(
+        TurnRunner::new_with_llm(
             Arc::new(self.clone()),
             &session_state,
             Some(background_result_tx),
             session_store_dir,
-        )?;
+            model.llm,
+        )
+    }
 
-        // ── Turn 执行 + 结束生命周期事件 ─────────────────────────────
+    async fn run_and_finalize_turn(
+        session: Arc<Self>,
+        mut agent: TurnRunner,
+        text: String,
+        turn_id: TurnId,
+        completion_tx: tokio::sync::oneshot::Sender<RunTurnResult>,
+    ) {
+        let result = run_turn(&mut agent, &text, &turn_id).await;
+        let finish_reason = match &result.output {
+            Ok(out) => out.finish_reason.clone(),
+            Err(_) => "error".into(),
+        };
+        let pending_error = match (&result.output, result.emitted_error) {
+            (Err(e), false) => Some(e.to_string()),
+            _ => None,
+        };
+
+        // 先交付执行结果，再落终态事件；被 abort 时由 abort 路径写入终态。
+        let _ = completion_tx.send(result);
+        if let Some(error_msg) = pending_error {
+            let _ = session
+                .emit_durable(
+                    Some(&turn_id),
+                    EventPayload::ErrorOccurred {
+                        code: -32603,
+                        message: error_msg,
+                        recoverable: false,
+                    },
+                )
+                .await;
+        }
+        let _ = session
+            .emit_durable(
+                Some(&turn_id),
+                EventPayload::TurnCompleted {
+                    finish_reason: finish_reason.clone(),
+                },
+            )
+            .await;
+        session
+            .emit_live(
+                Some(&turn_id),
+                EventPayload::AgentRunCompleted {
+                    reason: finish_reason,
+                },
+            )
+            .await;
+    }
+
+    /// 提交用户输入开始一轮 turn，返回运行句柄。
+    ///
+    /// 内部完成：准备工具表、同步 system prompt、
+    /// 装配 `TurnRunner`、起后台任务监听后台工具结果，最后 spawn agent task。
+    ///
+    /// 事件通过 store + runtime 广播分发；订阅者通过 `Session::subscribe` 或
+    /// `ServerEventBus::attach` 接收。
+    ///
+    /// 调用方负责持有 `TurnHandle` 直到完成或主动 abort；handle 析构会让 task 自然继续。
+    pub async fn submit(&self, text: String, turn_id: TurnId) -> Result<TurnHandle, TurnError> {
+        self.emit_turn_start_events(&text, &turn_id).await;
+        let agent = self.prepare_turn_runner().await?;
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         let turn_id_for_task = turn_id.clone();
         let session_for_completion = Arc::new(self.clone());
         let join = tokio::spawn(async move {
-            let result = run_turn(&mut agent, &text, &turn_id_for_task).await;
-
-            let finish_reason = match &result.output {
-                Ok(out) => out.finish_reason.clone(),
-                Err(_) => "error".into(),
-            };
-            // 提取需要在 TurnCompleted 之前发射的 ErrorOccurred 信息。
-            // 先于 completion_tx.send 提取，避免 result 被 move 后不可用。
-            let pending_error = match (&result.output, result.emitted_error) {
-                (Err(e), false) => Some(e.to_string()),
-                _ => None,
-            };
-            // 先通知调用方（completion_tx），再 emit。
-            // 若被 abort，completion_tx 之后的代码不会执行，由 abort handler 发 aborted。
-            let _ = completion_tx.send(result);
-            if let Some(error_msg) = pending_error {
-                let _ = session_for_completion
-                    .emit_durable(
-                        Some(&turn_id_for_task),
-                        EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: error_msg,
-                            recoverable: false,
-                        },
-                    )
-                    .await;
-            }
-            let _ = session_for_completion
-                .emit_durable(
-                    Some(&turn_id_for_task),
-                    EventPayload::TurnCompleted {
-                        finish_reason: finish_reason.clone(),
-                    },
-                )
-                .await;
-            session_for_completion
-                .emit_live(
-                    Some(&turn_id_for_task),
-                    EventPayload::AgentRunCompleted {
-                        reason: finish_reason,
-                    },
-                )
-                .await;
+            Self::run_and_finalize_turn(
+                session_for_completion,
+                agent,
+                text,
+                turn_id_for_task,
+                completion_tx,
+            )
+            .await;
         });
 
         Ok(TurnHandle::new(turn_id, join, completion_rx))
@@ -711,10 +724,7 @@ impl Session {
         strategy: astrcode_core::extension::CompactStrategy,
     ) -> Result<Vec<Event>, SessionError> {
         let cursor = self.latest_cursor().await?.unwrap_or_else(|| "0".into());
-        let extra_system_prompt = extra_system_prompt.and_then(|s| {
-            let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
+        let extra_system_prompt = normalize_extra_system_prompt(extra_system_prompt.as_deref());
         let mut events = Vec::with_capacity(3);
         events.push(
             self.append_event(Event::new(
@@ -734,11 +744,7 @@ impl Session {
             self.append_event(Event::new(
                 self.id.clone(),
                 None,
-                EventPayload::SystemPromptConfigured {
-                    text: system_prompt,
-                    fingerprint,
-                    extra_system_prompt,
-                },
+                system_prompt_configured_payload(system_prompt, fingerprint, extra_system_prompt),
             ))
             .await?,
         );

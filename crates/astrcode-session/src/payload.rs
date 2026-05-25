@@ -1,4 +1,4 @@
-//! Compact continuation 事件载荷构造。
+//! 事件载荷构造。
 
 use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
@@ -6,6 +6,19 @@ use astrcode_core::{
     extension::CompactStrategy,
     types::{Cursor, SessionId},
 };
+
+/// 构造 session 当前 system prompt 配置的持久事件载荷。
+pub fn system_prompt_configured_payload(
+    text: String,
+    fingerprint: String,
+    extra_system_prompt: Option<String>,
+) -> EventPayload {
+    EventPayload::SystemPromptConfigured {
+        text,
+        fingerprint,
+        extra_system_prompt,
+    }
+}
 
 /// 构造 compact continuation 边界事件载荷。
 pub fn compact_boundary_payload(

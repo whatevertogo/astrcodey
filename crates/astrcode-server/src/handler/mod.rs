@@ -579,11 +579,11 @@ impl CommandHandler {
                 .await
                 .map_err(HandlerError::SessionManager)?;
             let caps = session.caps();
-            session.runtime().set_llm(caps.llm());
-            session.runtime().set_small_llm(caps.small_llm());
-            session
-                .runtime()
-                .set_model_id(caps.read_effective().llm.model_id.clone());
+            session.runtime().replace_model_binding(
+                caps.llm(),
+                caps.small_llm(),
+                caps.read_effective().llm.model_id.clone(),
+            );
         }
         Ok(())
     }
