@@ -891,7 +891,6 @@ function connectSse(
     for (const delta of otherDeltas) {
       get().applyDelta(delta)
     }
-
   }
 
   const scheduleFlush = () => {
