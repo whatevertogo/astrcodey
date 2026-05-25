@@ -33,6 +33,8 @@ pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
         ExtensionEvent::StepStart => 14,
         ExtensionEvent::StepEnd => 15,
         ExtensionEvent::PostRecap => 16,
+        // 保持既有 WASM ABI 判别值稳定；新事件只追加。
+        ExtensionEvent::SessionResume => 17,
     }
 }
 
@@ -55,6 +57,7 @@ pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
         14 => Some(ExtensionEvent::StepStart),
         15 => Some(ExtensionEvent::StepEnd),
         16 => Some(ExtensionEvent::PostRecap),
+        17 => Some(ExtensionEvent::SessionResume),
         _ => None,
     }
 }

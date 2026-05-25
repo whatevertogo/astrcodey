@@ -45,6 +45,8 @@ pub struct ExtensionRunner {
     /// 通过 `update_extension_configs()` 替换，支持热更新。
     /// 使用 parking_lot::RwLock 以便在同步上下文中替换（不需要 async）。
     extension_configs: parking_lot::RwLock<BTreeMap<String, serde_json::Value>>,
+    /// 扩展 `start()` 阶段发送自定义事件的宿主通道。
+    startup_event_tx: parking_lot::RwLock<Option<mpsc::UnboundedSender<EventPayload>>>,
 }
 
 /// 从 `register()` 调用中收集的扩展能力记录。
@@ -61,6 +63,19 @@ pub struct RegisteredSlashCommand {
     pub command: astrcode_core::extension::SlashCommand,
 }
 
+/// 一次主动健康检查的扩展级结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionHealthReport {
+    pub extension_id: String,
+    pub error: Option<String>,
+}
+
+impl ExtensionHealthReport {
+    pub fn is_healthy(&self) -> bool {
+        self.error.is_none()
+    }
+}
+
 // ─── BoundExtensionEventSink ──────────────────────────────────────────────
 
 /// 绑定了 extension_id 和声明校验的事件发射器。
@@ -74,6 +89,25 @@ struct BoundExtensionEventSink {
     extension_id: String,
     declarations: HashMap<String, ExtensionEventDecl>,
     event_tx: mpsc::UnboundedSender<EventPayload>,
+}
+
+fn bind_extension_event_sink(
+    extension_id: &str,
+    declarations: &[ExtensionEventDecl],
+    event_tx: mpsc::UnboundedSender<EventPayload>,
+) -> Option<Arc<dyn ExtensionEventSink>> {
+    if declarations.is_empty() {
+        return None;
+    }
+    let declarations = declarations
+        .iter()
+        .map(|decl| (decl.event_type.clone(), decl.clone()))
+        .collect();
+    Some(Arc::new(BoundExtensionEventSink {
+        extension_id: extension_id.to_owned(),
+        declarations,
+        event_tx,
+    }))
 }
 
 #[async_trait::async_trait]
@@ -369,11 +403,21 @@ impl ExtensionRunner {
             extension_tasks: RwLock::new(HashMap::new()),
             timeout,
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
+            startup_event_tx: parking_lot::RwLock::new(None),
         }
     }
 
     /// 注册一个扩展。
     pub async fn register(&self, ext: Arc<dyn Extension>) -> Result<bool, ExtensionError> {
+        self.register_with_startup_working_dir(ext, None).await
+    }
+
+    /// 注册扩展，并向 `start()` 传递宿主启动时已知的项目目录。
+    pub async fn register_with_startup_working_dir(
+        &self,
+        ext: Arc<dyn Extension>,
+        startup_working_dir: Option<&str>,
+    ) -> Result<bool, ExtensionError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
         let id = ext.id().to_string();
 
@@ -402,7 +446,16 @@ impl ExtensionRunner {
             .cloned()
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
-        let ctx = ExtensionCtx::with_config(tasks.clone(), ExtensionConfig(ext_config.clone()));
+        let event_sink =
+            self.startup_event_tx.read().as_ref().and_then(|tx| {
+                bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
+            });
+        let ctx = ExtensionCtx::with_startup_services(
+            tasks.clone(),
+            ExtensionConfig(ext_config.clone()),
+            startup_working_dir.map(str::to_string),
+            event_sink,
+        );
         ext.start(ctx).await?;
 
         self.extensions.write().await.push(ext);
@@ -452,10 +505,10 @@ impl ExtensionRunner {
         if let Some(tasks) = &tasks {
             tasks.cancel();
         }
-        let stop_result = ext.stop(reason).await;
         if let Some(tasks) = tasks {
             tasks.wait(self.timeout).await;
         }
+        let stop_result = ext.stop(reason).await;
         stop_result?;
         Ok(true)
     }
@@ -557,6 +610,34 @@ impl ExtensionRunner {
 
     pub async fn count(&self) -> usize {
         self.extensions.read().await.len()
+    }
+
+    /// 为后续启动的扩展绑定启动阶段自定义事件通道。
+    ///
+    /// 该通道不属于某个 session；宿主负责决定如何消费这些进程级事件。
+    pub fn bind_startup_event_channel(&self, event_tx: mpsc::UnboundedSender<EventPayload>) {
+        *self.startup_event_tx.write() = Some(event_tx);
+    }
+
+    /// 主动采样已运行扩展的健康状态，不创建后台轮询任务。
+    pub async fn check_health(&self) -> Vec<ExtensionHealthReport> {
+        let extensions = self.extensions.read().await.clone();
+        let mut reports = Vec::with_capacity(extensions.len());
+        for extension in extensions {
+            let extension_id = extension.id().to_string();
+            let error = match tokio::time::timeout(self.timeout, extension.health()).await {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => {
+                    Some(ExtensionError::Timeout(self.timeout.as_millis() as u64).to_string())
+                },
+            };
+            reports.push(ExtensionHealthReport {
+                extension_id,
+                error,
+            });
+        }
+        reports
     }
 
     fn load_index(&self) -> Arc<HandlerIndex> {
@@ -935,15 +1016,7 @@ impl ExtensionRunner {
     ) -> Option<Arc<dyn ExtensionEventSink>> {
         let index = self.load_index();
         let decls = index.extension_event_decls.get(extension_id)?;
-        let decl_map: HashMap<String, ExtensionEventDecl> = decls
-            .iter()
-            .map(|d| (d.event_type.clone(), d.clone()))
-            .collect();
-        Some(Arc::new(BoundExtensionEventSink {
-            extension_id: extension_id.to_owned(),
-            declarations: decl_map,
-            event_tx,
-        }))
+        bind_extension_event_sink(extension_id, decls, event_tx)
     }
 
     /// 从 HandlerIndex 缓存收集斜杠命令。
@@ -1116,15 +1189,18 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
 
-    use astrcode_core::extension::{
-        Extension, ExtensionCtx, ExtensionError, Registrar, StopReason,
+    use astrcode_core::{
+        event::EventPayload,
+        extension::{Extension, ExtensionCtx, ExtensionError, Registrar, StopReason},
     };
+    use serde_json::json;
+    use tokio::sync::mpsc;
 
     use super::ExtensionRunner;
 
@@ -1133,6 +1209,55 @@ mod tests {
         stopped: Arc<AtomicUsize>,
         task_stopped: Arc<AtomicBool>,
         expected_reason: StopReason,
+    }
+
+    struct StartupDirectoryExtension {
+        received: Arc<Mutex<Option<String>>>,
+    }
+
+    struct StartupEventExtension;
+
+    struct UnhealthyExtension;
+
+    #[async_trait::async_trait]
+    impl Extension for StartupDirectoryExtension {
+        fn id(&self) -> &str {
+            "startup-directory"
+        }
+
+        async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+            *self.received.lock().unwrap() = ctx.startup_working_dir().map(str::to_string);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for StartupEventExtension {
+        fn id(&self) -> &str {
+            "startup-event"
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.extension_event("startup_ready").register();
+        }
+
+        async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+            let sink = ctx
+                .event_sink()
+                .ok_or_else(|| ExtensionError::Internal("missing startup event sink".into()))?;
+            sink.emit("startup_ready", 1, json!({"ready": true})).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for UnhealthyExtension {
+        fn id(&self) -> &str {
+            "unhealthy"
+        }
+
+        async fn health(&self) -> Result<(), ExtensionError> {
+            Err(ExtensionError::Internal("dependency unavailable".into()))
+        }
     }
 
     #[async_trait::async_trait]
@@ -1156,6 +1281,7 @@ mod tests {
 
         async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
             assert_eq!(reason, self.expected_reason);
+            assert!(self.task_stopped.load(Ordering::SeqCst));
             self.stopped.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -1212,5 +1338,66 @@ mod tests {
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
         assert!(task_stopped.load(Ordering::SeqCst));
         assert_eq!(runner.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn register_passes_startup_working_dir_to_extension() {
+        let received = Arc::new(Mutex::new(None));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+
+        runner
+            .register_with_startup_working_dir(
+                Arc::new(StartupDirectoryExtension {
+                    received: Arc::clone(&received),
+                }),
+                Some("D:/workspace"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(received.lock().unwrap().as_deref(), Some("D:/workspace"));
+    }
+
+    #[tokio::test]
+    async fn start_can_emit_declared_event_through_bound_startup_channel() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        runner.bind_startup_event_channel(event_tx);
+
+        runner
+            .register(Arc::new(StartupEventExtension))
+            .await
+            .unwrap();
+
+        let event = event_rx.recv().await.unwrap();
+        assert!(matches!(
+            event,
+            EventPayload::ExtensionEvent {
+                extension_id,
+                event_type,
+                schema_version: 1,
+                payload,
+            } if extension_id == "startup-event"
+                && event_type == "startup_ready"
+                && payload == json!({"ready": true})
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_health_reports_extension_failure() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner.register(Arc::new(UnhealthyExtension)).await.unwrap();
+
+        let reports = runner.check_health().await;
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].extension_id, "unhealthy");
+        assert!(!reports[0].is_healthy());
+        assert!(
+            reports[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("dependency unavailable"))
+        );
     }
 }

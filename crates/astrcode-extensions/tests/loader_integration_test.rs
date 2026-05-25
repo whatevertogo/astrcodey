@@ -41,6 +41,7 @@ fn discriminants_roundtrip() {
     // 事件判别值往返测试
     for event in [
         ExtensionEvent::SessionStart,
+        ExtensionEvent::SessionResume,
         ExtensionEvent::SessionShutdown,
         ExtensionEvent::TurnStart,
         ExtensionEvent::TurnEnd,

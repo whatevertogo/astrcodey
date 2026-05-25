@@ -53,6 +53,7 @@ pub struct SessionManager {
     event_store: Arc<dyn EventStore>,
     config: Arc<ConfigManager>,
     runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
+    open_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
     capabilities: Arc<SessionRuntimeServices>,
     event_bus: OnceLock<Arc<ServerEventBus>>,
     resource_cleanups: Mutex<Vec<Arc<dyn SessionResourceCleanup>>>,
@@ -71,6 +72,7 @@ impl SessionManager {
             event_store,
             config,
             runtime_states: Mutex::new(HashMap::new()),
+            open_locks: Mutex::new(HashMap::new()),
             capabilities,
             event_bus: OnceLock::new(),
             resource_cleanups: Mutex::new(resource_cleanups),
@@ -90,18 +92,58 @@ impl SessionManager {
     }
 
     fn get_or_create_runtime(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
-        self.runtime_states
+        self.get_or_create_runtime_with_state(session_id).0
+    }
+
+    fn get_or_create_runtime_with_state(
+        &self,
+        session_id: &SessionId,
+    ) -> (Arc<SessionRuntimeState>, bool) {
+        let mut runtime_states = self.runtime_states.lock();
+        if let Some(runtime) = runtime_states.get(session_id) {
+            return (Arc::clone(runtime), false);
+        }
+        let model_id = self.config.read_effective().llm.model_id.clone();
+        let runtime = Arc::new(SessionRuntimeState::new(
+            self.capabilities.llm(),
+            self.capabilities.small_llm(),
+            model_id,
+        ));
+        runtime_states.insert(session_id.clone(), Arc::clone(&runtime));
+        (runtime, true)
+    }
+
+    fn remove_runtime_if_same(&self, session_id: &SessionId, expected: &Arc<SessionRuntimeState>) {
+        let mut runtime_states = self.runtime_states.lock();
+        if runtime_states
+            .get(session_id)
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, expected))
+        {
+            runtime_states.remove(session_id);
+        }
+    }
+
+    fn open_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        self.open_locks
             .lock()
             .entry(session_id.clone())
-            .or_insert_with(|| {
-                let model_id = self.config.read_effective().llm.model_id.clone();
-                Arc::new(SessionRuntimeState::new(
-                    self.capabilities.llm(),
-                    self.capabilities.small_llm(),
-                    model_id,
-                ))
-            })
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    fn remove_open_lock_if_idle(
+        &self,
+        session_id: &SessionId,
+        expected: &Arc<tokio::sync::Mutex<()>>,
+    ) {
+        let mut open_locks = self.open_locks.lock();
+        if open_locks
+            .get(session_id)
+            .is_some_and(|lock| Arc::ptr_eq(lock, expected))
+            && Arc::strong_count(expected) == 2
+        {
+            open_locks.remove(session_id);
+        }
     }
 
     pub(crate) fn config(&self) -> &Arc<ConfigManager> {
@@ -169,18 +211,41 @@ impl SessionManager {
     }
 
     pub(crate) async fn open(&self, session_id: SessionId) -> Result<Session, SessionManagerError> {
-        let runtime = self.get_or_create_runtime(&session_id);
-        let session = Session::open(
-            Arc::clone(&self.event_store),
-            session_id,
-            runtime,
-            Arc::clone(&self.capabilities),
-        )
-        .await?;
-        if let Some(bus) = self.event_bus.get() {
-            bus.attach(&session);
+        let open_lock = self.open_lock(&session_id);
+        let opening = open_lock.lock().await;
+        let result = async {
+            let (runtime, resumed) = self.get_or_create_runtime_with_state(&session_id);
+            let session = match Session::open(
+                Arc::clone(&self.event_store),
+                session_id.clone(),
+                Arc::clone(&runtime),
+                Arc::clone(&self.capabilities),
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    if resumed {
+                        self.remove_runtime_if_same(&session_id, &runtime);
+                    }
+                    return Err(error.into());
+                },
+            };
+            if resumed {
+                if let Err(error) = session.emit_lifecycle(ExtensionEvent::SessionResume).await {
+                    self.remove_runtime_if_same(&session_id, &runtime);
+                    return Err(error.into());
+                }
+            }
+            if let Some(bus) = self.event_bus.get() {
+                bus.attach(&session);
+            }
+            Ok(session)
         }
-        Ok(session)
+        .await;
+        drop(opening);
+        self.remove_open_lock_if_idle(&session_id, &open_lock);
+        result
     }
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {

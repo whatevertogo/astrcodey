@@ -96,7 +96,10 @@ impl ExtensionRuntime {
         }
         for ext in desired_extensions {
             let id = ext.id().to_string();
-            if let Err(e) = runner.register(ext).await {
+            if let Err(e) = runner
+                .register_with_startup_working_dir(ext, ctx.working_dir.as_deref())
+                .await
+            {
                 load_errors.push(format!("failed to start extension {id}: {e}"));
             }
         }

@@ -51,6 +51,13 @@ pub trait Extension: Send + Sync {
         Ok(())
     }
 
+    /// 检查扩展当前是否可用。宿主可周期性调用用于健康观测。
+    ///
+    /// 默认认为不持有外部运行态资源的扩展始终健康。
+    async fn health(&self) -> Result<(), ExtensionError> {
+        Ok(())
+    }
+
     /// 扩展配置发生热更新时调用。
     ///
     /// 当用户修改 `config.json` 中的 `extensions.<id>` 并触发重载时，
@@ -95,6 +102,10 @@ pub struct ExtensionCtx {
     /// 扩展专有配置。用户配置文件中 `extensions.<id>` 对应的 JSON 值。
     /// 若用户未配置该扩展，则为空对象 `{}`。
     pub config: ExtensionConfig,
+    /// 宿主启动时绑定的工作目录；不绑定工作区的宿主可为 `None`。
+    startup_working_dir: Option<String>,
+    /// 启动阶段可用的扩展事件发送端；由宿主显式绑定。
+    event_sink: Option<Arc<dyn ExtensionEventSink>>,
 }
 
 impl ExtensionCtx {
@@ -102,15 +113,49 @@ impl ExtensionCtx {
         Self {
             tasks,
             config: ExtensionConfig::default(),
+            startup_working_dir: None,
+            event_sink: None,
         }
     }
 
     pub fn with_config(tasks: ExtensionTasks, config: ExtensionConfig) -> Self {
-        Self { tasks, config }
+        Self::with_startup_working_dir(tasks, config, None)
+    }
+
+    pub fn with_startup_working_dir(
+        tasks: ExtensionTasks,
+        config: ExtensionConfig,
+        startup_working_dir: Option<String>,
+    ) -> Self {
+        Self::with_startup_services(tasks, config, startup_working_dir, None)
+    }
+
+    pub fn with_startup_services(
+        tasks: ExtensionTasks,
+        config: ExtensionConfig,
+        startup_working_dir: Option<String>,
+        event_sink: Option<Arc<dyn ExtensionEventSink>>,
+    ) -> Self {
+        Self {
+            tasks,
+            config,
+            startup_working_dir,
+            event_sink,
+        }
     }
 
     pub fn tasks(&self) -> &ExtensionTasks {
         &self.tasks
+    }
+
+    /// 启动时宿主已知的工作目录，供扩展预加载该项目的资源。
+    pub fn startup_working_dir(&self) -> Option<&str> {
+        self.startup_working_dir.as_deref()
+    }
+
+    /// 返回启动阶段由宿主绑定的扩展事件发送端。
+    pub fn event_sink(&self) -> Option<&Arc<dyn ExtensionEventSink>> {
+        self.event_sink.as_ref()
     }
 
     pub fn shutdown(&self) -> CancellationToken {
@@ -280,6 +325,8 @@ pub enum ExtensionEvent {
     // ── 会话级别 ──
     /// 会话启动。
     SessionStart,
+    /// 已持久化的会话首次恢复到当前进程运行态。
+    SessionResume,
     /// 会话关闭。
     SessionShutdown,
 

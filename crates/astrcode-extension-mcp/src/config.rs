@@ -71,6 +71,23 @@ pub(crate) fn load_config(working_dir: &str) -> McpConfig {
     )
 }
 
+/// Load only the global MCP config (no project config).
+pub(crate) fn load_global_only() -> McpConfig {
+    let mut merged = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    load_one_config(
+        &global_config_path(),
+        ConfigScope::Global,
+        "",
+        &mut merged,
+        &mut diagnostics,
+    );
+    McpConfig {
+        servers: merged.into_values().collect(),
+        diagnostics,
+    }
+}
+
 fn project_mcp_enabled() -> bool {
     std::env::var("ASTRCODE_ENABLE_PROJECT_MCP")
         .map(|value| value == "1")

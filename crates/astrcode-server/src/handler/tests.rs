@@ -258,6 +258,20 @@ struct ReadThenEditAcrossTurnsLlm {
 
 struct FailSessionStartExtension;
 
+struct RecordSessionResumeExtension {
+    events: Arc<Mutex<Vec<ExtensionEvent>>>,
+}
+
+struct FailFirstSessionResumeExtension {
+    calls: Arc<AtomicUsize>,
+}
+
+struct BlockingSessionResumeExtension {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Clone)]
 struct RecordingLifecycleExtension {
     events: Arc<Mutex<Vec<ExtensionEvent>>>,
@@ -364,6 +378,93 @@ impl Extension for FailSessionStartExtension {
             0,
             Arc::new(FailSessionStartHandler),
         );
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for RecordSessionResumeExtension {
+    fn id(&self) -> &str {
+        "record-session-resume"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_event(
+            ExtensionEvent::SessionResume,
+            HookMode::Blocking,
+            0,
+            Arc::new(RecordingLifecycleHandler {
+                event: ExtensionEvent::SessionResume,
+                events: Arc::clone(&self.events),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for FailFirstSessionResumeExtension {
+    fn id(&self) -> &str {
+        "fail-first-session-resume"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_event(
+            ExtensionEvent::SessionResume,
+            HookMode::Blocking,
+            0,
+            Arc::new(FailFirstSessionResumeHandler {
+                calls: Arc::clone(&self.calls),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for BlockingSessionResumeExtension {
+    fn id(&self) -> &str {
+        "blocking-session-resume"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_event(
+            ExtensionEvent::SessionResume,
+            HookMode::Blocking,
+            0,
+            Arc::new(BlockingSessionResumeHandler {
+                calls: Arc::clone(&self.calls),
+                entered: Arc::clone(&self.entered),
+                release: Arc::clone(&self.release),
+            }),
+        );
+    }
+}
+
+struct FailFirstSessionResumeHandler {
+    calls: Arc<AtomicUsize>,
+}
+
+struct BlockingSessionResumeHandler {
+    calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl astrcode_core::extension::LifecycleHandler for FailFirstSessionResumeHandler {
+    async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(ExtensionError::Internal("session resume failed".into()));
+        }
+        Ok(HookResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl astrcode_core::extension::LifecycleHandler for BlockingSessionResumeHandler {
+    async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(HookResult::Allow)
     }
 }
 
@@ -985,6 +1086,94 @@ async fn client_create_session_reports_start_hook_failure() {
         }
     }
     assert!(saw_error, "client should receive create-session failure");
+}
+
+#[tokio::test]
+async fn reopening_persisted_session_emits_resume_once_per_runtime() {
+    let runtime = test_runtime();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    runtime
+        .extension_runner
+        .register(Arc::new(RecordSessionResumeExtension {
+            events: Arc::clone(&events),
+        }))
+        .await
+        .unwrap();
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock-model", None, None, None)
+        .await
+        .unwrap();
+
+    runtime.session_manager.open(sid.clone()).await.unwrap();
+    runtime.session_manager.open(sid).await.unwrap();
+
+    assert_eq!(*events.lock().unwrap(), vec![ExtensionEvent::SessionResume]);
+}
+
+#[tokio::test]
+async fn failed_session_resume_is_retried_on_next_open() {
+    let runtime = test_runtime();
+    let calls = Arc::new(AtomicUsize::new(0));
+    runtime
+        .extension_runner
+        .register(Arc::new(FailFirstSessionResumeExtension {
+            calls: Arc::clone(&calls),
+        }))
+        .await
+        .unwrap();
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock-model", None, None, None)
+        .await
+        .unwrap();
+
+    assert!(runtime.session_manager.open(sid.clone()).await.is_err());
+    assert!(runtime.session_manager.open(sid).await.is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn concurrent_open_waits_for_initial_session_resume() {
+    let runtime = test_runtime();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    runtime
+        .extension_runner
+        .register(Arc::new(BlockingSessionResumeExtension {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }))
+        .await
+        .unwrap();
+    let sid = new_session_id();
+    runtime
+        .event_store
+        .create_session(&sid, ".", "mock-model", None, None, None)
+        .await
+        .unwrap();
+
+    let first_runtime = Arc::clone(&runtime);
+    let first_sid = sid.clone();
+    let first = tokio::spawn(async move { first_runtime.session_manager.open(first_sid).await });
+    entered.notified().await;
+
+    let second_runtime = Arc::clone(&runtime);
+    let mut second = tokio::spawn(async move { second_runtime.session_manager.open(sid).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut second)
+            .await
+            .is_err()
+    );
+
+    release.notify_one();
+    assert!(first.await.unwrap().is_ok());
+    assert!(second.await.unwrap().is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
