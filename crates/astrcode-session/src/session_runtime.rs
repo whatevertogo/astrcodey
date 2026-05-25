@@ -240,6 +240,8 @@ impl SessionRuntimeState {
     }
 
     /// 消费完成信号通道并收集已完成的子 turn guard。非阻塞。
+    /// 消费子 turn 完成通知 channel 中积压的 signal，再收集已完成的 guard。
+    /// signal 本身不含 payload，仅作唤醒；真正状态在 `ChildTurnManager` 内。
     pub fn drain_completed(&self) -> Vec<Arc<ChildTurnGuard>> {
         let mut rx = self.children.completed_rx.lock();
         while rx.try_recv().is_ok() {}

@@ -26,10 +26,6 @@ pub(crate) struct CreatedSession {
 
 pub(crate) struct ForkedSession {
     pub(crate) session: Session,
-    #[allow(dead_code)]
-    pub(crate) start_event: Event,
-    #[allow(dead_code)]
-    pub(crate) fork_event: Event,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -443,8 +439,8 @@ impl SessionManager {
             bus.attach(&session);
         }
 
-        // 5. 写入 SessionForked 事件
-        let fork_event = session
+        // 5. 写入 SessionForked 事件（attach 之后 append，经 fanout 自动进入 event bus）
+        session
             .append_event(Event::new(
                 new_sid.clone(),
                 None,
@@ -475,20 +471,7 @@ impl SessionManager {
                 .await?;
         }
 
-        // 7. 读第一个事件作为 start_event 返回
-        let start_event = self
-            .event_store
-            .replay_events(&new_sid)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(SessionManagerError::MissingStartEvent)?;
-
-        Ok(ForkedSession {
-            session,
-            start_event,
-            fork_event,
-        })
+        Ok(ForkedSession { session })
     }
 }
 

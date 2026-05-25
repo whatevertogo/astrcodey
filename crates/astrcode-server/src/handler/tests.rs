@@ -1844,9 +1844,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
         .send(CommandMessage::AgentTurnCleanup {
             session_id: sid,
             turn_id,
-            completion: TurnCompletion::Completed {
-                finish_reason: "stop".into(),
-            },
+            completion: TurnCompletion::Aborted,
         })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;

@@ -21,8 +21,9 @@ use super::{
     background::{
         BackgroundTaskCompletion, BackgroundTaskManager, backgrounded_placeholder_result,
     },
+    session::Session,
     tool_types::ExecutableToolCall,
-    turn_context::{AgentSignal, send_event},
+    turn_context::{TurnEventTx, send_event},
 };
 
 // ─── Runtime context types ──────────────────────────────────────────────
@@ -48,13 +49,37 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub session_store_dir: Option<std::path::PathBuf>,
 }
 
+impl ToolRuntimeCapabilities {
+    pub(crate) fn for_turn(
+        session: &Session,
+        _shared: &crate::turn_context::SharedTurnContext,
+        background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+        session_store_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        let runtime = session.runtime();
+        let caps = session.caps();
+        let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
+            crate::background::BackgroundTaskReaderImpl::new(runtime.background_tasks()),
+        ));
+        Self {
+            background_result_tx,
+            background_tasks: runtime.background_tasks(),
+            background_task_reader,
+            file_observation_store: Some(runtime.file_observation_store()),
+            session_ops: caps.session_ops(),
+            small_model_id: Some(caps.read_effective().small_llm.model_id.clone()),
+            session_store_dir,
+        }
+    }
+}
+
 pub(crate) struct ToolCallRuntimeContext {
     pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
     pub tools: Vec<ToolDefinition>,
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
-    pub event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+    pub event_tx: Option<TurnEventTx>,
     pub capabilities: ToolRuntimeCapabilities,
 }
 
@@ -170,7 +195,7 @@ fn resolve_effective_policy(
 /// tool_event_tx 传给 ToolExecutionContext；JoinHandle 用于在工具执行完毕后等待桥排空。
 /// 调用方需在 tool_ctx drop 后再 drop tool_event_tx，然后 await JoinHandle。
 fn spawn_event_bridge(
-    agent_tx: &mpsc::UnboundedSender<AgentSignal>,
+    agent_tx: &TurnEventTx,
 ) -> (
     mpsc::UnboundedSender<EventPayload>,
     tokio::task::JoinHandle<()>,
@@ -179,7 +204,7 @@ fn spawn_event_bridge(
     let agent_tx = agent_tx.clone();
     let handle = tokio::spawn(async move {
         while let Some(payload) = tool_rx.recv().await {
-            let _ = agent_tx.send(AgentSignal::Event(payload));
+            let _ = agent_tx.send(payload);
         }
     });
     (tool_tx, handle)

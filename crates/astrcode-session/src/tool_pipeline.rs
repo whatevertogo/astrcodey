@@ -12,7 +12,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_tools::registry::ToolRegistry;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::task::JoinSet;
 
 use super::{
     deferred_tools::{discovered_deferred_tool_names, tool_is_visible},
@@ -22,7 +22,7 @@ use super::{
         CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
         PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
     },
-    turn_context::{AgentSignal, SharedTurnContext, TurnError, send_event},
+    turn_context::{SharedTurnContext, TurnError, TurnEventTx, send_event},
 };
 use crate::{
     session::Session,
@@ -71,7 +71,7 @@ impl ToolPipeline {
     fn make_runtime_context(
         &self,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        event_tx: Option<TurnEventTx>,
     ) -> ToolCallRuntimeContext {
         ToolCallRuntimeContext {
             session_id: self.shared.session_id.clone(),
@@ -95,7 +95,7 @@ impl ToolPipeline {
         &self,
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+        event_tx: &Option<TurnEventTx>,
     ) -> Result<Vec<PreparedToolCall>, TurnError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
@@ -330,7 +330,7 @@ impl ToolPipeline {
         &self,
         batch: &mut Vec<ExecutableToolCall>,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        event_tx: Option<TurnEventTx>,
         results: &mut BTreeMap<usize, ToolResult>,
     ) -> Result<(), TurnError> {
         if batch.is_empty() {
@@ -358,7 +358,7 @@ impl ToolPipeline {
 
         while let Some(joined) = join_set.join_next().await {
             let (index, result) =
-                joined.map_err(|err| TurnError::Internal(format!("tool task failed: {err}")))?;
+                joined.map_err(|err| TurnError::ToolTaskJoinFailed(err.to_string()))?;
             results.insert(index, result);
 
             if let Some(call) = pending.next() {
@@ -380,7 +380,7 @@ impl ToolPipeline {
         join_set: &mut JoinSet<(usize, ToolResult)>,
         call: ExecutableToolCall,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        event_tx: Option<TurnEventTx>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
         let ctx = self.make_runtime_context(tools, event_tx);
@@ -550,7 +550,7 @@ impl ToolPipeline {
                 content: original_content.clone(),
             })
             .await
-            .map_err(|error| TurnError::Internal(format!("persist tool result: {error}")))?;
+            .map_err(|error| TurnError::PersistToolResultFailed(error.to_string()))?;
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         result.metadata.insert(
             "persistedToolResult".into(),
@@ -624,7 +624,7 @@ fn is_artifact_read(result: &ToolResult) -> bool {
 // ─── Tool event & message helpers ────────────────────────────────────────
 
 fn send_tool_requested(
-    event_tx: Option<&mpsc::UnboundedSender<AgentSignal>>,
+    event_tx: Option<&TurnEventTx>,
     tc: &PendingToolCall,
     arguments: &serde_json::Value,
 ) {
@@ -660,4 +660,66 @@ fn committed_tool_result_content_len(messages: &[LlmMessage]) -> usize {
             _ => None,
         })
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::tool::ExecutionMode;
+
+    use super::*;
+    use crate::tool_types::{PreparedToolCall, PreparedToolOutcome};
+
+    fn execution_plan(prepared: &[PreparedToolCall]) -> Vec<&'static str> {
+        prepared
+            .iter()
+            .map(|call| match &call.outcome {
+                PreparedToolOutcome::Blocked(_) => "blocked",
+                PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => "parallel",
+                PreparedToolOutcome::Ready => "sequential",
+            })
+            .collect()
+    }
+
+    fn sample_call(index: usize, mode: ExecutionMode, blocked: bool) -> PreparedToolCall {
+        PreparedToolCall {
+            index,
+            call_id: format!("call-{index}"),
+            name: "tool".into(),
+            tool_input: serde_json::json!({}),
+            mode,
+            outcome: if blocked {
+                PreparedToolOutcome::Blocked(ToolResult {
+                    call_id: format!("call-{index}"),
+                    content: "blocked".into(),
+                    is_error: true,
+                    error: Some("blocked".into()),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                })
+            } else {
+                PreparedToolOutcome::Ready
+            },
+        }
+    }
+
+    #[test]
+    fn execution_plan_preserves_parallel_sequential_blocked_order() {
+        let prepared = vec![
+            sample_call(0, ExecutionMode::Parallel, false),
+            sample_call(1, ExecutionMode::Parallel, false),
+            sample_call(2, ExecutionMode::Sequential, false),
+            sample_call(3, ExecutionMode::Parallel, true),
+            sample_call(4, ExecutionMode::Sequential, false),
+        ];
+        assert_eq!(
+            execution_plan(&prepared),
+            vec![
+                "parallel",
+                "parallel",
+                "sequential",
+                "blocked",
+                "sequential"
+            ]
+        );
+    }
 }

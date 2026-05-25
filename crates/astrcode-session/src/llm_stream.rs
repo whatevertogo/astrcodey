@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     tool_types::PendingToolCall,
-    turn_context::{AgentSignal, TurnError, send_event},
+    turn_context::{TurnError, TurnEventTx, send_event},
 };
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
@@ -38,7 +38,7 @@ pub enum StreamOutcome {
 /// 返回 `StreamOutcome::ToolCalls` 表示需要执行工具后继续循环。
 pub async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
-    event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    event_tx: &Option<TurnEventTx>,
     message_id: MessageId,
 ) -> Result<StreamOutcome, TurnError> {
     let mut current_text = String::new();
@@ -162,11 +162,11 @@ pub async fn consume_llm_stream(
         }
     }
 
-    Err(TurnError::Internal("LLM stream ended unexpectedly".into()))
+    Err(TurnError::StreamEndedUnexpectedly)
 }
 
 pub fn ensure_assistant_message_started(
-    event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    event_tx: &Option<TurnEventTx>,
     message_id: &MessageId,
     message_started: &mut bool,
 ) {

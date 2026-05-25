@@ -204,8 +204,10 @@ pub(in crate::handler) enum CommandMessage {
             Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError>,
         >,
     },
-    /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）
-    #[allow(dead_code)]
+    /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）。
+    ///
+    /// `session_id` / `completion` 供 actor 侧空闲 recap 门控；
+    /// `turn_id` 用于日志与后续 stale-cleanup 校验。
     AgentTurnCleanup {
         session_id: SessionId,
         turn_id: TurnId,
@@ -345,8 +347,19 @@ impl CommandHandler {
                 recap_deadline = None;
             }
 
-            // Turn 完成 → 启动/重置 recap 计时
-            let starts_timer = matches!(&message, CommandMessage::AgentTurnCleanup { .. });
+            // Turn 正常结束且仍是当前活跃 session → 启动空闲 recap 计时
+            let starts_recap_timer = match &message {
+                CommandMessage::AgentTurnCleanup {
+                    session_id,
+                    completion,
+                    ..
+                } => {
+                    matches!(completion, TurnCompletion::Completed { .. })
+                        && self.active_session_id.as_ref() == Some(session_id)
+                        && !self.scheduler.registry().has_active(session_id)
+                },
+                _ => false,
+            };
 
             if matches!(&message, CommandMessage::Shutdown { .. }) {
                 let _ = self.handle_message(message).await;
@@ -355,12 +368,7 @@ impl CommandHandler {
 
             self.handle_message(message).await;
 
-            if starts_timer
-                && !self
-                    .active_session_id
-                    .as_ref()
-                    .is_some_and(|sid| self.scheduler.registry().has_active(sid))
-            {
+            if starts_recap_timer {
                 recap_deadline = Some(Instant::now() + IDLE_RECAP_DELAY);
             }
         }
@@ -404,10 +412,16 @@ impl CommandHandler {
             },
             // Agent Turn 清理（终态事件已由 turn task 直接广播）
             CommandMessage::AgentTurnCleanup {
-                session_id: _,
-                turn_id: _,
-                completion: _,
+                session_id,
+                turn_id,
+                completion,
             } => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    turn_id = %turn_id,
+                    ?completion,
+                    "agent turn cleanup"
+                );
                 // 排队输入由 TurnCompleted → TurnScheduler::on_turn_completed 统一出队。
             },
             CommandMessage::SubmitInputWithCompletion {

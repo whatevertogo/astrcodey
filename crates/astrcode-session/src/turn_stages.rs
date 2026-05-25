@@ -14,10 +14,10 @@ use crate::deferred_tools::{
 
 /// Mutable state carried across provider/tool iterations in a single turn.
 pub(crate) struct TurnState {
-    pub(crate) messages: Vec<LlmMessage>,
-    pub(crate) final_text: String,
-    pub(crate) tool_results: Vec<ToolResult>,
-    pub(crate) reactive_compact_used: bool,
+    messages: Vec<LlmMessage>,
+    final_text: String,
+    tool_results: Vec<ToolResult>,
+    reactive_compact_used: bool,
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
@@ -63,6 +63,48 @@ impl TurnState {
             all_tools,
             visible_tools,
         }
+    }
+
+    pub(crate) fn messages(&self) -> &[LlmMessage] {
+        &self.messages
+    }
+
+    pub(crate) fn replace_messages(&mut self, messages: Vec<LlmMessage>) {
+        self.messages = messages;
+    }
+
+    pub(crate) fn push_message(&mut self, message: LlmMessage) {
+        self.messages.push(message);
+    }
+
+    pub(crate) fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub(crate) fn append_final_text(&mut self, text: &str) {
+        self.final_text.push_str(text);
+    }
+
+    pub(crate) fn final_text(&self) -> &str {
+        &self.final_text
+    }
+
+    pub(crate) fn messages_and_tool_results_mut(
+        &mut self,
+    ) -> (&mut Vec<LlmMessage>, &mut Vec<ToolResult>) {
+        (&mut self.messages, &mut self.tool_results)
+    }
+
+    pub(crate) fn reactive_compact_used(&self) -> bool {
+        self.reactive_compact_used
+    }
+
+    pub(crate) fn mark_reactive_compact_used(&mut self) {
+        self.reactive_compact_used = true;
+    }
+
+    pub(crate) fn take_output_parts(self) -> (String, Vec<ToolResult>) {
+        (self.final_text, self.tool_results)
     }
 
     pub(crate) fn all_tool_snapshots(&self) -> &[ToolSnapshot] {
@@ -119,7 +161,7 @@ mod tests {
         );
 
         let user_messages = state
-            .messages
+            .messages()
             .iter()
             .filter(|message| message.role == LlmRole::User)
             .count();

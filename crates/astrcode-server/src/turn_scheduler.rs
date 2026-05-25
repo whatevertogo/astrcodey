@@ -69,9 +69,6 @@ pub enum SubmitOutcome {
 /// 待处理的消息，用于 "下一 turn" 路径
 pub(crate) struct PendingMessage {
     text: String,
-    /// 预留字段，用于未来支持带标记的消息队列
-    #[allow(dead_code)]
-    marker: Option<String>,
 }
 
 /// per-session 的待处理消息队列

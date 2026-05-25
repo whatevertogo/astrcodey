@@ -18,7 +18,7 @@ impl TurnScheduler {
 
         let mut queues = self.pending_queues.lock();
         let queue = queues.entry(session_id.clone()).or_default();
-        queue.push_back(super::PendingMessage { text, marker: None });
+        queue.push_back(super::PendingMessage { text });
 
         let queue_len = queue.len();
         drop(queues);

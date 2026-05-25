@@ -8,9 +8,8 @@ use astrcode_core::{
     llm::LlmMessage,
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
-use tokio::sync::mpsc;
 
-use super::turn_context::AgentSignal;
+use super::turn_context::TurnEventTx;
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 pub struct PendingToolCall {
@@ -36,7 +35,7 @@ pub struct ExecuteToolCalls<'a> {
     pub tools: &'a [ToolDefinition],
     pub messages: &'a mut Vec<LlmMessage>,
     pub all_tool_results: &'a mut Vec<ToolResult>,
-    pub event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
+    pub event_tx: &'a Option<TurnEventTx>,
 }
 
 pub struct CommitToolResults<'a> {
@@ -44,7 +43,7 @@ pub struct CommitToolResults<'a> {
     pub results: BTreeMap<usize, ToolResult>,
     pub messages: &'a mut Vec<LlmMessage>,
     pub all_tool_results: &'a mut Vec<ToolResult>,
-    pub event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
+    pub event_tx: &'a Option<TurnEventTx>,
 }
 
 pub struct PendingCommittedToolResult {
