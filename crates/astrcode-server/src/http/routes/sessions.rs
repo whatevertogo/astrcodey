@@ -58,7 +58,7 @@ pub(in crate::http) async fn create_session(
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {
-    match state.runtime.session_manager.list_summaries().await {
+    match state.runtime.session_manager().list_summaries().await {
         Ok(summaries) => Json(SessionListResponseDto {
             sessions: summaries.into_iter().map(summary_to_dto).collect(),
         })
@@ -79,7 +79,12 @@ pub(in crate::http) async fn conversation_snapshot(
             tracing::warn!(session_id = %session_id, error = %e, "stale turn repair failed in snapshot");
         }
     }
-    match state.runtime.session_manager.read_model(&session_id).await {
+    match state
+        .runtime
+        .session_manager()
+        .read_model(&session_id)
+        .await
+    {
         Ok(snapshot) => {
             let streaming = state.event_bus.streaming_snapshot(&session_id);
             Json(conversation_to_dto(snapshot, streaming.as_ref())).into_response()
@@ -151,7 +156,7 @@ pub(in crate::http) async fn list_commands(
             use astrcode_protocol::http::{KeybindingDto, StatusItemDto};
             let keybindings: Vec<KeybindingDto> = state
                 .runtime
-                .extension_runner
+                .extension_runner()
                 .collect_keybindings()
                 .into_iter()
                 .map(|kb| KeybindingDto {
@@ -163,7 +168,7 @@ pub(in crate::http) async fn list_commands(
                 .collect();
             let status_items: Vec<StatusItemDto> = state
                 .runtime
-                .extension_runner
+                .extension_runner()
                 .collect_status_items()
                 .into_iter()
                 .map(|item| StatusItemDto {

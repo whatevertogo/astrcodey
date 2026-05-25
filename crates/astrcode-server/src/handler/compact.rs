@@ -117,7 +117,7 @@ impl CommandHandler {
             message_count: provider_messages.len(),
         };
         let custom_instructions =
-            match collect_compact_instructions(&self.runtime.extension_runner, hook_ctx).await {
+            match collect_compact_instructions(self.runtime.extension_runner(), hook_ctx).await {
                 Ok(instructions) => instructions,
                 Err(error) => {
                     return Err(HandlerError::Extension(error));
@@ -143,9 +143,9 @@ impl CommandHandler {
             transcript_path: snapshot_path,
             custom_instructions: custom_instructions.clone(),
         };
-        let llm = self.runtime.config_manager.read_llm_provider();
+        let llm = self.runtime.config_manager().read_llm_provider();
         let request_fn = make_compact_request_fn(llm);
-        let settings = self.runtime.context_assembler.settings().clone();
+        let settings = self.runtime.context_assembler().settings().clone();
         let mut compaction = match compact_messages_with_fallback(
             &provider_messages,
             state.system_prompt.as_deref(),
@@ -175,13 +175,13 @@ impl CommandHandler {
             &state.working_dir,
             state.system_prompt.as_deref(),
             &tools,
-            self.runtime.context_assembler.settings(),
+            self.runtime.context_assembler().settings(),
             session_store_dir,
         )
         .await;
 
         if let Err(error) =
-            dispatch_post_compact(&self.runtime.extension_runner, hook_ctx, &compaction).await
+            dispatch_post_compact(self.runtime.extension_runner(), hook_ctx, &compaction).await
         {
             return Err(HandlerError::Extension(error));
         }

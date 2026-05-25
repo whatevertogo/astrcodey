@@ -272,7 +272,7 @@ async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
 }
 
 async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
-    match runtime.session_manager.latest_cursor(session_id).await {
+    match runtime.session_manager().latest_cursor(session_id).await {
         Ok(Some(cursor)) => cursor,
         Ok(None) => "0".to_string(),
         Err(error) => {

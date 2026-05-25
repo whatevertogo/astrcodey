@@ -2,6 +2,12 @@
 //!
 //! 主会话和子会话共用同一条 submit/abort 路径。取代了之前分散在
 //! `CommandHandler.active_turns` 和 `SessionManager.ActiveExecutionIndex` 的两套编排。
+//!
+//! ## 下一 turn 输入队列（唯一）
+//!
+//! `pending_queues` 是进程内唯一的「等当前 turn 结束再处理」队列（HTTP / stdio / Actor
+//! 均通过 [`notify_turn`](TurnScheduler::notify_turn) 入队）。`on_turn_completed` 按 FIFO
+//! 每次只弹出一条并启动新 turn，保证连发 prompt 仍对应多个独立 `UserMessage` 事件。
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -28,6 +34,9 @@ use crate::{
     session_manager::SessionManager, session_operations::ServerSessionOperations,
     turn_registry::TurnRegistry,
 };
+
+#[path = "turn_scheduler_queue.rs"]
+mod turn_queue;
 
 #[derive(Debug, Error)]
 pub enum TurnError {
@@ -58,10 +67,10 @@ pub enum SubmitOutcome {
 }
 
 /// 待处理的消息，用于 "下一 turn" 路径
-#[allow(dead_code)]
-struct PendingMessage {
+pub(crate) struct PendingMessage {
     text: String,
     /// 预留字段，用于未来支持带标记的消息队列
+    #[allow(dead_code)]
     marker: Option<String>,
 }
 
@@ -72,8 +81,7 @@ pub struct TurnScheduler {
     session_manager: Arc<SessionManager>,
     registry: Arc<TurnRegistry>,
     /// 等待当前 turn 结束后处理的消息队列
-    /// key: session_id, value: 消息队列
-    pending_queues: Mutex<HashMap<SessionId, PendingQueue>>,
+    pub(super) pending_queues: Mutex<HashMap<SessionId, PendingQueue>>,
 }
 
 impl TurnScheduler {
@@ -96,7 +104,7 @@ impl TurnScheduler {
     /// 提交新 turn。
     ///
     /// attach session 到 event_bus、修复遗留状态、调用 `Session::submit`、注册到 registry。
-    /// 如果队列中有待处理消息，会一并处理。
+    /// 排队中的输入由 [`on_turn_completed`](Self::on_turn_completed) 在 turn 结束后按 FIFO 处理。
     pub async fn submit(
         &self,
         session_id: SessionId,
@@ -114,17 +122,11 @@ impl TurnScheduler {
             .await
             .map_err(|e| TurnError::SessionNotFound(format!("{session_id}: {e}")))?;
 
-        // 检查是否有队列中的待处理消息，如果有则追加到本次输入
-        let combined_text = self.combine_with_pending(session_id.clone(), text);
-
         let turn_id = new_turn_id();
-        let handle = session
-            .submit(combined_text, turn_id.clone())
-            .await
-            .map_err(|e| {
-                tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
-                TurnError::Turn(e)
-            })?;
+        let handle = session.submit(text, turn_id.clone()).await.map_err(|e| {
+            tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
+            TurnError::Turn(e)
+        })?;
 
         let session_arc = Arc::new(session);
         if !self.registry.register(
@@ -176,103 +178,6 @@ impl TurnScheduler {
             source
         );
         self.submit_or_inject(session_id, marker).await
-    }
-
-    /// 通知需要处理，在**下一 turn** 触发。
-    ///
-    /// ## 行为
-    /// - 如果当前有活跃 turn → 消息入队，等待当前 turn 结束后自动触发新 turn
-    /// - 如果当前无活跃 turn → 立即启动新 turn
-    ///
-    /// ## 使用场景
-    /// 用户输入但希望等待当前 turn 自然结束后再处理，避免中断正在进行的工作。
-    pub async fn notify_turn(
-        &self,
-        session_id: SessionId,
-        text: String,
-    ) -> Result<SubmitOutcome, TurnError> {
-        // 如果当前无活跃 turn，直接启动新 turn
-        if !self.registry.has_active(&session_id) {
-            let (turn_id, handle) = self.submit(session_id, text).await?;
-            return Ok(SubmitOutcome::Started { turn_id, handle });
-        }
-
-        // 当前有活跃 turn，消息入队
-        let mut queues = self.pending_queues.lock();
-        let queue = queues.entry(session_id.clone()).or_default();
-        queue.push_back(PendingMessage { text, marker: None });
-
-        let queue_len = queue.len();
-        drop(queues); // 显式释放锁
-
-        tracing::info!(
-            session_id = %session_id,
-            queue_len = queue_len,
-            "message queued for next turn"
-        );
-
-        Ok(SubmitOutcome::Queued)
-    }
-
-    /// 检查并获取指定 session 的待处理消息，合并为单个输入
-    fn combine_with_pending(&self, session_id: SessionId, current_text: String) -> String {
-        let mut queues = self.pending_queues.lock();
-        let Some(queue) = queues.get_mut(&session_id) else {
-            return current_text;
-        };
-
-        if queue.is_empty() {
-            queues.remove(&session_id);
-            return current_text;
-        }
-
-        // 合并队列中的消息
-        let mut parts: Vec<String> = queue
-            .drain(..)
-            .map(|m| m.text)
-            .filter(|t| !t.is_empty())
-            .collect();
-
-        // 添加当前消息
-        if !current_text.is_empty() {
-            parts.push(current_text);
-        }
-
-        // 清理空队列
-        queues.remove(&session_id);
-
-        parts.join("\n\n")
-    }
-
-    /// 通知当前 turn 已完成，检查并处理队列中的待处理消息
-    /// 此方法应在 TurnCompleted 事件处理后调用
-    pub async fn on_turn_completed(&self, session_id: &SessionId) {
-        // 处理已完成的子 agent（recycle + notify）
-        self.process_child_completions(session_id).await;
-
-        // 检查队列
-        let queue_len = {
-            let queues = self.pending_queues.lock();
-            queues.get(session_id).map(|q| q.len()).unwrap_or(0)
-        };
-
-        if queue_len > 0 && !self.registry.has_active(session_id) {
-            tracing::info!(
-                session_id = %session_id,
-                pending_count = queue_len,
-                "auto-submitting queued messages for next turn"
-            );
-
-            // 启动新 turn 处理队列中的消息
-            // submit 会自动合并队列中的消息
-            if let Err(e) = self.submit(session_id.clone(), String::new()).await {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "failed to auto-submit queued messages"
-                );
-            }
-        }
     }
 
     /// 中止活跃 turn。

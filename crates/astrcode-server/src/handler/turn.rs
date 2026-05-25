@@ -5,12 +5,12 @@ use std::sync::Arc;
 use astrcode_core::types::*;
 use tokio::sync::mpsc;
 
-use super::{CommandHandler, CommandMessage, HandlerError};
-use crate::turn_scheduler::TurnScheduler;
+use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_error_for_client};
+use crate::turn_scheduler::{TurnError, TurnScheduler};
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
-pub(crate) enum TurnCompletion {
+pub enum TurnCompletion {
     Completed { finish_reason: String },
     Failed { error: String },
     Aborted,
@@ -29,21 +29,12 @@ impl CommandHandler {
             .scheduler
             .submit(sid.clone(), user_text)
             .await
-            .map_err(|e| match e {
-                crate::turn_scheduler::TurnError::TurnAlreadyRunning => {
-                    self.send_error(40900, "A turn is already running");
-                    HandlerError::TurnAlreadyRunning
-                },
-                crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
-                    HandlerError::SessionNotFound(msg)
-                },
-                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
-                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::SessionManager(e) => {
-                    HandlerError::SessionManager(e)
-                },
-                other => HandlerError::InvalidRequest(other.to_string()),
+            .map_err(|e| {
+                let (code, err) = turn_error_for_client(e);
+                if code == 40900 {
+                    self.send_error(code, "A turn is already running");
+                }
+                err
             })?;
 
         let scheduler = Arc::clone(&self.scheduler);
@@ -72,11 +63,11 @@ impl CommandHandler {
     ) -> Result<(), HandlerError> {
         match self.scheduler.abort(session_id).await {
             Ok(()) => Ok(()),
-            Err(crate::turn_scheduler::TurnError::NoActiveTurn) => {
+            Err(TurnError::NoActiveTurn) => {
                 self.send_error(40400, "No active turn");
                 Err(HandlerError::NoActiveTurn)
             },
-            Err(e) => Err(HandlerError::InvalidRequest(e.to_string())),
+            Err(e) => Err(HandlerError::from(e)),
         }
     }
 
@@ -97,19 +88,7 @@ impl CommandHandler {
         self.scheduler
             .repair_stale(session_id)
             .await
-            .map_err(|e| match e {
-                crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
-                    HandlerError::SessionNotFound(msg)
-                },
-                crate::turn_scheduler::TurnError::NoActiveTurn => HandlerError::NoActiveTurn,
-                crate::turn_scheduler::TurnError::SessionManager(err) => {
-                    HandlerError::SessionManager(err)
-                },
-                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
-                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
-                other => HandlerError::InvalidRequest(other.to_string()),
-            })
+            .map_err(HandlerError::from)
     }
 
     /// 提交提示词并返回完成通知接收器。
@@ -155,6 +134,7 @@ async fn run_completion_watcher(
     };
 
     scheduler.registry().remove_if_matches(&sid, &turn_id);
+    scheduler.on_turn_completed(&sid).await;
 
     if let Some(tx) = completion_tx {
         let _ = tx.send(completion.clone());

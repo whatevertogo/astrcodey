@@ -51,7 +51,7 @@ impl CommandHandler {
         messages.push(LlmMessage::user(RECAP_PROMPT));
 
         // 单次调用，无 tools
-        let llm = self.runtime.capabilities.llm();
+        let llm = self.runtime.capabilities().llm();
         let rx = llm
             .generate(messages, vec![])
             .await

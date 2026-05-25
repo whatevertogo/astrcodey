@@ -45,6 +45,10 @@ tower-http = { workspace = true }
 getrandom = "0.3"
 agent-client-protocol = "0.11"
 
+[[test]]
+name = "http_routes"
+required-features = ["testing"]
+
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

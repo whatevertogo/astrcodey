@@ -309,7 +309,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
     let sid = SessionId::from(session_id.clone());
 
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             sid,
             None,
@@ -349,7 +349,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
     let sid = SessionId::from(session_id.clone());
 
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             sid.clone(),
             None,
@@ -370,7 +370,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
     assert_eq!(snapshot.blocks.len(), 1);
 
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             sid,
             None,
@@ -382,7 +382,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
         .await
         .unwrap();
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             SessionId::from(session_id.clone()),
             None,
@@ -448,12 +448,12 @@ async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
     let parent_sid = SessionId::from(parent_id.clone());
     let child_sid = new_session_id();
     runtime
-        .event_store
+        .event_store()
         .create_session(&child_sid, ".", "mock-model", Some(&parent_sid), None, None)
         .await
         .unwrap();
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             parent_sid.clone(),
             None,
@@ -468,7 +468,7 @@ async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
         .await
         .unwrap();
     let parent_cursor = runtime
-        .event_store
+        .event_store()
         .latest_cursor(&parent_sid)
         .await
         .unwrap()
@@ -542,7 +542,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
 
     for text in ["one", "two", "three"] {
         runtime
-            .event_store
+            .event_store()
             .append_event(Event::new(
                 sid.clone(),
                 None,
@@ -554,7 +554,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
             .await
             .unwrap();
         runtime
-            .event_store
+            .event_store()
             .append_event(Event::new(
                 sid.clone(),
                 None,
@@ -596,7 +596,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     assert!(sse.contains("sessionContinued"));
     assert!(
         !runtime
-            .event_store
+            .event_store()
             .session_read_model(&sid)
             .await
             .unwrap()
@@ -619,7 +619,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     fs::write(read_fixture, "pub fn compact_restore_fixture() {}").unwrap();
 
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             sid.clone(),
             None,
@@ -632,7 +632,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .await
         .unwrap();
     runtime
-        .event_store
+        .event_store()
         .append_event(Event::new(
             sid.clone(),
             None,
@@ -656,7 +656,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
 
     for text in ["one", "two", "three"] {
         runtime
-            .event_store
+            .event_store()
             .append_event(Event::new(
                 sid.clone(),
                 None,
@@ -668,7 +668,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             .await
             .unwrap();
         runtime
-            .event_store
+            .event_store()
             .append_event(Event::new(
                 sid.clone(),
                 None,
@@ -711,7 +711,11 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
     assert!(sse.contains(&session_id));
 
-    let state = runtime.event_store.session_read_model(&sid).await.unwrap();
+    let state = runtime
+        .event_store()
+        .session_read_model(&sid)
+        .await
+        .unwrap();
     assert!(!state.context_messages.is_empty());
     let restored_context = state
         .context_messages
@@ -887,14 +891,13 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         Arc::clone(&capabilities),
         vec![],
     ));
-    Arc::new(ServerRuntime {
+    Arc::new(ServerRuntime::assemble_for_test(
         event_store,
-        config_manager: config,
+        config,
         context_assembler,
         session_manager,
         extension_runner,
         capabilities,
-        startup_working_dir: std::env::temp_dir(),
-        shutdown_token: tokio_util::sync::CancellationToken::new(),
-    })
+        std::env::temp_dir(),
+    ))
 }
