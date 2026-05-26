@@ -9,7 +9,7 @@ use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{build_client, stream_body_error, transport_error},
+    common::{build_client, read_http_error_body, stream_body_error, transport_error},
     retry::RetryPolicy,
     serialization::{
         chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
@@ -487,7 +487,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             body["tool_choice"] = serde_json::json!("auto");
         }
         self.apply_prompt_cache_fields(&mut body, messages, tools);
-        if self.config.reasoning_split {
+        if self.config.reasoning_split() {
             body["reasoning_split"] = serde_json::json!(true);
         }
 
@@ -539,12 +539,12 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) {
-        if !self.config.supports_prompt_cache_key {
+        if !self.config.supports_prompt_cache_key() {
             return;
         }
 
         body["prompt_cache_key"] = serde_json::json!(self.prompt_cache_key(messages, tools));
-        if let Some(retention) = self.config.prompt_cache_retention {
+        if let Some(retention) = self.config.prompt_cache_retention() {
             body["prompt_cache_retention"] =
                 serde_json::json!(prompt_cache_retention_wire_value(self.api_mode, retention));
         }
@@ -639,7 +639,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
                 continue;
             }
 
-            let text = response.text().await.unwrap_or_default();
+            let text = read_http_error_body(response, &endpoint).await;
             if status.as_u16() >= 500 {
                 return Err(LlmError::ServerError {
                     status: status.as_u16(),
@@ -953,12 +953,16 @@ mod tests {
     }
 
     fn provider(api_mode: OpenAiApiMode, supports_cache_key: bool) -> StandardProvider {
+        use astrcode_core::llm::{OpenAiProviderExtras, ProviderExtras};
         let config = LlmClientConfig {
             base_url: "https://api.test/v1".into(),
             api_key: "sk-test".into(),
-            supports_prompt_cache_key: supports_cache_key,
-            prompt_cache_retention: supports_cache_key
-                .then_some(PromptCacheRetention::TwentyFourHours),
+            extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
+                supports_prompt_cache_key: supports_cache_key,
+                prompt_cache_retention: supports_cache_key
+                    .then_some(PromptCacheRetention::TwentyFourHours),
+                ..OpenAiProviderExtras::default()
+            }),
             ..LlmClientConfig::default()
         };
         StandardProvider::new(config, api_mode, "gpt-test".into(), Some(1024), Some(8192))

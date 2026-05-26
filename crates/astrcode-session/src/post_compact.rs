@@ -132,7 +132,10 @@ fn fresh_read_file(working_dir: &Path, requested_path: &str) -> Option<PostCompa
 
 fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote> {
     let session_dir = session_store_dir?;
-    let plans_dir = session_dir.join("plan");
+    let plans_dir = session_dir
+        .join("extension_data")
+        .join("astrcode-mode")
+        .join("plan");
     let mut plans = fs::read_dir(&plans_dir)
         .ok()?
         .filter_map(Result::ok)
@@ -354,18 +357,6 @@ mod tests {
         LlmMessage::tool("read", call_id, "old content", false)
     }
 
-    fn message_text(message: &LlmMessage) -> String {
-        message
-            .content
-            .iter()
-            .map(|content| match content {
-                LlmContent::Text { text } => text.as_str(),
-                _ => "",
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     #[tokio::test]
     async fn post_compact_rereads_recent_files_from_disk() {
         let temp = tempfile_dir("post-compact-reread");
@@ -393,7 +384,11 @@ mod tests {
         )
         .await;
 
-        let restored = message_text(compaction.context_messages.last().unwrap());
+        let restored = compaction
+            .context_messages
+            .last()
+            .unwrap()
+            .joined_display_text("\n");
         assert!(restored.contains("source.rs"));
         assert!(restored.contains("fresh disk content"));
         assert!(!restored.contains("old content"));
@@ -407,7 +402,10 @@ mod tests {
         std::env::set_var("ASTRCODE_TEST_HOME", &home);
         let session_id = "session-post-compact-notes";
         let session_dir = temp.join("session-store");
-        let plans = session_dir.join("plan");
+        let plans = session_dir
+            .join("extension_data")
+            .join("astrcode-mode")
+            .join("plan");
         fs::create_dir_all(&plans).unwrap();
         fs::write(plans.join("work.md"), "plan body").unwrap();
         let messages = vec![
@@ -454,7 +452,11 @@ mod tests {
         compaction.append_post_compact_context(files, notes, &settings);
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
-        let restored = message_text(compaction.context_messages.last().unwrap());
+        let restored = compaction
+            .context_messages
+            .last()
+            .unwrap()
+            .joined_display_text("\n");
         assert!(restored.contains("Plan File"));
         assert!(restored.contains("plan body"));
         assert!(restored.contains("Loaded Skill Content"));

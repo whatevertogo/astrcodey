@@ -10,11 +10,12 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
-        DiscoveredTool, Extension, ExtensionCtx, ExtensionError, ExtensionEvent, HookMode,
-        HookResult, LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, StopReason, ToolDiscoveryHandler, ToolHandler,
+        DiscoveredTool, Extension, ExtensionCapability, ExtensionCtx, ExtensionError,
+        ExtensionEvent, HookMode, HookResult, LifecycleContext, LifecycleHandler,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, StopReason,
+        ToolDiscoveryHandler, ToolHandler,
     },
     tool::{
         DEFERRED_TOOLS_METADATA_KEY, ExecutionMode, ToolDefinition, ToolExecutionContext,
@@ -60,6 +61,14 @@ struct McpExtension {
 impl Extension for McpExtension {
     fn id(&self) -> &str {
         EXTENSION_ID
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::WorkspaceRead,
+            ExtensionCapability::ProcessSpawn,
+            ExtensionCapability::NetworkClient,
+        ]
     }
 
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
@@ -368,8 +377,8 @@ impl PromptBuildHandler for McpPromptBuildHandler {
     }
 }
 
-fn mcp_tool_metadata() -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>
-{
+fn mcp_tool_metadata()
+-> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
     let mut map = std::collections::HashMap::new();
     map.insert(TOOL_SEARCH_TOOL_NAME.to_string(), tool_search_metadata());
     map
@@ -431,7 +440,7 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> Discov
     let servers = config.servers.clone();
 
     let results: Vec<(String, Result<Vec<McpTool>, _>)> =
-        futures::future::join_all(servers.iter().map(|server| async {
+        futures_util::future::join_all(servers.iter().map(|server| async {
             let name = server.name.clone();
             let result = pool.list_tools(server).await;
             (name, result)

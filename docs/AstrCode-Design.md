@@ -1,6 +1,6 @@
 # AstrCode 设计概述
 
-Rust 实现的 AI coding agent，~73k 行（Rust ~66k + TypeScript ~6.7k），21 crates，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~74k 行（Rust ~67.6k + TypeScript ~6.3k），`crates/` 下 21 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -64,11 +64,14 @@ Compact 通过 `make_compact_request_fn` 从 `LlmProvider` 构造请求闭包：
 - 闭包传入 `compact_messages_with_fallback`，`LlmContextAssembler` 不持有 provider 引用，保持模型切换时的无状态设计
 - compact prompt 禁止工具调用，如果模型尝试调用工具则解析失败，触发 contract repair 重试
 
-### 双路径 + 熔断
+### 双路径 + 熔断 + 安全持久化
 
 - 自动压缩和手动压缩统一走 `compact_messages_with_fallback`：先尝试 LLM 生成结构化摘要，失败时降级到确定性模板
 - LLM 调用通过闭包注入（`make_compact_request_fn`），`LlmContextAssembler` 不持有 provider 引用
 - 确定性 fallback 仅在 LLM 完全不可用时触发，作为最后保障
+- **压缩熔断器**（`CompactCircuitBreaker`）：LLM 连续失败达到阈值后，在冷却期内跳过自动压缩
+- **可选预测性压缩**：根据 turn token 增长估算，在超出窗口前提前 compact
+- **CAS 持久化**：`persist_compact_result` 使用 compare-and-swap；并发写入冲突时安全失败，不污染事件日志
 
 ### Post-compact 上下文恢复
 
@@ -167,7 +170,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode），支持通过 FFI 加载原生扩展和 WASM 扩展运行时（基于 wasmtime 的沙箱化执行）。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过基于 wasmtime 的 WASM 沙箱运行时加载，并使用 manifest 声明宿主能力。
 
 ---
 
@@ -235,12 +238,15 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 | 指标 | 数值 |
 |------|------|
-| Rust 代码行数 | ~66k（含测试） |
-| TypeScript/TSX 代码行数 | ~6.7k |
-| Crates 数量 | 21（含 Tauri shell） |
-| Rust 源文件数量 | 217 |
+| Rust 代码行数（`crates/`） | ~66.9k（含测试） |
+| Rust 代码行数（`src-tauri/`） | ~690 |
+| Rust 合计 | ~67.6k |
+| TypeScript/TSX 代码行数 | ~6.3k |
+| Workspace 成员 | 22（21 个 `crates/` + `src-tauri`） |
+| Rust 源文件数量 | 261 |
 | 内置工具数量 | 9 |
-| 扩展 crate 数量 | 7 |
+| 第一方扩展 crate | 6（mode / skill / todo / agent-tools / mcp / memory） |
+| 扩展基础设施 | `extension-sdk`、`bundled-extensions`、`extensions`（宿主） |
 
 ---
 

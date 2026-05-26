@@ -1,4 +1,4 @@
-//! LLM 流消费 — 从 LLM provider 接收事件流，发射到 EventBus/mpsc，解析文本/工具调用。
+//! LLM 流消费 — 从 LLM provider 接收事件流，发射 live 事件，解析文本/工具调用。
 
 use astrcode_context::compaction::is_prompt_too_long_message;
 use astrcode_core::{
@@ -8,10 +8,7 @@ use astrcode_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::{
-    tool_types::PendingToolCall,
-    turn_context::{AgentSignal, TurnError, send_event},
-};
+use crate::{tool_types::PendingToolCall, turn_context::TurnError, turn_publish::TurnPublisher};
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
 
@@ -36,9 +33,10 @@ pub enum StreamOutcome {
 ///
 /// 返回 `StreamOutcome::Complete` 表示回复完成（无工具调用），
 /// 返回 `StreamOutcome::ToolCalls` 表示需要执行工具后继续循环。
+/// `AssistantMessageCompleted` 由 turn_runner 在 outcome 分支 durable 写入。
 pub async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
-    event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+    publisher: &TurnPublisher,
     message_id: MessageId,
 ) -> Result<StreamOutcome, TurnError> {
     let mut current_text = String::new();
@@ -49,25 +47,25 @@ pub async fn consume_llm_stream(
     while let Some(event) = rx.recv().await {
         match event {
             LlmEvent::ContentDelta { delta } => {
-                ensure_assistant_message_started(event_tx, &message_id, &mut message_started);
-                send_event(
-                    event_tx.as_ref(),
-                    EventPayload::AssistantTextDelta {
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
+                    .await;
+                publisher
+                    .live(EventPayload::AssistantTextDelta {
                         message_id: message_id.clone(),
                         delta: delta.clone(),
-                    },
-                );
+                    })
+                    .await;
                 current_text.push_str(&delta);
             },
             LlmEvent::ThinkingDelta { delta } => {
-                ensure_assistant_message_started(event_tx, &message_id, &mut message_started);
-                send_event(
-                    event_tx.as_ref(),
-                    EventPayload::ThinkingDelta {
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
+                    .await;
+                publisher
+                    .live(EventPayload::ThinkingDelta {
                         message_id: message_id.clone(),
                         delta: delta.clone(),
-                    },
-                );
+                    })
+                    .await;
                 reasoning_content.push_str(&delta);
             },
             LlmEvent::ToolCallStart {
@@ -75,8 +73,6 @@ pub async fn consume_llm_stream(
                 name,
                 arguments,
             } => {
-                // Replace duplicate call_id entries from buggy providers
-                // instead of silently merging arguments.
                 if let Some(existing) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
                     tracing::warn!(
                         call_id,
@@ -86,21 +82,19 @@ pub async fn consume_llm_stream(
                     existing.name = name.clone();
                     existing.arguments = arguments.clone();
                 } else {
-                    send_event(
-                        event_tx.as_ref(),
-                        EventPayload::ToolCallStarted {
+                    publisher
+                        .live(EventPayload::ToolCallStarted {
                             call_id: call_id.clone().into(),
                             tool_name: name.clone(),
-                        },
-                    );
+                        })
+                        .await;
                     if !arguments.is_empty() {
-                        send_event(
-                            event_tx.as_ref(),
-                            EventPayload::ToolCallArgumentsDelta {
+                        publisher
+                            .live(EventPayload::ToolCallArgumentsDelta {
                                 call_id: call_id.clone().into(),
                                 delta: arguments.clone(),
-                            },
-                        );
+                            })
+                            .await;
                     }
                     tool_calls.push(PendingToolCall {
                         call_id,
@@ -113,13 +107,12 @@ pub async fn consume_llm_stream(
                 if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
                     tc.arguments.push_str(&delta);
                 }
-                send_event(
-                    event_tx.as_ref(),
-                    EventPayload::ToolCallArgumentsDelta {
+                publisher
+                    .live(EventPayload::ToolCallArgumentsDelta {
                         call_id: call_id.into(),
                         delta,
-                    },
-                );
+                    })
+                    .await;
             },
             LlmEvent::Done { finish_reason } => {
                 if tool_calls.is_empty() {
@@ -146,39 +139,44 @@ pub async fn consume_llm_stream(
             },
             LlmEvent::Error { message } => {
                 let recoverable = is_prompt_too_long_message(&message);
-                send_event(
-                    event_tx.as_ref(),
-                    EventPayload::ErrorOccurred {
-                        code: -32603,
-                        message: message.clone(),
-                        recoverable,
-                    },
-                );
                 if recoverable {
+                    publisher
+                        .live(EventPayload::ErrorOccurred {
+                            code: -32603,
+                            message: message.clone(),
+                            recoverable: true,
+                        })
+                        .await;
                     return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
                 }
+                publisher
+                    .durable(EventPayload::ErrorOccurred {
+                        code: -32603,
+                        message: message.clone(),
+                        recoverable: false,
+                    })
+                    .await?;
                 return Err(TurnError::Llm(LlmError::StreamParse(message)));
             },
         }
     }
 
-    Err(TurnError::Internal("LLM stream ended unexpectedly".into()))
+    Err(TurnError::StreamEndedUnexpectedly)
 }
 
-pub fn ensure_assistant_message_started(
-    event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+pub async fn ensure_assistant_message_started(
+    publisher: &TurnPublisher,
     message_id: &MessageId,
     message_started: &mut bool,
 ) {
     if *message_started {
         return;
     }
-    send_event(
-        event_tx.as_ref(),
-        EventPayload::AssistantMessageStarted {
+    publisher
+        .live(EventPayload::AssistantMessageStarted {
             message_id: message_id.clone(),
-        },
-    );
+        })
+        .await;
     *message_started = true;
 }
 
@@ -188,15 +186,6 @@ pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> 
     } else {
         Some(reasoning_content)
     }
-}
-
-pub fn assistant_message_with_thinking(
-    text: &str,
-    reasoning_content: Option<String>,
-) -> LlmMessage {
-    let mut message = LlmMessage::assistant(text);
-    message.reasoning_content = reasoning_content;
-    message
 }
 
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
@@ -212,6 +201,15 @@ mod tests {
     use astrcode_core::llm::LlmMessage;
 
     use super::*;
+
+    fn assistant_message_with_thinking(
+        text: &str,
+        reasoning_content: Option<String>,
+    ) -> LlmMessage {
+        let mut message = LlmMessage::assistant(text);
+        message.reasoning_content = reasoning_content;
+        message
+    }
 
     #[test]
     fn non_empty_reasoning_returns_some() {

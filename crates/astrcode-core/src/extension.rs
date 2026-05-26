@@ -36,6 +36,13 @@ pub trait Extension: Send + Sync {
     /// 返回扩展的唯一标识符。
     fn id(&self) -> &str;
 
+    /// 声明扩展需要宿主授予的能力。
+    ///
+    /// 宿主以此限制注入到扩展工具和生命周期上下文中的敏感能力。
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[]
+    }
+
     /// 一次性调用。扩展通过 registrar 注册工具、命令和事件处理器。
     fn register(&self, _reg: &mut Registrar) {}
 
@@ -66,6 +73,28 @@ pub trait Extension: Send + Sync {
     async fn on_config_changed(&self, _config: ExtensionConfig) -> Result<(), ExtensionError> {
         Ok(())
     }
+}
+
+/// 扩展可以显式申请的宿主能力。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionCapability {
+    /// 访问该 session 下命名空间隔离的持久状态。
+    SessionState,
+    /// 创建子 session、提交 turn 与回收 session。
+    SessionControl,
+    /// 调用宿主配置的小模型。
+    SmallModel,
+    /// 只读查询历史 session 投影。
+    SessionHistory,
+    /// 发射已声明的扩展事件。
+    EmitEvents,
+    /// 读取工作区或扩展发现目录。
+    WorkspaceRead,
+    /// 启动受扩展管理的子进程。
+    ProcessSpawn,
+    /// 发起网络客户端请求。
+    NetworkClient,
 }
 
 /// 扩展专有配置的包装类型。
@@ -106,6 +135,11 @@ pub struct ExtensionCtx {
     startup_working_dir: Option<String>,
     /// 启动阶段可用的扩展事件发送端；由宿主显式绑定。
     event_sink: Option<Arc<dyn ExtensionEventSink>>,
+    /// 由宿主统一绑定的受信运行态服务。
+    ///
+    /// 扩展只能在标准启动生命周期内取得这些能力，组合根不得为单个扩展
+    /// 另开构造参数注入路径。
+    host_services: Option<Arc<ExtensionHostServices>>,
 }
 
 impl ExtensionCtx {
@@ -115,6 +149,7 @@ impl ExtensionCtx {
             config: ExtensionConfig::default(),
             startup_working_dir: None,
             event_sink: None,
+            host_services: None,
         }
     }
 
@@ -136,11 +171,22 @@ impl ExtensionCtx {
         startup_working_dir: Option<String>,
         event_sink: Option<Arc<dyn ExtensionEventSink>>,
     ) -> Self {
+        Self::with_host_services(tasks, config, startup_working_dir, event_sink, None)
+    }
+
+    pub fn with_host_services(
+        tasks: ExtensionTasks,
+        config: ExtensionConfig,
+        startup_working_dir: Option<String>,
+        event_sink: Option<Arc<dyn ExtensionEventSink>>,
+        host_services: Option<Arc<ExtensionHostServices>>,
+    ) -> Self {
         Self {
             tasks,
             config,
             startup_working_dir,
             event_sink,
+            host_services,
         }
     }
 
@@ -156,6 +202,11 @@ impl ExtensionCtx {
     /// 返回启动阶段由宿主绑定的扩展事件发送端。
     pub fn event_sink(&self) -> Option<&Arc<dyn ExtensionEventSink>> {
         self.event_sink.as_ref()
+    }
+
+    /// 返回宿主授予扩展的运行态服务。
+    pub fn host_services(&self) -> Option<&Arc<ExtensionHostServices>> {
+        self.host_services.as_ref()
     }
 
     pub fn shutdown(&self) -> CancellationToken {
@@ -299,7 +350,7 @@ pub struct ExtensionHostServices {
     ///
     /// 由 `Arc<dyn EventStore>` 通过 trait upcasting 转换而来
     /// （Rust 1.86+，`EventStore: EventReader` 建立 supertrait 关系）。
-    pub session_read: Arc<dyn EventReader>,
+    pub session_read: Option<Arc<dyn EventReader>>,
     /// 小模型 provider，用于记忆提取。
     pub small_llm: Option<Arc<dyn LlmProvider>>,
 }
@@ -308,7 +359,7 @@ impl ExtensionHostServices {
     pub fn new(event_store: Arc<dyn EventStore>, small_llm: Option<Arc<dyn LlmProvider>>) -> Self {
         Self {
             // Arc<dyn EventStore> → Arc<dyn EventReader> 由 trait upcasting 自动完成。
-            session_read: event_store,
+            session_read: Some(event_store),
             small_llm,
         }
     }
@@ -382,14 +433,12 @@ pub enum ExtensionEvent {
 
 // ─── Extension Manifest ──────────────────────────────────────────────────
 
-/// 从扩展的 `extension.json` 解析的清单文件。
+/// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
 ///
-/// 用于「发现」阶段：loader 读 manifest 拿到 `id` / `library`，加载 WASM 模块后，
-/// 模块通过 `extension_init` 走 host imports（`host_register_tool` /
-/// `host_register_command` / `host_subscribe`）声明真正的能力。manifest 只承担
-/// 元数据展示职责（`name` / `version` / `description`），不再重复声明能力——
-/// 之前的 `subscriptions` / `tools` / `slash_commands` 字段已删，避免「manifest 写
-/// 一份、register 时再写一份」两份事实漂移。
+/// **当前 loader 行为（s5r）**：`protocol.s5r`（须为 `"1.0"`）与 **`library`**（WASM
+/// 相对路径）为必填； 扩展的真实 `id`、能力、工具与 hook 均由 guest 的 `extension_init` 握手返回。
+/// 本结构中的 `id` / `name` / `capabilities` 等字段可被 serde 解析，供 UI、诊断或
+/// 未来校验使用，但**不会**替代 WASM manifest。磁盘路径仅支持 `.wasm`，无 native dlopen。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     /// 扩展唯一标识符。
@@ -405,6 +454,9 @@ pub struct ExtensionManifest {
     /// 可选的宿主版本提示。目前仅作为元数据，不做硬性校验。
     #[serde(default)]
     pub astrcode_version: Option<String>,
+    /// 宿主必须授予此扩展的能力。
+    #[serde(default)]
+    pub capabilities: Vec<ExtensionCapability>,
     /// 原生库路径（相对于扩展目录，`.dll` / `.so` / `.wasm`）。
     pub library: String,
 }
@@ -773,7 +825,9 @@ pub struct PreToolUseContext {
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub available_tools: Vec<ToolDefinition>,
-    /// 插件事件发射器（仅插件钩子会有值）。
+    /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// session 在存储层的真实目录路径。
     pub session_store_dir: Option<std::path::PathBuf>,
@@ -802,7 +856,9 @@ pub struct PostToolUseContext {
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,
     pub is_error: bool,
-    /// 插件事件发射器（仅插件钩子会有值）。
+    /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// session 在存储层的真实目录路径。
     pub session_store_dir: Option<std::path::PathBuf>,
@@ -868,7 +924,9 @@ pub struct LifecycleContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
-    /// 插件事件发射器（仅插件钩子会有值）。
+    /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
+    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// 仅 TurnEnd 事件填充：当轮最后一条 user 和 assistant 消息文本。
     pub last_exchange: Option<ExchangeSummary>,

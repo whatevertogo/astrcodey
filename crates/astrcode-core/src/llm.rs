@@ -172,6 +172,15 @@ impl LlmMessage {
         self
     }
 
+    /// 将各 content 块经 [`LlmContent::to_display_text`] 转换后用 `separator` 拼接。
+    pub fn joined_display_text(&self, separator: &str) -> String {
+        self.content
+            .iter()
+            .map(LlmContent::to_display_text)
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
     /// 判断该消息在去掉展示元数据后是否仍应发送给 provider。
     pub fn has_provider_visible_content(&self) -> bool {
         if self.content.iter().any(|content| match content {
@@ -284,20 +293,27 @@ impl PromptCacheRetention {
     }
 }
 
-/// LLM 客户端配置。
-///
-/// TODO: `reasoning_split`、`supports_prompt_cache_key`、`prompt_cache_retention` 是
-/// OpenAI/MiniMax 特有概念，不应出现在通用配置里。引入第二个需要完全不同配置的
-/// provider 时（如 Anthropic native API），应将它们抽入 `ProviderExt` tagged enum：
-///
-/// ```ignore
-/// pub enum ProviderExt {
-///     OpenAi(OpenAiExt),
-///     // Anthropic(AnthropicExt), ...
-/// }
-/// ```
-///
-/// `reasoning_content` 留在 `LlmMessage` 上没问题——推理/思考输出已是跨 provider 概念。
+/// OpenAI 兼容 API 的 provider 特有选项（MiniMax reasoning_split、prompt cache 等）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenAiProviderExtras {
+    /// 是否请求 provider 分离 reasoning/thinking 到独立字段（如 MiniMax reasoning_split）。
+    pub reasoning_split: bool,
+    /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
+    pub supports_prompt_cache_key: bool,
+    /// 可选的 OpenAI prompt cache retention。
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
+}
+
+/// Provider 特有配置；通用字段留在 [`LlmClientConfig`]。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderExtras {
+    #[default]
+    None,
+    OpenAi(OpenAiProviderExtras),
+}
+
+/// LLM 客户端配置（跨 provider 通用字段 + [`ProviderExtras`]）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmClientConfig {
     /// API 端点的基础 URL。
@@ -314,14 +330,32 @@ pub struct LlmClientConfig {
     pub retry_base_delay_ms: u64,
     /// 当前模型是否为 reasoning/thinking 模式。
     pub reasoning: bool,
-    /// 是否请求 provider 分离 reasoning/thinking 到独立字段（如 MiniMax reasoning_split）。
-    pub reasoning_split: bool,
-    /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
-    pub supports_prompt_cache_key: bool,
-    /// 可选的 OpenAI prompt cache retention。
-    pub prompt_cache_retention: Option<PromptCacheRetention>,
+    /// Provider 特有选项。
+    pub extras: ProviderExtras,
     /// 额外的 HTTP 请求头。
     pub extra_headers: std::collections::HashMap<String, String>,
+}
+
+impl LlmClientConfig {
+    pub fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
+        match &self.extras {
+            ProviderExtras::OpenAi(extras) => Some(extras),
+            ProviderExtras::None => None,
+        }
+    }
+
+    pub fn reasoning_split(&self) -> bool {
+        self.openai_extras().is_some_and(|e| e.reasoning_split)
+    }
+
+    pub fn supports_prompt_cache_key(&self) -> bool {
+        self.openai_extras()
+            .is_some_and(|e| e.supports_prompt_cache_key)
+    }
+
+    pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
+        self.openai_extras().and_then(|e| e.prompt_cache_retention)
+    }
 }
 
 impl Default for LlmClientConfig {
@@ -334,9 +368,7 @@ impl Default for LlmClientConfig {
             max_retries: 2,
             retry_base_delay_ms: 250,
             reasoning: false,
-            reasoning_split: false,
-            supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
+            extras: ProviderExtras::None,
             extra_headers: std::collections::HashMap::new(),
         }
     }

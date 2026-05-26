@@ -2,6 +2,12 @@
 //!
 //! 主会话和子会话共用同一条 submit/abort 路径。取代了之前分散在
 //! `CommandHandler.active_turns` 和 `SessionManager.ActiveExecutionIndex` 的两套编排。
+//!
+//! ## 下一 turn 输入队列（唯一）
+//!
+//! `pending_queues` 是进程内唯一的「等当前 turn 结束再处理」队列（HTTP / stdio / Actor
+//! 均通过 [`notify_turn`](TurnScheduler::notify_turn) 入队）。`on_turn_completed` 按 FIFO
+//! 每次只弹出一条并启动新 turn，保证连发 prompt 仍对应多个独立 `UserMessage` 事件。
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -29,8 +35,15 @@ use crate::{
     turn_registry::TurnRegistry,
 };
 
+#[path = "turn_scheduler_queue.rs"]
+mod turn_queue;
+
+/// Turn 调度层错误（会话是否存在、是否已有 turn 在跑等）。
+///
+/// 与 [`astrcode_session::turn_context::TurnError`]（单 turn 执行期错误）区分命名，避免跨 crate
+/// 歧义。
 #[derive(Debug, Error)]
-pub enum TurnError {
+pub enum TurnScheduleError {
     #[error("A turn is already running")]
     TurnAlreadyRunning,
     #[error("No active turn")]
@@ -58,11 +71,8 @@ pub enum SubmitOutcome {
 }
 
 /// 待处理的消息，用于 "下一 turn" 路径
-#[allow(dead_code)]
-struct PendingMessage {
+pub(crate) struct PendingMessage {
     text: String,
-    /// 预留字段，用于未来支持带标记的消息队列
-    marker: Option<String>,
 }
 
 /// per-session 的待处理消息队列
@@ -72,8 +82,7 @@ pub struct TurnScheduler {
     session_manager: Arc<SessionManager>,
     registry: Arc<TurnRegistry>,
     /// 等待当前 turn 结束后处理的消息队列
-    /// key: session_id, value: 消息队列
-    pending_queues: Mutex<HashMap<SessionId, PendingQueue>>,
+    pub(super) pending_queues: Mutex<HashMap<SessionId, PendingQueue>>,
 }
 
 impl TurnScheduler {
@@ -96,14 +105,14 @@ impl TurnScheduler {
     /// 提交新 turn。
     ///
     /// attach session 到 event_bus、修复遗留状态、调用 `Session::submit`、注册到 registry。
-    /// 如果队列中有待处理消息，会一并处理。
+    /// 排队中的输入由 [`on_turn_completed`](Self::on_turn_completed) 在 turn 结束后按 FIFO 处理。
     pub async fn submit(
         &self,
         session_id: SessionId,
         text: String,
-    ) -> Result<(TurnId, TurnHandle), TurnError> {
+    ) -> Result<(TurnId, TurnHandle), TurnScheduleError> {
         if self.registry.has_active(&session_id) {
-            return Err(TurnError::TurnAlreadyRunning);
+            return Err(TurnScheduleError::TurnAlreadyRunning);
         }
 
         tracing::info!(session_id = %session_id, text_len = text.len(), "scheduler: submit turn");
@@ -112,19 +121,13 @@ impl TurnScheduler {
             .session_manager
             .open(session_id.clone())
             .await
-            .map_err(|e| TurnError::SessionNotFound(format!("{session_id}: {e}")))?;
-
-        // 检查是否有队列中的待处理消息，如果有则追加到本次输入
-        let combined_text = self.combine_with_pending(session_id.clone(), text);
+            .map_err(|e| TurnScheduleError::SessionNotFound(format!("{session_id}: {e}")))?;
 
         let turn_id = new_turn_id();
-        let handle = session
-            .submit(combined_text, turn_id.clone())
-            .await
-            .map_err(|e| {
-                tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
-                TurnError::Turn(e)
-            })?;
+        let handle = session.submit(text, turn_id.clone()).await.map_err(|e| {
+            tracing::error!(session_id = %session_id, error = %e, "session.submit failed");
+            TurnScheduleError::Turn(e)
+        })?;
 
         let session_arc = Arc::new(session);
         if !self.registry.register(
@@ -134,7 +137,7 @@ impl TurnScheduler {
             session_arc,
         ) {
             handle.abort();
-            return Err(TurnError::TurnAlreadyRunning);
+            return Err(TurnScheduleError::TurnAlreadyRunning);
         }
 
         Ok((turn_id, handle))
@@ -145,7 +148,7 @@ impl TurnScheduler {
         &self,
         session_id: SessionId,
         text: String,
-    ) -> Result<SubmitOutcome, TurnError> {
+    ) -> Result<SubmitOutcome, TurnScheduleError> {
         if self.registry.has_active(&session_id) {
             self.inject(&session_id, text).await?;
             Ok(SubmitOutcome::Injected)
@@ -167,7 +170,7 @@ impl TurnScheduler {
         &self,
         session_id: SessionId,
         source: &str,
-    ) -> Result<SubmitOutcome, TurnError> {
+    ) -> Result<SubmitOutcome, TurnScheduleError> {
         // 先处理已完成的子 agent——LLM 在下一步就能看到子 agent 完成结果
         self.process_child_completions(&session_id).await;
 
@@ -178,103 +181,6 @@ impl TurnScheduler {
         self.submit_or_inject(session_id, marker).await
     }
 
-    /// 通知需要处理，在**下一 turn** 触发。
-    ///
-    /// ## 行为
-    /// - 如果当前有活跃 turn → 消息入队，等待当前 turn 结束后自动触发新 turn
-    /// - 如果当前无活跃 turn → 立即启动新 turn
-    ///
-    /// ## 使用场景
-    /// 用户输入但希望等待当前 turn 自然结束后再处理，避免中断正在进行的工作。
-    pub async fn notify_turn(
-        &self,
-        session_id: SessionId,
-        text: String,
-    ) -> Result<SubmitOutcome, TurnError> {
-        // 如果当前无活跃 turn，直接启动新 turn
-        if !self.registry.has_active(&session_id) {
-            let (turn_id, handle) = self.submit(session_id, text).await?;
-            return Ok(SubmitOutcome::Started { turn_id, handle });
-        }
-
-        // 当前有活跃 turn，消息入队
-        let mut queues = self.pending_queues.lock();
-        let queue = queues.entry(session_id.clone()).or_default();
-        queue.push_back(PendingMessage { text, marker: None });
-
-        let queue_len = queue.len();
-        drop(queues); // 显式释放锁
-
-        tracing::info!(
-            session_id = %session_id,
-            queue_len = queue_len,
-            "message queued for next turn"
-        );
-
-        Ok(SubmitOutcome::Queued)
-    }
-
-    /// 检查并获取指定 session 的待处理消息，合并为单个输入
-    fn combine_with_pending(&self, session_id: SessionId, current_text: String) -> String {
-        let mut queues = self.pending_queues.lock();
-        let Some(queue) = queues.get_mut(&session_id) else {
-            return current_text;
-        };
-
-        if queue.is_empty() {
-            queues.remove(&session_id);
-            return current_text;
-        }
-
-        // 合并队列中的消息
-        let mut parts: Vec<String> = queue
-            .drain(..)
-            .map(|m| m.text)
-            .filter(|t| !t.is_empty())
-            .collect();
-
-        // 添加当前消息
-        if !current_text.is_empty() {
-            parts.push(current_text);
-        }
-
-        // 清理空队列
-        queues.remove(&session_id);
-
-        parts.join("\n\n")
-    }
-
-    /// 通知当前 turn 已完成，检查并处理队列中的待处理消息
-    /// 此方法应在 TurnCompleted 事件处理后调用
-    pub async fn on_turn_completed(&self, session_id: &SessionId) {
-        // 处理已完成的子 agent（recycle + notify）
-        self.process_child_completions(session_id).await;
-
-        // 检查队列
-        let queue_len = {
-            let queues = self.pending_queues.lock();
-            queues.get(session_id).map(|q| q.len()).unwrap_or(0)
-        };
-
-        if queue_len > 0 && !self.registry.has_active(session_id) {
-            tracing::info!(
-                session_id = %session_id,
-                pending_count = queue_len,
-                "auto-submitting queued messages for next turn"
-            );
-
-            // 启动新 turn 处理队列中的消息
-            // submit 会自动合并队列中的消息
-            if let Err(e) = self.submit(session_id.clone(), String::new()).await {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "failed to auto-submit queued messages"
-                );
-            }
-        }
-    }
-
     /// 中止活跃 turn。
     ///
     /// 1. 级联停止并回收所有运行中的子（Agent）会话（深度优先）
@@ -283,7 +189,7 @@ impl TurnScheduler {
     /// 4. 写终态事件
     ///
     /// 幂等性：多次调用同一 session 的 abort 是安全的，后续调用会静默成功。
-    pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnError> {
+    pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
         // 先停止并回收所有子会话，确保子会话的进程内资源和持久化状态被正确清理
         self.cascade_abort_children(session_id).await;
 
@@ -297,12 +203,12 @@ impl TurnScheduler {
         // 先读取当前状态，避免与正在进行的 abort 冲突
         let session = match self.session_manager.open(session_id.clone()).await {
             Ok(s) => s,
-            Err(_) => return Err(TurnError::SessionNotFound(session_id.to_string())),
+            Err(_) => return Err(TurnScheduleError::SessionNotFound(session_id.to_string())),
         };
 
         let state = match session.read_model().await {
             Ok(s) => s,
-            Err(e) => return Err(TurnError::Session(e)),
+            Err(e) => return Err(TurnScheduleError::Session(e)),
         };
 
         // 如果已经是终态，直接返回成功（幂等性）
@@ -504,15 +410,19 @@ impl TurnScheduler {
     }
 
     /// 向活跃 turn 注入中途消息。
-    pub async fn inject(&self, session_id: &SessionId, text: String) -> Result<(), TurnError> {
+    pub async fn inject(
+        &self,
+        session_id: &SessionId,
+        text: String,
+    ) -> Result<(), TurnScheduleError> {
         let turn_id = self
             .registry
             .active_turn_id(session_id)
-            .ok_or(TurnError::NoActiveTurn)?;
+            .ok_or(TurnScheduleError::NoActiveTurn)?;
         let session = self
             .registry
             .get_session(session_id)
-            .ok_or(TurnError::NoActiveTurn)?;
+            .ok_or(TurnScheduleError::NoActiveTurn)?;
         let message_id = new_message_id();
         session
             .emit_durable(
@@ -520,13 +430,13 @@ impl TurnScheduler {
                 EventPayload::UserMessage { message_id, text },
             )
             .await
-            .map_err(TurnError::EventEmit)?;
+            .map_err(TurnScheduleError::EventEmit)?;
         Ok(())
     }
 
 
     /// 聚合修复：stale phase + stale background tasks + stale runs。
-    pub async fn repair_stale(&self, session_id: &SessionId) -> Result<(), TurnError> {
+    pub async fn repair_stale(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
         if self.registry.has_active(session_id) {
             return Ok(());
         }
@@ -535,13 +445,16 @@ impl TurnScheduler {
             .session_manager
             .open(session_id.clone())
             .await
-            .map_err(|e| TurnError::SessionNotFound(format!("{session_id}: {e}")))?;
+            .map_err(|e| TurnScheduleError::SessionNotFound(format!("{session_id}: {e}")))?;
 
-        let state = session.read_model().await.map_err(TurnError::Session)?;
+        let state = session
+            .read_model()
+            .await
+            .map_err(TurnScheduleError::Session)?;
 
         // Phase repair
         match repair_stale_phase_for_state(session_id, &session, &state).await {
-            Ok(()) | Err(TurnError::NoActiveTurn) => {},
+            Ok(()) | Err(TurnScheduleError::NoActiveTurn) => {},
             Err(e) => return Err(e),
         }
 
@@ -562,9 +475,9 @@ async fn repair_stale_phase_for_state(
     session_id: &SessionId,
     session: &Session,
     state: &SessionReadModel,
-) -> Result<(), TurnError> {
+) -> Result<(), TurnScheduleError> {
     if matches!(state.phase, Phase::Idle | Phase::Error) {
-        return Err(TurnError::NoActiveTurn);
+        return Err(TurnScheduleError::NoActiveTurn);
     }
 
     tracing::info!(
@@ -586,7 +499,7 @@ async fn repair_stale_phase_for_state(
                 },
             )
             .await
-            .map_err(TurnError::EventEmit)?;
+            .map_err(TurnScheduleError::EventEmit)?;
     }
 
     session
@@ -597,7 +510,7 @@ async fn repair_stale_phase_for_state(
             },
         )
         .await
-        .map_err(TurnError::EventEmit)?;
+        .map_err(TurnScheduleError::EventEmit)?;
     session
         .emit_live(
             None,
@@ -614,7 +527,7 @@ async fn repair_stale_background_tasks_for_state(
     session_id: &SessionId,
     session: &Session,
     state: &SessionReadModel,
-) -> Result<(), TurnError> {
+) -> Result<(), TurnScheduleError> {
     let active_tasks: std::collections::HashSet<_> = session
         .runtime()
         .background_tasks()
@@ -649,7 +562,7 @@ async fn repair_stale_background_tasks_for_state(
                 },
             )
             .await
-            .map_err(TurnError::EventEmit)?;
+            .map_err(TurnScheduleError::EventEmit)?;
     }
     Ok(())
 }
@@ -658,7 +571,7 @@ async fn repair_stale_runs_for_state(
     registry: &TurnRegistry,
     session: &Session,
     state: &SessionReadModel,
-) -> Result<(), TurnError> {
+) -> Result<(), TurnScheduleError> {
     for link in state
         .agent_sessions
         .iter()
@@ -677,7 +590,7 @@ async fn repair_stale_runs_for_state(
                 },
             )
             .await
-            .map_err(TurnError::EventEmit)?;
+            .map_err(TurnScheduleError::EventEmit)?;
     }
     Ok(())
 }

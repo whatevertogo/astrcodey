@@ -8,4 +8,5 @@ pub mod hash;
 pub mod hostpaths;
 pub mod perf_snapshot;
 pub mod shell;
+pub mod sync;
 pub mod text;

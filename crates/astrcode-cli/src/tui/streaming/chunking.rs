@@ -54,6 +54,7 @@ impl AdaptiveChunkingPolicy {
         }
     }
 
+    #[allow(dead_code)]
     pub fn mode(&self) -> ChunkingMode {
         self.mode
     }

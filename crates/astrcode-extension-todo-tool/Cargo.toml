@@ -1,14 +1,15 @@
 [package]
 name = "astrcode-extension-todo-tool"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Progress todo list extension"
 
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
-astrcode-core = { path = "../astrcode-core" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-support = { path = "../astrcode-support" }
 async-trait = { workspace = true }
 chrono = { workspace = true }

@@ -6,13 +6,12 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use astrcode_core::{
     event::EventPayload,
     extension::{PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult},
-    llm::{LlmContent, LlmMessage, LlmRole},
     storage::ToolResultArtifactReader,
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_tools::registry::ToolRegistry;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::task::JoinSet;
 
 use super::{
     deferred_tools::{discovered_deferred_tool_names, tool_is_visible},
@@ -22,9 +21,11 @@ use super::{
         CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
         PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
     },
-    turn_context::{AgentSignal, SharedTurnContext, TurnError, send_event},
+    turn_context::{SharedTurnContext, TurnError},
+    turn_publish::TurnPublisher,
 };
 use crate::{
+    llm_request_history::committed_tool_result_content_len,
     session::Session,
     tool_results::{
         MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS,
@@ -71,7 +72,7 @@ impl ToolPipeline {
     fn make_runtime_context(
         &self,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        publisher: Arc<TurnPublisher>,
     ) -> ToolCallRuntimeContext {
         ToolCallRuntimeContext {
             session_id: self.shared.session_id.clone(),
@@ -79,7 +80,7 @@ impl ToolPipeline {
             model_id: self.shared.model_id.clone(),
             tools: tools.to_vec(),
             tool_result_reader: Some(Arc::clone(&self.session) as Arc<dyn ToolResultArtifactReader>),
-            event_tx,
+            publisher,
             capabilities: self.tool_runtime_capabilities.clone(),
         }
     }
@@ -95,7 +96,7 @@ impl ToolPipeline {
         &self,
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
-        event_tx: &Option<mpsc::UnboundedSender<AgentSignal>>,
+        publisher: &TurnPublisher,
     ) -> Result<Vec<PreparedToolCall>, TurnError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
@@ -115,7 +116,7 @@ impl ToolPipeline {
                     metadata: Default::default(),
                     duration_ms: None,
                 };
-                send_tool_requested(event_tx.as_ref(), tc, &args);
+                send_tool_requested(publisher, tc, &args).await?;
                 prepared.push(PreparedToolCall {
                     index,
                     call_id: tc.call_id.clone(),
@@ -134,6 +135,7 @@ impl ToolPipeline {
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
+                event_tx: self.shared.turn_event_tx.clone(),
                 extension_event_sink: None,
                 session_store_dir: self.shared.session_store_dir.clone(),
             };
@@ -145,7 +147,7 @@ impl ToolPipeline {
                 _ => args.clone(),
             };
 
-            send_tool_requested(event_tx.as_ref(), tc, &tool_input);
+            send_tool_requested(publisher, tc, &tool_input).await?;
 
             let outcome = if let PreToolUseResult::Block { reason } = pre_hook_result {
                 PreparedToolOutcome::Blocked(ToolResult {
@@ -238,9 +240,10 @@ impl ToolPipeline {
                         )
                         .await?,
                     );
+                    let publisher = Arc::clone(&input.publisher);
                     let (index, result) = execute_tool_call(
                         Arc::clone(&self.tool_registry),
-                        self.make_runtime_context(input.tools, input.event_tx.clone()),
+                        self.make_runtime_context(input.tools, Arc::clone(&publisher)),
                         executable,
                     )
                     .await;
@@ -250,9 +253,8 @@ impl ToolPipeline {
                         self.commit_tool_results(CommitToolResults {
                             prepared: &input.prepared[position..position + 1],
                             results,
-                            messages: input.messages,
-                            all_tool_results: input.all_tool_results,
-                            event_tx: input.event_tx,
+                            state: input.state,
+                            publisher,
                         })
                         .await?,
                     );
@@ -288,7 +290,7 @@ impl ToolPipeline {
         self.flush_parallel_batch(
             parallel_batch,
             input.tools,
-            input.event_tx.clone(),
+            Arc::clone(&input.publisher),
             &mut results,
         )
         .await?;
@@ -296,9 +298,8 @@ impl ToolPipeline {
         self.commit_tool_results(CommitToolResults {
             prepared: &input.prepared[batch_start..batch_end],
             results,
-            messages: input.messages,
-            all_tool_results: input.all_tool_results,
-            event_tx: input.event_tx,
+            state: input.state,
+            publisher: Arc::clone(&input.publisher),
         })
         .await
     }
@@ -315,9 +316,8 @@ impl ToolPipeline {
         self.commit_tool_results(CommitToolResults {
             prepared: &input.prepared[position..position + 1],
             results,
-            messages: input.messages,
-            all_tool_results: input.all_tool_results,
-            event_tx: input.event_tx,
+            state: input.state,
+            publisher: Arc::clone(&input.publisher),
         })
         .await
     }
@@ -330,7 +330,7 @@ impl ToolPipeline {
         &self,
         batch: &mut Vec<ExecutableToolCall>,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        publisher: Arc<TurnPublisher>,
         results: &mut BTreeMap<usize, ToolResult>,
     ) -> Result<(), TurnError> {
         if batch.is_empty() {
@@ -353,16 +353,16 @@ impl ToolPipeline {
 
         for _ in 0..max_parallel {
             let Some(call) = pending.next() else { break };
-            self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
+            self.spawn_tool_call(&mut join_set, call, tools, Arc::clone(&publisher));
         }
 
         while let Some(joined) = join_set.join_next().await {
             let (index, result) =
-                joined.map_err(|err| TurnError::Internal(format!("tool task failed: {err}")))?;
+                joined.map_err(|err| TurnError::ToolTaskJoinFailed(err.to_string()))?;
             results.insert(index, result);
 
             if let Some(call) = pending.next() {
-                self.spawn_tool_call(&mut join_set, call, tools, event_tx.clone());
+                self.spawn_tool_call(&mut join_set, call, tools, Arc::clone(&publisher));
             }
         }
 
@@ -380,10 +380,10 @@ impl ToolPipeline {
         join_set: &mut JoinSet<(usize, ToolResult)>,
         call: ExecutableToolCall,
         tools: &[ToolDefinition],
-        event_tx: Option<mpsc::UnboundedSender<AgentSignal>>,
+        publisher: Arc<TurnPublisher>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
-        let ctx = self.make_runtime_context(tools, event_tx);
+        let ctx = self.make_runtime_context(tools, publisher);
 
         join_set.spawn(async move { execute_tool_call(tool_registry, ctx, call).await });
     }
@@ -392,8 +392,8 @@ impl ToolPipeline {
     ///
     /// 对每个已执行的工具调用依次处理：
     /// 1. 分发 `PostToolUse` 扩展钩子，允许扩展修改结果内容或阻止。
-    /// 2. 通过 `event_tx` 发送 `ToolCallCompleted` 事件通知客户端。
-    /// 3. 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
+    /// 2. 通过 `TurnPublisher` 发送 durable `ToolCallCompleted`。
+    /// 3. 将工具结果写入 turn 输出聚合（projection 为 LLM 历史 SSOT）。
     pub async fn commit_tool_results(
         &self,
         mut input: CommitToolResults<'_>,
@@ -418,6 +418,7 @@ impl ToolPipeline {
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
                     is_error: result.is_error,
+                    event_tx: self.shared.turn_event_tx.clone(),
                     extension_event_sink: None,
                     session_store_dir: self.shared.session_store_dir.clone(),
                 };
@@ -475,7 +476,8 @@ impl ToolPipeline {
             )
             .await?;
         }
-        let committed_tool_result_chars = committed_tool_result_content_len(input.messages);
+        let model = input.publisher.snapshot_model().await?;
+        let committed_tool_result_chars = committed_tool_result_content_len(&model);
         // 当累计工具结果超过消息字符预算时，按体积从大到小持久化，直到总量回到预算内。
         self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending_results)
             .await?;
@@ -483,30 +485,17 @@ impl ToolPipeline {
         let mut discovered_tools = Vec::new();
         for pending in pending_results {
             discovered_tools.extend(discovered_deferred_tool_names(&pending.result));
-            if input.event_tx.is_some() {
-                send_event(
-                    input.event_tx.as_ref(),
-                    EventPayload::ToolCallCompleted {
-                        call_id: pending.call_id.clone().into(),
-                        tool_name: pending.tool_name.clone(),
-                        result: pending.result.clone(),
-                        arguments: pending.arguments.clone(),
-                        arguments_json: pending.arguments_json.clone(),
-                    },
-                );
-            }
-            // 将工具结果消息追加到 LLM 对话历史，供下一轮调用使用。
-            input.messages.push(LlmMessage {
-                role: LlmRole::Tool,
-                content: vec![LlmContent::ToolResult {
-                    tool_call_id: pending.call_id,
-                    content: pending.result.content.clone(),
-                    is_error: pending.result.is_error,
-                }],
-                name: Some(pending.tool_name),
-                reasoning_content: None,
-            });
-            input.all_tool_results.push(pending.result);
+            input
+                .publisher
+                .durable(EventPayload::ToolCallCompleted {
+                    call_id: pending.call_id.clone().into(),
+                    tool_name: pending.tool_name.clone(),
+                    result: pending.result.clone(),
+                    arguments: pending.arguments.clone(),
+                    arguments_json: pending.arguments_json.clone(),
+                })
+                .await?;
+            input.state.push_tool_result(pending.result);
         }
 
         Ok(discovered_tools)
@@ -550,7 +539,7 @@ impl ToolPipeline {
                 content: original_content.clone(),
             })
             .await
-            .map_err(|error| TurnError::Internal(format!("persist tool result: {error}")))?;
+            .map_err(|error| TurnError::PersistToolResultFailed(error.to_string()))?;
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         result.metadata.insert(
             "persistedToolResult".into(),
@@ -623,19 +612,18 @@ fn is_artifact_read(result: &ToolResult) -> bool {
 
 // ─── Tool event & message helpers ────────────────────────────────────────
 
-fn send_tool_requested(
-    event_tx: Option<&mpsc::UnboundedSender<AgentSignal>>,
+async fn send_tool_requested(
+    publisher: &TurnPublisher,
     tc: &PendingToolCall,
     arguments: &serde_json::Value,
-) {
-    send_event(
-        event_tx,
-        EventPayload::ToolCallRequested {
+) -> Result<(), TurnError> {
+    publisher
+        .durable(EventPayload::ToolCallRequested {
             call_id: tc.call_id.clone().into(),
             tool_name: tc.name.clone(),
             arguments: arguments.clone(),
-        },
-    );
+        })
+        .await
 }
 
 fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
@@ -650,14 +638,64 @@ fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
     }
 }
 
-fn committed_tool_result_content_len(messages: &[LlmMessage]) -> usize {
-    messages
-        .iter()
-        .filter(|message| message.role == LlmRole::Tool)
-        .flat_map(|message| &message.content)
-        .filter_map(|content| match content {
-            LlmContent::ToolResult { content, .. } => Some(content.len()),
-            _ => None,
-        })
-        .sum()
+#[cfg(test)]
+mod tests {
+    use astrcode_core::tool::ExecutionMode;
+
+    use super::*;
+    use crate::tool_types::{PreparedToolCall, PreparedToolOutcome};
+
+    fn execution_plan(prepared: &[PreparedToolCall]) -> Vec<&'static str> {
+        prepared
+            .iter()
+            .map(|call| match &call.outcome {
+                PreparedToolOutcome::Blocked(_) => "blocked",
+                PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => "parallel",
+                PreparedToolOutcome::Ready => "sequential",
+            })
+            .collect()
+    }
+
+    fn sample_call(index: usize, mode: ExecutionMode, blocked: bool) -> PreparedToolCall {
+        PreparedToolCall {
+            index,
+            call_id: format!("call-{index}"),
+            name: "tool".into(),
+            tool_input: serde_json::json!({}),
+            mode,
+            outcome: if blocked {
+                PreparedToolOutcome::Blocked(ToolResult {
+                    call_id: format!("call-{index}"),
+                    content: "blocked".into(),
+                    is_error: true,
+                    error: Some("blocked".into()),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                })
+            } else {
+                PreparedToolOutcome::Ready
+            },
+        }
+    }
+
+    #[test]
+    fn execution_plan_preserves_parallel_sequential_blocked_order() {
+        let prepared = vec![
+            sample_call(0, ExecutionMode::Parallel, false),
+            sample_call(1, ExecutionMode::Parallel, false),
+            sample_call(2, ExecutionMode::Sequential, false),
+            sample_call(3, ExecutionMode::Parallel, true),
+            sample_call(4, ExecutionMode::Sequential, false),
+        ];
+        assert_eq!(
+            execution_plan(&prepared),
+            vec![
+                "parallel",
+                "parallel",
+                "sequential",
+                "blocked",
+                "sequential"
+            ]
+        );
+    }
 }

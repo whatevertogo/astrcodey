@@ -1,13 +1,15 @@
 [package]
 name = "astrcode-extensions"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Extension/hook system: lifecycle events, hook modes, extension loading and dispatch"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-support = { path = "../astrcode-support" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -15,8 +17,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 dirs = { workspace = true }
 parking_lot = { workspace = true }
-wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime"] }
+tokio-util = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
+astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
 wasm-encoder = "0.245"
+wat = "1"
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }

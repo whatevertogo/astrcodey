@@ -1,4 +1,4 @@
-use astrcode_core::tool::ToolDefinition;
+use astrcode_extension_sdk::tool::ToolDefinition;
 use serde_json::json;
 
 const DEFAULT_MAX_RESULTS: usize = 5;
@@ -253,7 +253,7 @@ impl ParsedToolName {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_extension_sdk::tool::{ExecutionMode, ToolOrigin};
 
     use super::*;
 

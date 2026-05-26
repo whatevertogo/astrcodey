@@ -10,10 +10,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
-        ChildToolPolicy, Extension, ExtensionError, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolHandler,
+        ChildToolPolicy, Extension, ExtensionCapability, ExtensionError, PromptBuildContext,
+        PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
@@ -35,6 +35,10 @@ struct AgentToolsExtension;
 impl Extension for AgentToolsExtension {
     fn id(&self) -> &str {
         "astrcode-agent-tools"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::SessionControl]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -187,7 +191,7 @@ impl ToolHandler for AgentToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != "agent" {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -238,7 +242,7 @@ impl ToolHandler for AgentToolHandler {
             })?;
 
         // 1. 创建子会话
-        use astrcode_core::tool::{CreateSessionRequest, SubmitTurnRequest};
+        use astrcode_extension_sdk::tool::{CreateSessionRequest, SubmitTurnRequest};
         let handle = session_ops
             .create_session(
                 ctx.session_id.as_str(),
@@ -290,7 +294,7 @@ impl ToolHandler for AgentToolHandler {
         ]);
 
         match result {
-            astrcode_core::tool::SubmitTurnResult::Completed { content } => {
+            astrcode_extension_sdk::tool::SubmitTurnResult::Completed { content } => {
                 // 同步路径：turn 完成后回收 ephemeral 子 session
                 if let Err(e) = session_ops
                     .recycle_session(ctx.session_id.as_str(), &handle.session_id)
@@ -311,7 +315,7 @@ impl ToolHandler for AgentToolHandler {
                     duration_ms: None,
                 })
             },
-            astrcode_core::tool::SubmitTurnResult::Backgrounded {
+            astrcode_extension_sdk::tool::SubmitTurnResult::Backgrounded {
                 task_id,
                 session_id,
             } => {
@@ -354,11 +358,11 @@ impl PromptBuildHandler for AgentPromptBuildHandler {
 }
 
 fn agent_tool_metadata()
--> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+-> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
     let mut map = std::collections::HashMap::new();
     map.insert(
         "agent".to_string(),
-        astrcode_core::tool::ToolPromptMetadata::new(
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
             "Delegate to a subagent only when the task needs multi-step exploration or isolated \
              context. For directed searches (a known symbol, file, or pattern) use `find`/`grep` \
              directly. Prefer `subagentType=explore` for broad exploration that would otherwise \
@@ -379,7 +383,7 @@ fn agent_tool_metadata()
             "If the response says the requested `subagentType` was not found, the available \
              agents are listed below it. Pick from that list and retry; do not invent agent names.",
         )
-        .prompt_tag(astrcode_core::tool::ToolPromptTag::Collaboration),
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
     );
     map
 }

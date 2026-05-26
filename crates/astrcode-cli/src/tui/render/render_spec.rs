@@ -17,6 +17,7 @@ use crate::tui::theme::Theme;
 ///
 /// `prefix` is prepended to every line (e.g. `"  "` for 2-space indent).
 /// `width` is the available column count (used for wrapping).
+#[allow(dead_code)] // unit tests; scrollback rich render path pending
 pub fn render_spec_to_lines(
     spec: &RenderSpec,
     prefix: &str,

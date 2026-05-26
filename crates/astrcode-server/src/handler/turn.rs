@@ -5,12 +5,12 @@ use std::sync::Arc;
 use astrcode_core::types::*;
 use tokio::sync::mpsc;
 
-use super::{CommandHandler, CommandMessage, HandlerError};
-use crate::turn_scheduler::TurnScheduler;
+use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_schedule_error_for_client};
+use crate::turn_scheduler::{TurnScheduleError, TurnScheduler};
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
-pub(crate) enum TurnCompletion {
+pub enum TurnCompletion {
     Completed { finish_reason: String },
     Failed { error: String },
     Aborted,
@@ -29,21 +29,12 @@ impl CommandHandler {
             .scheduler
             .submit(sid.clone(), user_text)
             .await
-            .map_err(|e| match e {
-                crate::turn_scheduler::TurnError::TurnAlreadyRunning => {
-                    self.send_error(40900, "A turn is already running");
-                    HandlerError::TurnAlreadyRunning
-                },
-                crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
-                    HandlerError::SessionNotFound(msg)
-                },
-                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
-                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::SessionManager(e) => {
-                    HandlerError::SessionManager(e)
-                },
-                other => HandlerError::InvalidRequest(other.to_string()),
+            .map_err(|e| {
+                let (code, err) = turn_schedule_error_for_client(e);
+                if code == 40900 {
+                    self.send_error(code, "A turn is already running");
+                }
+                err
             })?;
 
         let scheduler = Arc::clone(&self.scheduler);
@@ -72,11 +63,11 @@ impl CommandHandler {
     ) -> Result<(), HandlerError> {
         match self.scheduler.abort(session_id).await {
             Ok(()) => Ok(()),
-            Err(crate::turn_scheduler::TurnError::NoActiveTurn) => {
+            Err(TurnScheduleError::NoActiveTurn) => {
                 self.send_error(40400, "No active turn");
                 Err(HandlerError::NoActiveTurn)
             },
-            Err(e) => Err(HandlerError::InvalidRequest(e.to_string())),
+            Err(e) => Err(HandlerError::from(e)),
         }
     }
 
@@ -97,19 +88,7 @@ impl CommandHandler {
         self.scheduler
             .repair_stale(session_id)
             .await
-            .map_err(|e| match e {
-                crate::turn_scheduler::TurnError::SessionNotFound(msg) => {
-                    HandlerError::SessionNotFound(msg)
-                },
-                crate::turn_scheduler::TurnError::NoActiveTurn => HandlerError::NoActiveTurn,
-                crate::turn_scheduler::TurnError::SessionManager(err) => {
-                    HandlerError::SessionManager(err)
-                },
-                crate::turn_scheduler::TurnError::Session(e) => HandlerError::Session(e),
-                crate::turn_scheduler::TurnError::Turn(e) => HandlerError::Turn(e),
-                crate::turn_scheduler::TurnError::EventEmit(e) => HandlerError::Session(e),
-                other => HandlerError::InvalidRequest(other.to_string()),
-            })
+            .map_err(HandlerError::from)
     }
 
     /// 提交提示词并返回完成通知接收器。
@@ -129,40 +108,57 @@ impl CommandHandler {
 /// Turn 的终态事件（TurnCompleted / AgentRunCompleted）由 `Session::submit` 内部发射。
 /// 这里只负责 registry 清理、sync durable events、通知 actor 触发 queued input dispatch。
 async fn run_completion_watcher(
-    handle: astrcode_session::turn_handle::TurnHandle,
+    mut handle: astrcode_session::turn_handle::TurnHandle,
     scheduler: Arc<TurnScheduler>,
     actor_tx: mpsc::UnboundedSender<CommandMessage>,
     sid: SessionId,
-    turn_id: TurnId,
-    completion_tx: Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
+    mut turn_id: TurnId,
+    mut completion_tx: Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
 ) {
-    let completion = match handle.wait().await {
-        Some(result) => match result.output {
-            Ok(output) => {
-                scheduler.sync_durable_events(&sid).await;
-                TurnCompletion::Completed {
-                    finish_reason: output.finish_reason,
-                }
+    loop {
+        let completion = match handle.wait().await {
+            Some(result) => match result.output {
+                Ok(output) => {
+                    scheduler.sync_durable_events(&sid).await;
+                    TurnCompletion::Completed {
+                        finish_reason: output.finish_reason,
+                    }
+                },
+                Err(error) => {
+                    scheduler.sync_durable_events(&sid).await;
+                    TurnCompletion::Failed {
+                        error: error.to_string(),
+                    }
+                },
             },
-            Err(error) => {
-                scheduler.sync_durable_events(&sid).await;
-                TurnCompletion::Failed {
-                    error: error.to_string(),
-                }
-            },
-        },
-        None => TurnCompletion::Aborted,
-    };
+            None => TurnCompletion::Aborted,
+        };
 
-    scheduler.registry().remove_if_matches(&sid, &turn_id);
+        scheduler.registry().remove_if_matches(&sid, &turn_id);
+        scheduler.on_turn_completed(&sid).await;
 
-    if let Some(tx) = completion_tx {
-        let _ = tx.send(completion.clone());
+        if let Some((next_turn_id, next_handle)) = scheduler.start_next_queued_turn(&sid).await {
+            if let Some(tx) = completion_tx.take() {
+                let _ = tx.send(completion.clone());
+            }
+            let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
+                session_id: sid.clone(),
+                turn_id: turn_id.clone(),
+                completion: completion.clone(),
+            });
+            turn_id = next_turn_id;
+            handle = next_handle;
+            continue;
+        }
+
+        if let Some(tx) = completion_tx.take() {
+            let _ = tx.send(completion.clone());
+        }
+        let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
+            session_id: sid,
+            turn_id,
+            completion,
+        });
+        break;
     }
-
-    let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
-        session_id: sid,
-        turn_id,
-        completion,
-    });
 }

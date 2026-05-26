@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-storage"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Session persistence: JSONL event log, snapshots, file locking, config storage"
 
 [features]
@@ -12,7 +13,7 @@ testing = []
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -21,6 +22,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 fs2 = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }

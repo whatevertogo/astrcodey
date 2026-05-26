@@ -1,19 +1,15 @@
-//! TUI event stream: EventBroker, TerminalFocus, TuiEvent, EventStream.
+//! TUI event stream: EventBroker, TuiEvent, EventStream.
 //!
 //! Ported from tui/tui_event/{mod,stream}.rs — merged into one file.
 
 use std::{
     io,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     task::{Context, Poll},
 };
 
 use crossterm::event::{Event, EventStream as CrosstermEventStream, KeyEvent, KeyEventKind};
-use futures::Stream;
+use futures_util::Stream;
 use parking_lot::Mutex;
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 
@@ -66,23 +62,6 @@ impl EventBroker {
     }
 }
 
-// ─── TerminalFocus ────────────────────────────────────────────────────────────
-
-// TODO: TerminalFocus 已被捕获但未被任何消费者使用。
-// 未来可用于焦点感知：当终端失焦时暂停流式输出或降低刷新频率。
-#[derive(Clone)]
-pub struct TerminalFocus(Arc<AtomicBool>);
-
-impl TerminalFocus {
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
-    }
-
-    pub fn set_focused(&self, focused: bool) {
-        self.0.store(focused, Ordering::Relaxed);
-    }
-}
-
 // ─── TuiEvent ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -90,8 +69,6 @@ pub enum TuiEvent {
     Key(KeyEvent),
     Paste(String),
     Draw,
-    ScrollUp(u16),
-    ScrollDown(u16),
 }
 
 // ─── EventStream ─────────────────────────────────────────────────────────────
@@ -100,7 +77,6 @@ pub struct EventStream {
     broker: Option<EventBroker>,
     draw_stream: BroadcastStream<()>,
     resume_stream: WatchStream<()>,
-    focus: TerminalFocus,
     poll_draw_first: bool,
     _pin: std::marker::PhantomPinned,
 }
@@ -108,17 +84,12 @@ pub struct EventStream {
 impl Unpin for EventStream {}
 
 impl EventStream {
-    pub fn new(
-        broker: EventBroker,
-        draw_rx: tokio::sync::broadcast::Receiver<()>,
-        focus: TerminalFocus,
-    ) -> Self {
+    pub fn new(broker: EventBroker, draw_rx: tokio::sync::broadcast::Receiver<()>) -> Self {
         let resume_stream = WatchStream::from_changes(broker.resume_rx());
         Self {
             broker: Some(broker),
             draw_stream: BroadcastStream::new(draw_rx),
             resume_stream,
-            focus,
             poll_draw_first: false,
             _pin: std::marker::PhantomPinned,
         }
@@ -174,14 +145,8 @@ impl EventStream {
             },
             Event::Resize(_, _) => Some(TuiEvent::Draw),
             Event::Paste(text) => Some(TuiEvent::Paste(text)),
-            Event::FocusGained => {
-                self.focus.set_focused(true);
-                Some(TuiEvent::Draw)
-            },
-            Event::FocusLost => {
-                self.focus.set_focused(false);
-                None
-            },
+            Event::FocusGained => Some(TuiEvent::Draw),
+            Event::FocusLost => None,
             _ => None,
         }
     }

@@ -164,9 +164,17 @@ impl RenderSpec {
             Self::Box {
                 title, children, ..
             } => {
-                let mut parts = title.iter().cloned().collect::<Vec<_>>();
-                parts.extend(children.iter().map(Self::plain_text_fallback));
-                parts.join("\n")
+                let mut out = String::new();
+                if let Some(title) = title {
+                    out.push_str(title);
+                }
+                for child in children {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&child.plain_text_fallback());
+                }
+                out
             },
             Self::List { items, .. } => items
                 .iter()

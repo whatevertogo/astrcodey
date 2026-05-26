@@ -2,21 +2,19 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
         CommandContext, ExtensionCommandResult, ExtensionError, ExtensionTasks, HookResult,
         LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
         PromptContributions, SlashCommand, ToolHandler,
     },
-    llm::LlmProvider,
-    storage::EventReader,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::store::MemoryStorePool;
+use crate::{MemoryServices, store::MemoryStorePool};
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
@@ -99,7 +97,7 @@ impl ToolHandler for MemorySaveHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        _ctx: &astrcode_core::tool::ToolExecutionContext,
+        _ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -136,7 +134,7 @@ impl ToolHandler for MemoryDeleteHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: DeleteArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -249,7 +247,7 @@ pub(crate) struct TurnExtractState {
 
 pub(crate) struct MemoryTurnEndHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub small_llm: Arc<dyn LlmProvider>,
+    pub services: MemoryServices,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub(crate) extract_state: Mutex<TurnExtractState>,
 }
@@ -290,7 +288,11 @@ impl LifecycleHandler for MemoryTurnEndHandler {
             .store_pool
             .get(&ctx.working_dir)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let small_llm = self.small_llm.clone();
+        let small_llm = self
+            .services
+            .get()
+            .and_then(|services| services.small_llm.clone())
+            .ok_or_else(|| ExtensionError::Internal("small model capability unavailable".into()))?;
         let session_id = ctx.session_id.clone();
         let assistant_message = exchange.assistant_message.clone();
 
@@ -382,8 +384,7 @@ impl MemoryPipelineCoordinator {
 
 pub(crate) struct MemorySessionStartHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub session_read: Arc<dyn EventReader>,
-    pub small_llm: Arc<dyn LlmProvider>,
+    pub services: MemoryServices,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
@@ -405,8 +406,17 @@ impl LifecycleHandler for MemorySessionStartHandler {
             .store_pool
             .get(&ctx.working_dir)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let session_read = self.session_read.clone();
-        let small_llm = self.small_llm.clone();
+        let services = self
+            .services
+            .get()
+            .ok_or_else(|| ExtensionError::Internal("memory host services unavailable".into()))?;
+        let session_read = services.session_read.clone().ok_or_else(|| {
+            ExtensionError::Internal("session history capability unavailable".into())
+        })?;
+        let small_llm = services
+            .small_llm
+            .clone()
+            .ok_or_else(|| ExtensionError::Internal("small model capability unavailable".into()))?;
         let Some(mut current_session_id) = self.pipeline.request_run(ctx.session_id.to_string())
         else {
             tracing::debug!(session_id = %ctx.session_id, "memory pipeline queued");
@@ -460,7 +470,7 @@ pub(crate) struct MemoryCommandHandler {
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::CommandHandler for MemoryCommandHandler {
+impl astrcode_extension_sdk::extension::CommandHandler for MemoryCommandHandler {
     async fn execute(
         &self,
         _command_name: &str,

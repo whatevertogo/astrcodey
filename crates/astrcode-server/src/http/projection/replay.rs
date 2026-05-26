@@ -18,11 +18,12 @@ pub(in crate::http) fn event_to_replay_deltas(
         ..
     } = &event.payload
     {
-        let mut deltas: Vec<ConversationDeltaDto> = completed_block_from_payload(event)
-            .map(|block| ConversationDeltaDto::AppendBlock { block })
-            .into_iter()
-            .collect();
+        let mut deltas = Vec::new();
         if continued_session_id != &event.session_id {
+            deltas.extend(
+                completed_block_from_payload(event)
+                    .map(|block| ConversationDeltaDto::AppendBlock { block }),
+            );
             deltas.push(ConversationDeltaDto::SessionContinued {
                 parent_session_id: event.session_id.to_string(),
                 new_session_id: continued_session_id.to_string(),
@@ -110,13 +111,7 @@ mod tests {
         boundary.seq = Some(7);
 
         let deltas = event_to_replay_deltas(&boundary, true);
-        assert_eq!(deltas.len(), 1);
-        assert!(matches!(
-            &deltas[0],
-            ConversationDeltaDto::AppendBlock {
-                block: ConversationBlockDto::CompactSummary { .. }
-            }
-        ));
+        assert!(deltas.is_empty());
 
         let continued = Event::new(
             "session-1".into(),

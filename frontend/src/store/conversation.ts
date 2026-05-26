@@ -520,7 +520,7 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         agentSessions: snapshot.agentSessions ?? [],
       })
 
-      connectSse(sessionId, snapshot.cursor.value, get, set)
+      connectSse(sessionId, snapshot.cursor.value, 0, get, set)
     } catch (err) {
       console.error('Failed to switch session:', err)
     }
@@ -601,8 +601,12 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     switch (delta.kind) {
       case 'appendBlock':
         set((current) => {
+          const baseBlocks =
+            delta.block.kind === 'compactSummary'
+              ? current.blocks.filter((b) => b.kind !== 'compactSummary')
+              : current.blocks
           return {
-            blocks: upsertBlock(current.blocks, delta.block),
+            blocks: upsertBlock(baseBlocks, delta.block),
             queuedMessages:
               delta.block.kind === 'user' && current.queuedMessages.length > 0
                 ? current.queuedMessages.slice(1)
@@ -812,11 +816,22 @@ export const useAppStore = create<ConversationState>((set, get) => ({
   },
 }))
 
-const SSE_RECONNECT_DELAY_MS = 3000
+const SSE_RECONNECT_BASE_MS = 1000
+const SSE_RECONNECT_MAX_MS = 30_000
+
+function sseReconnectDelayMs(attempt: number): number {
+  const capped = Math.min(
+    SSE_RECONNECT_MAX_MS,
+    SSE_RECONNECT_BASE_MS * 2 ** attempt
+  )
+  const jitter = Math.random() * 0.3 * capped
+  return Math.round(capped + jitter)
+}
 
 function connectSse(
   sessionId: string,
   cursor: string,
+  reconnectAttempt: number,
   get: () => ConversationState,
   set: (
     partial:
@@ -933,29 +948,32 @@ function connectSse(
         const current = get()
         if (current.activeSessionId === sessionId) {
           const latestCursor = current.cursor ?? cursor
+          const delayMs = sseReconnectDelayMs(reconnectAttempt)
           setTimeout(() => {
             if (get().activeSessionId === sessionId) {
-              connectSse(sessionId, latestCursor, get, set)
+              connectSse(
+                sessionId,
+                latestCursor,
+                reconnectAttempt + 1,
+                get,
+                set
+              )
             }
-          }, SSE_RECONNECT_DELAY_MS)
+          }, delayMs)
         }
       }
     })
     .catch((err) => {
       if (abortController.signal.aborted) return
-      console.error(
-        'SSE stream error, reconnecting in',
-        SSE_RECONNECT_DELAY_MS,
-        'ms:',
-        err
-      )
+      const delayMs = sseReconnectDelayMs(reconnectAttempt)
+      console.error('SSE stream error, reconnecting in', delayMs, 'ms:', err)
       if (get().activeSessionId === sessionId) {
         const latestCursor = get().cursor ?? cursor
         setTimeout(() => {
           if (get().activeSessionId === sessionId) {
-            connectSse(sessionId, latestCursor, get, set)
+            connectSse(sessionId, latestCursor, reconnectAttempt + 1, get, set)
           }
-        }, SSE_RECONNECT_DELAY_MS)
+        }, delayMs)
       }
     })
 }

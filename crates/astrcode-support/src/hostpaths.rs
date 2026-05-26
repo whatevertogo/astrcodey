@@ -3,9 +3,99 @@
 //! 解析 astrcode 各类目录路径，包括配置目录、会话目录、项目目录和运行时数据目录。
 //! 同时提供路径安全检查，防止路径遍历攻击。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use astrcode_core::types::project_key_from_path;
+
+/// 工作区路径解析失败（路径穿越、绝对路径、非法组件等）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePathError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl WorkspacePathError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// 将相对路径 `rel` 解析到已规范化的工作区根 `root` 之下。
+///
+/// 拒绝：`../`、绝对路径、Windows 前缀路径、NUL、根组件与符号链接逃逸（经 canonicalize +
+/// `starts_with`）。
+pub fn resolve_under_workspace_root(
+    root: impl AsRef<Path>,
+    rel: &str,
+) -> Result<PathBuf, WorkspacePathError> {
+    if rel.is_empty() {
+        return Err(WorkspacePathError::new("invalid_input", "empty path"));
+    }
+    if rel.contains('\0') {
+        return Err(WorkspacePathError::new(
+            "invalid_input",
+            "path contains NUL",
+        ));
+    }
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return Err(WorkspacePathError::new(
+            "invalid_input",
+            "absolute paths are not allowed",
+        ));
+    }
+    for component in rel_path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(WorkspacePathError::new(
+                    "invalid_input",
+                    "absolute path components are not allowed",
+                ));
+            },
+            Component::ParentDir => {
+                return Err(WorkspacePathError::new(
+                    "permission_denied",
+                    "path escapes workspace root",
+                ));
+            },
+            Component::Normal(name) => {
+                if name == ".." {
+                    return Err(WorkspacePathError::new(
+                        "permission_denied",
+                        "path escapes workspace root",
+                    ));
+                }
+            },
+            Component::CurDir => {},
+        }
+    }
+
+    let root = root
+        .as_ref()
+        .canonicalize()
+        .map_err(|e| WorkspacePathError::new("io_error", e.to_string()))?;
+
+    let mut joined = root.clone();
+    for component in rel_path.components() {
+        if let Component::Normal(name) = component {
+            joined.push(name);
+        }
+    }
+
+    let canonical = joined
+        .canonicalize()
+        .map_err(|e| WorkspacePathError::new("io_error", e.to_string()))?;
+    if !is_path_within(&canonical, &root) {
+        return Err(WorkspacePathError::new(
+            "permission_denied",
+            "path outside working directory",
+        ));
+    }
+    Ok(canonical)
+}
 
 /// 解析用户主目录。
 ///
@@ -195,5 +285,35 @@ mod tests {
     fn test_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn resolve_under_workspace_root_rejects_parent_segments() {
+        let root = std::env::temp_dir().join("astrcode-path-test-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("safe")).unwrap();
+        let err = resolve_under_workspace_root(&root, "../outside.txt").unwrap_err();
+        assert_eq!(err.code, "permission_denied");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_under_workspace_root_rejects_absolute_rel() {
+        let root = std::env::temp_dir().join("astrcode-path-test-abs");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = resolve_under_workspace_root(&root, "/etc/passwd").unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_under_workspace_root_allows_nested_file() {
+        let root = std::env::temp_dir().join("astrcode-path-test-nested");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a").join("b.txt"), "ok").unwrap();
+        let resolved = resolve_under_workspace_root(&root, "a/b.txt").unwrap();
+        assert!(resolved.ends_with("b.txt"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

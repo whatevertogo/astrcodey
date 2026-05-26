@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-bundled-extensions"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "First-party bundled extension registration"
 
 [features]
@@ -14,7 +15,7 @@ mode = ["dep:astrcode-extension-mode"]
 memory = ["dep:astrcode-extension-memory"]
 
 [dependencies]
-astrcode-core = { path = "../astrcode-core" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 async-trait = { workspace = true }
 tracing = { workspace = true }

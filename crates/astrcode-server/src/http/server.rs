@@ -121,7 +121,7 @@ pub async fn run_http_server(
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
     let event_tx = Arc::new(EventFanout::new(1024));
-    let shutdown_token = runtime.shutdown_token.clone();
+    let shutdown_token = runtime.shutdown_token().clone();
     let runtime_for_shutdown = Arc::clone(&runtime);
     let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));

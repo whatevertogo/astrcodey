@@ -1,5 +1,7 @@
 # AstrCode
 
+**English | [中文](README_CN.md)**
+
 **BE PI OR BETTER THAN PI**  
 *Inspired by Claude Code, Codex, OpenCode, and Pi — but built as a Rust-native*
 
@@ -10,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~57k lines of Rust across 20 crates, plus a React + TypeScript web frontend (~4.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an extension/hook system (with native extension loading via FFI and WASM extension support, background pre-warm, health checks, and a startup event channel), a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal UI (TUI), a web frontend, a Tauri desktop app, an HTTP/SSE API, and an ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~67.6k lines of Rust across 21 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~6.3k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with sandboxed WASM extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -21,6 +23,7 @@ AstrCode is a full-stack AI coding assistant built from scratch in ~57k lines of
 - [Crates](#crates)
 - [Key Design Decisions](#key-design-decisions)
 - [Running Modes](#running-modes)
+- [Further Reading](#further-reading)
 - [Distribution](#distribution)
 - [Acknowledgments](#acknowledgments)
 - [License](#license)
@@ -78,7 +81,7 @@ Example `~/.astrcode/config.json`:
       "name": "openai",
       "providerKind": "openai",
       "apiKey": "env:OPENAI_API_KEY",
-      "apiMode": "chatCompletions",
+      "apiMode": "chat_completions",
       "models": [
         { "id": "gpt-4.1", "maxTokens": 16384, "contextLimit": 128000 }
       ]
@@ -88,7 +91,7 @@ Example `~/.astrcode/config.json`:
       "providerKind": "openai",
       "baseUrl": "https://api.deepseek.com",
       "apiKey": "env:DEEPSEEK_API_KEY",
-      "apiMode": "chatCompletions",
+      "apiMode": "chat_completions",
       "models": [
         { "id": "deepseek-chat", "maxTokens": 16384, "contextLimit": 128000 }
       ]
@@ -170,6 +173,8 @@ To enable the memory extension, add `"astrcode.memory": true` to `extensionState
 
 ### Built-in Extensions
 
+First-party extensions are wired through [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions). Authors of new extensions should depend on [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) rather than internal host crates.
+
 | Extension | Crate | Description |
 |---|---|---|
 | **Mode** | `astrcode-extension-mode` | Agent running mode switching (Code / Plan), with Exit Gate, plan artifact persistence, keybinding & status item registration |
@@ -199,7 +204,7 @@ cat > ~/.astrcode/config.json << 'EOF'
       "name": "openai",
       "providerKind": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "${OPENAI_API_KEY}",
+      "apiKey": "env:OPENAI_API_KEY",
       "models": [
         {
           "id": "gpt-4o",
@@ -250,8 +255,10 @@ AstrCode uses a JSON-based configuration system stored in `~/.astrcode/config.js
 - Multi-provider support (Anthropic, OpenAI, Google GenAI)
 - Separate small LLM configuration for extensions (e.g., memory extraction)
 - Project-level config overrides via `.astrcode/config.json`
-- Environment variable substitution for API keys
+- Environment variable substitution for API keys (`env:VAR_NAME`)
 - Runtime behavior tuning (timeouts, retries, compaction, agent limits)
+- Compact circuit breaker and optional predictive compact
+- WASM extension sandbox limits (fuel, memory)
 
 For detailed configuration documentation, see [Configuration Guide](docs/configuration.md).
 
@@ -284,60 +291,94 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
     │            │ │extensions │ │ tools        │
     │ Anthropic  │ │Hook system│ │File/shell/   │
-    │ OpenAI     │ │Native FFI │ │task tools    │
+    │ OpenAI     │ │Ext SDK    │ │task tools    │
     │ Google     │ │WASM ext   │ │              │
     │ SSE+retry  │ │           │ │              │
     └────────┬───┘ └─────┬─────┘ └──────────────┘
              │           │
-   ┌─────────┴──┐  ┌────┴────────────┐
-   │astrcode-   │  │ Extension crates │
-   │ context    │  │ ├ mcp            │
-   │ Token budget│  │ ├ skill          │
-   │ Auto-compact│  │ ├ todo-tool      │
-   └────────────┘  │ ├ mode           │
-                   │ ├ agent-tools    │
-                   │ └ memory         │
-                   └─────────────────┘
-        ┌─────────────────────────────┐
-        │        Shared layer         │
-        │ core · protocol · storage   │
-        │ support · log               │
-        └─────────────────────────────┘
+   ┌─────────┴──┐  ┌────┴─────────────────────────┐
+   │astrcode-   │  │ Extension layer             │
+   │ context    │  │ bundled-extensions          │
+   │ Token budget│  │ sdk · mode · skill · todo  │
+   │ Auto-compact│  │ agent-tools · mcp · memory │
+   └────────────┘  │ + disk WASM (s5r)          │
+                   └────────────────────────────┘
+        ┌─────────────────────────────────────┐
+        │              Shared layer            │
+        │ core · protocol · storage · support  │
+        │ log · client                         │
+        └─────────────────────────────────────┘
 ```
 
 ## Crates
 
+The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**22 workspace members** total). Crates are grouped by architectural layer (details in [Project Structure](docs/Project-Structure.md)).
+
+### Layer 0: Foundation
+
 | Crate | Lines | Description |
 |---|---|---|
-| `astrcode-server` | 9.5k | Session management, JSON-RPC/HTTP/ACP handlers, transport, concurrency control |
-| `astrcode-cli` | 8.0k | Terminal UI (ratatui), headless exec, server launcher |
-| `astrcode-session` | 5.2k | Agent loop core: turn runner, tool pipeline, LLM stream consumption, compact orchestration |
-| `astrcode-core` | 4.9k | Shared types, traits, config system, error types, prompt composition, extension contracts |
-| `astrcode-tools` | 4.6k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
-| `astrcode-storage` | 3.7k | JSONL event log, session snapshots, config persistence, file locking |
-| `astrcode-ai` | 3.6k | Multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), SSE streaming, retry |
-| `astrcode-context` | 3.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| `astrcode-extensions` | 2.8k | Extension lifecycle, hook dispatch, native FFI loading, WASM extension runtime |
-| `astrcode-extension-mcp` | ~2.4k | MCP protocol client — persistent process pool, background pre-warm, inflight merge, health check |
-| `astrcode-protocol` | 1.2k | JSON-RPC 2.0 wire types, commands, events, HTTP DTOs |
-| `astrcode-extension-mode` | 1.2k | Agent running mode switching (Code / Plan), plan artifact, exit gate, keybinding & status item registration |
-| `astrcode-eval` | 1.1k | Eval framework — HTTP server control, event log metrics, structured reporting |
-| `astrcode-extension-skill` | 949 | Slash-command skill discovery and dispatch |
-| `astrcode-extension-todo-tool` | 733 | Progress tracking todo list tool |
-| `astrcode-extension-agent-tools` | 704 | Sub-agent delegation, agent discovery (Claude Code compatible format) |
-| `astrcode-extension-memory` | ~1.8k  | Project-scoped markdown memory storage |
-| `astrcode-support` | 682 | Path resolution, shell detection, text processing |
-| `astrcode-client` | 521 | Typed JSON-RPC client, transport, stream subscription |
-| `astrcode-log` | 353 | File rotation, stderr output, env-filter logging |
-| `astrcode-bundled-extensions` | 39 | Composition root for optional extension crates |
+| [`astrcode-core`](crates/astrcode-core) | 5.3k | Shared domain types, traits, config system, extension contracts, prompt composition |
+| [`astrcode-support`](crates/astrcode-support) | 1.0k | Host utilities: path resolution, shell detection, tool result persistence |
+| [`astrcode-log`](crates/astrcode-log) | 308 | File rotation, stderr output, env-filter logging |
 
-**Total: ~57k lines across 20 Rust crates + Tauri shell, 203 source files.**
+### Layer 1: Domain Services
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-ai`](crates/astrcode-ai) | 3.5k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
+| [`astrcode-tools`](crates/astrcode-tools) | 5.1k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
+| [`astrcode-storage`](crates/astrcode-storage) | 3.8k | JSONL event log, snapshots, config persistence, file locking |
+| [`astrcode-context`](crates/astrcode-context) | 3.6k | Token estimation, context window budgeting, auto-compact, prompt engine |
+| [`astrcode-session`](crates/astrcode-session) | 8.0k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 5.1k | Extension lifecycle, hook dispatch, capability gating, WASM runtime (wasmtime + s5r) |
+
+### Layer 2: Extensions
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 642 | Stable extension authoring API, capability declarations, s5r wire types, manifest helpers |
+| [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 88 | Composition root that registers all first-party extension crates |
+| [`astrcode-extension-mode`](crates/astrcode-extension-mode) | 978 | Code / Plan mode switching, exit gate, plan artifact, keybindings & status bar |
+| [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 852 | Slash-command skill discovery and Skill tool dispatch |
+| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 786 | Progress-tracking todo list tool |
+| [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 658 | Sub-agent delegation, agent discovery (Claude Code compatible) |
+| [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | 2.7k | MCP client: stdio/HTTP transports, persistent process pool, pre-warm, health checks |
+| [`astrcode-extension-memory`](crates/astrcode-extension-memory) | 1.6k | Project-scoped markdown memory (disabled by default) |
+
+### Layer 3: Server & Protocol
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-protocol`](crates/astrcode-protocol) | 1.3k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
+| [`astrcode-server`](crates/astrcode-server) | 12.2k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
+
+### Layer 4: Clients
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-client`](crates/astrcode-client) | 617 | Typed JSON-RPC client, transport abstraction, stream subscription |
+| [`astrcode-cli`](crates/astrcode-cli) | 7.7k | CLI entry: TUI (ratatui), headless exec, server launcher |
+
+### Eval
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-eval`](crates/astrcode-eval) | 1.0k | Benchmark runner: HTTP server control, event-log metrics, structured reports |
+
+### Desktop Shell
+
+| Component | Lines | Description |
+|---|---|---|
+| [`src-tauri/`](src-tauri) | ~690 | Tauri v2 shell: sidecar management, single-instance coordination, native dialogs |
+
+**Totals:** ~67.6k lines of Rust (21 crates + Tauri), **261** `.rs` files; ~6.3k lines of TypeScript in `frontend/` (~**74k** lines overall).
 
 ### Frontend & Desktop App
 
 | Component | Lines | Description |
 |---|---|---|
-| `frontend/` (React + TS) | ~4.8k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
+| `frontend/` (React + TS) | ~6.3k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
 | `src-tauri/` (Tauri v2) | ~670 | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
 
 The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
@@ -374,9 +415,12 @@ When conversation history approaches 83.5% of the model's context limit, `astrco
 
 1. LLM-backed compaction (model generates a structured 9-section summary) runs by default for both auto and manual compact
 2. On LLM failure (network error, parse error, timeout), the system falls back to deterministic rule-based summarization
-3. Compact transcripts are persisted as snapshots for debugging
-4. Post-compact context restoration re-reads recent files and preserves agent/skill/tool state
-5. **Incremental compact** — when a summary already exists, new compaction merges new information rather than rewriting from scratch
+3. A compact circuit breaker temporarily skips auto-compact after consecutive LLM failures, with configurable cooldown
+4. Optional predictive compact estimates turn token growth and compacts before the context window is exceeded
+5. Compact results are persisted with CAS conflict detection; concurrent writes fail safely instead of corrupting history
+6. Compact transcripts are persisted as snapshots for debugging
+7. Post-compact context restoration re-reads recent files and preserves agent/skill/tool state
+8. **Incremental compact** — when a summary already exists, new compaction merges new information rather than rewriting from scratch
 
 ### Tool Execution
 
@@ -393,14 +437,16 @@ Large tool results are automatically persisted to disk and replaced with preview
 The extension system (`astrcode-extensions`) is a core architectural pillar, not an afterthought:
 
 - **Extension trait** — each extension declares hook subscriptions, contributes tools and slash commands, handles lifecycle events
+- **Extension SDK** — bundled extensions and extension authors depend on `astrcode-extension-sdk` rather than coupling to host-internal `astrcode-core`
+- **Capability declarations** — bundled extensions use `Extension::capabilities()`; WASM extensions declare `requested_capabilities` during the s5r handshake; the runtime authorizes `astrcode.*` invokes via `HostRouter`
+- **Namespaced session state** — session-scoped extension state is stored under `<session>/extension_data/<extension-id>/`, keeping the session root owned by the host
 - **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only)
 - **Keybinding registration** — extensions register keyboard shortcuts (e.g. `Shift+Tab` for mode toggle) via `Registrar::keybinding()`
 - **Status bar items** — extensions contribute status bar entries (e.g. current mode indicator) with runtime updates via `StatusItemUpdate` notifications
-- **Native extension loading** — disk-loaded `.dll`/`.so` extensions via `libloading` + FFI, supporting global (`~/.astrcode/extensions/`) and project-level (`.astrcode/extensions/`) directories
-- **WASM extension runtime** — wasmtime-based sandboxed extension execution with a host-guest protocol for tool registration and event handling
+- **WASM extension runtime** — wasmtime sandbox + **s5r symmetric peer** (`peer_exchange`, `handler.invoke`, capability-scoped `astrcode.*` host invokes, multi-step **continuations**); disk extensions require `protocol.s5r: "1.0"` in `extension.json`. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
 - **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
-- **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir` and `event_sink`), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)
+- **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)
 - **Active health checks** — `ExtensionRunner::check_health()` provides an on-demand sampling API; polling strategy is decided by the host
 - **Startup event channel** — `bind_startup_event_channel()` binds a process-level event channel so extensions can emit custom events during `start()`
 
@@ -473,6 +519,16 @@ Stable sections (Identity, System, Task Guidelines) come first to leverage promp
 | `/quit` or `/q` | Exit astrcode |
 
 Extensions can register additional slash commands and keybindings at runtime.
+
+## Further Reading
+
+| Document | Description |
+|---|---|
+| [Project Structure](docs/Project-Structure.md) | Workspace layout, crate layers, HTTP/frontend/Tauri modules |
+| [Design Overview](docs/AstrCode-Design.md) | Event-sourcing, compact, tools, extensions, eval |
+| [Configuration Guide](docs/configuration.md) | Full `config.json` reference |
+| [Extension System](docs/extension-system.md) | Built-in vs WASM extensions, s5r protocol, host capabilities |
+| [Session-First](docs/session-first.md) | Event log lifecycle and replay model |
 
 ## Distribution
 

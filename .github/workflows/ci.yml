@@ -39,7 +39,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+      - name: Build s5r guest WASM (E2E)
+        run: cargo build --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml --target wasm32-wasip1 --release
       - run: cargo test --workspace --all-features --exclude astrcode-desktop
 
   audit:
@@ -52,6 +56,17 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
 
   deps:
     name: Dependency Direction

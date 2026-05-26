@@ -6,15 +6,16 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
-        Extension, ExtensionError, HookMode, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderResult, Registrar, ToolHandler,
     },
     render::{
         RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY, UI_SUMMARY_METADATA_KEY,
     },
+    state,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,7 @@ const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
 /// Compute todo storage root from a known session base directory.
 pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
-    base.join("todos")
+    state::session_data_dir(base, "astrcode-todo-tool").join("todos")
 }
 
 /// Return bundled todo extension.
@@ -68,6 +69,10 @@ struct TodoToolExtension;
 impl Extension for TodoToolExtension {
     fn id(&self) -> &str {
         "astrcode-todo-tool"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::SessionState]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -92,7 +97,7 @@ impl ToolHandler for TodoWriteToolHandler {
         tool_name: &str,
         arguments: Value,
         _working_dir: &str,
-        ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -150,11 +155,11 @@ impl PostToolUseHandler for TodoPostToolUseHandler {
 }
 
 fn todo_write_metadata()
--> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+-> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
     let mut map = std::collections::HashMap::new();
     map.insert(
         TODO_WRITE_TOOL_NAME.to_string(),
-        astrcode_core::tool::ToolPromptMetadata::new(
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
             "Maintain the current progress snapshot for this branch of work. Use it when you want \
              to keep track of multi-step progress that benefits from tracking.",
         )
@@ -168,7 +173,7 @@ fn todo_write_metadata()
              activeForm: \"准备设计优化方案\" }, { content: \"验证优化效果\", status: \
              \"pending\", activeForm: \"准备验证优化效果\" }] }",
         )
-        .prompt_tag(astrcode_core::tool::ToolPromptTag::Planning),
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map
 }
@@ -341,9 +346,9 @@ impl ProgressReminder {
         let result = if should_remind {
             state.assistant_cycles_since_reminder = 0;
             ProviderResult::AppendMessages {
-                messages: vec![astrcode_core::llm::LlmMessage::user(reminder_message(
-                    &items,
-                ))],
+                messages: vec![astrcode_extension_sdk::llm::LlmMessage::user(
+                    reminder_message(&items),
+                )],
             }
         } else {
             ProviderResult::Allow
@@ -643,7 +648,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage};
+    use astrcode_extension_sdk::llm::{LlmContent, LlmMessage};
 
     use super::*;
 

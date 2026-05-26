@@ -36,7 +36,7 @@ pub(crate) fn session_snapshot(
 ///
 /// Compact summary 消息（synthetic user message）会被转换为 system 角色，
 /// 以便客户端能正确识别其为系统生成的上下文摘要。
-pub(super) fn message_to_dto(message: &LlmMessage) -> MessageDto {
+pub fn message_to_dto(message: &LlmMessage) -> MessageDto {
     let content = message
         .content
         .iter()

@@ -113,3 +113,25 @@ assert.throws(
     }),
   ProtocolDecodeError
 )
+
+assert.throws(() => decodeConversationStreamEnvelope(null), ProtocolDecodeError)
+
+assert.throws(
+  () =>
+    decodeConversationStreamEnvelope({
+      sessionId: 's',
+      cursor: 'not-an-object',
+      delta: fixture[0].delta,
+    }),
+  ProtocolDecodeError
+)
+
+assert.throws(
+  () =>
+    decodeConversationStreamEnvelope({
+      sessionId: 's',
+      cursor: { value: '1' },
+      delta: { kind: 'not-a-real-delta' },
+    }),
+  ProtocolDecodeError
+)

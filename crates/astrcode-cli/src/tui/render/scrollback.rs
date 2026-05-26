@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::render_spec::{
-    MarkdownStyles, render_markdown_to_lines, render_spec_inner, tone_style, visual_lines,
+    MarkdownStyles, render_markdown_to_lines, render_spec_inner, visual_lines,
 };
 use crate::tui::{
     ext::message::MessageRendererRegistry,

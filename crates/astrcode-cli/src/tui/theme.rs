@@ -32,6 +32,7 @@ pub struct Theme {
     /// 输入编辑器占位提示样式
     pub composer_placeholder: Style,
     /// 弹窗边框样式
+    #[allow(dead_code)]
     pub popup_border: Style,
     /// 弹窗选中项样式
     pub popup_selected: Style,

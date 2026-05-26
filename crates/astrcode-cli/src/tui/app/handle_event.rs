@@ -1,11 +1,6 @@
 //! Apply ClientNotification to App state.
 
-use std::collections::BTreeMap;
-
-use astrcode_core::{
-    event::{Event, EventPayload},
-    render::UI_RENDER_METADATA_KEY,
-};
+use astrcode_core::event::{Event, EventPayload};
 use astrcode_protocol::events::{
     ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
 };
@@ -794,13 +789,7 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use astrcode_core::{
-        event::{Event, EventPayload},
-        render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-        tool::ToolResult,
-    };
+    use astrcode_core::event::{Event, EventPayload};
 
     use super::*;
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
@@ -813,34 +802,6 @@ mod tests {
         let event = Event::new("session".into(), Some("turn".into()), payload);
         apply_event(app, &event);
     }
-
-    fn tool_result(content: &str, is_error: bool) -> ToolResult {
-        ToolResult {
-            call_id: "call-1".into(),
-            content: content.into(),
-            is_error,
-            error: None,
-            metadata: BTreeMap::new(),
-            duration_ms: None,
-        }
-    }
-
-    fn tool_result_with_render(content: &str, spec: RenderSpec) -> ToolResult {
-        let mut metadata = BTreeMap::new();
-        metadata.insert(
-            UI_RENDER_METADATA_KEY.into(),
-            serde_json::to_value(spec).unwrap(),
-        );
-        ToolResult {
-            call_id: "call-1".into(),
-            content: content.into(),
-            is_error: false,
-            error: None,
-            metadata,
-            duration_ms: None,
-        }
-    }
-
 
     #[test]
     fn assistant_deltas_enter_scrollback_incrementally() {
@@ -992,7 +953,7 @@ mod codex_style_tests {
     };
 
     use super::*;
-    use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
+    use crate::tui::store::transcript::MessageRole;
 
     fn make_app() -> App {
         App::new(crate::tui::theme::Theme::detect())

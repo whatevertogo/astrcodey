@@ -40,7 +40,7 @@ pub(in crate::http) async fn set_enabled(
     State(state): State<HttpState>,
     Json(request): Json<SetExtensionEnabledRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config_manager.raw_config_snapshot();
+    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
     let extension_states = candidate
         .runtime
         .extension_states
@@ -107,10 +107,10 @@ pub(in crate::http) async fn set_enabled(
 }
 
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
-    let effective = state.runtime.config_manager.read_effective();
+    let effective = state.runtime.config_manager().read_effective();
     let loaded_ids = state
         .runtime
-        .extension_runner
+        .extension_runner()
         .registered_extension_ids()
         .await;
     let loaded_set: BTreeSet<_> = loaded_ids.iter().cloned().collect();

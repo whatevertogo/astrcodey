@@ -120,12 +120,15 @@ fn build_test_ops(
         capabilities,
         vec![],
     ));
-    let event_bus = Arc::new(ServerEventBus::new(Arc::new(EventFanout::new(1024))));
-    session_manager.bind_event_bus(event_bus);
     let scheduler = Arc::new(TurnScheduler::new(
         Arc::clone(&session_manager),
         Arc::new(TurnRegistry::new()),
     ));
+    let event_bus = Arc::new(ServerEventBus::new(
+        Arc::new(EventFanout::new(1024)),
+        Arc::clone(&scheduler),
+    ));
+    session_manager.bind_event_bus(event_bus);
     Arc::new(ServerSessionOperations {
         session_manager,
         scheduler,

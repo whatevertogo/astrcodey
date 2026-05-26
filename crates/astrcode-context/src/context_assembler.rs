@@ -6,7 +6,8 @@ use crate::{
     ContextSettings,
     compaction::{
         CompactError, CompactExecution, CompactResult, CompactSkipReason,
-        CompactSummaryRenderOptions, compact_messages_with_fallback,
+        CompactSummaryRenderOptions, compact_messages_deterministic,
+        compact_messages_with_fallback,
     },
     token_budget::{
         build_prompt_snapshot, estimate_turn_growth, should_compact, should_compact_predictive,
@@ -45,9 +46,34 @@ pub struct PreparedCompaction {
     pub llm_api_failed: bool,
 }
 
+/// 是否执行 compact，以及 compact 时是否调用 LLM。
+#[derive(Debug, Clone, Copy)]
+pub struct CompactMessagesOptions {
+    pub run: bool,
+    pub use_llm: bool,
+    pub keep_recent_turns: Option<usize>,
+}
+
+/// compact 执行结果（不含持久化）。
+#[derive(Debug, Clone)]
+pub enum CompactIfNeededOutcome {
+    /// 未触发 compact（阈值未到且非 force）。
+    NotRun { messages: Vec<LlmMessage> },
+    /// 触发但无安全前缀可压（Empty / NothingToCompact）。
+    Skipped { messages: Vec<LlmMessage> },
+    /// 已生成摘要与新的可见窗口。
+    Applied {
+        messages: Vec<LlmMessage>,
+        compaction: PreparedCompaction,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PrepareMessagesOptions {
-    pub allow_auto_compact: bool,
+    /// 根据阈值或 force 执行 compact（与是否调用 LLM 无关）。
+    pub run_compact: bool,
+    /// compact 时是否调用 LLM；为 false 时仅用确定性模板。
+    pub use_llm_for_compact: bool,
     pub force_compact: bool,
     pub keep_recent_turns: Option<usize>,
 }
@@ -66,6 +92,73 @@ impl LlmContextAssembler {
         Self { settings }
     }
 
+    /// 在需要时执行 compact，返回新的可见消息窗口。
+    pub async fn compact_if_needed<F, Fut>(
+        &self,
+        messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+        custom_instructions: &[String],
+        render_options: CompactSummaryRenderOptions,
+        options: CompactMessagesOptions,
+        request_text: F,
+    ) -> CompactIfNeededOutcome
+    where
+        F: FnMut(Vec<LlmMessage>) -> Fut,
+        Fut: Future<Output = Result<String, CompactError>>,
+    {
+        if !options.run {
+            return CompactIfNeededOutcome::NotRun { messages };
+        }
+
+        let keep_recent_turns = options
+            .keep_recent_turns
+            .or(self.settings.compact_keep_recent_turns);
+
+        let execution = if options.use_llm {
+            compact_messages_with_fallback(
+                &messages,
+                system_prompt,
+                &self.settings,
+                custom_instructions,
+                &render_options,
+                keep_recent_turns,
+                request_text,
+            )
+            .await
+        } else {
+            compact_messages_deterministic(
+                &messages,
+                system_prompt,
+                &render_options,
+                keep_recent_turns,
+            )
+        };
+
+        match execution {
+            Ok(compaction) => {
+                let PreparedCompaction {
+                    result,
+                    llm_api_failed,
+                } = prepared_compaction_from_execution(compaction);
+                let messages = [
+                    result.context_messages.clone(),
+                    result.retained_messages.clone(),
+                ]
+                .concat();
+                CompactIfNeededOutcome::Applied {
+                    messages,
+                    compaction: PreparedCompaction {
+                        result,
+                        llm_api_failed,
+                    },
+                }
+            },
+            Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
+                CompactIfNeededOutcome::Skipped { messages }
+            },
+        }
+    }
+
     /// 准备 provider 可见消息；达到阈值时先尝试 LLM compact，失败降级到 deterministic。
     pub async fn prepare_messages_with_llm<F, Fut>(
         &self,
@@ -77,52 +170,54 @@ impl LlmContextAssembler {
         F: FnMut(Vec<LlmMessage>) -> Fut,
         Fut: Future<Output = Result<String, CompactError>>,
     {
-        let mut messages = input.messages;
-        let snapshot = self.snapshot(&messages, input.system_prompt, input.model_limits.clone());
-        let should_compact_now = options.force_compact
-            || (options.allow_auto_compact
-                && (should_compact(snapshot)
-                    || (self.settings.predictive_compact_enabled
-                        && should_compact_predictive(
-                            snapshot,
-                            estimate_turn_growth(
-                                &messages,
-                                self.settings.predictive_compact_baseline_growth_tokens,
-                            ),
-                            input.model_limits.clone(),
-                        ))));
-        let compaction = if should_compact_now {
-            let render_options = CompactSummaryRenderOptions {
-                custom_instructions: input.custom_instructions.clone(),
-                ..Default::default()
-            };
-            match compact_messages_with_fallback(
-                &messages,
+        let snapshot = self.snapshot(
+            &input.messages,
+            input.system_prompt,
+            input.model_limits.clone(),
+        );
+        let threshold_met = should_compact(snapshot)
+            || (self.settings.predictive_compact_enabled
+                && should_compact_predictive(
+                    snapshot,
+                    estimate_turn_growth(
+                        &input.messages,
+                        self.settings.predictive_compact_baseline_growth_tokens,
+                    ),
+                    input.model_limits.clone(),
+                ));
+        let render_options = CompactSummaryRenderOptions {
+            custom_instructions: input.custom_instructions.clone(),
+            ..Default::default()
+        };
+        let compact_options = CompactMessagesOptions {
+            run: options.force_compact || (options.run_compact && threshold_met),
+            use_llm: options.use_llm_for_compact,
+            keep_recent_turns: options.keep_recent_turns,
+        };
+
+        match self
+            .compact_if_needed(
+                input.messages,
                 input.system_prompt,
-                &self.settings,
                 &input.custom_instructions,
-                &render_options,
-                options
-                    .keep_recent_turns
-                    .or(self.settings.compact_keep_recent_turns),
+                render_options,
+                compact_options,
                 request_text,
             )
             .await
-            {
-                Ok(compaction) => {
-                    let prepared = prepared_context_from_compaction(compaction);
-                    messages = prepared.messages;
-                    prepared.compaction
-                },
-                Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => None,
-            }
-        } else {
-            None
-        };
-
-        PreparedContext {
-            messages,
-            compaction,
+        {
+            CompactIfNeededOutcome::NotRun { messages }
+            | CompactIfNeededOutcome::Skipped { messages } => PreparedContext {
+                messages,
+                compaction: None,
+            },
+            CompactIfNeededOutcome::Applied {
+                messages,
+                compaction,
+            } => PreparedContext {
+                messages,
+                compaction: Some(compaction),
+            },
         }
     }
 
@@ -174,18 +269,10 @@ impl LlmContextAssembler {
     }
 }
 
-fn prepared_context_from_compaction(compaction: CompactExecution) -> PreparedContext {
-    let messages = [
-        compaction.result.context_messages.clone(),
-        compaction.result.retained_messages.clone(),
-    ]
-    .concat();
-    PreparedContext {
-        messages,
-        compaction: Some(PreparedCompaction {
-            result: compaction.result,
-            llm_api_failed: compaction.llm_api_failed,
-        }),
+fn prepared_compaction_from_execution(compaction: CompactExecution) -> PreparedCompaction {
+    PreparedCompaction {
+        result: compaction.result,
+        llm_api_failed: compaction.llm_api_failed,
     }
 }
 
@@ -216,7 +303,8 @@ mod tests {
                     custom_instructions: Vec::new(),
                 },
                 PrepareMessagesOptions {
-                    allow_auto_compact: true,
+                    run_compact: true,
+                    use_llm_for_compact: true,
                     force_compact: false,
                     keep_recent_turns: None,
                 },
@@ -239,7 +327,8 @@ mod tests {
                     custom_instructions: Vec::new(),
                 },
                 PrepareMessagesOptions {
-                    allow_auto_compact: true,
+                    run_compact: true,
+                    use_llm_for_compact: true,
                     force_compact: false,
                     keep_recent_turns: None,
                 },
@@ -260,5 +349,32 @@ mod tests {
                     .iter()
                     .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("<compact_summary>")))
         }));
+    }
+
+    #[tokio::test]
+    async fn compact_if_needed_runs_deterministic_when_llm_disabled() {
+        let assembler = LlmContextAssembler::new(ContextSettings::default());
+        let messages = vec![
+            LlmMessage::user("old user ".repeat(400)),
+            LlmMessage::assistant("old answer ".repeat(400)),
+            LlmMessage::user("current"),
+        ];
+
+        let outcome = assembler
+            .compact_if_needed(
+                messages,
+                None,
+                &[],
+                CompactSummaryRenderOptions::default(),
+                CompactMessagesOptions {
+                    run: true,
+                    use_llm: false,
+                    keep_recent_turns: None,
+                },
+                |_msgs| async { panic!("deterministic compact must not call LLM request_fn") },
+            )
+            .await;
+
+        assert!(matches!(outcome, CompactIfNeededOutcome::Applied { .. }));
     }
 }

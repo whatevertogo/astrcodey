@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-server"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Backend server: session manager, agent loop, JSON-RPC handler, config service"
 
 [[bin]]
@@ -29,7 +30,7 @@ astrcode-session = { path = "../astrcode-session" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
 astrcode-log = { path = "../astrcode-log" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "fs", "net", "rt-multi-thread", "macros", "process", "io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -42,13 +43,16 @@ axum = { workspace = true }
 futures-util = { workspace = true }
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
-getrandom = "0.3"
-agent-client-protocol = "0.11"
+getrandom = { workspace = true }
+agent-client-protocol = { workspace = true }
+
+[[test]]
+name = "http_routes"
+required-features = ["testing"]
 
 [dev-dependencies]
-http-body-util = "0.1"
-tower = { version = "0.5", features = ["util"] }
-tokio-util = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", default-features = false }
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。

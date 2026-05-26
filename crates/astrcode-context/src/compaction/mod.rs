@@ -284,6 +284,25 @@ where
     }
 }
 
+/// 仅使用确定性模板压缩，不调用 LLM。
+pub fn compact_messages_deterministic(
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+    render_options: &CompactSummaryRenderOptions,
+    keep_recent_turns: Option<usize>,
+) -> Result<CompactExecution, CompactSkipReason> {
+    compact_messages_with_render_options_and_keep(
+        messages,
+        system_prompt,
+        render_options,
+        keep_recent_turns,
+    )
+    .map(|result| CompactExecution {
+        result,
+        llm_api_failed: true,
+    })
+}
+
 fn should_retry_prompt_too_long(error: &CompactError) -> bool {
     matches!(error, CompactError::Llm(LlmError::PromptTooLong(_)))
         || is_prompt_too_long_message(&error.to_string())

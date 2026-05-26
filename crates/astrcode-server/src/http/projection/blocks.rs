@@ -5,12 +5,36 @@ use std::collections::{BTreeMap, HashMap};
 use astrcode_core::{
     event::{Event, EventPayload},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::BackgroundToolCallView,
+    storage::{BackgroundToolCallView, CompactBoundaryView},
     types::ToolCallId,
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
 
 use super::args::format_args_inline;
+
+/// 对话 UI 中 compact 卡片的稳定 block id（多次 compact 时 upsert / 刷新替换）。
+pub(in crate::http) const COMPACT_SUMMARY_BLOCK_ID: &str = "compact-current";
+
+/// 仅用于对话展示：返回最近一次 compact boundary。
+pub(in crate::http) fn latest_compact_boundary(
+    boundaries: &[CompactBoundaryView],
+) -> Option<&CompactBoundaryView> {
+    boundaries.iter().max_by_key(|boundary| boundary.seq)
+}
+
+/// 将 compact boundary 投影为对话 block（插在保留消息之前）。
+pub(in crate::http) fn compact_summary_block(
+    boundary: &CompactBoundaryView,
+) -> ConversationBlockDto {
+    ConversationBlockDto::CompactSummary {
+        id: COMPACT_SUMMARY_BLOCK_ID.to_string(),
+        summary: boundary.summary.clone(),
+        trigger: boundary.trigger.clone(),
+        pre_tokens: boundary.pre_tokens,
+        post_tokens: boundary.post_tokens,
+        transcript_path: boundary.transcript_path.clone(),
+    }
+}
 
 /// Build the completed [`ConversationBlockDto`] for payloads that produce a single
 /// final block. Shared by live and replay delta functions.
@@ -75,17 +99,14 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
             summary,
             transcript_path,
             ..
-        } => {
-            let block_id = format!("compact-{}", event.seq.unwrap_or_default());
-            Some(ConversationBlockDto::CompactSummary {
-                id: block_id,
-                summary: summary.clone(),
-                trigger: trigger.clone(),
-                pre_tokens: *pre_tokens,
-                post_tokens: *post_tokens,
-                transcript_path: transcript_path.clone(),
-            })
-        },
+        } => Some(ConversationBlockDto::CompactSummary {
+            id: COMPACT_SUMMARY_BLOCK_ID.to_string(),
+            summary: summary.clone(),
+            trigger: trigger.clone(),
+            pre_tokens: *pre_tokens,
+            post_tokens: *post_tokens,
+            transcript_path: transcript_path.clone(),
+        }),
         EventPayload::RecapGenerated { text, .. } => Some(ConversationBlockDto::SystemNote {
             id: event.id.to_string(),
             text: text.clone(),

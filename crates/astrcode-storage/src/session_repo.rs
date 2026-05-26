@@ -226,8 +226,9 @@ impl FileSystemSessionRepository {
             return Ok(meta);
         }
 
-        // Opening a log restores its in-memory next_seq from disk. That should
-        // happen once per active process/session, not once per append.
+        // 磁盘打开与 projection 恢复可能较慢；不得持 `sessions` 写锁跨越 await，
+        // 否则会阻塞同实例上的 append/checkpoint，并在 Windows 上与未释放的
+        // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
         let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
@@ -242,10 +243,12 @@ impl FileSystemSessionRepository {
         });
 
         let mut sessions = self.sessions.write().await;
-        Ok(sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| opened)
-            .clone())
+        Ok(if let Some(meta) = sessions.get(session_id) {
+            Arc::clone(meta)
+        } else {
+            sessions.insert(session_id.clone(), Arc::clone(&opened));
+            opened
+        })
     }
 
     async fn restore_projection(
@@ -1065,6 +1068,7 @@ mod tests {
         .await
         .unwrap();
 
+        drop(repo);
         let reopened = test_repo(base_path);
         let model = reopened.session_read_model(&session_id).await.unwrap();
 
@@ -1143,6 +1147,7 @@ mod tests {
         .unwrap();
 
         let expected = repo.session_read_model(&session_id).await.unwrap();
+        drop(repo);
         let reopened = test_repo(base_path);
         let restored = reopened.session_read_model(&session_id).await.unwrap();
 
@@ -1213,6 +1218,7 @@ mod tests {
         )
         .unwrap();
 
+        drop(repo);
         let reopened = test_repo(base_path);
         let restored = reopened.session_read_model(&session_id).await.unwrap();
 
@@ -1229,6 +1235,7 @@ mod tests {
             .await
             .unwrap();
 
+        drop(repo);
         let reopened = test_repo(base_path);
         let summaries = reopened.list_session_summaries().await.unwrap();
 
@@ -1293,6 +1300,7 @@ mod tests {
                 .exists()
         );
 
+        drop(repo);
         let reopened = test_repo(base_path);
         let sessions = reopened.list_sessions().await.unwrap();
         let child = reopened.session_read_model(&child_id).await.unwrap();
@@ -1484,6 +1492,7 @@ mod tests {
         assert_eq!(provider[1].role, LlmRole::User);
 
         // Reopen and verify projection restores from compact boundary.
+        drop(repo);
         let reopened = test_repo(base_path);
         let restored = reopened.session_read_model(&session_id).await.unwrap();
         assert_eq!(

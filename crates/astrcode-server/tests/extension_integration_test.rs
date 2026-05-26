@@ -226,6 +226,7 @@ fn pre_tool_use_context(command: &str) -> PreToolUseContext {
         tool_name: "shell".into(),
         tool_input: serde_json::json!({ "command": command }),
         available_tools: vec![],
+        event_tx: None,
         extension_event_sink: None,
         session_store_dir: None,
     }
@@ -368,6 +369,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
         session_id: "test-session".into(),
         working_dir: "/tmp".into(),
         model: astrcode_core::config::ModelSelection::simple("test-model"),
+        event_tx: None,
         extension_event_sink: None,
         last_exchange: None,
     };
@@ -389,6 +391,7 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
         session_id: "empty".into(),
         working_dir: "/tmp".into(),
         model: astrcode_core::config::ModelSelection::simple("noop"),
+        event_tx: None,
         extension_event_sink: None,
         last_exchange: None,
     };
@@ -414,6 +417,7 @@ async fn extension_subscribes_only_to_matching_events() {
         session_id: "test-session".into(),
         working_dir: "/tmp".into(),
         model: astrcode_core::config::ModelSelection::simple("test-model"),
+        event_tx: None,
         extension_event_sink: None,
         last_exchange: None,
     };

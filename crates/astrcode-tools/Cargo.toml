@@ -1,13 +1,14 @@
 [package]
 name = "astrcode-tools"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Built-in tools: file ops, shell execution, agent collaboration, event emission"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-support = { path = "../astrcode-support" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "process", "io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -19,10 +20,10 @@ ignore = { workspace = true }
 regex = { workspace = true }
 similar = { workspace = true }
 tracing = { workspace = true }
-grep-searcher = "0.1"
-grep-regex = "0.1"
-portable-pty = "0.9"
+grep-searcher = { workspace = true }
+grep-regex = { workspace = true }
+portable-pty = { workspace = true }
 parking_lot = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { workspace = true }

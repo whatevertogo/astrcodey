@@ -4,7 +4,7 @@ use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, tool::FileObservationStore,
     types::SessionId,
 };
-use astrcode_support::event_fanout::EventFanout;
+use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -135,20 +135,23 @@ impl SessionRuntimeState {
     }
 
     /// 返回 provider 与模型标识的一致快照。
+    ///
+    /// 需要同时读取 `llm` / `small_llm` / `model_id` 时请用此方法；
+    /// 分别调用 [`Self::llm`]、[`Self::small_llm`] 可能在替换间隙读到不一致组合。
     pub fn model_binding(&self) -> SessionModelBinding {
-        self.model.lock().clone()
+        lock_parking(&self.model).clone()
     }
 
     pub fn llm(&self) -> Arc<dyn LlmProvider> {
-        Arc::clone(&self.model.lock().llm)
+        Arc::clone(&lock_parking(&self.model).llm)
     }
 
     pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
-        Arc::clone(&self.model.lock().small_llm)
+        Arc::clone(&lock_parking(&self.model).small_llm)
     }
 
     pub fn model_id(&self) -> String {
-        self.model.lock().model_id.clone()
+        lock_parking(&self.model).model_id.clone()
     }
 
     pub fn replace_model_binding(
@@ -157,7 +160,7 @@ impl SessionRuntimeState {
         small_llm: Arc<dyn LlmProvider>,
         model_id: String,
     ) {
-        *self.model.lock() = SessionModelBinding {
+        *lock_parking(&self.model) = SessionModelBinding {
             llm,
             small_llm,
             model_id,
@@ -169,11 +172,11 @@ impl SessionRuntimeState {
     }
 
     pub fn tool_registry(&self) -> Arc<ToolRegistry> {
-        self.tools.registry.lock().clone()
+        Arc::clone(&lock_parking(&self.tools.registry))
     }
 
     pub fn set_tool_registry(&self, registry: Arc<ToolRegistry>) {
-        *self.tools.registry.lock() = registry;
+        *lock_parking(&self.tools.registry) = registry;
     }
 
     pub fn background_tasks(&self) -> Arc<Mutex<BackgroundTaskManager>> {
@@ -181,19 +184,19 @@ impl SessionRuntimeState {
     }
 
     pub fn extra_system_prompt(&self) -> Option<String> {
-        self.configuration.extra_system_prompt.lock().clone()
+        lock_parking(&self.configuration.extra_system_prompt).clone()
     }
 
     pub fn set_extra_system_prompt(&self, prompt: Option<String>) {
-        *self.configuration.extra_system_prompt.lock() = prompt;
+        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
     }
 
     pub fn tool_policy(&self) -> Option<ChildToolPolicy> {
-        self.configuration.tool_policy.lock().clone()
+        lock_parking(&self.configuration.tool_policy).clone()
     }
 
     pub fn set_tool_policy(&self, policy: Option<ChildToolPolicy>) {
-        *self.configuration.tool_policy.lock() = policy;
+        *lock_parking(&self.configuration.tool_policy) = policy;
     }
 
     pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
@@ -201,22 +204,20 @@ impl SessionRuntimeState {
     }
 
     pub fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
-        self.compact_circuit_breaker
-            .lock()
-            .reconfigure(threshold, cooldown);
+        lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
     }
 
     pub fn cached_stable_prefix(&self) -> Option<(String, String)> {
-        self.configuration.cached_stable_prefix.lock().clone()
+        lock_parking(&self.configuration.cached_stable_prefix).clone()
     }
 
     pub fn set_cached_stable_prefix(&self, text: String, fingerprint: String) {
-        *self.configuration.cached_stable_prefix.lock() = Some((text, fingerprint));
+        *lock_parking(&self.configuration.cached_stable_prefix) = Some((text, fingerprint));
     }
 
     /// 清空缓存的稳定前缀，强制下一 turn 全量重建（compact 后调用）。
     pub fn invalidate_stable_prefix_cache(&self) {
-        *self.configuration.cached_stable_prefix.lock() = None;
+        *lock_parking(&self.configuration.cached_stable_prefix) = None;
     }
 
     /// 订阅本 session 的事件流。
@@ -240,6 +241,8 @@ impl SessionRuntimeState {
     }
 
     /// 消费完成信号通道并收集已完成的子 turn guard。非阻塞。
+    /// 消费子 turn 完成通知 channel 中积压的 signal，再收集已完成的 guard。
+    /// signal 本身不含 payload，仅作唤醒；真正状态在 `ChildTurnManager` 内。
     pub fn drain_completed(&self) -> Vec<Arc<ChildTurnGuard>> {
         let mut rx = self.children.completed_rx.lock();
         while rx.try_recv().is_ok() {}

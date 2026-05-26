@@ -384,24 +384,30 @@ fn parse_range(value: &str, kind: &str) -> std::result::Result<(usize, usize), S
     }
 }
 
-/// 将单个文件的补丁应用到工作目录。
-///
-/// 处理新建文件、删除文件和更新文件三种情况，包含路径遍历防护和符号链接拒绝。
-fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
-    let Some(target_path_str) = file_patch
+struct PatchTarget<'a> {
+    change_type: &'static str,
+    path_label: String,
+    resolved_path: std::path::PathBuf,
+    is_new_file: bool,
+    is_delete: bool,
+    file_patch: &'a FilePatch,
+}
+
+fn resolve_patch_target<'a>(
+    working_dir: &Path,
+    file_patch: &'a FilePatch,
+) -> Result<PatchTarget<'a>, FileChange> {
+    let path_label = file_patch
         .new_path
         .clone()
         .or_else(|| file_patch.old_path.clone())
-    else {
-        return FileChange {
+        .ok_or_else(|| FileChange {
             change_type: "error".into(),
             path: "unknown".into(),
             applied: false,
             summary: "patch specifies neither old nor new path".into(),
             error: Some("patch specifies neither old nor new path".into()),
-        };
-    };
-
+        })?;
     let is_new_file = file_patch.old_path.is_none();
     let is_delete = file_patch.new_path.is_none();
     let change_type = if is_new_file {
@@ -411,56 +417,134 @@ fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
     } else {
         "updated"
     };
-    let target_path = resolve_path(working_dir, Path::new(&target_path_str));
-
-    // patch 同样需要路径遍历防护：diff 中的路径可能包含 ../ 逃逸
-    if !is_path_within(&target_path, working_dir) {
-        return failed_file_change(
+    let resolved_path = resolve_path(working_dir, Path::new(&path_label));
+    if !is_path_within(&resolved_path, working_dir) {
+        return Err(failed_file_change(
             change_type,
-            &target_path_str,
-            format!("path escapes working directory: {}", target_path.display()),
-        );
+            &path_label,
+            format!(
+                "path escapes working directory: {}",
+                resolved_path.display()
+            ),
+        ));
     }
-
-    if is_unc_path(&target_path) {
-        return failed_file_change(
+    if is_unc_path(&resolved_path) {
+        return Err(failed_file_change(
             change_type,
-            &target_path_str,
-            format!("UNC paths are not supported: {}", target_path.display()),
-        );
+            &path_label,
+            format!("UNC paths are not supported: {}", resolved_path.display()),
+        ));
     }
-    if std::fs::symlink_metadata(&target_path)
+    if std::fs::symlink_metadata(&resolved_path)
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        return failed_file_change(
+        return Err(failed_file_change(
             change_type,
-            &target_path_str,
-            format!("refusing to patch symlink {}", target_path.display()),
+            &path_label,
+            format!("refusing to patch symlink {}", resolved_path.display()),
+        ));
+    }
+    Ok(PatchTarget {
+        change_type,
+        path_label,
+        resolved_path,
+        is_new_file,
+        is_delete,
+        file_patch,
+    })
+}
+
+fn read_original_for_patch(target: &PatchTarget<'_>) -> Result<Option<String>, FileChange> {
+    if target.resolved_path.exists() {
+        std::fs::read_to_string(&target.resolved_path)
+            .map(Some)
+            .map_err(|error| {
+                failed_file_change(
+                    target.change_type,
+                    &target.path_label,
+                    format!("failed to read existing file: {error}"),
+                )
+            })
+    } else if target.is_new_file {
+        Ok(None)
+    } else {
+        Err(failed_file_change(
+            target.change_type,
+            &target.path_label,
+            format!("file does not exist: {}", target.path_label),
+        ))
+    }
+}
+
+fn commit_delete_patch(target: &PatchTarget<'_>) -> FileChange {
+    if let Err(error) = std::fs::remove_file(&target.resolved_path) {
+        return failed_file_change(
+            "deleted",
+            &target.path_label,
+            format!(
+                "failed to delete {}: {error}",
+                target.resolved_path.display()
+            ),
         );
     }
+    FileChange {
+        change_type: "deleted".into(),
+        path: target.path_label.clone(),
+        applied: true,
+        summary: format!("deleted {}", target.resolved_path.display()),
+        error: None,
+    }
+}
 
-    let original_content = if target_path.exists() {
-        match std::fs::read_to_string(&target_path) {
-            Ok(content) => Some(content),
-            Err(error) => {
+fn commit_write_patch(target: &PatchTarget<'_>, new_content: &str) -> FileChange {
+    if target.is_new_file {
+        if let Some(parent) = target.resolved_path.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
                 return failed_file_change(
-                    change_type,
-                    &target_path_str,
-                    format!("failed to read existing file: {error}"),
+                    target.change_type,
+                    &target.path_label,
+                    format!("failed to create parent directory: {error}"),
                 );
-            },
+            }
         }
-    } else if is_new_file {
-        None
-    } else {
+    }
+    if let Err(error) = std::fs::write(&target.resolved_path, new_content) {
         return failed_file_change(
-            change_type,
-            &target_path_str,
-            format!("file does not exist: {target_path_str}"),
+            target.change_type,
+            &target.path_label,
+            format!(
+                "failed to write {}: {error}",
+                target.resolved_path.display()
+            ),
         );
-    };
+    }
+    let (added_lines, removed_lines) = patch_line_counts(target.file_patch);
+    FileChange {
+        change_type: target.change_type.into(),
+        path: target.path_label.clone(),
+        applied: true,
+        summary: format!(
+            "{} {} (+{added_lines} -{removed_lines})",
+            target.change_type,
+            target.resolved_path.display()
+        ),
+        error: None,
+    }
+}
 
+/// 将单个文件的补丁应用到工作目录。
+///
+/// 处理新建文件、删除文件和更新文件三种情况，包含路径遍历防护和符号链接拒绝。
+fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
+    let target = match resolve_patch_target(working_dir, file_patch) {
+        Ok(target) => target,
+        Err(change) => return change,
+    };
+    let original_content = match read_original_for_patch(&target) {
+        Ok(content) => content,
+        Err(change) => return change,
+    };
     let original_doc = original_content
         .as_deref()
         .map(parse_text_document)
@@ -469,83 +553,38 @@ fn apply_file_patch(working_dir: &Path, file_patch: &FilePatch) -> FileChange {
             line_ending: LineEnding::Lf,
             has_trailing_newline: false,
         });
-
-    let result_lines = match apply_hunks(&original_doc.lines, &file_patch.hunks) {
+    let result_lines = match apply_hunks(&original_doc.lines, &target.file_patch.hunks) {
         Ok(lines) => lines,
         Err(error) => {
             return failed_file_change(
-                change_type,
-                &target_path_str,
+                target.change_type,
+                &target.path_label,
                 format!(
                     "failed to apply patch to {}: {error}",
-                    target_path.display()
+                    target.resolved_path.display()
                 ),
             );
         },
     };
-
-    if is_delete {
+    if target.is_delete {
         if !result_lines.is_empty() {
             return failed_file_change(
                 "deleted",
-                &target_path_str,
+                &target.path_label,
                 format!(
                     "delete patch for {} does not remove the full file",
-                    target_path.display()
+                    target.resolved_path.display()
                 ),
             );
         }
-        if let Err(error) = std::fs::remove_file(&target_path) {
-            return failed_file_change(
-                "deleted",
-                &target_path_str,
-                format!("failed to delete {}: {error}", target_path.display()),
-            );
-        }
-        return FileChange {
-            change_type: "deleted".into(),
-            path: target_path_str,
-            applied: true,
-            summary: format!("deleted {}", target_path.display()),
-            error: None,
-        };
+        return commit_delete_patch(&target);
     }
-
     let new_content = render_text_document(
         &result_lines,
         original_doc.line_ending,
         original_doc.has_trailing_newline,
     );
-    if is_new_file {
-        if let Some(parent) = target_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                return failed_file_change(
-                    change_type,
-                    &target_path_str,
-                    format!("failed to create parent directory: {error}"),
-                );
-            }
-        }
-    }
-    if let Err(error) = std::fs::write(&target_path, &new_content) {
-        return failed_file_change(
-            change_type,
-            &target_path_str,
-            format!("failed to write {}: {error}", target_path.display()),
-        );
-    }
-
-    let (added_lines, removed_lines) = patch_line_counts(file_patch);
-    FileChange {
-        change_type: change_type.into(),
-        path: target_path_str,
-        applied: true,
-        summary: format!(
-            "{change_type} {} (+{added_lines} -{removed_lines})",
-            target_path.display()
-        ),
-        error: None,
-    }
+    commit_write_patch(&target, &new_content)
 }
 
 /// 构造一个失败的文件变更结果。

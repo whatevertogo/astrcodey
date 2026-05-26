@@ -13,7 +13,7 @@ use std::sync::Arc;
 use astrcode_ai::create_provider;
 use astrcode_core::{
     config::{Config, ConfigStore, EffectiveConfig, LlmSettings},
-    llm::{LlmClientConfig, LlmProvider},
+    llm::{LlmClientConfig, LlmProvider, OpenAiProviderExtras, ProviderExtras},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::SessionRuntimeServices;
@@ -26,8 +26,6 @@ pub struct ConfigManager {
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
     capabilities: Arc<SessionRuntimeServices>,
-    /// 扩展运行器，用于在配置变更时推送扩展配置热更新。
-    extension_runner: Arc<ExtensionRunner>,
 }
 
 fn build_provider_from_settings(settings: &LlmSettings) -> Arc<dyn LlmProvider> {
@@ -39,9 +37,11 @@ fn build_provider_from_settings(settings: &LlmSettings) -> Arc<dyn LlmProvider> 
         max_retries: settings.max_retries,
         retry_base_delay_ms: settings.retry_base_delay_ms,
         reasoning: settings.reasoning,
-        reasoning_split: settings.reasoning_split,
-        supports_prompt_cache_key: settings.supports_prompt_cache_key,
-        prompt_cache_retention: settings.prompt_cache_retention,
+        extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
+            reasoning_split: settings.reasoning_split,
+            supports_prompt_cache_key: settings.supports_prompt_cache_key,
+            prompt_cache_retention: settings.prompt_cache_retention,
+        }),
         extra_headers: Default::default(),
     };
     create_provider(
@@ -77,7 +77,6 @@ impl ConfigManager {
             config_store,
             raw_config: RwLock::new(raw_config),
             capabilities: Arc::clone(&capabilities),
-            extension_runner,
         };
         (manager, capabilities)
     }
@@ -88,13 +87,15 @@ impl ConfigManager {
         raw_config: Config,
         capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
-        let extension_runner = capabilities.extension_runner().clone();
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
             capabilities,
-            extension_runner,
         }
+    }
+
+    fn extension_runner(&self) -> &Arc<ExtensionRunner> {
+        self.capabilities.extension_runner()
     }
 
     pub fn capabilities(&self) -> &Arc<SessionRuntimeServices> {
@@ -163,7 +164,7 @@ impl ConfigManager {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            self.extension_runner.update_extension_configs(configs);
+            self.extension_runner().update_extension_configs(configs);
         }
         Ok(())
     }
@@ -172,9 +173,9 @@ impl ConfigManager {
     ///
     /// 应在 `apply_raw_config_and_rebuild` 之后调用（通常在 HTTP handler 的 async 上下文中）。
     pub async fn notify_extensions_config_changed(&self) -> Vec<String> {
-        if self.extension_runner.count().await == 0 {
+        if self.extension_runner().count().await == 0 {
             return Vec::new();
         }
-        self.extension_runner.notify_config_changed().await
+        self.extension_runner().notify_config_changed().await
     }
 }

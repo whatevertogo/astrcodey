@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-core"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Core shared types and traits for the astrcode AI coding agent platform"
 
 [dependencies]
@@ -12,5 +13,5 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }

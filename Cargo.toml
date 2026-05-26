@@ -10,6 +10,7 @@ members = [
     "crates/astrcode-context",
     "crates/astrcode-session",
     "crates/astrcode-extensions",
+    "crates/astrcode-extension-sdk",
     "crates/astrcode-bundled-extensions",
     "crates/astrcode-server",
     "crates/astrcode-protocol",
@@ -26,8 +27,14 @@ members = [
     "src-tauri",
 ]
 
+[workspace.package]
+version = "0.2.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "fs", "signal", "process", "sync"] }
+# Base tokio: enable features per crate to avoid pulling unused subsystems.
+tokio = { version = "1", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2"
@@ -40,8 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 dirs = "6"
 fs2 = "0.4"
-futures = "0.3"
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_yaml = "0.9"
@@ -59,7 +65,30 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 notify = "8"
+libc = "0.2"
+getrandom = "0.3"
+agent-client-protocol = "0.11"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+portable-pty = "0.9"
+ratatui = { version = "0.30", features = ["scrolling-regions"] }
+ratatui-crossterm = { version = "0.1", features = ["scrolling-regions"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2"
+anyhow = "1"
+rand = "0.9"
+portpicker = "0.1"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-http = "2"
+# WASM extension host (keep in sync; >=44.0.2 fixes RUSTSEC-2026-0149)
+wasmtime = { version = "44", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = "44"
 
 # --- Profiles ---
 

@@ -4,13 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_core::{
-    llm::LlmMessage,
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
-};
-use tokio::sync::mpsc;
+use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolResult};
 
-use super::turn_context::AgentSignal;
+use super::turn_publish::TurnPublisher;
+use crate::turn_stages::TurnState;
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
 pub struct PendingToolCall {
@@ -34,17 +31,15 @@ pub struct PreparedToolCall {
 pub struct ExecuteToolCalls<'a> {
     pub prepared: &'a [PreparedToolCall],
     pub tools: &'a [ToolDefinition],
-    pub messages: &'a mut Vec<LlmMessage>,
-    pub all_tool_results: &'a mut Vec<ToolResult>,
-    pub event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
+    pub state: &'a mut TurnState,
+    pub publisher: std::sync::Arc<TurnPublisher>,
 }
 
 pub struct CommitToolResults<'a> {
     pub prepared: &'a [PreparedToolCall],
     pub results: BTreeMap<usize, ToolResult>,
-    pub messages: &'a mut Vec<LlmMessage>,
-    pub all_tool_results: &'a mut Vec<ToolResult>,
-    pub event_tx: &'a Option<mpsc::UnboundedSender<AgentSignal>>,
+    pub state: &'a mut TurnState,
+    pub publisher: std::sync::Arc<TurnPublisher>,
 }
 
 pub struct PendingCommittedToolResult {

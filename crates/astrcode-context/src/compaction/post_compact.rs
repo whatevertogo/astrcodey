@@ -227,7 +227,7 @@ mod tests {
     fn render(files: Vec<PostCompactFile>) -> String {
         let settings = ContextSettings::default();
         let message = post_compact_context_message(files, Vec::new(), &settings).unwrap();
-        message_text(&message)
+        message.joined_display_text("\n")
     }
 
     fn read_result_with_content(call_id: &str, content: &str) -> LlmMessage {
@@ -299,7 +299,7 @@ mod tests {
         )
         .unwrap();
 
-        let text = message_text(&message);
+        let text = message.joined_display_text("\n");
         assert!(text.contains("<post_compact_context>"));
         assert!(text.contains("src/lib.rs"));
         assert!(text.contains("fresh content"));
@@ -334,17 +334,5 @@ mod tests {
         let paths = recent_read_paths(&source, &[], &default_settings());
 
         assert_eq!(paths, ["src/ok.rs", "src/manual.rs"]);
-    }
-
-    fn message_text(message: &LlmMessage) -> String {
-        message
-            .content
-            .iter()
-            .map(|content| match content {
-                LlmContent::Text { text } => text.as_str(),
-                _ => "",
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

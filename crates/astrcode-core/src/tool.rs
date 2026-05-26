@@ -209,8 +209,8 @@ pub enum ToolError {
     #[error("Execution error: {0}")]
     Execution(String),
     /// 工具执行被钩子阻止。
-    #[error("Tool execution blocked by hook: {0}")]
-    Blocked(String),
+    #[error("Tool execution blocked by hook: {reason}")]
+    Blocked { reason: String },
     /// 工具执行超时。
     #[error("Timeout after {0}ms")]
     Timeout(u64),

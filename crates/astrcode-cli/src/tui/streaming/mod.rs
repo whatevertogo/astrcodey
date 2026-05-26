@@ -32,11 +32,6 @@ impl StreamState {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.queued_lines.clear();
-        self.has_seen_delta = false;
-    }
-
     pub fn enqueue(&mut self, lines: Vec<Line<'static>>) {
         let now = Instant::now();
         self.queued_lines

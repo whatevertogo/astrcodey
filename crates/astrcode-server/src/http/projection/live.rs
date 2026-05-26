@@ -82,11 +82,14 @@ pub(in crate::http) fn event_to_deltas(
             continued_session_id,
             ..
         } => {
-            let mut deltas: Vec<ConversationDeltaDto> = completed_block_from_payload(event)
-                .map(|block| ConversationDeltaDto::AppendBlock { block })
-                .into_iter()
-                .collect();
+            let mut deltas = Vec::new();
+            // 同会话 compact：等 SessionContinued + snapshot 刷新后再插入卡片，
+            // 避免 AppendBlock 把摘要误追加到列表末尾。
             if continued_session_id != &event.session_id {
+                deltas.extend(
+                    completed_block_from_payload(event)
+                        .map(|block| ConversationDeltaDto::AppendBlock { block }),
+                );
                 deltas.push(ConversationDeltaDto::SessionContinued {
                     parent_session_id: event.session_id.to_string(),
                     new_session_id: continued_session_id.to_string(),
@@ -484,12 +487,7 @@ mod tests {
         boundary.seq = Some(4);
 
         let boundary_deltas = event_to_deltas(&boundary, true);
-        assert!(matches!(
-            boundary_deltas.as_slice(),
-            [ConversationDeltaDto::AppendBlock {
-                block: ConversationBlockDto::CompactSummary { .. }
-            }]
-        ));
+        assert!(boundary_deltas.is_empty());
 
         let continuation = Event::new(
             "session-1".into(),

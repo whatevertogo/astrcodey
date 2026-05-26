@@ -96,5 +96,7 @@ async fn main() {
         }
     }
     tracing::info!("Server shutting down");
+    runtime.shutdown_token().cancel();
+    handler.shutdown().await;
     runtime.shutdown_extensions().await;
 }

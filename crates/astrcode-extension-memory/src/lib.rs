@@ -12,15 +12,11 @@ mod pipeline;
 mod pipeline_prompts;
 mod store;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use astrcode_core::{
-    extension::{
-        Extension, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionTasks, HookMode,
-        Registrar, StopReason,
-    },
-    llm::LlmProvider,
-    storage::EventReader,
+use astrcode_extension_sdk::extension::{
+    Extension, ExtensionCapability, ExtensionCtx, ExtensionError, ExtensionEvent,
+    ExtensionHostServices, ExtensionTasks, HookMode, Registrar, StopReason,
 };
 use handlers::{
     MemoryCommandHandler, MemoryDeleteHandler, MemoryRecallHandler, MemorySaveHandler,
@@ -29,36 +25,22 @@ use handlers::{
 use parking_lot::Mutex;
 use store::MemoryStorePool;
 
-/// 返回记忆扩展。
-///
-/// 需要 `small_llm` 用于记忆提取和增量召回。
-/// `small_llm` 为 None 时返回错误，提示用户配置小模型。
-pub fn extension(
-    small_llm: Option<Arc<dyn LlmProvider>>,
-    session_read: Arc<dyn EventReader>,
-) -> Result<Arc<dyn Extension>, ExtensionError> {
-    let small_llm = small_llm.ok_or_else(|| {
-        ExtensionError::Internal(
-            "Memory extension requires a small LLM provider. Please configure a small model (e.g. \
-             via runtime.small_llm) to enable memory."
-                .to_string(),
-        )
-    })?;
-
+/// 返回记忆扩展；所需宿主能力在标准 `start()` 生命周期中取得。
+pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
-    Ok(Arc::new(MemoryExtension {
+    Arc::new(MemoryExtension {
         store_pool,
-        small_llm,
-        session_read,
+        services: Arc::new(OnceLock::new()),
         pipeline: Arc::new(handlers::MemoryPipelineCoordinator::default()),
         tasks: Arc::new(Mutex::new(None)),
-    }))
+    })
 }
+
+pub(crate) type MemoryServices = Arc<OnceLock<Arc<ExtensionHostServices>>>;
 
 struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
-    small_llm: Arc<dyn LlmProvider>,
-    session_read: Arc<dyn EventReader>,
+    services: MemoryServices,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
     tasks: Arc<Mutex<Option<ExtensionTasks>>>,
 }
@@ -69,7 +51,31 @@ impl Extension for MemoryExtension {
         "astrcode.memory"
     }
 
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::SmallModel,
+            ExtensionCapability::SessionHistory,
+            ExtensionCapability::EmitEvents,
+        ]
+    }
+
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+        let services = ctx.host_services().cloned().ok_or_else(|| {
+            ExtensionError::Internal("memory extension requires host services".into())
+        })?;
+        if services.small_llm.is_none() {
+            return Err(ExtensionError::Internal(
+                "memory extension requires a configured small model provider".into(),
+            ));
+        }
+        if services.session_read.is_none() {
+            return Err(ExtensionError::Internal(
+                "memory extension requires session history access".into(),
+            ));
+        }
+        self.services.set(services).map_err(|_| {
+            ExtensionError::Internal("memory extension services already initialized".into())
+        })?;
         *self.tasks.lock() = Some(ctx.tasks().clone());
         Ok(())
     }
@@ -109,8 +115,7 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemorySessionStartHandler {
                 store_pool: self.store_pool.clone(),
-                session_read: self.session_read.clone(),
-                small_llm: self.small_llm.clone(),
+                services: self.services.clone(),
                 pipeline: self.pipeline.clone(),
                 tasks: self.tasks.clone(),
             }),
@@ -121,7 +126,7 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemoryTurnEndHandler {
                 store_pool: self.store_pool.clone(),
-                small_llm: self.small_llm.clone(),
+                services: self.services.clone(),
                 tasks: self.tasks.clone(),
                 extract_state: Default::default(),
             }),

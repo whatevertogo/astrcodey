@@ -1,160 +1,35 @@
 //! WASM 扩展协议 — 宿主状态、内存读写、host import 注册。
-//!
-//! 定义了 WASM 插件和宿主之间的通信协议：
-//! - 宿主通过 Linker 提供 host_xxx import 函数
-//! - 插件在 `extension_init()` 中调用这些 import 注册工具/命令/事件订阅
-//! - 宿主调用插件的 `handle_tool` / `handle_command` / `handle_event` 时， 通过线性内存传递 JSON
-//!   请求，插件通过 `host_set_response` 返回结果
 
-use astrcode_core::{
-    extension::{ExtensionEvent, HookMode, SlashCommand},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin},
-};
+use std::sync::Arc;
+
+use astrcode_extension_sdk::s5r::WireMessage;
 use wasmtime::{Caller, Linker, ResourceLimiter};
+use wasmtime_wasi::WasiCtxBuilder;
 
-// ─── Discriminant helpers ───────────────────────────────────────────────
+use crate::{extension_peer::ExtensionPeer, host_router::InvokeContext};
 
-pub const fn event_discriminant(event: ExtensionEvent) -> u8 {
-    match event {
-        ExtensionEvent::SessionStart => 0,
-        ExtensionEvent::SessionShutdown => 1,
-        ExtensionEvent::TurnStart => 2,
-        ExtensionEvent::TurnEnd => 3,
-        ExtensionEvent::PreToolUse => 4,
-        ExtensionEvent::PostToolUse => 5,
-        ExtensionEvent::BeforeProviderRequest => 6,
-        ExtensionEvent::AfterProviderResponse => 7,
-        ExtensionEvent::UserPromptSubmit => 8,
-        ExtensionEvent::PromptBuild => 9,
-        ExtensionEvent::PreCompact => 10,
-        ExtensionEvent::PostCompact => 11,
-        ExtensionEvent::TurnAborted => 12,
-        ExtensionEvent::PostToolUseFailure => 13,
-        ExtensionEvent::StepStart => 14,
-        ExtensionEvent::StepEnd => 15,
-        ExtensionEvent::PostRecap => 16,
-        // 保持既有 WASM ABI 判别值稳定；新事件只追加。
-        ExtensionEvent::SessionResume => 17,
-    }
-}
-
-pub fn event_from_discriminant(d: u8) -> Option<ExtensionEvent> {
-    match d {
-        0 => Some(ExtensionEvent::SessionStart),
-        1 => Some(ExtensionEvent::SessionShutdown),
-        2 => Some(ExtensionEvent::TurnStart),
-        3 => Some(ExtensionEvent::TurnEnd),
-        4 => Some(ExtensionEvent::PreToolUse),
-        5 => Some(ExtensionEvent::PostToolUse),
-        6 => Some(ExtensionEvent::BeforeProviderRequest),
-        7 => Some(ExtensionEvent::AfterProviderResponse),
-        8 => Some(ExtensionEvent::UserPromptSubmit),
-        9 => Some(ExtensionEvent::PromptBuild),
-        10 => Some(ExtensionEvent::PreCompact),
-        11 => Some(ExtensionEvent::PostCompact),
-        12 => Some(ExtensionEvent::TurnAborted),
-        13 => Some(ExtensionEvent::PostToolUseFailure),
-        14 => Some(ExtensionEvent::StepStart),
-        15 => Some(ExtensionEvent::StepEnd),
-        16 => Some(ExtensionEvent::PostRecap),
-        17 => Some(ExtensionEvent::SessionResume),
-        _ => None,
-    }
-}
-
-pub const fn mode_discriminant(mode: HookMode) -> u8 {
-    match mode {
-        HookMode::Blocking => 0,
-        HookMode::NonBlocking => 1,
-        HookMode::Advisory => 2,
-    }
-}
-
-pub fn mode_from_discriminant(d: u8) -> Option<HookMode> {
-    match d {
-        0 => Some(HookMode::Blocking),
-        1 => Some(HookMode::NonBlocking),
-        2 => Some(HookMode::Advisory),
-        _ => None,
-    }
-}
-
-// ─── Tool execution mode discriminants ───────────────────────────────────
-
-pub const fn execution_mode_discriminant(mode: ExecutionMode) -> u8 {
-    match mode {
-        ExecutionMode::Sequential => 0,
-        ExecutionMode::Parallel => 1,
-    }
-}
-
-/// 把 guest 传过来的判别值转成 `ExecutionMode`。
-///
-/// 未知值默认回退到 `Sequential` ——这是更安全的选择：并发执行可能与共享文件
-/// 状态、subprocess 等冲突。明确想要 `Parallel` 的扩展必须传 `1`。
-pub fn execution_mode_from_discriminant(d: u8) -> ExecutionMode {
-    match d {
-        1 => ExecutionMode::Parallel,
-        _ => ExecutionMode::Sequential,
-    }
-}
-
-// ─── Guest response effect codes ─────────────────────────────────────────
-
-/// WASM guest `handle_event` / `handle_tool` 返回的 effect code。
-pub const GUEST_EFFECT_OK: i8 = 0;
-/// 操作失败，content 为错误信息。
-pub const GUEST_EFFECT_ERROR: i8 = 1;
-/// 工具执行结果包含 `RunSession` outcome。
-pub const GUEST_EFFECT_TOOL_OUTCOME: i8 = 2;
-/// `PreToolUse` 返回 `ModifiedInput`，content 为新 tool_input JSON。
-pub const GUEST_EFFECT_MODIFIED_INPUT: i8 = 3;
-/// `PromptBuild` 返回贡献，content 为 `PromptContributions` JSON。
-pub const GUEST_EFFECT_PROMPT_CONTRIBUTIONS: i8 = 4;
-/// `Compact` 返回贡献，content 为 `CompactContributions` JSON。
-pub const GUEST_EFFECT_COMPACT_CONTRIBUTIONS: i8 = 5;
-/// `Provider` 返回 `ReplaceMessages`，content 为 messages JSON。
-pub const GUEST_EFFECT_REPLACE_MESSAGES: i8 = 6;
-/// `Provider` 返回 `AppendMessages`，content 为 messages JSON。
-pub const GUEST_EFFECT_APPEND_MESSAGES: i8 = 7;
-
-// ─── WASM resource limits ────────────────────────────────────────────────
-
-/// WASM guest 单次调用允许的最大 fuel（指令数）。仅作为 `HostState::new()` 的默认值，
-/// 生产路径通过 `with_limits()` 从配置系统注入。
 const DEFAULT_WASM_FUEL: u64 = 10_000_000;
-
-/// WASM guest 线性内存上限（64 MB）。
 const DEFAULT_WASM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 
-// ─── Host State ─────────────────────────────────────────────────────────
-
-/// 宿主在 wasmtime Store 中携带的状态。
-///
-/// 在 `extension_init()` 期间由 host import 函数填充，
-/// 在后续调用中用于读取插件响应。
+/// 宿主在 wasmtime `Store` 中携带的状态。
 pub struct HostState {
-    pub tools: Vec<ToolDefinition>,
-    pub commands: Vec<SlashCommand>,
-    pub subscriptions: Vec<(ExtensionEvent, HookMode)>,
-    pub response_ptr: u32,
-    pub response_len: u32,
-    /// 单次 guest 调用的 fuel 预算。
     pub fuel_budget: u64,
-    /// 线性内存增长上限。
     pub memory_limit: usize,
+    wasi_ctx: wasmtime_wasi::p1::WasiP1Ctx,
+    /// 对等会话（握手完成后设置）。
+    peer: Option<Arc<ExtensionPeer>>,
+    /// 当前 guest 调用栈上的 invoke 上下文（供嵌套 host import 使用）。
+    invoke_ctx: Option<InvokeContext>,
 }
 
 impl HostState {
     pub fn new() -> Self {
         Self {
-            tools: Vec::new(),
-            commands: Vec::new(),
-            subscriptions: Vec::new(),
-            response_ptr: 0,
-            response_len: 0,
             fuel_budget: DEFAULT_WASM_FUEL,
             memory_limit: DEFAULT_WASM_MEMORY_BYTES,
+            wasi_ctx: WasiCtxBuilder::new().build_p1(),
+            peer: None,
+            invoke_ctx: None,
         }
     }
 
@@ -162,6 +37,18 @@ impl HostState {
         self.fuel_budget = fuel;
         self.memory_limit = memory_bytes;
         self
+    }
+
+    pub fn set_peer(&mut self, peer: Arc<ExtensionPeer>) {
+        self.peer = Some(peer);
+    }
+
+    pub fn set_invoke_context(&mut self, ctx: &InvokeContext) {
+        self.invoke_ctx = Some(ctx.clone());
+    }
+
+    pub fn clear_invoke_context(&mut self) {
+        self.invoke_ctx = None;
     }
 }
 
@@ -172,24 +59,13 @@ impl Default for HostState {
 }
 
 impl ResourceLimiter for HostState {
-    // 只做总量上限限制：desired 是增长后的绝对大小，只要不超 limit 就放行。
-    // current（当前大小）和 maximum（wasm 模块自声明上限）不参与判断——
-    // 我们用自己的 memory_limit 作为唯一硬上限。
     fn memory_growing(
         &mut self,
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
-        let allowed = desired <= self.memory_limit;
-        if !allowed {
-            tracing::warn!(
-                desired_bytes = desired,
-                limit_bytes = self.memory_limit,
-                "wasm extension exceeded memory limit"
-            );
-        }
-        Ok(allowed)
+        Ok(desired <= self.memory_limit)
     }
 
     fn table_growing(
@@ -199,151 +75,137 @@ impl ResourceLimiter for HostState {
         _maximum: Option<usize>,
     ) -> Result<bool, wasmtime::Error> {
         const TABLE_ENTRY_LIMIT: usize = 1024;
-        let allowed = desired <= TABLE_ENTRY_LIMIT;
-        if !allowed {
-            tracing::warn!(
-                desired_entries = desired,
-                limit = TABLE_ENTRY_LIMIT,
-                "wasm extension exceeded table entry limit"
-            );
-        }
-        Ok(allowed)
+        Ok(desired <= TABLE_ENTRY_LIMIT)
     }
 }
 
-// ─── Memory helpers ─────────────────────────────────────────────────────
-
-fn read_memory_string(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) -> String {
+fn read_caller_string(caller: &mut Caller<'_, HostState>, ptr: u32, len: u32) -> String {
     if len == 0 {
         return String::new();
     }
     let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
-        tracing::warn!("wasm guest: memory export not found");
         return String::new();
     };
     let data = mem.data(caller);
     let start = ptr as usize;
-    let end = start + len as usize;
+    let end = start.saturating_add(len as usize);
     if end > data.len() {
-        tracing::warn!(
-            ptr,
-            len,
-            mem_size = data.len(),
-            "wasm guest: out-of-bounds memory read"
-        );
         return String::new();
     }
     String::from_utf8_lossy(&data[start..end]).into_owned()
 }
 
-// ─── Host import functions ──────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-fn host_register_tool(
-    mut caller: Caller<'_, HostState>,
-    name_ptr: i32,
-    name_len: i32,
-    desc_ptr: i32,
-    desc_len: i32,
-    schema_ptr: i32,
-    schema_len: i32,
-    execution_mode_disc: i32,
-) {
-    let name = read_memory_string(&mut caller, name_ptr as u32, name_len as u32);
-    let desc = read_memory_string(&mut caller, desc_ptr as u32, desc_len as u32);
-    let schema = read_memory_string(&mut caller, schema_ptr as u32, schema_len as u32);
-    let params: serde_json::Value = serde_json::from_str(&schema).unwrap_or(serde_json::json!({}));
-    let execution_mode = match execution_mode_disc {
-        1 => ExecutionMode::Parallel,
-        _ => ExecutionMode::Sequential,
-    };
-    caller.data_mut().tools.push(ToolDefinition {
-        name,
-        description: desc,
-        parameters: params,
-        origin: ToolOrigin::Extension,
-        execution_mode,
-    });
-}
-
-fn host_register_command(
-    mut caller: Caller<'_, HostState>,
-    name_ptr: i32,
-    name_len: i32,
-    desc_ptr: i32,
-    desc_len: i32,
-) {
-    let name = read_memory_string(&mut caller, name_ptr as u32, name_len as u32);
-    let desc = read_memory_string(&mut caller, desc_ptr as u32, desc_len as u32);
-    caller.data_mut().commands.push(SlashCommand {
-        name,
-        description: desc,
-        args_schema: None,
-    });
-}
-
-fn host_subscribe(mut caller: Caller<'_, HostState>, event_disc: i32, mode_disc: i32) {
-    let Some(event) = event_from_discriminant(event_disc as u8) else {
-        return;
-    };
-    let Some(mode) = mode_from_discriminant(mode_disc as u8) else {
-        return;
-    };
-    caller.data_mut().subscriptions.push((event, mode));
-}
-
-fn host_set_response(mut caller: Caller<'_, HostState>, ptr: i32, len: i32) {
-    caller.data_mut().response_ptr = ptr as u32;
-    caller.data_mut().response_len = len as u32;
-}
-
-fn host_log(mut caller: Caller<'_, HostState>, _level: i32, msg_ptr: i32, msg_len: i32) {
-    let msg = read_memory_string(&mut caller, msg_ptr as u32, msg_len as u32);
-    tracing::info!(target: "wasm_ext", "{}", msg);
-}
-
-// ─── Linker builder ─────────────────────────────────────────────────────
-
-/// 创建包含所有 host import 函数的 Linker。
-pub fn create_linker(engine: &wasmtime::Engine) -> Result<Linker<HostState>, String> {
-    let mut linker = Linker::new(engine);
-    linker
-        .func_wrap("env", "host_register_tool", host_register_tool)
-        .map_err(|e| format!("register host_register_tool: {e}"))?;
-    linker
-        .func_wrap("env", "host_register_command", host_register_command)
-        .map_err(|e| format!("register host_register_command: {e}"))?;
-    linker
-        .func_wrap("env", "host_subscribe", host_subscribe)
-        .map_err(|e| format!("register host_subscribe: {e}"))?;
-    linker
-        .func_wrap("env", "host_set_response", host_set_response)
-        .map_err(|e| format!("register host_set_response: {e}"))?;
-    linker
-        .func_wrap("env", "host_log", host_log)
-        .map_err(|e| format!("register host_log: {e}"))?;
-    Ok(linker)
-}
-
-/// 从 HostState 读取响应字符串并清空。
-pub fn take_response(store: &wasmtime::Store<HostState>, memory: &wasmtime::Memory) -> String {
-    let state = store.data();
-    let (ptr, len) = (state.response_ptr, state.response_len);
+pub fn read_str_from_memory(
+    store: &wasmtime::Store<HostState>,
+    memory: &wasmtime::Memory,
+    ptr: u32,
+    len: u32,
+) -> Result<String, String> {
     if len == 0 {
-        return String::new();
+        return Ok(String::new());
     }
     let data = memory.data(store);
     let start = ptr as usize;
-    let end = start + len as usize;
+    let end = start.checked_add(len as usize).ok_or("ptr+len overflow")?;
     if end > data.len() {
-        return String::new();
+        return Err(format!("out-of-bounds read: ptr={ptr}, len={len}"));
     }
-    String::from_utf8_lossy(&data[start..end]).into_owned()
+    Ok(String::from_utf8_lossy(&data[start..end]).into_owned())
 }
 
-/// 向 guest 内存写入数据，返回 (ptr, len)。
-///
-/// 使用 guest 导出的 `alloc` 函数分配空间。
+fn write_result_to_guest(caller: &mut Caller<'_, HostState>, resp_bytes: &[u8]) -> i64 {
+    let resp_len = resp_bytes.len();
+    let Some(alloc_export) = caller.get_export("alloc").and_then(|e| e.into_func()) else {
+        return 0;
+    };
+    let Ok(typed_alloc) = alloc_export.typed::<i32, i32>(&*caller) else {
+        return 0;
+    };
+    let ptr = match typed_alloc.call(&mut *caller, resp_len as i32) {
+        Ok(p) => p as u32,
+        Err(_) => return 0,
+    };
+
+    let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return 0;
+    };
+    let start = ptr as usize;
+    let end = start + resp_len;
+    if end > mem.data(&*caller).len() {
+        return 0;
+    }
+    mem.data_mut(&mut *caller)[start..end].copy_from_slice(resp_bytes);
+    ((ptr as i64) << 32) | (resp_len as i64)
+}
+
+fn host_log(mut caller: Caller<'_, HostState>, level: i32, msg_ptr: i32, msg_len: i32) {
+    let msg = read_caller_string(&mut caller, msg_ptr as u32, msg_len as u32);
+    match level {
+        0 => tracing::trace!(target: "wasm_ext", "{msg}"),
+        1 => tracing::debug!(target: "wasm_ext", "{msg}"),
+        3 => tracing::warn!(target: "wasm_ext", "{msg}"),
+        4 => tracing::error!(target: "wasm_ext", "{msg}"),
+        _ => tracing::info!(target: "wasm_ext", "{msg}"),
+    }
+}
+
+/// guest→host 统一 RPC 入口（与 guest export `peer_exchange` 对称）。
+fn peer_exchange_import(mut caller: Caller<'_, HostState>, req_ptr: i32, req_len: i32) -> i64 {
+    let json = read_caller_string(&mut caller, req_ptr as u32, req_len as u32);
+    let resp_json = {
+        let state = caller.data();
+        let Some(peer_mtx) = state.peer.as_ref() else {
+            return write_result_to_guest(
+                &mut caller,
+                r#"{"type":"result","id":"?","kind":"invoke_result","success":false,"error":{"code":"not_ready","message":"peer not initialized","retryable":false}}"#
+                    .as_bytes(),
+            );
+        };
+        let Some(ctx) = state.invoke_ctx.as_ref() else {
+            return write_result_to_guest(
+                &mut caller,
+                r#"{"type":"result","id":"?","kind":"invoke_result","success":false,"error":{"code":"no_context","message":"invoke context missing","retryable":false}}"#
+                    .as_bytes(),
+            );
+        };
+        let msg: WireMessage = match serde_json::from_str(&json) {
+            Ok(m) => m,
+            Err(e) => {
+                let err = format!(
+                    r#"{{"type":"result","id":"?","kind":"invoke_result","success":false,"error":{{"code":"invalid_message","message":"{e}","retryable":false}}}}"#
+                );
+                return write_result_to_guest(&mut caller, err.as_bytes());
+            },
+        };
+        match peer_mtx.handle_inbound_sync(msg, ctx) {
+            Ok(resp) => match serde_json::to_string(&resp) {
+                Ok(s) => s,
+                Err(e) => format!(
+                    r#"{{"type":"result","id":"?","kind":"invoke_result","success":false,"error":{{"code":"internal","message":"{e}","retryable":false}}}}"#
+                ),
+            },
+            Err(e) => format!(
+                r#"{{"type":"result","id":"?","kind":"invoke_result","success":false,"error":{{"code":"transport","message":"{}","retryable":false}}}}"#,
+                e.0
+            ),
+        }
+    };
+    write_result_to_guest(&mut caller, resp_json.as_bytes())
+}
+
+pub fn create_linker(engine: &wasmtime::Engine) -> Result<Linker<HostState>, String> {
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut HostState| &mut state.wasi_ctx)
+        .map_err(|e| format!("add wasi to linker: {e}"))?;
+    linker
+        .func_wrap("env", "host_log", host_log)
+        .map_err(|e| format!("register host_log: {e}"))?;
+    linker
+        .func_wrap("env", "peer_exchange", peer_exchange_import)
+        .map_err(|e| format!("register peer_exchange: {e}"))?;
+    Ok(linker)
+}
+
 pub fn write_to_guest(
     store: &mut wasmtime::Store<HostState>,
     memory: &wasmtime::Memory,
@@ -355,7 +217,9 @@ pub fn write_to_guest(
         .map_err(|e| format!("wasm alloc failed: {e}"))? as u32;
     let mem_data = memory.data_mut(&mut *store);
     let start = ptr as usize;
-    let end = start + data.len();
+    let end = start
+        .checked_add(data.len())
+        .ok_or("ptr+len overflow in write_to_guest")?;
     if end > mem_data.len() {
         return Err("wasm alloc returned out-of-bounds pointer".into());
     }

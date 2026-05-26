@@ -43,25 +43,17 @@ pub struct ServerEventBus {
     /// per-session 的 streaming 状态，由 forwarder 从 live 事件流维护。
     /// 外层 Mutex 保护 HashMap 结构；内层 Arc<Mutex> 让 forwarder 无需竞争整个 map。
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
-    /// TurnScheduler 引用，用于后台任务完成后触发继续处理。
-    /// 使用 OnceCell 避免构造时的循环依赖问题。
-    scheduler: tokio::sync::OnceCell<Arc<TurnScheduler>>,
+    scheduler: Arc<TurnScheduler>,
 }
 
 impl ServerEventBus {
-    pub fn new(tx: Arc<EventFanout<ClientNotification>>) -> Self {
+    pub fn new(tx: Arc<EventFanout<ClientNotification>>, scheduler: Arc<TurnScheduler>) -> Self {
         Self {
             tx,
             attached: Mutex::new(HashSet::new()),
             streaming: Mutex::new(HashMap::new()),
-            scheduler: tokio::sync::OnceCell::new(),
+            scheduler,
         }
-    }
-
-    /// 绑定 TurnScheduler，用于后台任务完成后触发继续处理。
-    /// 此方法应在 Server 构造完成后调用，解决构造时的循环依赖问题。
-    pub async fn bind_scheduler(&self, scheduler: Arc<TurnScheduler>) {
-        let _ = self.scheduler.set(scheduler);
     }
 
     /// 返回内部 fan-out 通道的引用。
@@ -94,7 +86,7 @@ impl ServerEventBus {
         }
         let mut rx = session.subscribe();
         let tx = Arc::clone(&self.tx);
-        let scheduler = self.scheduler.get().cloned();
+        let scheduler = Arc::clone(&self.scheduler);
         let state = Arc::clone(
             self.streaming
                 .lock()
@@ -109,37 +101,26 @@ impl ServerEventBus {
                 // 先判断是否需要异步处理（避免后续克隆 event）
                 let needs_task_step =
                     matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. });
-                let needs_turn_completed =
-                    matches!(event.payload, EventPayload::TurnCompleted { .. });
 
                 // 发送 event（消耗所有权，避免克隆）
                 tx.send(ClientNotification::Event(event));
 
+                // 排队输入在 completion watcher 于 registry 清理后调用
+                // `TurnScheduler::on_turn_completed`，避免与 registry 竞态。
+
                 // 异步处理（如果需要）
                 if needs_task_step {
-                    if let Some(ref scheduler) = scheduler {
-                        let scheduler = Arc::clone(scheduler);
-                        let sid = session_id.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = scheduler.notify_step(sid.clone(), "task").await {
-                                tracing::warn!(
-                                    session_id = %sid,
-                                    error = %e,
-                                    "failed to notify background completion (step path)"
-                                );
-                            }
-                        });
-                    }
-                }
-
-                if needs_turn_completed {
-                    if let Some(ref scheduler) = scheduler {
-                        let scheduler = Arc::clone(scheduler);
-                        let sid = session_id.clone();
-                        tokio::spawn(async move {
-                            scheduler.on_turn_completed(&sid).await;
-                        });
-                    }
+                    let scheduler = Arc::clone(&scheduler);
+                    let sid = session_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = scheduler.notify_step(sid.clone(), "task").await {
+                            tracing::warn!(
+                                session_id = %sid,
+                                error = %e,
+                                "failed to notify background completion (step path)"
+                            );
+                        }
+                    });
                 }
             }
         });

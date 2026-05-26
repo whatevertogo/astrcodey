@@ -4,32 +4,24 @@
 //! `astrcode-extensions` owns the extension runtime, while this crate decides
 //! which first-party extensions are linked into a binary.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
-use astrcode_core::extension::ExtensionHostServices;
 use astrcode_extensions::loader::{ExtensionLoadContext, ExtensionSource, LoadExtensionsResult};
 
 /// Source for all enabled first-party bundled extensions.
 pub struct BundledExtensionSource {
     extension_states: BTreeMap<String, bool>,
-    host_services: Option<Arc<ExtensionHostServices>>,
 }
 
 impl BundledExtensionSource {
-    pub fn new(
-        extension_states: BTreeMap<String, bool>,
-        host_services: Option<Arc<ExtensionHostServices>>,
-    ) -> Self {
-        Self {
-            extension_states,
-            host_services,
-        }
+    pub fn new(extension_states: BTreeMap<String, bool>) -> Self {
+        Self { extension_states }
     }
 }
 
 impl Default for BundledExtensionSource {
     fn default() -> Self {
-        Self::new(BTreeMap::new(), None)
+        Self::new(BTreeMap::new())
     }
 }
 
@@ -37,11 +29,7 @@ impl Default for BundledExtensionSource {
 impl ExtensionSource for BundledExtensionSource {
     async fn load(&self, _ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
         let mut errors = Vec::new();
-        let extensions = bundled_extensions(
-            &self.extension_states,
-            self.host_services.as_ref(),
-            &mut errors,
-        );
+        let extensions = bundled_extensions(&self.extension_states, &mut errors);
         LoadExtensionsResult { extensions, errors }
     }
 }
@@ -52,9 +40,8 @@ impl ExtensionSource for BundledExtensionSource {
 /// same tool name.
 pub fn bundled_extensions(
     extension_states: &BTreeMap<String, bool>,
-    host_services: Option<&Arc<ExtensionHostServices>>,
-    errors: &mut Vec<String>,
-) -> Vec<std::sync::Arc<dyn astrcode_core::extension::Extension>> {
+    _errors: &mut Vec<String>,
+) -> Vec<std::sync::Arc<dyn astrcode_extension_sdk::extension::Extension>> {
     let mut extensions = Vec::new();
 
     #[cfg(feature = "agent-tools")]
@@ -79,18 +66,7 @@ pub fn bundled_extensions(
     }
     #[cfg(feature = "memory")]
     if is_enabled(extension_states, "astrcode.memory") {
-        match host_services {
-            Some(hs) => {
-                match astrcode_extension_memory::extension(
-                    hs.small_llm.clone(),
-                    hs.session_read.clone(),
-                ) {
-                    Ok(ext) => extensions.push(ext),
-                    Err(e) => errors.push(format!("astrcode.memory failed to load: {e}")),
-                }
-            },
-            None => errors.push("astrcode.memory requires ExtensionHostServices".to_string()),
-        }
+        extensions.push(astrcode_extension_memory::extension());
     }
 
     extensions

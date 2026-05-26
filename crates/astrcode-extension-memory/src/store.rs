@@ -181,8 +181,9 @@ impl MemoryStore {
     pub(crate) fn new(project_path: Option<&str>) -> std::io::Result<Self> {
         let dir = if let Some(proj_path) = project_path {
             // 基于项目路径创建唯一的存储目录
-            let project_key =
-                astrcode_core::types::project_key_from_path(std::path::Path::new(proj_path));
+            let project_key = astrcode_extension_sdk::types::project_key_from_path(
+                std::path::Path::new(proj_path),
+            );
             hostpaths::astrcode_dir()
                 .join("projects")
                 .join(project_key)

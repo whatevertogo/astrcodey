@@ -11,11 +11,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
-        CommandContext, CommandDiscoveryHandler, CommandHandler, Extension, ExtensionCommandResult,
-        ExtensionError, PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar,
-        ToolHandler,
+        CommandContext, CommandDiscoveryHandler, CommandHandler, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolHandler,
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
@@ -40,6 +40,10 @@ struct SkillExtension;
 impl Extension for SkillExtension {
     fn id(&self) -> &str {
         "astrcode-skill"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::WorkspaceRead]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -107,7 +111,7 @@ impl ToolHandler for SkillToolHandler {
         tool_name: &str,
         arguments: Value,
         working_dir: &str,
-        ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != SKILL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -152,7 +156,7 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
         &self,
         working_dir: &str,
     ) -> Vec<(
-        astrcode_core::extension::SlashCommand,
+        astrcode_extension_sdk::extension::SlashCommand,
         Arc<dyn CommandHandler>,
     )> {
         self.shared
@@ -161,7 +165,7 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
             .map(|skill| {
                 let description =
                     truncate_for_index(&skill.index_description(), MAX_DESCRIPTION_CHARS);
-                let cmd = astrcode_core::extension::SlashCommand {
+                let cmd = astrcode_extension_sdk::extension::SlashCommand {
                     name: skill.id.clone(),
                     description,
                     args_schema: None,
@@ -209,11 +213,11 @@ impl CommandHandler for SkillCommandHandler {
 }
 
 fn skill_tool_metadata()
--> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+-> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
     let mut map = std::collections::HashMap::new();
     map.insert(
         SKILL_TOOL_NAME.to_string(),
-        astrcode_core::tool::ToolPromptMetadata::new(
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
             "Call `Skill` with the exact skill name from [Skills] before continuing when a task \
              matches one of the listed skills.",
         )
@@ -222,7 +226,7 @@ fn skill_tool_metadata()
             "If the response says the skill was not found, the available skill names are listed \
              with it. Pick from that list — do not retry with a guessed name.",
         )
-        .prompt_tag(astrcode_core::tool::ToolPromptTag::Discovery),
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Discovery),
     );
     map
 }
@@ -665,7 +669,7 @@ fn truncate_for_index(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{
+    use astrcode_extension_sdk::{
         config::ModelSelection,
         extension::CommandContext,
         tool::{ToolCapabilities, ToolExecutionContext},
@@ -864,7 +868,7 @@ mod tests {
         let ctx = PromptBuildContext {
             session_id: "test".into(),
             working_dir: workspace.to_string_lossy().into_owned(),
-            model: astrcode_core::config::ModelSelection::simple("mock"),
+            model: astrcode_extension_sdk::config::ModelSelection::simple("mock"),
             tools: vec![skill_tool_definition()],
         };
         let contributions = handler.handle(ctx).await.expect("prompt build");
@@ -919,7 +923,8 @@ mod tests {
             .await
             .expect("skill command");
 
-        let astrcode_core::extension::ExtensionCommandResult::StartTurn { instructions } = result
+        let astrcode_extension_sdk::extension::ExtensionCommandResult::StartTurn { instructions } =
+            result
         else {
             panic!("skill command should start a turn");
         };

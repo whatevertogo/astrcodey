@@ -272,7 +272,7 @@ async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
 }
 
 async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String {
-    match runtime.session_manager.latest_cursor(session_id).await {
+    match runtime.session_manager().latest_cursor(session_id).await {
         Ok(Some(cursor)) => cursor,
         Ok(None) => "0".to_string(),
         Err(error) => {
@@ -598,6 +598,12 @@ fn event_adds_message(event: &Event) -> bool {
 }
 
 fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {
-    let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".into());
+    let data = match serde_json::to_string(value) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::error!(%error, "failed to serialize SSE conversation envelope");
+            r#"{"error":"serialization_failed"}"#.to_string()
+        },
+    };
     SseEvent::default().event("conversation").data(data)
 }

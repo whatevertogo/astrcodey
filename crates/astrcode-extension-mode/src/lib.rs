@@ -12,26 +12,25 @@
 //! - `switchMode`: switch between code and plan modes, with exit gate in plan mode
 //! - `upsertSessionPlan`: create or update the session plan artifact (plan mode only)
 //!
-//! Mode state: `<session>/mode/mode-state.json`
-//! Plan artifact: `<session>/plan/plan.md`
+//! Mode state: `<session>/extension_data/astrcode-mode/mode/mode-state.json`
+//! Plan artifact: `<session>/extension_data/astrcode-mode/plan/plan.md`
 
 mod catalog;
 mod prompts;
 mod store;
 mod tools;
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
-        HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
-        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
+        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        ToolHandler,
     },
     llm::LlmMessage,
+    state,
     tool::{ToolResult, tool_metadata},
 };
 use serde_json::json;
@@ -45,10 +44,11 @@ use crate::{
     },
 };
 
-fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<&Path, ExtensionError> {
+fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<PathBuf, ExtensionError> {
     session_store_dir
         .as_deref()
-        .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))
+        .map(|base| state::session_data_dir(base, "astrcode-mode"))
+        .ok_or_else(|| ExtensionError::Internal("session state capability not available".into()))
 }
 
 pub fn extension() -> Arc<dyn Extension> {
@@ -65,6 +65,10 @@ struct ModeExtension {
 impl Extension for ModeExtension {
     fn id(&self) -> &str {
         "astrcode-mode"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::SessionState]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -96,14 +100,14 @@ impl Extension for ModeExtension {
             Arc::new(ModeProviderHandler),
         );
         // 注册快捷键：Shift+Tab 切换模式
-        reg.keybinding(astrcode_core::extension::Keybinding {
+        reg.keybinding(astrcode_extension_sdk::extension::Keybinding {
             key: "shift+tab".into(),
             command: "mode".into(),
             arguments: String::new(),
             description: "Toggle plan/code mode".into(),
         });
         // 注册状态栏项：显示当前模式
-        reg.status_item(astrcode_core::extension::StatusItem {
+        reg.status_item(astrcode_extension_sdk::extension::StatusItem {
             id: "mode".into(),
             text: "code".into(),
             priority: 0,
@@ -134,11 +138,11 @@ impl ToolHandler for ModeToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &astrcode_core::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
         let base = require_session_base(&ctx.capabilities.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
-        let plan_dir = store::plan_dir_from_base(base);
+        let mode_root = store::mode_dir_from_base(&base);
+        let plan_dir = store::plan_dir_from_base(&base);
 
         match tool_name {
             SWITCH_MODE_TOOL_NAME => Ok(
@@ -172,7 +176,7 @@ struct ModePreToolUseHandler {
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let mode_root = store::mode_dir_from_base(&base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
         let mode_id = ModeId::from_raw(&state.current_mode);
         let Some(spec) = self.catalog.get(&mode_id) else {
@@ -209,7 +213,7 @@ impl CommandHandler for ModeSlashCommandHandler {
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         let target_mode = match arguments.trim() {
@@ -256,7 +260,7 @@ impl CommandHandler for ModeSlashCommandHandler {
 impl ProviderHandler for ModeProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
         let base = require_session_base(&ctx.session_store_dir)?;
-        let mode_root = store::mode_dir_from_base(base);
+        let mode_root = store::mode_dir_from_base(&base);
         let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
         if let Some(context) = state.pending_transition_context.take() {
@@ -270,9 +274,9 @@ impl ProviderHandler for ModeProviderHandler {
     }
 }
 
-fn mode_tool_metadata() -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>
-{
-    use astrcode_core::tool::ToolPromptMetadata;
+fn mode_tool_metadata()
+-> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
+    use astrcode_extension_sdk::tool::ToolPromptMetadata;
     let mut map = std::collections::HashMap::new();
     map.insert(
         SWITCH_MODE_TOOL_NAME.to_string(),
@@ -280,14 +284,14 @@ fn mode_tool_metadata() -> std::collections::HashMap<String, astrcode_core::tool
             "Use `switchMode` to enter plan mode for read-only exploration, or return to code \
              mode for execution.",
         )
-        .prompt_tag(astrcode_core::tool::ToolPromptTag::Planning),
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map.insert(
         UPSERT_PLAN_TOOL_NAME.to_string(),
         ToolPromptMetadata::new(
             "Only available in plan mode. The plan must contain all required headings.",
         )
-        .prompt_tag(astrcode_core::tool::ToolPromptTag::Planning),
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map
 }

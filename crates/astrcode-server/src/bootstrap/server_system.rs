@@ -22,9 +22,9 @@ impl SessionResourceCleanup for TurnSchedulerCleanup {
     fn cleanup(&self, session_id: &SessionId) {
         let scheduler = Arc::clone(&self.scheduler);
         let sid = session_id.clone();
-        // 使用 tokio::spawn 调用 async cleanup
         tokio::spawn(async move {
             scheduler.cleanup(&sid).await;
+            tracing::debug!(session_id = %sid, "turn scheduler cleanup finished");
         });
     }
 }
@@ -51,38 +51,33 @@ pub fn spawn_server_system(
     runtime: &Arc<ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> ServerSystem {
-    let event_bus = Arc::new(ServerEventBus::new(Arc::clone(&event_tx)));
-
-    runtime
-        .session_manager
-        .bind_event_bus(Arc::clone(&event_bus));
-
     let registry = Arc::new(TurnRegistry::new());
     let scheduler = Arc::new(TurnScheduler::new(
-        runtime.session_manager.clone(),
+        runtime.session_manager().clone(),
         Arc::clone(&registry),
     ));
 
-    // 绑定 scheduler 到 event_bus，用于后台任务完成后触发继续处理
-    // 使用 tokio::spawn 是因为 bind_scheduler 是 async 的
-    let scheduler_for_bind = Arc::clone(&scheduler);
-    let event_bus_for_bind = Arc::clone(&event_bus);
-    tokio::spawn(async move {
-        event_bus_for_bind.bind_scheduler(scheduler_for_bind).await;
-    });
+    let event_bus = Arc::new(ServerEventBus::new(
+        Arc::clone(&event_tx),
+        Arc::clone(&scheduler),
+    ));
+
+    runtime
+        .session_manager()
+        .bind_event_bus(Arc::clone(&event_bus));
 
     // 绑定子会话操作能力到扩展运行时
     runtime
-        .extension_runner
+        .extension_runner()
         .bind_session_ops(Arc::new(ServerSessionOperations {
-            session_manager: Arc::clone(&runtime.session_manager),
+            session_manager: Arc::clone(runtime.session_manager()),
             scheduler: Arc::clone(&scheduler),
         }));
 
     // 注册 TurnScheduler 到 session 资源清理链
     // 确保 session delete/recycle 时清理待处理消息队列
     runtime
-        .session_manager
+        .session_manager()
         .add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
             scheduler: Arc::clone(&scheduler),
         }));

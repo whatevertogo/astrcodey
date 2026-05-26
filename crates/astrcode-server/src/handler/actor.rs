@@ -3,14 +3,17 @@
 //! 提供 `CommandHandle` 作为外部访问入口，所有操作通过消息通道异步执行，
 //! 避免并发冲突并简化状态管理。
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_core::types::{SessionId, TurnId};
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
-use crate::{bootstrap::ServerRuntime, turn_scheduler::TurnScheduler};
+use crate::{
+    bootstrap::ServerRuntime,
+    turn_scheduler::{SubmitOutcome, TurnScheduler},
+};
 
 /// 外部访问 CommandHandler 的句柄，通过消息通道发送命令。
 #[derive(Clone)]
@@ -147,6 +150,14 @@ impl CommandHandle {
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
+    /// 停止 actor 主循环并等待任务退出。
+    pub async fn shutdown(&self) {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(CommandMessage::Shutdown { reply }).is_ok() {
+            let _ = rx.await;
+        }
+    }
+
     /// 删除指定工作目录下的所有会话，返回删除数量。
     pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
         let (reply, rx) = oneshot::channel();
@@ -193,7 +204,10 @@ pub(in crate::handler) enum CommandMessage {
             Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError>,
         >,
     },
-    /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）
+    /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）。
+    ///
+    /// `session_id` / `completion` 供 actor 侧空闲 recap 门控；
+    /// `turn_id` 用于日志与后续 stale-cleanup 校验。
     AgentTurnCleanup {
         session_id: SessionId,
         turn_id: TurnId,
@@ -221,40 +235,27 @@ pub(in crate::handler) enum CommandMessage {
         working_dir: String,
         reply: oneshot::Sender<Result<usize, HandlerError>>,
     },
+    /// 关闭 actor 主循环
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 impl CommandHandler {
-    fn enqueue_input_for_next_turn(&mut self, session_id: SessionId, text: String) {
-        self.queued_inputs
-            .entry(session_id)
-            .or_default()
-            .push_back(text);
-    }
-
-    async fn maybe_start_queued_turn(&mut self, session_id: &SessionId) {
-        if self.scheduler.registry().has_active(session_id) {
-            return;
-        }
-        let next_text = self
-            .queued_inputs
-            .get_mut(session_id)
-            .and_then(|queue| queue.pop_front());
-        let Some(text) = next_text else {
-            return;
-        };
-        if self
-            .queued_inputs
-            .get(session_id)
-            .is_some_and(|queue| queue.is_empty())
-        {
-            self.queued_inputs.remove(session_id);
-        }
-        if let Err(error) = self
-            .start_turn_for_session(session_id.clone(), text, None)
-            .await
-        {
-            tracing::error!(%session_id, error = %error, "failed to start queued turn");
-            self.send_error(super::slash::command_error_code(&error), &error.to_string());
+    async fn queue_input_for_next_turn(
+        &self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<PromptSubmission, HandlerError> {
+        match self.scheduler.notify_turn(session_id, text).await {
+            Ok(SubmitOutcome::Queued) => Ok(PromptSubmission::Handled {
+                message: "queued for next turn".into(),
+            }),
+            Ok(SubmitOutcome::Started { turn_id, .. }) => {
+                Ok(PromptSubmission::Accepted { turn_id })
+            },
+            Ok(SubmitOutcome::Injected) => Ok(PromptSubmission::Handled {
+                message: "injected into active turn".into(),
+            }),
+            Err(e) => Err(HandlerError::from(e)),
         }
     }
 
@@ -266,13 +267,12 @@ impl CommandHandler {
         actor_tx: mpsc::UnboundedSender<CommandMessage>,
     ) -> Self {
         let model_selection =
-            super::model_selection::ModelSelectionController::new(runtime.config_manager.clone());
+            super::model_selection::ModelSelectionController::new(runtime.config_manager().clone());
         Self {
             runtime,
             active_session_id: None,
             scheduler,
             event_bus,
-            queued_inputs: HashMap::new(),
             actor_tx,
             model_selection,
         }
@@ -347,17 +347,28 @@ impl CommandHandler {
                 recap_deadline = None;
             }
 
-            // Turn 完成 → 启动/重置 recap 计时
-            let starts_timer = matches!(&message, CommandMessage::AgentTurnCleanup { .. });
+            // Turn 正常结束且仍是当前活跃 session → 启动空闲 recap 计时
+            let starts_recap_timer = match &message {
+                CommandMessage::AgentTurnCleanup {
+                    session_id,
+                    completion,
+                    ..
+                } => {
+                    matches!(completion, TurnCompletion::Completed { .. })
+                        && self.active_session_id.as_ref() == Some(session_id)
+                        && !self.scheduler.registry().has_active(session_id)
+                },
+                _ => false,
+            };
+
+            if matches!(&message, CommandMessage::Shutdown { .. }) {
+                let _ = self.handle_message(message).await;
+                break;
+            }
 
             self.handle_message(message).await;
 
-            if starts_timer
-                && !self
-                    .active_session_id
-                    .as_ref()
-                    .is_some_and(|sid| self.scheduler.registry().has_active(sid))
-            {
+            if starts_recap_timer {
                 recap_deadline = Some(Instant::now() + IDLE_RECAP_DELAY);
             }
         }
@@ -377,14 +388,12 @@ impl CommandHandler {
                 text,
                 reply,
             } => {
-                if self.scheduler.registry().has_active(&session_id) {
-                    self.enqueue_input_for_next_turn(session_id, text);
-                    let _ = reply.send(Ok(PromptSubmission::Handled {
-                        message: "queued for next turn".into(),
-                    }));
+                let result = if self.scheduler.registry().has_active(&session_id) {
+                    self.queue_input_for_next_turn(session_id, text).await
                 } else {
-                    let _ = reply.send(self.submit_input_for_session(session_id, text).await);
-                }
+                    self.submit_input_for_session(session_id, text).await
+                };
+                let _ = reply.send(result);
             },
             CommandMessage::CompactSession {
                 session_id,
@@ -396,9 +405,6 @@ impl CommandHandler {
             },
             CommandMessage::AbortSession { session_id, reply } => {
                 let result = self.abort_session(&session_id).await;
-                if result.is_ok() {
-                    self.maybe_start_queued_turn(&session_id).await;
-                }
                 let _ = reply.send(result);
             },
             CommandMessage::ListCommandsForSession { session_id, reply } => {
@@ -410,12 +416,13 @@ impl CommandHandler {
                 turn_id,
                 completion,
             } => {
-                let sid = session_id.clone();
-                let _ = turn_id;
-                // abort 完成时不 dispatch，已由 AbortSession handler 处理。
-                if !matches!(completion, TurnCompletion::Aborted) {
-                    self.maybe_start_queued_turn(&sid).await;
-                }
+                tracing::debug!(
+                    session_id = %session_id,
+                    turn_id = %turn_id,
+                    ?completion,
+                    "agent turn cleanup"
+                );
+                // 排队输入由 TurnCompleted → TurnScheduler::on_turn_completed 统一出队。
             },
             CommandMessage::SubmitInputWithCompletion {
                 session_id,
@@ -436,6 +443,9 @@ impl CommandHandler {
             },
             CommandMessage::DeleteProject { working_dir, reply } => {
                 let _ = reply.send(self.delete_project(working_dir).await);
+            },
+            CommandMessage::Shutdown { reply } => {
+                let _ = reply.send(());
             },
         }
     }

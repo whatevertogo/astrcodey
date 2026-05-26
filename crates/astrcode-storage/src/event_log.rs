@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -17,6 +17,8 @@ use astrcode_core::{
     event::{Event, EventPayload},
     storage::StorageError,
 };
+use astrcode_support::sync::lock_parking;
+use parking_lot::Mutex;
 
 /// An append-only JSONL event log.
 ///
@@ -27,26 +29,25 @@ use astrcode_core::{
 pub struct EventLog {
     path: PathBuf,
     writer: Arc<Mutex<BufWriter<File>>>,
-    next_seq: Mutex<u64>,
+    next_seq: Arc<Mutex<u64>>,
     sync_pending: Arc<AtomicBool>,
 }
 
 impl Drop for EventLog {
     fn drop(&mut self) {
-        if let Ok(mut writer) = self.writer.lock() {
-            if let Err(e) = writer.flush() {
-                tracing::warn!(
-                    "Failed to flush event log '{}' on drop: {e}",
-                    self.path.display()
-                );
-                return;
-            }
-            if let Err(e) = writer.get_ref().sync_all() {
-                tracing::warn!(
-                    "Failed to sync event log '{}' on drop: {e}",
-                    self.path.display()
-                );
-            }
+        let mut writer = lock_parking(&self.writer);
+        if let Err(e) = writer.flush() {
+            tracing::warn!(
+                "Failed to flush event log '{}' on drop: {e}",
+                self.path.display()
+            );
+            return;
+        }
+        if let Err(e) = writer.get_ref().sync_all() {
+            tracing::warn!(
+                "Failed to sync event log '{}' on drop: {e}",
+                self.path.display()
+            );
         }
     }
 }
@@ -69,7 +70,7 @@ impl EventLog {
             Self {
                 path,
                 writer: Arc::new(Mutex::new(writer)),
-                next_seq: Mutex::new(1),
+                next_seq: Arc::new(Mutex::new(1)),
                 sync_pending: Arc::new(AtomicBool::new(false)),
             },
             event,
@@ -94,7 +95,7 @@ impl EventLog {
         Ok(Self {
             path,
             writer: Arc::new(Mutex::new(BufWriter::new(file))),
-            next_seq: Mutex::new(next_seq),
+            next_seq: Arc::new(Mutex::new(next_seq)),
             sync_pending: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -105,29 +106,25 @@ impl EventLog {
     /// `sync_all()` until [`force_sync`] is called, typically at turn boundaries.
     /// I/O is offloaded to a blocking thread to avoid stalling the tokio runtime.
     pub async fn append(&self, mut event: Event) -> Result<Event, StorageError> {
-        {
-            let mut next_seq = self
-                .next_seq
-                .lock()
-                .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
-            event.seq = Some(*next_seq);
-            *next_seq += 1;
-        }
-
-        let line = serde_json::to_string(&event)?;
-        let writer = self.writer.clone();
+        let writer = Arc::clone(&self.writer);
+        let next_seq = Arc::clone(&self.next_seq);
         let path = self.path.clone();
-        let sync_pending = self.sync_pending.clone();
+        let sync_pending = Arc::clone(&self.sync_pending);
 
         tokio::task::spawn_blocking(move || {
-            let mut guard = writer
-                .lock()
-                .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
+            // 持有 seq 锁直到写入完成，避免并发 append 在磁盘上出现 seq 乱序。
+            let mut seq_guard = lock_parking(&next_seq);
+            event.seq = Some(*seq_guard);
+            *seq_guard += 1;
+
+            let line = serde_json::to_string(&event)?;
+            let mut guard = lock_parking(&writer);
             writeln!(guard, "{}", line)?;
             guard.flush().map_err(|e| {
                 StorageError::Io(std::io::Error::new(e.kind(), enhance_flush_error(&path, e)))
             })?;
             drop(guard);
+            drop(seq_guard);
             sync_pending.store(true, Ordering::Release);
             Ok(event)
         })
@@ -178,11 +175,7 @@ impl EventLog {
 
     /// Count total events.
     pub async fn count(&self) -> Result<usize, StorageError> {
-        let next_seq = self
-            .next_seq
-            .lock()
-            .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
-        Ok(*next_seq as usize)
+        Ok(*lock_parking(&self.next_seq) as usize)
     }
 
     /// Force-fsync the event log if there are pending writes.
@@ -193,10 +186,7 @@ impl EventLog {
         if !self.sync_pending.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
+        let mut writer = lock_parking(&self.writer);
         writer.flush().map_err(|e| {
             StorageError::Io(std::io::Error::new(
                 e.kind(),
@@ -592,16 +582,8 @@ impl BatchAppender {
         }
 
         let count = self.buffer.len();
-        let mut next_seq = self
-            .log
-            .next_seq
-            .lock()
-            .map_err(|_| StorageError::LockError("event log sequence lock poisoned".into()))?;
-        let mut writer = self
-            .log
-            .writer
-            .lock()
-            .map_err(|_| StorageError::LockError("event log writer lock poisoned".into()))?;
+        let mut next_seq = lock_parking(&self.log.next_seq);
+        let mut writer = lock_parking(&self.log.writer);
         let mut seq = *next_seq;
         for event in &mut self.buffer {
             event.seq = Some(seq);
@@ -820,5 +802,42 @@ mod tests {
         let events = log.replay_all().await.unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].seq, Some(1));
+    }
+
+    #[test]
+    fn iterator_rejects_malformed_jsonl_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("corrupt.jsonl");
+        let valid = serde_json::to_string(&make_start_event("s1")).unwrap();
+        std::fs::write(&path, format!("{valid}\nnot-json\n")).unwrap();
+        let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
+        assert!(iter.next().unwrap().is_ok());
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[test]
+    fn iterator_malformed_line_table() {
+        let cases = [
+            "{",
+            "{\"session_id\":",
+            "[]",
+            "null",
+            "{\"not\":\"an_event\"}",
+        ];
+        for (idx, line) in cases.iter().enumerate() {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(format!("bad-{idx}.jsonl"));
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
+            let err = iter.next().unwrap().unwrap_err();
+            assert!(
+                matches!(err, StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+                "case {idx} should be InvalidData"
+            );
+        }
     }
 }

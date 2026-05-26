@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     extension::ExtensionError,
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     storage::{EventReader, SessionReadModel, SessionSummary},
@@ -161,7 +161,7 @@ async fn extract(
         let current_date = Local::now().format("%Y-%m-%d").to_string();
         let prompt = pipeline_prompts::phase1_user_prompt(&conversation, &current_date);
         let messages = vec![LlmMessage {
-            role: astrcode_core::llm::LlmRole::User,
+            role: astrcode_extension_sdk::llm::LlmRole::User,
             content: vec![LlmContent::Text {
                 text: format!("{}\n\n{}", pipeline_prompts::PHASE1_SYSTEM, prompt),
             }],
@@ -204,8 +204,8 @@ fn extract_conversation(model: &SessionReadModel) -> String {
         .iter()
         .filter_map(|msg| {
             let role = match msg.role {
-                astrcode_core::llm::LlmRole::User => "User",
-                astrcode_core::llm::LlmRole::Assistant => "Assistant",
+                astrcode_extension_sdk::llm::LlmRole::User => "User",
+                astrcode_extension_sdk::llm::LlmRole::Assistant => "Assistant",
                 _ => return None,
             };
             let text: String = msg

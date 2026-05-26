@@ -10,7 +10,15 @@
 ///
 /// 用于把工具调用参数、命令行、用户输入等折叠成可放进单行 UI 的预览。
 pub fn compact_inline(text: &str, max_chars: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = String::new();
+    let mut words = text.split_whitespace();
+    if let Some(first) = words.next() {
+        compact.push_str(first);
+        for word in words {
+            compact.push(' ');
+            compact.push_str(word);
+        }
+    }
     if compact.chars().count() <= max_chars {
         return compact;
     }
@@ -64,5 +72,25 @@ mod tests {
     #[test]
     fn truncate_first_line_preserves_internal_whitespace() {
         assert_eq!(truncate_first_line("hello   world", 80), "hello   world");
+    }
+
+    #[test]
+    fn compact_inline_empty_string() {
+        assert_eq!(compact_inline("", 10), "");
+    }
+
+    #[test]
+    fn compact_inline_collapses_whitespace() {
+        assert_eq!(compact_inline("  hello   world  ", 80), "hello world");
+    }
+
+    #[test]
+    fn compact_inline_truncates_at_char_boundary() {
+        assert_eq!(compact_inline("0123456789", 5), "01234…");
+    }
+
+    #[test]
+    fn compact_inline_exact_limit_no_ellipsis() {
+        assert_eq!(compact_inline("abcde", 5), "abcde");
     }
 }

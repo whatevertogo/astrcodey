@@ -51,7 +51,7 @@ impl CommandHandler {
         messages.push(LlmMessage::user(RECAP_PROMPT));
 
         // 单次调用，无 tools
-        let llm = self.runtime.capabilities.llm();
+        let llm = self.runtime.capabilities().llm();
         let rx = llm
             .generate(messages, vec![])
             .await
@@ -78,6 +78,7 @@ impl CommandHandler {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
             model: astrcode_core::config::ModelSelection::simple(state.model_id.clone()),
+            event_tx: None,
             extension_event_sink: None,
             last_exchange: None,
         };

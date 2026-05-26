@@ -101,7 +101,7 @@ pub async fn stream_with_retry(
             continue;
         }
 
-        let text = response.text().await.unwrap_or_default();
+        let text = read_http_error_body(response, &endpoint).await;
         return Err(classify_error(status.as_u16(), text));
     }
 }
@@ -180,8 +180,23 @@ pub async fn stream_with_event_type(
             continue;
         }
 
-        let text = response.text().await.unwrap_or_default();
+        let text = read_http_error_body(response, &endpoint).await;
         return Err(classify_error(status.as_u16(), text));
+    }
+}
+
+/// 读取非 2xx 响应体；传输失败时记录并返回空串（仍附带 HTTP 状态码）。
+pub async fn read_http_error_body(response: reqwest::Response, endpoint: &str) -> String {
+    match response.text().await {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                endpoint = %redacted_endpoint(endpoint),
+                error = %error,
+                "failed to read LLM error response body"
+            );
+            String::new()
+        },
     }
 }
 

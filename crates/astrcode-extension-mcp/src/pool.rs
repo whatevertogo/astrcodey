@@ -173,7 +173,7 @@ impl McpProcessPool {
         &self,
         servers: &[McpServerConfig],
     ) -> Vec<(String, Result<(), McpPoolError>)> {
-        let results = futures::future::join_all(servers.iter().map(|server| async {
+        let results = futures_util::future::join_all(servers.iter().map(|server| async {
             let name = server.name.clone();
             let result = self.ensure_pooled(server).await;
             (name, result)

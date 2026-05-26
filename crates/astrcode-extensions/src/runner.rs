@@ -11,14 +11,15 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{
-    event::EventPayload,
+use astrcode_core::event::EventPayload;
+use astrcode_extension_sdk::{
     extension::*,
-    tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
+    tool::{
+        ExecutionMode, SessionOperations, Tool, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolResult,
+    },
 };
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
-
-use crate::runtime::SessionOperations;
 
 /// 将生命周期事件分发到所有已注册的扩展。
 ///
@@ -47,12 +48,15 @@ pub struct ExtensionRunner {
     extension_configs: parking_lot::RwLock<BTreeMap<String, serde_json::Value>>,
     /// 扩展 `start()` 阶段发送自定义事件的宿主通道。
     startup_event_tx: parking_lot::RwLock<Option<mpsc::UnboundedSender<EventPayload>>>,
+    /// 统一注入给 bundled extension 的宿主运行态服务。
+    host_services: parking_lot::RwLock<Option<Arc<ExtensionHostServices>>>,
 }
 
 /// 从 `register()` 调用中收集的扩展能力记录。
 struct ExtensionRecord {
     id: String,
     reg: Registrar,
+    capabilities: Vec<ExtensionCapability>,
     /// 注册时的配置快照，用于 diff 检测热更新。
     config: serde_json::Value,
 }
@@ -60,7 +64,7 @@ struct ExtensionRecord {
 #[derive(Debug, Clone)]
 pub struct RegisteredSlashCommand {
     pub extension_id: String,
-    pub command: astrcode_core::extension::SlashCommand,
+    pub command: astrcode_extension_sdk::extension::SlashCommand,
 }
 
 /// 一次主动健康检查的扩展级结果。
@@ -110,6 +114,19 @@ fn bind_extension_event_sink(
     }))
 }
 
+fn attach_extension_event_sink(
+    index: &HandlerIndex,
+    extension_id: &str,
+    event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+) -> Option<Arc<dyn ExtensionEventSink>> {
+    if !index.allows(extension_id, ExtensionCapability::EmitEvents) {
+        return None;
+    }
+    let tx = event_tx.as_ref()?;
+    let decls = index.extension_event_decls.get(extension_id)?;
+    bind_extension_event_sink(extension_id, decls, tx.clone())
+}
+
 #[async_trait::async_trait]
 impl ExtensionEventSink for BoundExtensionEventSink {
     async fn emit(
@@ -118,34 +135,14 @@ impl ExtensionEventSink for BoundExtensionEventSink {
         schema_version: u32,
         payload: serde_json::Value,
     ) -> Result<(), ExtensionError> {
-        let decl = self.declarations.get(event_type).ok_or_else(|| {
-            ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
-        })?;
-
-        if schema_version > decl.schema_version {
-            return Err(ExtensionError::Internal(format!(
-                "schema_version {schema_version} exceeds declared {} for {event_type}",
-                decl.schema_version
-            )));
-        }
-
-        let serialized =
-            serde_json::to_string(&payload).map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        if serialized.len() > decl.max_payload_bytes {
-            return Err(ExtensionError::Internal(format!(
-                "payload exceeds {} bytes for {event_type}",
-                decl.max_payload_bytes
-            )));
-        }
-
-        self.event_tx
-            .send(EventPayload::ExtensionEvent {
-                extension_id: self.extension_id.clone(),
-                event_type: event_type.to_owned(),
-                schema_version,
-                payload,
-            })
-            .map_err(|_| ExtensionError::Internal("event channel closed".into()))
+        crate::host_router::emit_for_sink(
+            &self.extension_id,
+            &self.declarations,
+            &self.event_tx,
+            event_type,
+            schema_version,
+            payload,
+        )
     }
 }
 
@@ -169,15 +166,34 @@ struct HandlerIndex {
     post_tool_use_failure: Vec<Arc<dyn PostToolUseFailureHandler>>,
     lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
-    tool_metadata: std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata>,
-    static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)>,
-    tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)>,
+    tool_metadata:
+        std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata>,
+    static_tools: Vec<(
+        ToolDefinition,
+        Arc<dyn ToolHandler>,
+        String,
+        Vec<ExtensionCapability>,
+    )>,
+    tool_discoveries: Vec<(
+        String,
+        Arc<dyn ToolDiscoveryHandler>,
+        Vec<ExtensionCapability>,
+    )>,
     static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)>,
-    command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>>,
-    keybindings: Vec<astrcode_core::extension::Keybinding>,
-    status_items: Vec<astrcode_core::extension::StatusItem>,
+    command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)>,
+    keybindings: Vec<astrcode_extension_sdk::extension::Keybinding>,
+    status_items: Vec<astrcode_extension_sdk::extension::StatusItem>,
     extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
     extension_data_dir_extensions: std::collections::HashSet<String>,
+    capabilities: HashMap<String, Vec<ExtensionCapability>>,
+}
+
+impl HandlerIndex {
+    fn allows(&self, extension_id: &str, capability: ExtensionCapability) -> bool {
+        self.capabilities
+            .get(extension_id)
+            .is_some_and(|capabilities| capabilities.contains(&capability))
+    }
 }
 
 fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
@@ -189,17 +205,29 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
     let mut lc: Vec<PrioritizedEventHandler<ExtensionEvent, dyn LifecycleHandler>> = Vec::new();
     let mut tool_metadata = std::collections::HashMap::new();
-    let mut static_tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>, String)> = Vec::new();
-    let mut tool_discoveries: Vec<(String, Arc<dyn ToolDiscoveryHandler>)> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut static_tools: Vec<(
+        ToolDefinition,
+        Arc<dyn ToolHandler>,
+        String,
+        Vec<ExtensionCapability>,
+    )> = Vec::new();
+    let mut tool_discoveries: Vec<(
+        String,
+        Arc<dyn ToolDiscoveryHandler>,
+        Vec<ExtensionCapability>,
+    )> = Vec::new();
     let mut static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = Vec::new();
-    let mut command_discoveries: Vec<Arc<dyn CommandDiscoveryHandler>> = Vec::new();
-    let mut keybindings: Vec<astrcode_core::extension::Keybinding> = Vec::new();
-    let mut status_items: Vec<astrcode_core::extension::StatusItem> = Vec::new();
+    let mut command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)> = Vec::new();
+    let mut keybindings: Vec<astrcode_extension_sdk::extension::Keybinding> = Vec::new();
+    let mut status_items: Vec<astrcode_extension_sdk::extension::StatusItem> = Vec::new();
     let mut extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>> = HashMap::new();
     let mut extension_data_dir_extensions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut capabilities = HashMap::new();
 
     for record in records {
+        capabilities.insert(record.id.clone(), record.capabilities.clone());
         for (mode, pri, h) in record.reg.pre_tool_use() {
             pre.push((*pri, record.id.clone(), *mode, Arc::clone(h)));
         }
@@ -224,16 +252,25 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         // collect 缓存
         tool_metadata.extend(record.reg.all_tool_metadata().clone());
         for (def, handler) in record.reg.tools().iter() {
-            static_tools.push((def.clone(), Arc::clone(handler), record.id.clone()));
+            static_tools.push((
+                def.clone(),
+                Arc::clone(handler),
+                record.id.clone(),
+                record.capabilities.clone(),
+            ));
         }
         for discovery in record.reg.tool_discoveries().iter() {
-            tool_discoveries.push((record.id.clone(), Arc::clone(discovery)));
+            tool_discoveries.push((
+                record.id.clone(),
+                Arc::clone(discovery),
+                record.capabilities.clone(),
+            ));
         }
         for (cmd, handler) in record.reg.commands().iter() {
             static_commands.push((record.id.clone(), cmd.clone(), Arc::clone(handler)));
         }
         for discovery in record.reg.command_discoveries().iter() {
-            command_discoveries.push(Arc::clone(discovery));
+            command_discoveries.push((record.id.clone(), Arc::clone(discovery)));
         }
         for kb in record.reg.keybindings() {
             keybindings.push(kb.clone());
@@ -277,6 +314,7 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         status_items,
         extension_event_decls,
         extension_data_dir_extensions,
+        capabilities,
     }
 }
 
@@ -398,12 +436,14 @@ impl ExtensionRunner {
                 status_items: Vec::new(),
                 extension_event_decls: HashMap::new(),
                 extension_data_dir_extensions: std::collections::HashSet::new(),
+                capabilities: HashMap::new(),
             })),
             session_ops: Arc::new(StdRwLock::new(None)),
             extension_tasks: RwLock::new(HashMap::new()),
             timeout,
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
             startup_event_tx: parking_lot::RwLock::new(None),
+            host_services: parking_lot::RwLock::new(None),
         }
     }
 
@@ -420,6 +460,7 @@ impl ExtensionRunner {
     ) -> Result<bool, ExtensionError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
         let id = ext.id().to_string();
+        let capabilities = ext.capabilities().to_vec();
 
         if self.extensions.read().await.iter().any(|e| e.id() == id) {
             tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
@@ -450,11 +491,30 @@ impl ExtensionRunner {
             self.startup_event_tx.read().as_ref().and_then(|tx| {
                 bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
             });
-        let ctx = ExtensionCtx::with_startup_services(
+        let needs_host_services = capabilities.contains(&ExtensionCapability::SessionHistory)
+            || capabilities.contains(&ExtensionCapability::SmallModel);
+        let host_services = needs_host_services
+            .then(|| {
+                self.host_services.read().as_ref().map(|services| {
+                    Arc::new(ExtensionHostServices {
+                        session_read: capabilities
+                            .contains(&ExtensionCapability::SessionHistory)
+                            .then(|| services.session_read.clone())
+                            .flatten(),
+                        small_llm: capabilities
+                            .contains(&ExtensionCapability::SmallModel)
+                            .then(|| services.small_llm.clone())
+                            .flatten(),
+                    })
+                })
+            })
+            .flatten();
+        let ctx = ExtensionCtx::with_host_services(
             tasks.clone(),
             ExtensionConfig(ext_config.clone()),
             startup_working_dir.map(str::to_string),
             event_sink,
+            host_services,
         );
         ext.start(ctx).await?;
 
@@ -466,6 +526,7 @@ impl ExtensionRunner {
             records.push(ExtensionRecord {
                 id: id.clone(),
                 reg,
+                capabilities,
                 config: ext_config,
             });
             log_handler_dispatch_order(&records);
@@ -547,6 +608,11 @@ impl ExtensionRunner {
     /// 绑定会话原子操作能力。
     pub fn bind_session_ops(&self, ops: Arc<dyn SessionOperations>) {
         *self.session_ops.write().unwrap_or_else(|e| e.into_inner()) = Some(ops);
+    }
+
+    /// 绑定扩展在标准 `start()` 生命周期中可取得的宿主服务。
+    pub fn bind_host_services(&self, services: Arc<ExtensionHostServices>) {
+        *self.host_services.write() = Some(services);
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
@@ -672,9 +738,15 @@ impl ExtensionRunner {
         let mut modified = false;
 
         for (extension_id, mode, handler) in &index.pre_tool_use {
+            let mut handler_ctx = ctx.clone();
+            if !index.allows(extension_id, ExtensionCapability::SessionState) {
+                handler_ctx.session_store_dir = None;
+            }
+            handler_ctx.extension_event_sink =
+                attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
+                    let result = tokio::time::timeout(self.timeout, handler.handle(handler_ctx))
                         .await
                         .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
                     match result {
@@ -689,15 +761,14 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    if let Err(e) = handler.handle(ctx.clone()).await {
+                    if let Err(e) = handler.handle(handler_ctx).await {
                         tracing::warn!(error = %e, "advisory pre_tool_use handler failed");
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
                     self.spawn_extension_task(extension_id, "pre_tool_use", async move {
-                        if let Err(e) = handler.handle(ctx).await {
+                        if let Err(e) = handler.handle(handler_ctx).await {
                             tracing::warn!(error = %e, "non-blocking pre_tool_use handler failed");
                         }
                     })
@@ -724,9 +795,15 @@ impl ExtensionRunner {
         let mut modified = false;
 
         for (extension_id, mode, handler) in &index.post_tool_use {
+            let mut handler_ctx = ctx.clone();
+            if !index.allows(extension_id, ExtensionCapability::SessionState) {
+                handler_ctx.session_store_dir = None;
+            }
+            handler_ctx.extension_event_sink =
+                attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
+                    let result = tokio::time::timeout(self.timeout, handler.handle(handler_ctx))
                         .await
                         .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
                     match result {
@@ -747,15 +824,14 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    if let Err(e) = handler.handle(ctx.clone()).await {
+                    if let Err(e) = handler.handle(handler_ctx).await {
                         tracing::warn!(error = %e, "advisory post_tool_use handler failed");
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
                     self.spawn_extension_task(extension_id, "post_tool_use", async move {
-                        if let Err(e) = handler.handle(ctx).await {
+                        if let Err(e) = handler.handle(handler_ctx).await {
                             tracing::warn!(error = %e, "non-blocking post_tool_use handler failed");
                         }
                     })
@@ -788,9 +864,13 @@ impl ExtensionRunner {
         let mut ctx = ctx;
         let mut modified = false;
         for (extension_id, mode, handler) in handlers {
+            let mut handler_ctx = ctx.clone();
+            if !index.allows(extension_id, ExtensionCapability::SessionState) {
+                handler_ctx.session_store_dir = None;
+            }
             match mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
+                    let result = tokio::time::timeout(self.timeout, handler.handle(handler_ctx))
                         .await
                         .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
                     match result {
@@ -814,15 +894,14 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    if let Err(e) = handler.handle(ctx.clone()).await {
+                    if let Err(e) = handler.handle(handler_ctx).await {
                         tracing::warn!(error = %e, "advisory provider handler failed");
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
                     self.spawn_extension_task(extension_id, "provider", async move {
-                        if let Err(e) = handler.handle(ctx).await {
+                        if let Err(e) = handler.handle(handler_ctx).await {
                             tracing::warn!(error = %e, "non-blocking provider handler failed");
                         }
                     })
@@ -925,25 +1004,30 @@ impl ExtensionRunner {
         };
 
         for (extension_id, mode, handler) in handlers {
+            let mut handler_ctx = ctx.clone();
+            handler_ctx.extension_event_sink =
+                attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
-                        .await
-                        .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+                    let result =
+                        tokio::time::timeout(self.timeout, handler.handle(handler_ctx.clone()))
+                            .await
+                            .map_err(|_| {
+                                ExtensionError::Timeout(self.timeout.as_millis() as u64)
+                            })??;
                     if let HookResult::Block { reason } = result {
                         return Err(ExtensionError::Blocked { reason });
                     }
                 },
                 HookMode::Advisory => {
-                    if let Err(e) = handler.handle(ctx.clone()).await {
+                    if let Err(e) = handler.handle(handler_ctx).await {
                         tracing::warn!(error = %e, "advisory lifecycle handler failed");
                     }
                 },
                 HookMode::NonBlocking => {
-                    let ctx = ctx.clone();
                     let handler = Arc::clone(handler);
                     self.spawn_extension_task(extension_id, "lifecycle", async move {
-                        if let Err(e) = handler.handle(ctx).await {
+                        if let Err(e) = handler.handle(handler_ctx).await {
                             tracing::warn!(error = %e, "non-blocking lifecycle handler failed");
                         }
                     })
@@ -960,16 +1044,23 @@ impl ExtensionRunner {
     pub async fn collect_tool_adapters_typed(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
         let index = self.load_index();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        for (def, handler, _ext_id) in &index.static_tools {
+        for (def, handler, ext_id, capabilities) in &index.static_tools {
             let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
             tools.push(Arc::new(HandlerTool {
                 definition: def.clone(),
                 handler: Arc::clone(handler),
                 prompt_metadata,
                 working_dir: working_dir.to_string(),
+                extension_id: ext_id.clone(),
+                capabilities: capabilities.clone(),
+                event_declarations: index
+                    .extension_event_decls
+                    .get(ext_id)
+                    .cloned()
+                    .unwrap_or_default(),
             }));
         }
-        for (_ext_id, discovery) in &index.tool_discoveries {
+        for (ext_id, discovery, capabilities) in &index.tool_discoveries {
             match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                 Ok(discovered) => {
                     for discovered_tool in discovered {
@@ -978,6 +1069,13 @@ impl ExtensionRunner {
                             handler: discovered_tool.handler,
                             prompt_metadata: discovered_tool.prompt_metadata,
                             working_dir: working_dir.to_string(),
+                            extension_id: ext_id.clone(),
+                            capabilities: capabilities.clone(),
+                            event_declarations: index
+                                .extension_event_decls
+                                .get(ext_id)
+                                .cloned()
+                                .unwrap_or_default(),
                         }));
                     }
                 },
@@ -992,17 +1090,17 @@ impl ExtensionRunner {
     /// 从 HandlerIndex 缓存收集工具提示词元数据。
     pub async fn collect_tool_prompt_metadata_typed(
         &self,
-    ) -> std::collections::HashMap<String, astrcode_core::tool::ToolPromptMetadata> {
+    ) -> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
         self.load_index().tool_metadata.clone()
     }
 
     /// 收集所有插件注册的快捷键绑定。
-    pub fn collect_keybindings(&self) -> Vec<astrcode_core::extension::Keybinding> {
+    pub fn collect_keybindings(&self) -> Vec<astrcode_extension_sdk::extension::Keybinding> {
         self.load_index().keybindings.clone()
     }
 
     /// 收集所有插件注册的状态栏项。
-    pub fn collect_status_items(&self) -> Vec<astrcode_core::extension::StatusItem> {
+    pub fn collect_status_items(&self) -> Vec<astrcode_extension_sdk::extension::StatusItem> {
         self.load_index().status_items.clone()
     }
 
@@ -1029,11 +1127,11 @@ impl ExtensionRunner {
         for (ext_id, cmd, handler) in &index.static_commands {
             cmds.push((ext_id.clone(), cmd.clone(), Arc::clone(handler)));
         }
-        for discovery in &index.command_discoveries {
+        for (extension_id, discovery) in &index.command_discoveries {
             match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
                 Ok(discovered) => {
                     for (cmd, handler) in discovered {
-                        cmds.push(("discovery".into(), cmd, handler));
+                        cmds.push((extension_id.clone(), cmd, handler));
                     }
                 },
                 Err(_) => {
@@ -1052,6 +1150,7 @@ impl ExtensionRunner {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
+        let index = self.load_index();
         let cmds = self.collect_commands_for_typed(working_dir).await;
         let mut matched: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = cmds
             .into_iter()
@@ -1059,9 +1158,13 @@ impl ExtensionRunner {
             .collect();
         matched.sort_by_key(|a| std::cmp::Reverse(command_dispatch_priority(&a.0)));
 
-        if let Some((_, _, handler)) = matched.into_iter().next() {
+        if let Some((extension_id, _, handler)) = matched.into_iter().next() {
+            let mut scoped_ctx = ctx.clone();
+            if !index.allows(&extension_id, ExtensionCapability::SessionState) {
+                scoped_ctx.session_store_dir = None;
+            }
             handler
-                .execute(command_name, arguments, working_dir, ctx)
+                .execute(command_name, arguments, working_dir, &scoped_ctx)
                 .await
         } else {
             Err(ExtensionError::NotFound(command_name.into()))
@@ -1087,8 +1190,11 @@ fn command_dispatch_priority(extension_id: &str) -> u8 {
 struct HandlerTool {
     definition: ToolDefinition,
     handler: Arc<dyn ToolHandler>,
-    prompt_metadata: Option<astrcode_core::tool::ToolPromptMetadata>,
+    prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
     working_dir: String,
+    extension_id: String,
+    capabilities: Vec<ExtensionCapability>,
+    event_declarations: Vec<ExtensionEventDecl>,
 }
 
 #[async_trait::async_trait]
@@ -1101,18 +1207,44 @@ impl Tool for HandlerTool {
         self.definition.execution_mode
     }
 
-    fn prompt_metadata(&self) -> Option<astrcode_core::tool::ToolPromptMetadata> {
+    fn prompt_metadata(&self) -> Option<astrcode_extension_sdk::tool::ToolPromptMetadata> {
         self.prompt_metadata.clone()
     }
 
     async fn execute(
         &self,
         arguments: serde_json::Value,
-        _ctx: &ToolExecutionContext,
+        ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
+        let mut ctx = ctx.clone();
+        if !self
+            .capabilities
+            .contains(&ExtensionCapability::SessionState)
+        {
+            ctx.capabilities.session_store_dir = None;
+        }
+        if !self
+            .capabilities
+            .contains(&ExtensionCapability::SessionControl)
+        {
+            ctx.capabilities.session_ops = None;
+        }
+        if !self.capabilities.contains(&ExtensionCapability::SmallModel) {
+            ctx.capabilities.small_model_id = None;
+        }
+        ctx.capabilities.extension_event_sink = if self
+            .capabilities
+            .contains(&ExtensionCapability::EmitEvents)
+        {
+            ctx.event_tx.clone().and_then(|event_tx| {
+                bind_extension_event_sink(&self.extension_id, &self.event_declarations, event_tx)
+            })
+        } else {
+            None
+        };
         let mut result = match self
             .handler
-            .execute(&self.definition.name, arguments, &self.working_dir, _ctx)
+            .execute(&self.definition.name, arguments, &self.working_dir, &ctx)
             .await
         {
             Ok(result) => result,
@@ -1127,7 +1259,7 @@ impl Tool for HandlerTool {
 
         if let Some(outcome_value) = result
             .metadata
-            .remove(astrcode_core::extension::EXTENSION_TOOL_OUTCOME_KEY)
+            .remove(astrcode_extension_sdk::extension::EXTENSION_TOOL_OUTCOME_KEY)
         {
             match serde_json::from_value::<ExtensionToolOutcome>(outcome_value) {
                 Ok(ExtensionToolOutcome::Text { content, is_error }) => {
@@ -1146,7 +1278,7 @@ impl Tool for HandlerTool {
 
 /// 将 [`ExtensionError`] 转换为结构化的错误 [`ToolResult`]。
 fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionError) -> ToolResult {
-    use astrcode_core::tool::tool_metadata;
+    use astrcode_extension_sdk::tool::tool_metadata;
 
     let (message, suggestion) = match &err {
         ExtensionError::NotFound(_) => (
@@ -1195,9 +1327,16 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_core::{
-        event::EventPayload,
-        extension::{Extension, ExtensionCtx, ExtensionError, Registrar, StopReason},
+    use astrcode_core::event::EventPayload;
+    use astrcode_extension_sdk::{
+        extension::{
+            Extension, ExtensionCapability, ExtensionCtx, ExtensionError, Registrar, StopReason,
+            ToolHandler,
+        },
+        tool::{
+            ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
+            ToolResult,
+        },
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1218,6 +1357,113 @@ mod tests {
     struct StartupEventExtension;
 
     struct UnhealthyExtension;
+
+    struct StateProbeExtension {
+        allowed: bool,
+    }
+
+    struct StateProbeTool;
+
+    struct SmallModelProbeExtension {
+        small_model_allowed: bool,
+        session_control_allowed: bool,
+    }
+
+    struct SmallModelProbeTool;
+
+    #[async_trait::async_trait]
+    impl Extension for StateProbeExtension {
+        fn id(&self) -> &str {
+            "state-probe"
+        }
+
+        fn capabilities(&self) -> &[ExtensionCapability] {
+            if self.allowed {
+                &[ExtensionCapability::SessionState]
+            } else {
+                &[]
+            }
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.tool(
+                ToolDefinition {
+                    name: "stateProbe".into(),
+                    description: String::new(),
+                    parameters: json!({"type": "object"}),
+                    origin: ToolOrigin::Extension,
+                    execution_mode: ExecutionMode::Sequential,
+                },
+                Arc::new(StateProbeTool),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHandler for StateProbeTool {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _arguments: serde_json::Value,
+            _working_dir: &str,
+            ctx: &ToolExecutionContext,
+        ) -> Result<ToolResult, ExtensionError> {
+            Ok(ToolResult::text(
+                ctx.capabilities.session_store_dir.is_some().to_string(),
+                false,
+                Default::default(),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for SmallModelProbeExtension {
+        fn id(&self) -> &str {
+            "small-model-probe"
+        }
+
+        fn capabilities(&self) -> &[ExtensionCapability] {
+            match (self.small_model_allowed, self.session_control_allowed) {
+                (true, true) => &[
+                    ExtensionCapability::SmallModel,
+                    ExtensionCapability::SessionControl,
+                ],
+                (true, false) => &[ExtensionCapability::SmallModel],
+                (false, true) => &[ExtensionCapability::SessionControl],
+                (false, false) => &[],
+            }
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.tool(
+                ToolDefinition {
+                    name: "smallModelProbe".into(),
+                    description: String::new(),
+                    parameters: json!({"type": "object"}),
+                    origin: ToolOrigin::Extension,
+                    execution_mode: ExecutionMode::Sequential,
+                },
+                Arc::new(SmallModelProbeTool),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolHandler for SmallModelProbeTool {
+        async fn execute(
+            &self,
+            _tool_name: &str,
+            _arguments: serde_json::Value,
+            _working_dir: &str,
+            ctx: &ToolExecutionContext,
+        ) -> Result<ToolResult, ExtensionError> {
+            Ok(ToolResult::text(
+                ctx.capabilities.small_model_id.is_some().to_string(),
+                false,
+                Default::default(),
+            ))
+        }
+    }
 
     #[async_trait::async_trait]
     impl Extension for StartupDirectoryExtension {
@@ -1399,5 +1645,72 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("dependency unavailable"))
         );
+    }
+
+    #[tokio::test]
+    async fn extension_tool_receives_session_state_only_when_declared() {
+        for (allowed, expected) in [(false, "false"), (true, "true")] {
+            let runner = ExtensionRunner::new(Duration::from_secs(1));
+            runner
+                .register(Arc::new(StateProbeExtension { allowed }))
+                .await
+                .unwrap();
+            let tool = runner
+                .collect_tool_adapters_typed("D:/workspace")
+                .await
+                .into_iter()
+                .next()
+                .unwrap();
+            let ctx = ToolExecutionContext {
+                session_id: "session".into(),
+                working_dir: "D:/workspace".into(),
+                tool_call_id: None,
+                event_tx: None,
+                capabilities: ToolCapabilities {
+                    session_store_dir: Some("D:/session".into()),
+                    ..Default::default()
+                },
+            };
+
+            let result = tool.execute(json!({}), &ctx).await.unwrap();
+            assert_eq!(result.content, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_tool_receives_small_model_only_when_declared() {
+        for (small_model_allowed, session_control_allowed, expected) in [
+            (false, false, "false"),
+            (true, false, "true"),
+            (false, true, "false"),
+        ] {
+            let runner = ExtensionRunner::new(Duration::from_secs(1));
+            runner
+                .register(Arc::new(SmallModelProbeExtension {
+                    small_model_allowed,
+                    session_control_allowed,
+                }))
+                .await
+                .unwrap();
+            let tool = runner
+                .collect_tool_adapters_typed("D:/workspace")
+                .await
+                .into_iter()
+                .next()
+                .unwrap();
+            let ctx = ToolExecutionContext {
+                session_id: "session".into(),
+                working_dir: "D:/workspace".into(),
+                tool_call_id: None,
+                event_tx: None,
+                capabilities: ToolCapabilities {
+                    small_model_id: Some("small-model".into()),
+                    ..Default::default()
+                },
+            };
+
+            let result = tool.execute(json!({}), &ctx).await.unwrap();
+            assert_eq!(result.content, expected);
+        }
     }
 }

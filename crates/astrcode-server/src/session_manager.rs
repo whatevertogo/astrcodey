@@ -10,7 +10,10 @@ use astrcode_core::{
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
 };
-use astrcode_session::{Session, SessionError, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_session::{
+    Session, SessionError, SessionRuntimeServices, SessionRuntimeState,
+    session::emit_lifecycle_for_read_model,
+};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 
@@ -23,10 +26,6 @@ pub(crate) struct CreatedSession {
 
 pub(crate) struct ForkedSession {
     pub(crate) session: Session,
-    #[allow(dead_code)]
-    pub(crate) start_event: Event,
-    #[allow(dead_code)]
-    pub(crate) fork_event: Event,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +38,8 @@ pub enum SessionManagerError {
     Extension(#[from] astrcode_core::extension::ExtensionError),
     #[error("session created but no events found")]
     MissingStartEvent,
+    #[error("invalid fork cursor: {0}")]
+    InvalidCursor(String),
 }
 
 /// Server 侧的 session 生命周期门面。
@@ -250,7 +251,7 @@ impl SessionManager {
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
-        Session::emit_lifecycle_for_read_model(
+        emit_lifecycle_for_read_model(
             &self.capabilities,
             session_id,
             &model,
@@ -346,7 +347,7 @@ impl SessionManager {
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
-        Session::emit_lifecycle_for_read_model(
+        emit_lifecycle_for_read_model(
             &self.capabilities,
             session_id,
             &model,
@@ -400,11 +401,9 @@ impl SessionManager {
         let (context_messages, retained_messages) = if at_cursor.is_some() {
             // 重放到指定 cursor 获取消息快照
             let events = self.event_store.replay_events(source_id).await?;
-            let truncated_seq: u64 = fork_cursor.parse().map_err(|_| {
-                SessionManagerError::Session(SessionError::Other(format!(
-                    "invalid cursor: {fork_cursor}"
-                )))
-            })?;
+            let truncated_seq: u64 = fork_cursor
+                .parse()
+                .map_err(|_| SessionManagerError::InvalidCursor(fork_cursor.clone()))?;
             let truncated_events: Vec<_> = events
                 .into_iter()
                 .filter(|e| e.seq.unwrap_or(0) <= truncated_seq)
@@ -440,8 +439,8 @@ impl SessionManager {
             bus.attach(&session);
         }
 
-        // 5. 写入 SessionForked 事件
-        let fork_event = session
+        // 5. 写入 SessionForked 事件（attach 之后 append，经 fanout 自动进入 event bus）
+        session
             .append_event(Event::new(
                 new_sid.clone(),
                 None,
@@ -472,20 +471,7 @@ impl SessionManager {
                 .await?;
         }
 
-        // 7. 读第一个事件作为 start_event 返回
-        let start_event = self
-            .event_store
-            .replay_events(&new_sid)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(SessionManagerError::MissingStartEvent)?;
-
-        Ok(ForkedSession {
-            session,
-            start_event,
-            fork_event,
-        })
+        Ok(ForkedSession { session })
     }
 }
 

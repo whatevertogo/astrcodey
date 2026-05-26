@@ -6,7 +6,10 @@ pub mod background;
 pub mod child_turn;
 pub mod compact;
 pub(crate) mod compact_circuit_breaker;
+pub(crate) mod compaction_coordinator;
+pub mod compaction_run;
 pub(crate) mod deferred_tools;
+pub(crate) mod llm_request_history;
 pub(crate) mod llm_stream;
 pub mod payload;
 pub mod post_compact;
@@ -21,6 +24,7 @@ pub(crate) mod tool_results;
 pub(crate) mod tool_types;
 pub mod turn_context;
 pub mod turn_handle;
+pub(crate) mod turn_publish;
 pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
@@ -29,9 +33,9 @@ pub use payload::{
     compact_boundary_payload, session_continued_from_compaction_payload,
     system_prompt_configured_payload,
 };
-pub use session::{Session, SessionError};
+pub use session::{Session, SessionCreateParams, SessionError};
 pub use session_runtime::{SessionModelBinding, SessionRuntimeState};
 pub use session_runtime_services::SessionRuntimeServices;
-pub use turn_context::{AgentSignal, TurnError};
+pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::TurnHandle;
-pub use turn_runner::{RunTurnResult, TurnOutput, TurnRunner, drive_agent, run_turn};
+pub use turn_runner::{RunTurnResult, TurnOutput};

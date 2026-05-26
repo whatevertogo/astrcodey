@@ -8,9 +8,6 @@
 //! - ToolRenderer / MessageRenderer registries (pi-mono design)
 //! - AdaptiveChunkingPolicy for streaming (codex design)
 
-// Suppress dead_code for Component infrastructure (built ahead of wiring).
-#![allow(dead_code, unused_imports)]
-
 pub(crate) mod app;
 pub(crate) mod command;
 pub(crate) mod composer;
@@ -36,10 +33,7 @@ use tokio_stream::StreamExt;
 use self::{
     app::App,
     command::slash::{self, SlashCommand},
-    frame::{
-        FrameRequester,
-        event_stream::{EventBroker, EventStream, TerminalFocus, TuiEvent},
-    },
+    frame::event_stream::{EventBroker, EventStream, TuiEvent},
     streaming::{chunking::AdaptiveChunkingPolicy, commit_tick::run_commit_tick},
     terminal::TerminalSession,
     theme::Theme,
@@ -58,13 +52,11 @@ pub async fn run() -> io::Result<()> {
     let mut app = App::new(theme.clone());
 
     // Frame scheduling — draw_tx drives the event_stream's draw channel
-    let (draw_tx, draw_rx) = tokio::sync::broadcast::channel::<()>(16);
-    let _frame_requester = FrameRequester::new(draw_tx.clone());
+    let (_draw_tx, draw_rx) = tokio::sync::broadcast::channel::<()>(16);
 
     // Input event stream
     let broker = EventBroker::new();
-    let focus = TerminalFocus::new();
-    let mut event_stream = EventStream::new(broker, draw_rx, focus);
+    let mut event_stream = EventStream::new(broker, draw_rx);
 
     // Streaming chunking policy
     let mut chunking_policy = AdaptiveChunkingPolicy::new();
@@ -101,7 +93,6 @@ pub async fn run() -> io::Result<()> {
                         app.composer.insert_paste(&text);
                     },
                     TuiEvent::Draw => {},
-                    TuiEvent::ScrollUp(_) | TuiEvent::ScrollDown(_) => {},
                 }
                 dirty = true;
             },
@@ -820,7 +811,7 @@ fn panel_total_height(panel: &Panel) -> u16 {
 fn render_panel(frame: &mut custom_terminal::Frame<'_>, panel: &Panel) {
     use ratatui::{
         layout::{Constraint, Direction, Layout},
-        text::{Line, Span, Text},
+        text::Text,
         widgets::Paragraph,
     };
 

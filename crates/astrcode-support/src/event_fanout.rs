@@ -17,6 +17,8 @@
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+use crate::sync::lock_parking;
+
 /// 默认 channel 容量。生产环境中 LLM streaming ~1-2 events/sec，
 /// 1024 条约缓冲 8-15 分钟，足够应对短暂拥塞。
 const DEFAULT_CAPACITY: usize = 1024;
@@ -40,7 +42,7 @@ impl<T: Clone> EventFanout<T> {
     ///
     /// 慢消费者（channel 已满）会被断开并移除，统一以 debug 级别记录数量。
     pub fn send(&self, event: T) {
-        let mut senders = self.senders.lock();
+        let mut senders = lock_parking(&self.senders);
         let before = senders.len();
         senders.retain(|tx| match tx.try_send(event.clone()) {
             Ok(()) => true,
@@ -48,20 +50,23 @@ impl<T: Clone> EventFanout<T> {
         });
         let dropped = before - senders.len();
         if dropped > 0 {
-            tracing::debug!(dropped, "dropped event fanout subscribers");
+            tracing::warn!(
+                dropped,
+                "removed slow or closed event fanout subscribers (backpressure)"
+            );
         }
     }
 
     /// 创建新订阅。
     pub fn subscribe(&self) -> mpsc::Receiver<T> {
         let (tx, rx) = mpsc::channel(self.capacity);
-        self.senders.lock().push(tx);
+        lock_parking(&self.senders).push(tx);
         rx
     }
 
     /// 当前订阅者数量。**不精确**（TOCTOU），仅供调试/监控。
     pub fn subscriber_count(&self) -> usize {
-        self.senders.lock().len()
+        lock_parking(&self.senders).len()
     }
 }
 

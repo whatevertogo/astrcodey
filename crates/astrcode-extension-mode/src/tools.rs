@@ -4,7 +4,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use astrcode_core::{
+use astrcode_extension_sdk::{
     render::{RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };

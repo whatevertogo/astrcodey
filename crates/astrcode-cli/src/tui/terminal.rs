@@ -4,7 +4,7 @@
 //! On resize: clear visible history rows, re-insert from buffer for the new width.
 //! This prevents "swallowed lines" on terminal resize.
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 
 use crossterm::{
     SynchronizedUpdate,
@@ -12,11 +12,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
-    text::Line,
-};
+#[cfg(not(unix))]
+use ratatui::backend::Backend;
+use ratatui::{backend::CrosstermBackend, layout::Position, text::Line};
 
 use crate::tui::{
     custom_terminal::Terminal as CustomTerminal, ext::message::MessageRendererRegistry,
