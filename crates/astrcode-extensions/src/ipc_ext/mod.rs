@@ -3,32 +3,34 @@
 mod protocol;
 mod session;
 
-pub use protocol::IPC_VERSION;
-
 use std::{path::Path, sync::Arc};
 
 use astrcode_core::extension::{
-    CommandContext, CommandHandler, CompactContext, CompactEvent,
-    CompactHandler, CompactResult, Extension, ExtensionCapability, ExtensionError,
-    ExtensionEvent, ExtensionEventDecl, ExtensionCommandResult, HookMode, HookResult,
-    LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-    PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-    PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar,
-    SlashCommand, StopReason, ToolHandler,
+    CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
+    Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+    ExtensionEventDecl, HookMode, HookResult, LifecycleContext, LifecycleHandler,
+    PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
+    PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
+    PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
+    Registrar, SlashCommand, StopReason, ToolHandler,
 };
-use astrcode_extension_sdk::{s5r::event_to_name, tool::{ToolDefinition, ToolResult}};
+use astrcode_extension_sdk::{
+    s5r::event_to_name,
+    tool::{ToolDefinition, ToolResult},
+};
+pub use protocol::IPC_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
     extension_manifest::ExtensionRegistration,
     host_router::{HostRouter, InvokeContext},
+    ipc_ext::session::IpcSession,
     remote_manifest::{
         build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
         parse_compact_result, parse_lifecycle_result, parse_post_tool_use_result,
         parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
         parse_tool_result, validate_registration,
     },
-    ipc_ext::session::IpcSession,
 };
 
 pub struct IpcExtension {
@@ -235,7 +237,11 @@ impl Extension for IpcExtension {
                         other.clone(),
                         *mode,
                         0,
-                        Arc::new(IpcLifecycleHandler { session, ext_id, on }),
+                        Arc::new(IpcLifecycleHandler {
+                            session,
+                            ext_id,
+                            on,
+                        }),
                     );
                 },
             }

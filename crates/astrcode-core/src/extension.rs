@@ -436,7 +436,7 @@ pub enum ExtensionEvent {
 /// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
 ///
 /// **当前 loader 行为（IPC）**：`protocol.ipc`（须为 `"1.0"`）与 **`command`**
-///（启动子进程的 argv 数组）为必填。扩展的真实 `id`、能力、工具与 hook 均由
+/// （启动子进程的 argv 数组）为必填。扩展的真实 `id`、能力、工具与 hook 均由
 /// `extension/initialize` 握手返回。本结构中的 `id` / `name` / `capabilities` 等字段
 /// 可被 serde 解析，供 UI、诊断或未来校验使用，但**不会**替代 IPC 握手 manifest。
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -132,8 +132,7 @@ impl ExtensionLoader {
 
         let global_dir = hostpaths::extensions_dir();
         if global_dir.exists() {
-            let (exts, errs) =
-                Self::load_from_dir(&global_dir, &host_router, working_dir).await;
+            let (exts, errs) = Self::load_from_dir(&global_dir, &host_router, working_dir).await;
             extensions.extend(exts);
             errors.extend(errs);
         }

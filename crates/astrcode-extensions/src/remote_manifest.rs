@@ -14,10 +14,7 @@ use astrcode_extension_sdk::{
 };
 use serde_json::json;
 
-use crate::extension_manifest::{
-    ExtensionRegistration,
-    manifest_types::ManifestHook,
-};
+use crate::extension_manifest::{ExtensionRegistration, manifest_types::ManifestHook};
 
 pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> {
     if reg.extension_id.trim().is_empty() {
@@ -101,7 +98,9 @@ pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionEr
     }
 }
 
-pub fn parse_command_result(resp: &HandlerResult) -> Result<ExtensionCommandResult, ExtensionError> {
+pub fn parse_command_result(
+    resp: &HandlerResult,
+) -> Result<ExtensionCommandResult, ExtensionError> {
     if !resp.ok {
         return Err(ExtensionError::Internal(
             resp.error.clone().unwrap_or_default(),
@@ -130,7 +129,9 @@ pub fn parse_pre_tool_use_result(resp: &HandlerResult) -> Result<PreToolUseResul
     }
 }
 
-pub fn parse_post_tool_use_result(resp: &HandlerResult) -> Result<PostToolUseResult, ExtensionError> {
+pub fn parse_post_tool_use_result(
+    resp: &HandlerResult,
+) -> Result<PostToolUseResult, ExtensionError> {
     if !resp.ok {
         return Ok(PostToolUseResult::Allow);
     }
@@ -175,7 +176,9 @@ pub fn parse_provider_result(resp: &HandlerResult) -> Result<ProviderResult, Ext
     }
 }
 
-pub fn parse_prompt_build_result(resp: &HandlerResult) -> Result<PromptContributions, ExtensionError> {
+pub fn parse_prompt_build_result(
+    resp: &HandlerResult,
+) -> Result<PromptContributions, ExtensionError> {
     if !resp.ok || resp.effect_name() != "prompt_contributions" {
         return Ok(PromptContributions::default());
     }

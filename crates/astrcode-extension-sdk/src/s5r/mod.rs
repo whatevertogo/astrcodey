@@ -14,6 +14,5 @@ pub use effects::{CallContinuation, HandlerResult};
 pub use messages::{
     CAP_HANDLER_INVOKE, CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase,
     HandlerDescriptor, InitializeMsg, InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg,
-    S5R_STACK, S5R_VERSION, WireMessage,
+    S5R_STACK, S5R_VERSION, WireMessage, event_from_name, event_to_name, mode_from_name,
 };
-pub use messages::{event_from_name, event_to_name, mode_from_name};

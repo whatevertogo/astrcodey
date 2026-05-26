@@ -5,9 +5,8 @@ use std::{fs, sync::Arc, time::Duration};
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        CommandContext, Extension, ExtensionCommandResult, ExtensionEvent,
-        ExtensionHostServices, HookMode, LifecycleContext, PreToolUseContext, PreToolUseResult,
-        Registrar, StopReason,
+        CommandContext, Extension, ExtensionCommandResult, ExtensionEvent, ExtensionHostServices,
+        HookMode, LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, StopReason,
     },
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
@@ -153,12 +152,11 @@ fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUs
 async fn ipc_manifest_registers_tools_hooks_and_capabilities() {
     let ext = load_ipc(minimal_router()).await;
     assert_eq!(ext.id(), "ipc-guest-demo");
-    assert!(ext.capabilities().iter().any(|c| {
-        matches!(
-            c,
-            astrcode_core::extension::ExtensionCapability::SmallModel
-        )
-    }));
+    assert!(
+        ext.capabilities()
+            .iter()
+            .any(|c| { matches!(c, astrcode_core::extension::ExtensionCapability::SmallModel) })
+    );
 
     let mut reg = Registrar::new();
     ext.register(&mut reg);
@@ -225,7 +223,11 @@ async fn ipc_ask_llm_via_host_invoke() {
     let ext = load_ipc(mock_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
-    let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ask_llm").unwrap();
+    let (_, handler) = reg
+        .tools()
+        .iter()
+        .find(|(d, _)| d.name == "ask_llm")
+        .unwrap();
     let result = handler
         .execute(
             "ask_llm",
@@ -263,14 +265,9 @@ async fn ipc_workspace_read_via_host_invoke() {
     )
     .unwrap();
 
-    let ext = IpcExtension::load(
-        &ext_dir,
-        &manifest,
-        mock_router(),
-        Some(wd_str.as_ref()),
-    )
-    .await
-    .expect("load");
+    let ext = IpcExtension::load(&ext_dir, &manifest, mock_router(), Some(wd_str.as_ref()))
+        .await
+        .expect("load");
     let mut reg = Registrar::new();
     ext.register(&mut reg);
     let (_, handler) = reg
@@ -279,7 +276,12 @@ async fn ipc_workspace_read_via_host_invoke() {
         .find(|(d, _)| d.name == "read_workspace")
         .unwrap();
     let result = handler
-        .execute("read_workspace", serde_json::json!({}), &wd_str, &tool_ctx(&wd_str))
+        .execute(
+            "read_workspace",
+            serde_json::json!({}),
+            &wd_str,
+            &tool_ctx(&wd_str),
+        )
         .await
         .unwrap();
     assert!(
@@ -344,7 +346,11 @@ async fn ipc_demo_command() {
     let ext = load_ipc(minimal_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
-    let (_, handler) = reg.commands().iter().find(|(c, _)| c.name == "demo").unwrap();
+    let (_, handler) = reg
+        .commands()
+        .iter()
+        .find(|(c, _)| c.name == "demo")
+        .unwrap();
     let result = handler
         .execute(
             "demo",

@@ -21,6 +21,7 @@ use tokio::{
     sync::{Mutex as AsyncMutex, oneshot},
     task::JoinHandle,
 };
+
 use crate::{
     extension_manifest::ExtensionRegistration,
     host_router::{HostRouter, InvokeContext, decls_to_map},
@@ -279,19 +280,19 @@ impl IpcSession {
                 .map_err(|e| IpcSessionError::Msg(format!("flush request: {e}")))?;
         }
 
-        let _active_invoke_guard = invoke_ctx
-            .map(|ctx| ActiveInvokeGuard::set(&self.active_invoke, ctx.clone()));
+        let _active_invoke_guard =
+            invoke_ctx.map(|ctx| ActiveInvokeGuard::set(&self.active_invoke, ctx.clone()));
 
         match tokio::time::timeout(IPC_REQUEST_TIMEOUT, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
                 Err(self.process_exited_error())
-            }
+            },
             Err(_) => {
                 self.pending.lock().await.remove(&id);
                 Err(IpcSessionError::Timeout)
-            }
+            },
         }
     }
 
@@ -381,7 +382,7 @@ async fn read_loop(stdout: tokio::process::ChildStdout, ctx: ReadLoopContext) {
             Err(e) => {
                 tracing::warn!(error = %e, "IPC: invalid JSONL from extension");
                 continue;
-            }
+            },
         };
 
         if let Some(id) = msg.id {
