@@ -1,12 +1,13 @@
 [package]
 name = "astrcode-support"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Host environment utilities: path resolution, shell detection, tool result persistence"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 dirs = { workspace = true }

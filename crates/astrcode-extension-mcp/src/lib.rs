@@ -440,7 +440,7 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> Discov
     let servers = config.servers.clone();
 
     let results: Vec<(String, Result<Vec<McpTool>, _>)> =
-        futures::future::join_all(servers.iter().map(|server| async {
+        futures_util::future::join_all(servers.iter().map(|server| async {
             let name = server.name.clone();
             let result = pool.list_tools(server).await;
             (name, result)

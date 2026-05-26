@@ -57,6 +57,17 @@ jobs:
           tool: cargo-audit
       - run: cargo audit
 
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
   deps:
     name: Dependency Direction
     runs-on: ubuntu-latest

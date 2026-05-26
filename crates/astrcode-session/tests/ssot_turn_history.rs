@@ -177,9 +177,8 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
     let tool_results = messages.iter().filter(|m| m.role == LlmRole::Tool).count();
     assert_eq!(tool_results, 2, "expected two tool result messages");
     assert!(
-        messages
-            .iter()
-            .any(|m| m.role == LlmRole::Assistant && m.joined_display_text("\n").contains("final answer")),
+        messages.iter().any(|m| m.role == LlmRole::Assistant
+            && m.joined_display_text("\n").contains("final answer")),
         "expected final assistant text in projection"
     );
 }

@@ -2,7 +2,6 @@
 //!
 //! `render_call` / `get_or_fallback` 等 API 为工具进行中 UI 预留，当前仅 `render_result` 接线。
 #![allow(dead_code)]
-//!
 //! Mapped from pi-mono ToolRenderContext + ToolDefinition.renderCall/renderResult.
 
 use std::{any::Any, collections::HashMap, sync::Arc};

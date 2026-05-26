@@ -96,6 +96,9 @@ pub enum ScrollbackEntry {
         #[allow(dead_code)]
         label: String,
     },
-    StreamText { role: MessageRole, text: String },
+    StreamText {
+        role: MessageRole,
+        text: String,
+    },
     BlankLine,
 }

@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-session"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Session runtime: Session handle, turn execution, and event bus"
 
 [dependencies]
@@ -17,7 +18,7 @@ chrono = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

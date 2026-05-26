@@ -335,5 +335,4 @@ mod tests {
 
         assert_eq!(paths, ["src/ok.rs", "src/manual.rs"]);
     }
-
 }

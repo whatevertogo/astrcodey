@@ -58,12 +58,36 @@ const BlockRenderer = memo(function BlockRenderer({
 })
 
 const BLOCK_GAP_PX = 40 // matches Tailwind gap-10 (2.5rem ≈ 40px)
+/** Within this distance from the bottom we treat the user as "following" the stream. */
+const STICK_TO_BOTTOM_THRESHOLD_PX = 64
 
 export default function MessageList({ blocks, sessionId }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const shouldStickRef = useRef(true)
-  const prevLengthRef = useRef(0)
+  const prevItemCountRef = useRef(0)
+  const lastScrollTopRef = useRef(0)
+  const ignoreScrollRef = useRef(false)
   const queuedMessages = useAppStore((s) => s.queuedMessages)
+
+  const distanceFromBottom = useCallback((container: HTMLDivElement) => {
+    return (
+      container.scrollHeight - container.scrollTop - container.clientHeight
+    )
+  }, [])
+
+  const scrollContainerToBottom = useCallback(
+    (behavior: ScrollBehavior = 'auto') => {
+      const container = listRef.current
+      if (!container) return
+      ignoreScrollRef.current = true
+      container.scrollTo({ top: container.scrollHeight, behavior })
+      lastScrollTopRef.current = container.scrollTop
+      requestAnimationFrame(() => {
+        ignoreScrollRef.current = false
+      })
+    },
+    []
+  )
 
   // All items: blocks + queued messages
   const allItems = useMemo(() => {
@@ -101,42 +125,77 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
 
   const updateStickiness = useCallback(() => {
     const container = listRef.current
-    if (!container) {
-      shouldStickRef.current = true
-      return
-    }
-    const distanceFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight
-    shouldStickRef.current = distanceFromBottom <= 48
-  }, [])
+    if (!container) return
 
-  // User scroll-up gesture immediately breaks auto-stick
+    const scrollTop = container.scrollTop
+    if (!ignoreScrollRef.current && scrollTop < lastScrollTopRef.current - 2) {
+      shouldStickRef.current = false
+    } else if (distanceFromBottom(container) <= STICK_TO_BOTTOM_THRESHOLD_PX) {
+      shouldStickRef.current = true
+    } else {
+      shouldStickRef.current = false
+    }
+    lastScrollTopRef.current = scrollTop
+  }, [distanceFromBottom])
+
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (e.deltaY < 0) {
       shouldStickRef.current = false
     }
   }, [])
 
-  // Auto-scroll: stick to bottom when appropriate
+  // New session: default to following the latest messages.
   useEffect(() => {
-    const shouldAutoScroll =
-      prevLengthRef.current === 0 || shouldStickRef.current
-    prevLengthRef.current = blocks.length + queuedMessages.length
-    if (!shouldAutoScroll) return
+    shouldStickRef.current = true
+    prevItemCountRef.current = 0
+    lastScrollTopRef.current = 0
+  }, [sessionId])
+
+  const streamingTailSignature = useMemo(() => {
+    const last = blocks[blocks.length - 1]
+    if (last?.kind === 'assistant' && last.status === 'streaming') {
+      const textLen = last.text?.length ?? 0
+      const reasoningLen = last.reasoningContent?.length ?? 0
+      return `${last.id}:${textLen}:${reasoningLen}`
+    }
+    return null
+  }, [blocks])
+
+  // New block / queued message: scroll only when the list grows and user is following.
+  useEffect(() => {
+    const itemCount = totalItemCount
+    const isFirstPaint = prevItemCountRef.current === 0 && itemCount > 0
+    const grew = itemCount > prevItemCountRef.current
+    prevItemCountRef.current = itemCount
+
+    if (!grew && !isFirstPaint) return
+    if (!shouldStickRef.current && !isFirstPaint) return
 
     requestAnimationFrame(() => {
-      if (totalItemCount > 0) {
-        virtualizer.scrollToIndex(totalItemCount - 1, { align: 'end' })
+      if (itemCount === 0) return
+      virtualizer.scrollToIndex(itemCount - 1, { align: 'end' })
+      scrollContainerToBottom()
+      const container = listRef.current
+      if (container) {
+        lastScrollTopRef.current = container.scrollTop
       }
-      updateStickiness()
     })
-  }, [
-    blocks,
-    queuedMessages.length,
-    updateStickiness,
-    totalItemCount,
-    virtualizer,
-  ])
+  }, [totalItemCount, virtualizer, scrollContainerToBottom])
+
+  // Streaming text growth: pin to bottom only if the user is already following (no scrollToIndex).
+  useEffect(() => {
+    if (!streamingTailSignature || !shouldStickRef.current) return
+
+    requestAnimationFrame(() => {
+      const container = listRef.current
+      if (!container) return
+      if (distanceFromBottom(container) > STICK_TO_BOTTOM_THRESHOLD_PX) {
+        shouldStickRef.current = false
+        return
+      }
+      scrollContainerToBottom()
+    })
+  }, [streamingTailSignature, distanceFromBottom, scrollContainerToBottom])
 
   const virtualItems = virtualizer.getVirtualItems()
 

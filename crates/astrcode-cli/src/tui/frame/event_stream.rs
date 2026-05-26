@@ -2,10 +2,14 @@
 //!
 //! Ported from tui/tui_event/{mod,stream}.rs — merged into one file.
 
-use std::{io, pin::Pin, task::{Context, Poll}};
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crossterm::event::{Event, EventStream as CrosstermEventStream, KeyEvent, KeyEventKind};
-use futures::Stream;
+use futures_util::Stream;
 use parking_lot::Mutex;
 use tokio_stream::wrappers::{BroadcastStream, WatchStream};
 

@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-extension-mcp"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Stdio MCP tool extension"
 
 [lib]
@@ -15,9 +16,9 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "process", "io-util", "net", "rt-multi-thread", "macros"] }
 tracing = { workspace = true }
-futures = { workspace = true }
+futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 
 [dev-dependencies]

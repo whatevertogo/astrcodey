@@ -12,11 +12,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
-    text::Line,
-};
+#[cfg(not(unix))]
+use ratatui::backend::Backend;
+use ratatui::{backend::CrosstermBackend, layout::Position, text::Line};
 
 use crate::tui::{
     custom_terminal::Terminal as CustomTerminal, ext::message::MessageRendererRegistry,

@@ -1,12 +1,14 @@
 [package]
 name = "astrcode-ai"
-version = "0.2.2"
-edition = "2021"
-description = "LLM provider abstraction: OpenAI-compatible API, SSE streaming, caching, retries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLM provider integrations and streaming"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-tokio = { workspace = true }
+astrcode-support = { path = "../astrcode-support" }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

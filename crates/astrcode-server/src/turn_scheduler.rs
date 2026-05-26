@@ -40,7 +40,8 @@ mod turn_queue;
 
 /// Turn 调度层错误（会话是否存在、是否已有 turn 在跑等）。
 ///
-/// 与 [`astrcode_session::turn_context::TurnError`]（单 turn 执行期错误）区分命名，避免跨 crate 歧义。
+/// 与 [`astrcode_session::turn_context::TurnError`]（单 turn 执行期错误）区分命名，避免跨 crate
+/// 歧义。
 #[derive(Debug, Error)]
 pub enum TurnScheduleError {
     #[error("A turn is already running")]
@@ -409,7 +410,11 @@ impl TurnScheduler {
     }
 
     /// 向活跃 turn 注入中途消息。
-    pub async fn inject(&self, session_id: &SessionId, text: String) -> Result<(), TurnScheduleError> {
+    pub async fn inject(
+        &self,
+        session_id: &SessionId,
+        text: String,
+    ) -> Result<(), TurnScheduleError> {
         let turn_id = self
             .registry
             .active_turn_id(session_id)
@@ -442,7 +447,10 @@ impl TurnScheduler {
             .await
             .map_err(|e| TurnScheduleError::SessionNotFound(format!("{session_id}: {e}")))?;
 
-        let state = session.read_model().await.map_err(TurnScheduleError::Session)?;
+        let state = session
+            .read_model()
+            .await
+            .map_err(TurnScheduleError::Session)?;
 
         // Phase repair
         match repair_stale_phase_for_state(session_id, &session, &state).await {

@@ -3,10 +3,7 @@
 use ratatui::text::Line;
 
 use super::StreamState;
-use crate::tui::{
-    render::visual_lines,
-    theme::Theme,
-};
+use crate::tui::{render::visual_lines, theme::Theme};
 
 /// Manages one assistant message stream.
 pub struct StreamController {

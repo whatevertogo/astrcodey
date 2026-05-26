@@ -1,7 +1,8 @@
 [package]
 name = "astrcode-extension-sdk"
-version = "0.2.2"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Stable authoring surface for AstrCode extensions"
 
 [dependencies]
@@ -11,4 +12,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

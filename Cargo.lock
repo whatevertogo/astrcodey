@@ -188,6 +188,7 @@ name = "astrcode-ai"
 version = "0.2.2"
 dependencies = [
  "astrcode-core",
+ "astrcode-support",
  "async-trait",
  "futures-util",
  "reqwest 0.12.28",
@@ -229,7 +230,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
- "futures",
+ "futures-util",
  "libc",
  "parking_lot",
  "ratatui",
@@ -345,7 +346,7 @@ dependencies = [
  "astrcode-protocol",
  "astrcode-support",
  "async-trait",
- "futures",
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
