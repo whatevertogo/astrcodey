@@ -186,7 +186,7 @@ pub(in crate::http) fn event_to_deltas(
                 tool_call_id: Some(tool_call_id.to_string()),
                 agent_name: Some(agent_name.clone()),
                 task: Some(task.clone()),
-                status: astrcode_core::storage::AgentSessionStatus::Running.into(),
+                status: Some(astrcode_core::storage::AgentSessionStatus::Running.into()),
                 final_session_id: None,
                 summary: None,
                 error: None,
@@ -211,7 +211,7 @@ pub(in crate::http) fn event_to_deltas(
                     tool_call_id: None,
                     agent_name: None,
                     task: None,
-                    status: match &event.payload {
+                    status: Some(match &event.payload {
                         EventPayload::AgentSessionCompleted { .. } => {
                             astrcode_core::storage::AgentSessionStatus::Completed.into()
                         },
@@ -219,7 +219,7 @@ pub(in crate::http) fn event_to_deltas(
                             astrcode_core::storage::AgentSessionStatus::Failed.into()
                         },
                         _ => unreachable!(),
-                    },
+                    }),
                     final_session_id: Some(final_session_id.to_string()),
                     summary: matches!(&event.payload, EventPayload::AgentSessionCompleted { .. })
                         .then(|| summary.clone()),

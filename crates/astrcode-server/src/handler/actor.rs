@@ -15,13 +15,22 @@ use crate::{
     turn_scheduler::{SubmitOutcome, TurnScheduler},
 };
 
+/// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
+pub(in crate::handler) const COMMAND_ACTOR_CAPACITY: usize = 256;
+
 /// 外部访问 CommandHandler 的句柄，通过消息通道发送命令。
 #[derive(Clone)]
 pub struct CommandHandle {
-    pub(super) tx: mpsc::UnboundedSender<CommandMessage>,
+    pub(super) tx: mpsc::Sender<CommandMessage>,
 }
 
 impl CommandHandle {
+    async fn post(&self, message: CommandMessage) -> Result<(), HandlerError> {
+        self.tx
+            .send(message)
+            .await
+            .map_err(|_| HandlerError::ActorUnavailable)
+    }
     /// 启动 CommandHandler Actor，返回可克隆的句柄。
     pub fn spawn(
         runtime: Arc<ServerRuntime>,
@@ -34,18 +43,16 @@ impl CommandHandle {
     /// 发送客户端命令，等待执行完成。
     pub async fn handle(&self, command: ClientCommand) -> Result<(), HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::ClientCommand { command, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::ClientCommand { command, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 创建新会话，返回会话 ID。
     pub async fn create_session(&self, working_dir: String) -> Result<SessionId, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::CreateSession { working_dir, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::CreateSession { working_dir, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -56,13 +63,12 @@ impl CommandHandle {
         text: String,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::SubmitInputWithCompletion {
-                session_id,
-                text,
-                reply,
-            })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::SubmitInputWithCompletion {
+            session_id,
+            text,
+            reply,
+        })
+        .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -73,13 +79,12 @@ impl CommandHandle {
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::SubmitInputForSession {
-                session_id,
-                text,
-                reply,
-            })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::SubmitInputForSession {
+            session_id,
+            text,
+            reply,
+        })
+        .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -90,22 +95,20 @@ impl CommandHandle {
         keep_recent_turns: Option<usize>,
     ) -> Result<ManualCompactOutcome, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::CompactSession {
-                session_id,
-                keep_recent_turns,
-                reply,
-            })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::CompactSession {
+            session_id,
+            keep_recent_turns,
+            reply,
+        })
+        .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 中止指定会话的活跃 Turn。
     pub async fn abort_session(&self, session_id: SessionId) -> Result<(), HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::AbortSession { session_id, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::AbortSession { session_id, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -115,9 +118,8 @@ impl CommandHandle {
         session_id: SessionId,
     ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::ListCommandsForSession { session_id, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::ListCommandsForSession { session_id, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -127,9 +129,8 @@ impl CommandHandle {
     /// 将 session 恢复为 Idle。session 已经是 Idle/Error 时静默返回 Ok。
     pub async fn repair_stale_turn(&self, session_id: SessionId) -> Result<(), HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::RepairStaleTurn { session_id, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::RepairStaleTurn { session_id, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
@@ -140,20 +141,19 @@ impl CommandHandle {
         at_cursor: Option<String>,
     ) -> Result<SessionId, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::ForkSession {
-                source_id,
-                at_cursor,
-                reply,
-            })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::ForkSession {
+            source_id,
+            at_cursor,
+            reply,
+        })
+        .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 停止 actor 主循环并等待任务退出。
     pub async fn shutdown(&self) {
         let (reply, rx) = oneshot::channel();
-        if self.tx.send(CommandMessage::Shutdown { reply }).is_ok() {
+        if self.post(CommandMessage::Shutdown { reply }).await.is_ok() {
             let _ = rx.await;
         }
     }
@@ -161,9 +161,8 @@ impl CommandHandle {
     /// 删除指定工作目录下的所有会话，返回删除数量。
     pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(CommandMessage::DeleteProject { working_dir, reply })
-            .map_err(|_| HandlerError::ActorUnavailable)?;
+        self.post(CommandMessage::DeleteProject { working_dir, reply })
+            .await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 }
@@ -264,7 +263,7 @@ impl CommandHandler {
         runtime: Arc<ServerRuntime>,
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
-        actor_tx: mpsc::UnboundedSender<CommandMessage>,
+        actor_tx: mpsc::Sender<CommandMessage>,
     ) -> Self {
         let model_selection =
             super::model_selection::ModelSelectionController::new(runtime.config_manager().clone());
@@ -284,7 +283,7 @@ impl CommandHandler {
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
     ) -> CommandHandle {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(COMMAND_ACTOR_CAPACITY);
         let mut handler = Self::new(runtime, scheduler, event_bus, tx.clone());
         let handle = tokio::spawn(async move {
             handler.run(rx).await;
@@ -301,7 +300,7 @@ impl CommandHandler {
     ///
     /// 内置空闲 recap 机制：turn 完成后若 3 分钟内无新 prompt 提交，
     /// 自动生成 recap 摘要推送给所有客户端。
-    async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<CommandMessage>) {
+    async fn run(&mut self, mut rx: mpsc::Receiver<CommandMessage>) {
         use std::time::Duration;
 
         use tokio::time::{Instant, sleep_until};

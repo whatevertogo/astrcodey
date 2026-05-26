@@ -68,6 +68,7 @@ pub mod prelude {
             CommandContext, CommandHandler, CompactContext, CompactContributions, CompactEvent,
             CompactHandler, CompactResult, Extension, ExtensionCapability, ExtensionCommandResult,
             ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionManifest,
+            StatusItemUpdatePayload,
             HookMode, HookResult, LifecycleContext, LifecycleHandler, PostToolUseContext,
             PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
             PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,

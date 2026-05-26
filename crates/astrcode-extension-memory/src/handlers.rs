@@ -529,6 +529,7 @@ impl astrcode_extension_sdk::extension::CommandHandler for MemoryCommandHandler 
         Ok(ExtensionCommandResult::Display {
             content: result,
             is_error: false,
+            status_update: None,
         })
     }
 }

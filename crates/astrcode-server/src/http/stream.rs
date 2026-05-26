@@ -580,7 +580,7 @@ fn child_phase_delta(
             tool_call_id: None,
             agent_name: None,
             task: None,
-            status: AgentSessionStatus::Running.into(),
+            status: None,
             final_session_id: None,
             summary: None,
             error: None,

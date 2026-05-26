@@ -627,6 +627,9 @@ pub enum ExtensionCommandResult {
         content: String,
         /// 是否为错误结果。
         is_error: bool,
+        /// 可选状态栏更新；避免宿主解析展示文案（如 `/mode` 切换）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_update: Option<StatusItemUpdatePayload>,
     },
     /// 同步处理完成，不启动 agent turn。
     Handled {
@@ -652,6 +655,19 @@ impl ExtensionCommandResult {
         Self::Display {
             content: content.into(),
             is_error,
+            status_update: None,
+        }
+    }
+
+    pub fn display_with_status(
+        content: impl Into<String>,
+        is_error: bool,
+        status_update: StatusItemUpdatePayload,
+    ) -> Self {
+        Self::Display {
+            content: content.into(),
+            is_error,
+            status_update: Some(status_update),
         }
     }
 

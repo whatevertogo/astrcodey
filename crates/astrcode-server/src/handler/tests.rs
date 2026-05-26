@@ -1321,7 +1321,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     );
 
     let event_tx = Arc::new(EventFanout::new(1024));
-    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
     let scheduler = test_scheduler(&runtime);
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
@@ -1429,7 +1429,7 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
     );
 
     let event_tx = Arc::new(EventFanout::new(1024));
-    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
     let scheduler = test_scheduler(&runtime);
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
@@ -1500,7 +1500,7 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
         .unwrap();
 
     let event_tx = Arc::new(EventFanout::new(1024));
-    let (actor_tx, _actor_rx) = mpsc::unbounded_channel();
+    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
     let scheduler = test_scheduler(&runtime);
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
@@ -1845,6 +1845,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
             turn_id,
             completion: TurnCompletion::Aborted,
         })
+        .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(10)).await;
 

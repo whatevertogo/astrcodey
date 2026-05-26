@@ -110,7 +110,7 @@ impl CommandHandler {
 async fn run_completion_watcher(
     mut handle: astrcode_session::turn_handle::TurnHandle,
     scheduler: Arc<TurnScheduler>,
-    actor_tx: mpsc::UnboundedSender<CommandMessage>,
+    actor_tx: mpsc::Sender<CommandMessage>,
     sid: SessionId,
     mut turn_id: TurnId,
     mut completion_tx: Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
@@ -141,11 +141,22 @@ async fn run_completion_watcher(
             if let Some(tx) = completion_tx.take() {
                 let _ = tx.send(completion.clone());
             }
-            let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
-                session_id: sid.clone(),
-                turn_id: turn_id.clone(),
-                completion: completion.clone(),
-            });
+            if actor_tx
+                .send(CommandMessage::AgentTurnCleanup {
+                    session_id: sid.clone(),
+                    turn_id: turn_id.clone(),
+                    completion: completion.clone(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    session_id = %sid,
+                    turn_id = %turn_id,
+                    "command actor queue closed; skipping turn cleanup message"
+                );
+                break;
+            }
             turn_id = next_turn_id;
             handle = next_handle;
             continue;
@@ -154,11 +165,20 @@ async fn run_completion_watcher(
         if let Some(tx) = completion_tx.take() {
             let _ = tx.send(completion.clone());
         }
-        let _ = actor_tx.send(CommandMessage::AgentTurnCleanup {
-            session_id: sid,
-            turn_id,
-            completion,
-        });
+        if actor_tx
+            .send(CommandMessage::AgentTurnCleanup {
+                session_id: sid,
+                turn_id: turn_id.clone(),
+                completion,
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                turn_id = %turn_id,
+                "command actor queue closed; skipping turn cleanup message"
+            );
+        }
         break;
     }
 }

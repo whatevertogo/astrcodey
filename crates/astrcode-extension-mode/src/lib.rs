@@ -25,6 +25,7 @@ use std::{path::PathBuf, sync::Arc};
 use astrcode_extension_sdk::{
     extension::{
         CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
+        StatusItemUpdatePayload,
         ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
         ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
         ToolHandler,
@@ -237,9 +238,13 @@ impl CommandHandler for ModeSlashCommandHandler {
         }
 
         if state.current_mode == target_mode {
-            return Ok(ExtensionCommandResult::display(
+            return Ok(ExtensionCommandResult::display_with_status(
                 format!("Already in {target_mode} mode"),
                 false,
+                StatusItemUpdatePayload {
+                    id: "mode".into(),
+                    text: target_mode.to_string(),
+                },
             ));
         }
 
@@ -249,9 +254,13 @@ impl CommandHandler for ModeSlashCommandHandler {
         }
         store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
 
-        Ok(ExtensionCommandResult::display(
+        Ok(ExtensionCommandResult::display_with_status(
             format!("Switched to {target_mode} mode"),
             false,
+            StatusItemUpdatePayload {
+                id: "mode".into(),
+                text: target_mode.to_string(),
+            },
         ))
     }
 }

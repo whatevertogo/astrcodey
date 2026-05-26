@@ -200,8 +200,9 @@ pub struct HttpAgentSessionLinkDto {
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
-    #[serde(default)]
-    pub status: AgentSessionStatusDto,
+    /// 仅终态更新携带；子 session 阶段补丁省略此字段，避免覆盖 `failed`/`completed`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<AgentSessionStatusDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

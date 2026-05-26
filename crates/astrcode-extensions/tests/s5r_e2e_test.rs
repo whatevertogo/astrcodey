@@ -376,7 +376,11 @@ async fn s5r_demo_command() {
         .await
         .unwrap();
     match result {
-        ExtensionCommandResult::Display { content, is_error } => {
+        ExtensionCommandResult::Display {
+            content,
+            is_error,
+            status_update: _,
+        } => {
             assert!(!is_error);
             assert!(content.contains("s5r guest demo"));
         },

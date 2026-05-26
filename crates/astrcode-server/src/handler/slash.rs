@@ -152,28 +152,18 @@ impl CommandHandler {
             .await
         {
             // 显示结果到客户端
-            Ok(ExtensionCommandResult::Display { content, is_error }) => {
-                // mode 命令成功时，同步推送状态栏更新。
-                // TODO: mode 扩展应返回结构化响应（如 JSON {"mode": "plan"}），
-                // 而不是让 CommandHandler 硬编码解析响应字符串。
-                // 当前依赖 mode 扩展的响应格式，如果扩展改了文案会静默失效。
-                if command.name == "mode" && !is_error {
-                    if let Some(mode) = content
-                        .strip_prefix("Switched to ")
-                        .and_then(|s| s.strip_suffix(" mode"))
-                        .or_else(|| {
-                            content
-                                .strip_prefix("Already in ")
-                                .and_then(|s| s.strip_suffix(" mode"))
-                        })
-                    {
-                        self.event_bus.send_notification(
-                            astrcode_protocol::events::ClientNotification::StatusItemUpdate {
-                                id: "mode".into(),
-                                text: mode.to_string(),
-                            },
-                        );
-                    }
+            Ok(ExtensionCommandResult::Display {
+                content,
+                is_error,
+                status_update,
+            }) => {
+                if let Some(update) = status_update {
+                    self.event_bus.send_notification(
+                        astrcode_protocol::events::ClientNotification::StatusItemUpdate {
+                            id: update.id,
+                            text: update.text,
+                        },
+                    );
                 }
                 self.event_bus.send_notification(
                     astrcode_protocol::events::ClientNotification::ExtensionCommandResult {

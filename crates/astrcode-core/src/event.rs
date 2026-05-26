@@ -468,6 +468,12 @@ impl EventPayload {
 ///
 /// 序号（`seq`）由存储层在追加事件时分配，用于事件日志的有序读取。
 /// `payload` 使用 `#[serde(flatten)]` 与信封字段平铺在同一 JSON 对象中。
+///
+/// **维护约定**：新增 [`EventPayload`] 变体时，其 serde 字段名不得与信封字段冲突：
+/// `seq`、`id`、`session_id`、`turn_id`、`timestamp`（`type` 由 payload 内部 tag 占用）。
+/// 冲突不会在 Rust 编译期报错，可能导致 JSONL replay 静默错乱。见
+/// `event_payload_fields_do_not_use_envelope_keys` 测试。
+/// TODO: 更好的设计？
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     /// 存储层分配的递增序号，新创建时为 `None`。
@@ -520,6 +526,36 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn event_payload_fields_do_not_use_envelope_keys() {
+        let event = Event {
+            seq: Some(1),
+            id: "event-1".into(),
+            session_id: "parent-session".into(),
+            turn_id: None,
+            timestamp: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            payload: EventPayload::AgentSessionCompleted {
+                child_session_id: "child-a".into(),
+                final_session_id: "child-a".into(),
+                summary: "ok".into(),
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        for key in ["seq", "id", "session_id", "timestamp"] {
+            assert!(
+                json.get(key).is_some(),
+                "flattened event must include envelope field `{key}`"
+            );
+        }
+        assert!(json.get("turn_id").is_none());
+        assert_eq!(json["session_id"], "parent-session");
+        assert_eq!(json["child_session_id"], "child-a");
+        assert_eq!(json["id"], "event-1");
+        assert!(json.get("payload").is_none());
+    }
 
     #[test]
     fn event_serializes_as_flat_json() {

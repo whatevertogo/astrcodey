@@ -96,7 +96,7 @@ pub(crate) struct CommandHandler {
     /// 事件总线，用于发送客户端通知
     event_bus: Arc<crate::server_event_bus::ServerEventBus>,
     /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
-    actor_tx: mpsc::UnboundedSender<CommandMessage>,
+    actor_tx: mpsc::Sender<CommandMessage>,
     /// 模型选择流程。
     model_selection: ModelSelectionController,
 }

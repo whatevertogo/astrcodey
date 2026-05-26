@@ -266,3 +266,60 @@ impl Default for ChildTurnManager {
 fn one_line_summary(text: &str) -> String {
     astrcode_support::text::compact_inline(text, 159)
 }
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::event::EventPayload;
+
+    use super::*;
+
+    #[test]
+    fn try_set_outcome_is_first_write_wins() {
+        let (tx, rx) = watch::channel(None);
+        try_set_outcome(
+            &tx,
+            ChildOutcome::Completed {
+                summary: "first".into(),
+            },
+        );
+        try_set_outcome(
+            &tx,
+            ChildOutcome::Failed {
+                error: "second".into(),
+            },
+        );
+        assert_eq!(
+            rx.borrow().clone(),
+            Some(ChildOutcome::Completed {
+                summary: "first".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn terminal_payload_uses_matching_child_and_final_session_ids() {
+        let child = SessionId::from("child-session");
+        match crate::payload::agent_session_completed_payload(child.clone(), "done".into()) {
+            EventPayload::AgentSessionCompleted {
+                child_session_id,
+                final_session_id,
+                ..
+            } => {
+                assert_eq!(child_session_id, child);
+                assert_eq!(final_session_id, child);
+            },
+            _ => panic!("expected AgentSessionCompleted"),
+        }
+        match crate::payload::agent_session_failed_payload(child.clone(), "err".into()) {
+            EventPayload::AgentSessionFailed {
+                child_session_id,
+                final_session_id,
+                ..
+            } => {
+                assert_eq!(child_session_id, child);
+                assert_eq!(final_session_id, child);
+            },
+            _ => panic!("expected AgentSessionFailed"),
+        }
+    }
+}
