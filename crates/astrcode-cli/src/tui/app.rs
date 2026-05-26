@@ -146,10 +146,6 @@ impl App {
         self.composer.text()
     }
 
-    pub fn input_cursor(&self) -> usize {
-        self.composer.cursor()
-    }
-
     pub fn take_input(&mut self) -> String {
         self.close_slash();
         self.composer.take_submit_text()

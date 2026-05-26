@@ -18,7 +18,7 @@
 |---|---|
 | 拆分 session.rs | `src/session/{mod,events,prompt,turn_entry,children,compact}.rs` |
 | TurnError 结构化 | `SessionReadFailed`、`StreamEndedUnexpectedly`、`ProviderBlocked` 等 |
-| AgentSignal 简化 | `TurnEventTx` 类型别名；`AgentSignal` 保留为兼容别名 |
+| Turn 事件通道 | `TurnEventTx` 为 turn 内 live 事件发送端 |
 | dispatch 改进 | `dispatch_turn_event` durable 失败时 `tracing::warn` |
 
 ## P2 — 已完成

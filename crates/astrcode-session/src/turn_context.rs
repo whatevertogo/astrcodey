@@ -13,12 +13,9 @@ use tokio::sync::mpsc;
 
 // ─── Turn event channel ──────────────────────────────────────────────────
 
-/// Turn 内 live 事件发送端（legacy）；新代码优先
+/// Turn 内 live 事件发送端；新代码优先
 /// [`TurnPublisher::live`](crate::turn_publish::TurnPublisher::live)。
 pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
-
-/// 向后兼容别名；新代码优先使用 [`TurnEventTx`]。
-pub type AgentSignal = TurnEventTx;
 
 pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {
     if let Some(tx) = event_tx {

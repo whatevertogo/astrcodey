@@ -43,10 +43,6 @@ impl MessageBody {
         self.plain.is_empty()
     }
 
-    pub fn contains_text(&self, text: &str) -> bool {
-        self.plain.contains(text)
-    }
-
     pub fn set_text(&mut self, text: String) {
         self.plain = text;
         self.render = None;
@@ -94,7 +90,12 @@ pub struct Message {
 #[derive(Debug, Clone)]
 pub enum ScrollbackEntry {
     Message(Message),
-    StreamHeader { role: MessageRole, label: String },
+    StreamHeader {
+        #[allow(dead_code)]
+        role: MessageRole,
+        #[allow(dead_code)]
+        label: String,
+    },
     StreamText { role: MessageRole, text: String },
     BlankLine,
 }

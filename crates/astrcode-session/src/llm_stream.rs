@@ -188,16 +188,6 @@ pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> 
     }
 }
 
-#[allow(dead_code)]
-pub fn assistant_message_with_thinking(
-    text: &str,
-    reasoning_content: Option<String>,
-) -> LlmMessage {
-    let mut message = LlmMessage::assistant(text);
-    message.reasoning_content = reasoning_content;
-    message
-}
-
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     messages
         .into_iter()
@@ -211,6 +201,15 @@ mod tests {
     use astrcode_core::llm::LlmMessage;
 
     use super::*;
+
+    fn assistant_message_with_thinking(
+        text: &str,
+        reasoning_content: Option<String>,
+    ) -> LlmMessage {
+        let mut message = LlmMessage::assistant(text);
+        message.reasoning_content = reasoning_content;
+        message
+    }
 
     #[test]
     fn non_empty_reasoning_returns_some() {

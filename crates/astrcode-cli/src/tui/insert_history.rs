@@ -34,6 +34,7 @@ use super::custom_terminal::Terminal;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertHistoryMode {
     Standard,
+    #[allow(dead_code)]
     Zellij,
 }
 

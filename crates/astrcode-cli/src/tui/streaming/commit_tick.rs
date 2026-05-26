@@ -12,7 +12,7 @@ use super::{
 /// Output of a single commit tick.
 pub struct CommitTickOutput {
     pub lines: Vec<Line<'static>>,
-    pub all_idle: bool,
+    pub _all_idle: bool,
 }
 
 /// Run one commit tick against the provided stream controller.
@@ -24,7 +24,7 @@ pub fn run_commit_tick(
     let Some(ctrl) = controller else {
         return CommitTickOutput {
             lines: Vec::new(),
-            all_idle: true,
+            _all_idle: true,
         };
     };
 
@@ -38,6 +38,6 @@ pub fn run_commit_tick(
         DrainPlan::Batch(n) => state.drain_n(n),
     };
 
-    let all_idle = state.is_idle();
-    CommitTickOutput { lines, all_idle }
+    let _all_idle = state.is_idle();
+    CommitTickOutput { lines, _all_idle }
 }

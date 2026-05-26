@@ -1,4 +1,5 @@
 //! MessageRenderer trait and MessageRendererRegistry.
+#![allow(dead_code)]
 //!
 //! Mapped from pi-mono `MessageRenderer<T>` + `registerMessageRenderer`.
 

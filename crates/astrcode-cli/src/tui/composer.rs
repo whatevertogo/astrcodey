@@ -7,27 +7,6 @@ use unicode_width::UnicodeWidthChar;
 const PASTE_PLACEHOLDER_THRESHOLD: usize = 600;
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
-/// Composer 可执行的编辑动作。
-// TODO: ComposerAction 暗示了 action-based undo 设计，但 undo 栈尚未接入。
-// 后续可将 apply() 返回的 action 记录到 undo 栈中以支持 Ctrl+Z 撤销。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComposerAction {
-    InsertChar(char),
-    InsertPaste(String),
-    Newline,
-    Backspace,
-    Delete,
-    MoveLeft,
-    MoveRight,
-    MoveHome,
-    MoveEnd,
-    MoveVisualUp { width: usize },
-    MoveVisualDown { width: usize },
-    DeleteBeforeCursor,
-    DeleteAfterCursor,
-    DeletePreviousWord,
-}
-
 /// 输入框内部状态。
 #[derive(Debug, Clone, Default)]
 pub struct ComposerState {
@@ -58,25 +37,6 @@ impl ComposerState {
         self.text = text;
         self.history_idx = None;
         self.pasted.clear();
-    }
-
-    pub fn apply(&mut self, action: ComposerAction) -> bool {
-        match action {
-            ComposerAction::InsertChar(ch) => self.insert_char(ch),
-            ComposerAction::InsertPaste(text) => self.insert_paste(&text),
-            ComposerAction::Newline => self.insert_char('\n'),
-            ComposerAction::Backspace => self.backspace(),
-            ComposerAction::Delete => self.delete(),
-            ComposerAction::MoveLeft => self.move_left(),
-            ComposerAction::MoveRight => self.move_right(),
-            ComposerAction::MoveHome => self.move_home(),
-            ComposerAction::MoveEnd => self.move_end(),
-            ComposerAction::MoveVisualUp { width } => self.move_visual_up(width),
-            ComposerAction::MoveVisualDown { width } => self.move_visual_down(width),
-            ComposerAction::DeleteBeforeCursor => self.delete_before_cursor(),
-            ComposerAction::DeleteAfterCursor => self.delete_after_cursor(),
-            ComposerAction::DeletePreviousWord => self.delete_previous_word(),
-        }
     }
 
     pub fn insert_char(&mut self, ch: char) -> bool {

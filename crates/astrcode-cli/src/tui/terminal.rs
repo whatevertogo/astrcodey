@@ -4,7 +4,7 @@
 //! On resize: clear visible history rows, re-insert from buffer for the new width.
 //! This prevents "swallowed lines" on terminal resize.
 
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 
 use crossterm::{
     SynchronizedUpdate,
