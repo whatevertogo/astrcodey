@@ -188,7 +188,6 @@ name = "astrcode-ai"
 version = "0.2.2"
 dependencies = [
  "astrcode-core",
- "astrcode-support",
  "async-trait",
  "futures-util",
  "reqwest 0.12.28",
