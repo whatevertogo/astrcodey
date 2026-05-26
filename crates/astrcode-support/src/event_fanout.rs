@@ -44,9 +44,27 @@ impl<T: Clone> EventFanout<T> {
     pub fn send(&self, event: T) {
         let mut senders = lock_parking(&self.senders);
         let before = senders.len();
-        senders.retain(|tx| match tx.try_send(event.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => false,
+        if before == 0 {
+            return;
+        }
+        // 单订阅者直接 move；多订阅者只额外 clone 一次作为后续广播副本。
+        let backup = if before > 1 {
+            Some(event.clone())
+        } else {
+            None
+        };
+        let mut owned = Some(event);
+        senders.retain(|tx| {
+            let payload = owned
+                .take()
+                .unwrap_or_else(|| backup.as_ref().expect("backup set when len > 1").clone());
+            match tx.try_send(payload) {
+                Ok(()) => true,
+                Err(TrySendError::Full(e)) | Err(TrySendError::Closed(e)) => {
+                    owned = Some(e);
+                    false
+                },
+            }
         });
         let dropped = before - senders.len();
         if dropped > 0 {

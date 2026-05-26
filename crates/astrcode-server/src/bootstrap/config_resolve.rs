@@ -8,7 +8,7 @@ pub(super) async fn resolve_effective_config(
     config_store: &FileConfigStore,
     config: &Config,
 ) -> EffectiveConfig {
-    match config.clone().into_effective() {
+    match config.effective_from() {
         Ok(effective) => {
             if let Err(err) = config_store.save_last_known_good(config).await {
                 tracing::warn!("Failed to save last-known-good config snapshot: {err}");

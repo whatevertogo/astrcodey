@@ -1,6 +1,10 @@
-//! E2E：IPC 子进程扩展 — 覆盖 initialize / handler.invoke / host/invoke / ping / 全量 API。
+//! E2E：s5r 子进程扩展 — 覆盖 initialize / handler.invoke / host/invoke / ping / 全量 API。
 
-use std::{fs, sync::Arc, time::Duration};
+use std::{
+    fs,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use astrcode_core::{
     event::EventPayload,
@@ -13,7 +17,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::config::ModelSelection;
 use astrcode_extensions::{
-    build_host_router, ipc_ext::IpcExtension, loader::ExtensionLoader, runner::ExtensionRunner,
+    build_host_router, loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
 use async_trait::async_trait;
@@ -21,43 +25,49 @@ use async_trait::async_trait;
 fn guest_binary_path() -> std::path::PathBuf {
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
-        .join("ipc-guest")
+        .join("s5r-guest")
         .join("target")
         .join("release");
     #[cfg(windows)]
-    let path = base.join("ipc_guest_demo.exe");
+    let path = base.join("s5r_guest_demo.exe");
     #[cfg(not(windows))]
-    let path = base.join("ipc_guest_demo");
+    let path = base.join("s5r_guest_demo");
     path
 }
 
+static GUEST_BINARY: OnceLock<std::path::PathBuf> = OnceLock::new();
+
 fn ensure_guest_built() -> std::path::PathBuf {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("ipc-guest")
-        .join("Cargo.toml");
-    eprintln!(
-        "IPC E2E: cargo build --release --manifest-path {}",
-        manifest.display()
-    );
-    let output = std::process::Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .output()
-        .expect("spawn cargo build ipc-guest");
-    assert!(
-        output.status.success(),
-        "ipc-guest build failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        guest_binary_path().exists(),
-        "ipc guest binary missing after build"
-    );
-    guest_binary_path()
+    GUEST_BINARY
+        .get_or_init(|| {
+            let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("s5r-guest")
+                .join("Cargo.toml");
+            eprintln!(
+                "s5r E2E: cargo build --release --manifest-path {}",
+                manifest.display()
+            );
+            let output = std::process::Command::new("cargo")
+                .arg("build")
+                .arg("--release")
+                .arg("--manifest-path")
+                .arg(&manifest)
+                .output()
+                .expect("spawn cargo build s5r-guest");
+            assert!(
+                output.status.success(),
+                "s5r-guest build failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                guest_binary_path().exists(),
+                "s5r guest binary missing after build"
+            );
+            guest_binary_path()
+        })
+        .clone()
 }
 
 fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
@@ -102,16 +112,16 @@ fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
     )
 }
 
-async fn load_ipc(router: Arc<astrcode_extensions::HostRouter>) -> Arc<IpcExtension> {
+async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtension> {
     let guest = ensure_guest_built();
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let ext_dir = std::env::temp_dir().join(format!("astrcode-ipc-e2e-{suffix}"));
+    let ext_dir = std::env::temp_dir().join(format!("astrcode-s5r-e2e-{suffix}"));
     fs::create_dir_all(&ext_dir).unwrap();
     let manifest = serde_json::json!({
-        "protocol": { "ipc": "1.0" },
+        "protocol": { "s5r": "1.0" },
         "command": [guest.to_string_lossy()]
     });
     fs::write(
@@ -119,9 +129,9 @@ async fn load_ipc(router: Arc<astrcode_extensions::HostRouter>) -> Arc<IpcExtens
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    IpcExtension::load(&ext_dir, &manifest, router, None)
+    S5rExtension::load(&ext_dir, &manifest, router, None)
         .await
-        .expect("load IPC extension")
+        .expect("load s5r extension")
 }
 
 fn tool_ctx(working_dir: &str) -> ToolExecutionContext {
@@ -149,9 +159,9 @@ fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUs
 }
 
 #[tokio::test]
-async fn ipc_manifest_registers_tools_hooks_and_capabilities() {
-    let ext = load_ipc(minimal_router()).await;
-    assert_eq!(ext.id(), "ipc-guest-demo");
+async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
+    let ext = load_s5r(minimal_router()).await;
+    assert_eq!(ext.id(), "s5r-guest-demo");
     assert!(
         ext.capabilities()
             .iter()
@@ -168,14 +178,14 @@ async fn ipc_manifest_registers_tools_hooks_and_capabilities() {
 }
 
 #[tokio::test]
-async fn ipc_ping_health() {
-    let ext = load_ipc(minimal_router()).await;
+async fn s5r_ping_health() {
+    let ext = load_s5r(minimal_router()).await;
     ext.health().await.expect("extension/ping via health()");
 }
 
 #[tokio::test]
-async fn ipc_ping_tool_returns_pong() {
-    let ext = load_ipc(minimal_router()).await;
+async fn s5r_ping_tool_returns_pong() {
+    let ext = load_s5r(minimal_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
     let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ping").unwrap();
@@ -188,8 +198,8 @@ async fn ipc_ping_tool_returns_pong() {
 }
 
 #[tokio::test]
-async fn ipc_greet_and_add_tools() {
-    let ext = load_ipc(minimal_router()).await;
+async fn s5r_greet_and_add_tools() {
+    let ext = load_s5r(minimal_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
 
@@ -197,13 +207,13 @@ async fn ipc_greet_and_add_tools() {
     let r = greet
         .execute(
             "greet",
-            serde_json::json!({ "name": "IPC" }),
+            serde_json::json!({ "name": "s5r" }),
             "/tmp",
             &tool_ctx("/tmp"),
         )
         .await
         .unwrap();
-    assert_eq!(r.content, "hello, IPC!");
+    assert_eq!(r.content, "hello, s5r!");
 
     let (_, add) = reg.tools().iter().find(|(d, _)| d.name == "add").unwrap();
     let r = add
@@ -219,8 +229,8 @@ async fn ipc_greet_and_add_tools() {
 }
 
 #[tokio::test]
-async fn ipc_ask_llm_via_host_invoke() {
-    let ext = load_ipc(mock_router()).await;
+async fn s5r_ask_llm_via_host_invoke() {
+    let ext = load_s5r(mock_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
     let (_, handler) = reg
@@ -242,12 +252,12 @@ async fn ipc_ask_llm_via_host_invoke() {
 }
 
 #[tokio::test]
-async fn ipc_workspace_read_via_host_invoke() {
+async fn s5r_workspace_read_via_host_invoke() {
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let wd = std::env::temp_dir().join(format!("astrcode-ipc-ws-{suffix}"));
+    let wd = std::env::temp_dir().join(format!("astrcode-s5r-ws-{suffix}"));
     fs::create_dir_all(&wd).unwrap();
     fs::write(wd.join("probe.txt"), "workspace-ok").unwrap();
     let wd_str = wd.to_string_lossy();
@@ -256,7 +266,7 @@ async fn ipc_workspace_read_via_host_invoke() {
     let ext_dir = wd.join("ext");
     fs::create_dir_all(&ext_dir).unwrap();
     let manifest = serde_json::json!({
-        "protocol": { "ipc": "1.0" },
+        "protocol": { "s5r": "1.0" },
         "command": [guest.to_string_lossy()]
     });
     fs::write(
@@ -265,7 +275,7 @@ async fn ipc_workspace_read_via_host_invoke() {
     )
     .unwrap();
 
-    let ext = IpcExtension::load(&ext_dir, &manifest, mock_router(), Some(wd_str.as_ref()))
+    let ext = S5rExtension::load(&ext_dir, &manifest, mock_router(), Some(wd_str.as_ref()))
         .await
         .expect("load");
     let mut reg = Registrar::new();
@@ -293,8 +303,8 @@ async fn ipc_workspace_read_via_host_invoke() {
 }
 
 #[tokio::test]
-async fn ipc_pre_tool_use_blocks_and_emits_event() {
-    let ext = load_ipc(mock_router()).await;
+async fn s5r_pre_tool_use_blocks_and_emits_event() {
+    let ext = load_s5r(mock_router()).await;
     let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
     runner.register(ext).await.unwrap();
 
@@ -324,8 +334,8 @@ async fn ipc_pre_tool_use_blocks_and_emits_event() {
             payload,
             ..
         } => {
-            assert_eq!(extension_id, "ipc-guest-demo");
-            assert_eq!(event_type, "ipc_guest.probe");
+            assert_eq!(extension_id, "s5r-guest-demo");
+            assert_eq!(event_type, "s5r_guest.probe");
             assert_eq!(payload["from"], "pre_tool_use");
         },
         other => panic!("unexpected: {other:?}"),
@@ -342,8 +352,8 @@ async fn ipc_pre_tool_use_blocks_and_emits_event() {
 }
 
 #[tokio::test]
-async fn ipc_demo_command() {
-    let ext = load_ipc(minimal_router()).await;
+async fn s5r_demo_command() {
+    let ext = load_s5r(minimal_router()).await;
     let mut reg = Registrar::new();
     ext.register(&mut reg);
     let (_, handler) = reg
@@ -368,15 +378,15 @@ async fn ipc_demo_command() {
     match result {
         ExtensionCommandResult::Display { content, is_error } => {
             assert!(!is_error);
-            assert!(content.contains("ipc guest demo"));
+            assert!(content.contains("s5r guest demo"));
         },
         other => panic!("unexpected command result: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn ipc_turn_end_continuations_and_pipeline() {
-    let ext = load_ipc(mock_router()).await;
+async fn s5r_turn_end_continuations_and_pipeline() {
+    let ext = load_s5r(mock_router()).await;
     let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
     runner.register(ext).await.unwrap();
 
@@ -431,19 +441,19 @@ async fn ipc_turn_end_continuations_and_pipeline() {
 }
 
 #[tokio::test]
-async fn ipc_loader_discovers_manifest() {
+async fn s5r_loader_discovers_manifest() {
     let guest = ensure_guest_built();
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("astrcode-ipc-loader-{suffix}"));
+    let root = std::env::temp_dir().join(format!("astrcode-s5r-loader-{suffix}"));
     let ext_dir = root.join("demo");
     fs::create_dir_all(&ext_dir).unwrap();
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::json!({
-            "protocol": { "ipc": "1.0" },
+            "protocol": { "s5r": "1.0" },
             "command": [guest.to_string_lossy()]
         })
         .to_string(),
@@ -454,13 +464,62 @@ async fn ipc_loader_discovers_manifest() {
         ExtensionLoader::load_from_dir_for_test(&root, &Some(minimal_router()), None).await;
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(exts.len(), 1);
-    assert_eq!(exts[0].id(), "ipc-guest-demo");
+    assert_eq!(exts[0].id(), "s5r-guest-demo");
     let _ = fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
-async fn ipc_stop_shuts_down_process() {
-    let ext = load_ipc(minimal_router()).await;
+async fn s5r_stop_shuts_down_process() {
+    let ext = load_s5r(minimal_router()).await;
     ext.stop(StopReason::Disabled).await.expect("stop");
     ext.health().await.expect_err("process should be gone");
+}
+
+#[tokio::test]
+async fn s5r_cancel_on_stop_during_slow_tool() {
+    let ext = load_s5r(minimal_router()).await;
+    let mut reg = Registrar::new();
+    ext.register(&mut reg);
+    let handler = reg
+        .tools()
+        .iter()
+        .find(|(d, _)| d.name == "slow")
+        .map(|(_, handler)| Arc::clone(handler))
+        .expect("slow tool");
+
+    let slow_task = tokio::spawn(async move {
+        handler
+            .execute("slow", serde_json::json!({}), "/tmp", &tool_ctx("/tmp"))
+            .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    ext.stop(StopReason::Disabled).await.expect("stop");
+
+    let result = tokio::time::timeout(Duration::from_secs(5), slow_task)
+        .await
+        .expect("slow tool task timed out")
+        .expect("slow tool join");
+
+    match result {
+        Ok(tool_result) => {
+            assert!(
+                tool_result.is_error,
+                "expected cancelled tool error, got: {}",
+                tool_result.content
+            );
+            assert!(
+                tool_result.content.contains("cancel"),
+                "unexpected content: {}",
+                tool_result.content
+            );
+        },
+        Err(err) => {
+            let msg = err.to_string().to_lowercase();
+            assert!(
+                msg.contains("cancel") || msg.contains("closed"),
+                "unexpected error: {err}"
+            );
+        },
+    }
 }

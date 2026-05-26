@@ -229,7 +229,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过 IPC 子进程加载，并在 initialize 握手中声明宿主能力。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
 
 ---
 

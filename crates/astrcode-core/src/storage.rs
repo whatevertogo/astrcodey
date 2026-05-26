@@ -367,10 +367,12 @@ impl ExtensionEventIndex {
         schema_version: u32,
     ) {
         let idx = self.entries.len();
-        self.by_extension
-            .entry(extension_id.clone())
-            .or_default()
-            .push(idx);
+        match self.by_extension.get_mut(&extension_id) {
+            Some(indices) => indices.push(idx),
+            None => {
+                self.by_extension.insert(extension_id.clone(), vec![idx]);
+            },
+        }
         self.entries.push(ExtensionEventEntry {
             seq,
             extension_id,

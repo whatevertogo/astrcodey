@@ -1,4 +1,4 @@
-//! 富 IPC 子进程扩展（方案 B）：stdio JSON-RPC / JSONL。
+//! 磁盘 s5r 子进程扩展：stdio 长度前缀帧 + WireMessage。
 
 mod protocol;
 mod session;
@@ -18,32 +18,32 @@ use astrcode_extension_sdk::{
     s5r::event_to_name,
     tool::{ToolDefinition, ToolResult},
 };
-pub use protocol::IPC_VERSION;
+pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
     extension_manifest::ExtensionRegistration,
     host_router::{HostRouter, InvokeContext},
-    ipc_ext::session::IpcSession,
     remote_manifest::{
         build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
         parse_compact_result, parse_lifecycle_result, parse_post_tool_use_result,
         parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
         parse_tool_result, validate_registration,
     },
+    s5r_ext::session::S5rSession,
 };
 
-pub struct IpcExtension {
+pub struct S5rExtension {
     id: String,
     capabilities: Vec<ExtensionCapability>,
-    session: Arc<IpcSession>,
+    session: Arc<S5rSession>,
     event_decls: Vec<ExtensionEventDecl>,
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<(ExtensionEvent, HookMode)>,
 }
 
-impl IpcExtension {
+impl S5rExtension {
     pub async fn load(
         ext_dir: &Path,
         manifest: &Value,
@@ -52,30 +52,22 @@ impl IpcExtension {
     ) -> Result<Arc<Self>, String> {
         let (program, args) = parse_command(manifest, ext_dir)?;
         let env = parse_env(manifest);
-        let session = IpcSession::spawn(
-            &program,
-            &args,
-            ext_dir,
-            &env,
-            host_router,
-            ext_dir,
-            working_dir,
-        )
-        .await?;
+        let session =
+            S5rSession::spawn(&program, &args, ext_dir, &env, host_router, working_dir).await?;
         let reg = session
             .registration()
-            .ok_or("IPC extension did not complete initialize handshake")?;
+            .ok_or("s5r extension did not complete initialize handshake")?;
         validate_registration(&reg)?;
         Ok(build_extension(session, reg))
     }
 }
 
-fn build_extension(session: Arc<IpcSession>, reg: ExtensionRegistration) -> Arc<IpcExtension> {
+fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<S5rExtension> {
     let tools = build_tools(&reg);
     let commands = build_commands(&reg);
     let subscriptions = build_subscriptions(&reg);
     let event_decls = reg.extension_events.clone();
-    Arc::new(IpcExtension {
+    Arc::new(S5rExtension {
         id: reg.extension_id,
         capabilities: reg.capabilities,
         session,
@@ -89,7 +81,7 @@ fn build_extension(session: Arc<IpcSession>, reg: ExtensionRegistration) -> Arc<
 fn parse_command(manifest: &Value, ext_dir: &Path) -> Result<(String, Vec<String>), String> {
     let cmd = manifest
         .get("command")
-        .ok_or("extension.json missing 'command' array for IPC extension")?;
+        .ok_or("extension.json missing 'command' array for s5r extension")?;
     let arr = cmd
         .as_array()
         .ok_or("'command' must be a JSON array of strings")?;
@@ -129,7 +121,7 @@ fn parse_env(manifest: &Value) -> Vec<(String, String)> {
 }
 
 #[async_trait::async_trait]
-impl Extension for IpcExtension {
+impl Extension for S5rExtension {
     fn id(&self) -> &str {
         &self.id
     }
@@ -149,7 +141,7 @@ impl Extension for IpcExtension {
         for tool_def in &self.tools {
             reg.tool(
                 tool_def.clone(),
-                Arc::new(IpcToolHandler {
+                Arc::new(S5rToolHandler {
                     session: Arc::clone(&self.session),
                     extension_id: self.id.clone(),
                 }),
@@ -158,7 +150,7 @@ impl Extension for IpcExtension {
         for cmd in &self.commands {
             reg.command(
                 cmd.clone(),
-                Arc::new(IpcCommandHandler {
+                Arc::new(S5rCommandHandler {
                     session: Arc::clone(&self.session),
                     extension_id: self.id.clone(),
                 }),
@@ -172,14 +164,14 @@ impl Extension for IpcExtension {
                     reg.on_pre_tool_use(
                         *mode,
                         0,
-                        Arc::new(IpcPreToolUseHandler { session, ext_id }),
+                        Arc::new(S5rPreToolUseHandler { session, ext_id }),
                     );
                 },
                 ExtensionEvent::PostToolUse => {
                     reg.on_post_tool_use(
                         *mode,
                         0,
-                        Arc::new(IpcPostToolUseHandler { session, ext_id }),
+                        Arc::new(S5rPostToolUseHandler { session, ext_id }),
                     );
                 },
                 ExtensionEvent::BeforeProviderRequest => {
@@ -187,7 +179,7 @@ impl Extension for IpcExtension {
                         ProviderEvent::BeforeRequest,
                         *mode,
                         0,
-                        Arc::new(IpcProviderHandler {
+                        Arc::new(S5rProviderHandler {
                             session,
                             ext_id,
                             on: "before_provider_request".into(),
@@ -199,7 +191,7 @@ impl Extension for IpcExtension {
                         ProviderEvent::AfterResponse,
                         *mode,
                         0,
-                        Arc::new(IpcProviderHandler {
+                        Arc::new(S5rProviderHandler {
                             session,
                             ext_id,
                             on: "after_provider_response".into(),
@@ -207,13 +199,13 @@ impl Extension for IpcExtension {
                     );
                 },
                 ExtensionEvent::PromptBuild => {
-                    reg.on_prompt_build(0, Arc::new(IpcPromptBuildHandler { session, ext_id }));
+                    reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
                 },
                 ExtensionEvent::PreCompact => {
                     reg.on_compact(
                         CompactEvent::PreCompact,
                         0,
-                        Arc::new(IpcCompactHandler {
+                        Arc::new(S5rCompactHandler {
                             session,
                             ext_id,
                             on: "pre_compact".into(),
@@ -224,7 +216,7 @@ impl Extension for IpcExtension {
                     reg.on_compact(
                         CompactEvent::PostCompact,
                         0,
-                        Arc::new(IpcCompactHandler {
+                        Arc::new(S5rCompactHandler {
                             session,
                             ext_id,
                             on: "post_compact".into(),
@@ -237,7 +229,7 @@ impl Extension for IpcExtension {
                         other.clone(),
                         *mode,
                         0,
-                        Arc::new(IpcLifecycleHandler {
+                        Arc::new(S5rLifecycleHandler {
                             session,
                             ext_id,
                             on,
@@ -262,7 +254,7 @@ impl Extension for IpcExtension {
 }
 
 fn hook_invoke_ctx(
-    session: &Arc<IpcSession>,
+    session: &Arc<S5rSession>,
     ext_id: &str,
     session_id: Option<String>,
     working_dir: Option<String>,
@@ -284,13 +276,13 @@ fn hook_invoke_ctx(
     }
 }
 
-struct IpcToolHandler {
-    session: Arc<IpcSession>,
+struct S5rToolHandler {
+    session: Arc<S5rSession>,
     extension_id: String,
 }
 
 #[async_trait::async_trait]
-impl ToolHandler for IpcToolHandler {
+impl ToolHandler for S5rToolHandler {
     async fn execute(
         &self,
         tool_name: &str,
@@ -330,13 +322,13 @@ impl ToolHandler for IpcToolHandler {
     }
 }
 
-struct IpcCommandHandler {
-    session: Arc<IpcSession>,
+struct S5rCommandHandler {
+    session: Arc<S5rSession>,
     extension_id: String,
 }
 
 #[async_trait::async_trait]
-impl CommandHandler for IpcCommandHandler {
+impl CommandHandler for S5rCommandHandler {
     async fn execute(
         &self,
         command_name: &str,
@@ -373,13 +365,13 @@ impl CommandHandler for IpcCommandHandler {
     }
 }
 
-struct IpcPreToolUseHandler {
-    session: Arc<IpcSession>,
+struct S5rPreToolUseHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
 }
 
 #[async_trait::async_trait]
-impl PreToolUseHandler for IpcPreToolUseHandler {
+impl PreToolUseHandler for S5rPreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
@@ -411,13 +403,13 @@ impl PreToolUseHandler for IpcPreToolUseHandler {
     }
 }
 
-struct IpcPostToolUseHandler {
-    session: Arc<IpcSession>,
+struct S5rPostToolUseHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
 }
 
 #[async_trait::async_trait]
-impl PostToolUseHandler for IpcPostToolUseHandler {
+impl PostToolUseHandler for S5rPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
@@ -450,14 +442,14 @@ impl PostToolUseHandler for IpcPostToolUseHandler {
     }
 }
 
-struct IpcProviderHandler {
-    session: Arc<IpcSession>,
+struct S5rProviderHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
     on: String,
 }
 
 #[async_trait::async_trait]
-impl ProviderHandler for IpcProviderHandler {
+impl ProviderHandler for S5rProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
@@ -487,13 +479,13 @@ impl ProviderHandler for IpcProviderHandler {
     }
 }
 
-struct IpcPromptBuildHandler {
-    session: Arc<IpcSession>,
+struct S5rPromptBuildHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
 }
 
 #[async_trait::async_trait]
-impl PromptBuildHandler for IpcPromptBuildHandler {
+impl PromptBuildHandler for S5rPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
@@ -522,14 +514,14 @@ impl PromptBuildHandler for IpcPromptBuildHandler {
     }
 }
 
-struct IpcCompactHandler {
-    session: Arc<IpcSession>,
+struct S5rCompactHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
     on: String,
 }
 
 #[async_trait::async_trait]
-impl CompactHandler for IpcCompactHandler {
+impl CompactHandler for S5rCompactHandler {
     async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
@@ -563,14 +555,14 @@ impl CompactHandler for IpcCompactHandler {
     }
 }
 
-struct IpcLifecycleHandler {
-    session: Arc<IpcSession>,
+struct S5rLifecycleHandler {
+    session: Arc<S5rSession>,
     ext_id: String,
     on: String,
 }
 
 #[async_trait::async_trait]
-impl LifecycleHandler for IpcLifecycleHandler {
+impl LifecycleHandler for S5rLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,

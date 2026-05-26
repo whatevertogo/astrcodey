@@ -18,8 +18,7 @@ pub struct HandlerResult {
 }
 
 impl HandlerResult {
-    pub fn ok(id_hint: &str) -> Self {
-        let _ = id_hint;
+    pub fn ok() -> Self {
         Self {
             ok: true,
             effect: Some("ok".into()),

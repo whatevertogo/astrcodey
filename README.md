@@ -442,7 +442,7 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 - **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only)
 - **Keybinding registration** — extensions register keyboard shortcuts (e.g. `Shift+Tab` for mode toggle) via `Registrar::keybinding()`
 - **Status bar items** — extensions contribute status bar entries (e.g. current mode indicator) with runtime updates via `StatusItemUpdate` notifications
-- **Disk IPC extensions** — stdio JSON-RPC / JSONL subprocess (`protocol.ipc` + `command` in `extension.json`); `extension/initialize`, `extension/handler.invoke`, and capability-scoped `host/invoke`. See [docs/extension-system.md](docs/extension-system.md)
+- **Disk s5r extensions** — stdio length-prefixed frames + JSON `WireMessage` (`protocol.s5r` + `command` in `extension.json`); worker `Initialize`, `handler.invoke`, and capability-scoped `astrcode.*` invoke. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
 - **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
 - **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)

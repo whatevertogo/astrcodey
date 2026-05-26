@@ -50,17 +50,17 @@ impl SnapshotManager {
     pub async fn create_snapshot(&self, model: &SessionReadModel) -> Result<(), StorageError> {
         tokio::fs::create_dir_all(&self.dir).await?;
         let cursor = model.cursor();
-        let snapshot = SessionProjectionSnapshot {
-            version: SNAPSHOT_VERSION,
-            cursor: cursor.clone(),
-            latest_seq: model.latest_seq,
-            created_at: Utc::now().to_rfc3339(),
-            model: model.clone(),
-        };
         let path = self.dir.join(format!("snapshot-{}.json", cursor));
         let temp_path = self
             .dir
             .join(format!(".snapshot-{}-{}.tmp", cursor, Uuid::new_v4()));
+        let snapshot = SessionProjectionSnapshot {
+            version: SNAPSHOT_VERSION,
+            cursor,
+            latest_seq: model.latest_seq,
+            created_at: Utc::now().to_rfc3339(),
+            model: model.clone(),
+        };
         let content = serde_json::to_vec_pretty(&snapshot)?;
         tokio::fs::write(&temp_path, content).await?;
         if let Err(e) = tokio::fs::remove_file(&path).await {

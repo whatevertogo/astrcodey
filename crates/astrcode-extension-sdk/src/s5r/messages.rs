@@ -1,4 +1,4 @@
-//! s5r 线缆消息类型。
+//! s5r 线缆消息类型（对齐 AstrBot `protocol/messages.py`）。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +13,10 @@ pub const S5R_STACK: &str = "astrcode";
 
 /// Meta 能力：宿主调用 guest 注册的 handler。
 pub const CAP_HANDLER_INVOKE: &str = "handler.invoke";
+
+pub const WIRE_CODEC_JSON: &str = "json";
+pub const SUPPORTED_PROTOCOL_VERSIONS_KEY: &str = "supported_protocol_versions";
+pub const WIRE_CODEC_METADATA_KEY: &str = "wire_codec";
 
 /// 五类线缆消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,13 +44,12 @@ impl WireMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeMsg {
     pub id: String,
+    pub protocol_version: String,
     pub peer: PeerInfo,
     #[serde(default)]
     pub handlers: Vec<HandlerDescriptor>,
     #[serde(default)]
     pub provided_capabilities: Vec<CapabilityDescriptor>,
-    #[serde(default)]
-    pub requested_capabilities: Vec<String>,
     #[serde(default)]
     pub metadata: Value,
 }
@@ -54,16 +57,20 @@ pub struct InitializeMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeOutput {
     pub peer: PeerInfo,
-    pub protocol_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<CapabilityDescriptor>,
+    #[serde(default)]
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub name: String,
     pub role: String,
-    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +89,10 @@ pub struct CapabilityDescriptor {
     pub input_schema: Value,
     #[serde(default)]
     pub output_schema: Value,
+    #[serde(default)]
+    pub supports_stream: bool,
+    #[serde(default)]
+    pub cancelable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +105,8 @@ pub enum ResultKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultMsg {
     pub id: String,
-    pub kind: ResultKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ResultKind>,
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
@@ -111,6 +123,7 @@ pub struct InvokeMsg {
     #[serde(default)]
     pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "caller_plugin_id")]
     pub caller_extension_id: Option<String>,
 }
 
@@ -129,6 +142,8 @@ pub struct EventMsg {
     pub phase: EventPhase,
     #[serde(default)]
     pub data: Value,
+    #[serde(default)]
+    pub output: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorPayload>,
 }
@@ -136,8 +151,12 @@ pub struct EventMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelMsg {
     pub id: String,
-    #[serde(default)]
+    #[serde(default = "default_cancel_reason")]
     pub reason: String,
+}
+
+fn default_cancel_reason() -> String {
+    "user_cancelled".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +181,24 @@ impl ErrorPayload {
             details: None,
         }
     }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+}
+
+pub fn parse_wire_message(payload: &[u8]) -> Result<WireMessage, String> {
+    serde_json::from_slice(payload).map_err(|e| format!("parse s5r message: {e}"))
+}
+
+pub fn encode_wire_message(msg: &WireMessage) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(msg).map_err(|e| format!("encode s5r message: {e}"))
 }
 
 /// s5r 事件名 → [`ExtensionEvent`]。

@@ -219,25 +219,25 @@ Extension configuration supports hot reload:
 
 Project-level `.astrcode/config.json` can also override extension settings using the same merge rules as other config fields.
 
-### IPC Extension Capabilities
+### s5r Extension Capabilities
 
-Disk IPC extensions declare required host capabilities via `capabilities` (snake_case, e.g. `small_model`, `emit_events`) in the **`extension/initialize` handshake**; undeclared sensitive capabilities are rejected by `HostRouter`.
+Disk s5r extensions declare required host capabilities via `capabilities` (snake_case, e.g. `small_model`, `emit_events`) in the **`Initialize.metadata`** handshake; undeclared sensitive capabilities are rejected by `HostRouter`.
 
-`extension.json` handles discovery and process launching (**`protocol.ipc`** + **`command`** array); tools / commands / hooks are returned by the subprocess in its initialize response:
+`extension.json` handles discovery and process launching (**`protocol.s5r`** + **`command`** array); tools / commands / hooks are sent by the worker in its `Initialize.metadata`:
 
 ```json
 {
-  "protocol": { "ipc": "1.0" },
-  "command": ["node", "dist/index.js"]
+  "protocol": { "s5r": "1.0" },
+  "command": ["./my-extension"]
 }
 ```
 
-Initialize response example (excerpt):
+Initialize metadata example (excerpt):
 
 ```json
 {
   "extension_id": "my-ext",
-  "protocol": { "ipc": "1.0" },
+  "protocol": { "s5r": "1.0" },
   "capabilities": ["session_state"],
   "tools": [],
   "commands": [],

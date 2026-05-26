@@ -69,7 +69,7 @@ impl StdioTransport {
                     continue;
                 }
                 if message.method.as_deref() == Some("initialize") {
-                    let request = message.params.clone().and_then(|params| {
+                    let request = message.params.and_then(|params| {
                         serde_json::from_value::<InitializeRequest>(params).ok()
                     });
                     if let Some(request) = request {

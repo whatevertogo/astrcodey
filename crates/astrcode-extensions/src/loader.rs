@@ -1,4 +1,4 @@
-//! 扩展加载器 — 从全局和项目目录发现并加载 IPC 子进程扩展。
+//! 扩展加载器 — 从全局和项目目录发现并加载 s5r 子进程扩展。
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -22,7 +22,7 @@ pub struct LoadExtensionsResult {
 /// 扩展加载上下文。
 pub struct ExtensionLoadContext {
     pub working_dir: Option<String>,
-    /// 磁盘 IPC 扩展加载时必需。
+    /// 磁盘 s5r 扩展加载时必需。
     pub host_router: Option<Arc<HostRouter>>,
 }
 
@@ -94,7 +94,7 @@ impl ExtensionRuntime {
     }
 }
 
-/// 磁盘 IPC 扩展源（`~/.astrcode/extensions/` 与项目 `.astrcode/extensions/`）。
+/// 磁盘 s5r 扩展源（`~/.astrcode/extensions/` 与项目 `.astrcode/extensions/`）。
 pub struct DiskExtensionSource {
     extension_states: BTreeMap<String, bool>,
 }
@@ -230,26 +230,26 @@ impl ExtensionLoader {
             .is_some()
         {
             return Err(format!(
-                "{}: protocol.native is not implemented yet; use protocol.ipc",
+                "{}: protocol.native is not implemented yet; use protocol.s5r",
                 ext_dir.display()
             ));
         }
 
-        let ipc_proto = entry
+        let s5r_proto = entry
             .get("protocol")
-            .and_then(|p| p.get("ipc"))
+            .and_then(|p| p.get("s5r"))
             .and_then(|v| v.as_str());
-        if ipc_proto != Some(crate::ipc_ext::IPC_VERSION) {
+        if s5r_proto != Some(crate::s5r_ext::S5R_PROTOCOL_VERSION) {
             return Err(format!(
-                "{}: extension.json must set protocol.ipc to \"{}\"",
+                "{}: extension.json must set protocol.s5r to \"{}\"",
                 ext_dir.display(),
-                crate::ipc_ext::IPC_VERSION
+                crate::s5r_ext::S5R_PROTOCOL_VERSION
             ));
         }
 
         if entry.get("command").is_none() {
             return Err(format!(
-                "{}: extension.json missing 'command' array for IPC extension",
+                "{}: extension.json missing 'command' array for s5r extension",
                 ext_dir.display()
             ));
         }
@@ -257,7 +257,7 @@ impl ExtensionLoader {
         let router = host_router
             .ok_or("ExtensionLoadContext.host_router is required for disk extensions")?;
 
-        crate::ipc_ext::IpcExtension::load(ext_dir, &entry, router, working_dir)
+        crate::s5r_ext::S5rExtension::load(ext_dir, &entry, router, working_dir)
             .await
             .map(|ext| ext as Arc<dyn Extension>)
     }

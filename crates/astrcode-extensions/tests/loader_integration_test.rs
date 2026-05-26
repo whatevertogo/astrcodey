@@ -17,7 +17,7 @@ async fn loader_returns_empty_result_for_none_working_dir() {
 }
 
 #[test]
-fn ipc_event_and_mode_names_roundtrip() {
+fn s5r_event_and_mode_names_roundtrip() {
     use astrcode_extension_sdk::{
         extension::{ExtensionEvent, HookMode},
         s5r::{event_from_name, mode_from_name},

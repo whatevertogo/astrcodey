@@ -1,11 +1,11 @@
-//! IPC 扩展握手 manifest 类型与解析。
+//! s5r 扩展握手 manifest 类型与解析。
 
 use astrcode_core::extension::{ExtensionCapability, ExtensionEventDecl};
 use astrcode_extension_sdk::s5r::capability_from_wire;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// `extension/initialize` 完成后解析出的注册信息。
+/// `Initialize.metadata` 解析出的注册信息。
 #[derive(Debug, Clone)]
 pub struct ExtensionRegistration {
     pub extension_id: String,
@@ -70,28 +70,31 @@ pub mod manifest_types {
 
 use manifest_types::{ManifestCommand, ManifestExtensionEvent, ManifestHook, ManifestTool};
 
-/// 从 IPC `extension/initialize` 的 JSON-RPC result 解析注册信息。
-pub fn registration_from_ipc(
-    value: &Value,
-    expected_ipc_version: &str,
+/// 从 s5r `InitializeMessage.metadata` 解析注册信息。
+pub fn registration_from_s5r_metadata(
+    metadata: &Value,
+    expected_s5r_version: &str,
 ) -> Result<ExtensionRegistration, String> {
+    let proto = metadata
+        .get("protocol")
+        .and_then(|p| p.get("s5r"))
+        .and_then(|v| v.as_str());
+    if proto != Some(expected_s5r_version) {
+        return Err(format!(
+            "initialize metadata protocol.s5r must be \"{expected_s5r_version}\""
+        ));
+    }
+    registration_from_manifest_value(metadata)
+}
+
+fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistration, String> {
     let extension_id = value
         .get("extension_id")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or("initialize result missing extension_id")?
+        .ok_or("initialize manifest missing extension_id")?
         .to_string();
-
-    let proto = value
-        .get("protocol")
-        .and_then(|p| p.get("ipc"))
-        .and_then(|v| v.as_str());
-    if proto != Some(expected_ipc_version) {
-        return Err(format!(
-            "initialize result protocol.ipc must be \"{expected_ipc_version}\""
-        ));
-    }
 
     let version = value
         .get("version")

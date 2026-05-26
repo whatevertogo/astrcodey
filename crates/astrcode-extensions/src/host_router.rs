@@ -21,15 +21,31 @@ const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// `workspace.read` 默认最大读取字节数（1 MiB）。
 const DEFAULT_WORKSPACE_READ_MAX_BYTES: u64 = 1024 * 1024;
 
-fn block_on_async<F: std::future::Future>(future: F) -> F::Output {
+fn block_on_async<F: std::future::Future + Send + 'static>(future: F) -> F::Output
+where
+    F::Output: Send + 'static,
+{
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    static BLOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let rt = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("host router tokio runtime")
     });
-    rt.block_on(future)
+
+    // 从 tokio 异步任务里直接 block_on 会占满 test/runtime worker，嵌套 host invoke 会死锁。
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || {
+            let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            rt.block_on(future)
+        })
+        .join()
+        .expect("block_on_async worker thread panicked")
+    } else {
+        let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        rt.block_on(future)
+    }
 }
 
 /// 单次 guest→host invoke 的运行时上下文。
@@ -178,6 +194,7 @@ impl HostRouter {
                     id: request_id.clone(),
                     phase: EventPhase::Started,
                     data: Value::Null,
+                    output: Value::Null,
                     error: None,
                 })];
                 match self.invoke_small_llm(&input, true, ctx) {
@@ -188,6 +205,7 @@ impl HostRouter {
                                     id: request_id.clone(),
                                     phase: EventPhase::Delta,
                                     data: chunk.clone(),
+                                    output: Value::Null,
                                     error: None,
                                 }));
                             }
@@ -195,7 +213,8 @@ impl HostRouter {
                         events.push(WireMessage::Event(EventMsg {
                             id: request_id,
                             phase: EventPhase::Completed,
-                            data: output,
+                            data: output.clone(),
+                            output,
                             error: None,
                         }));
                         Ok(events)
@@ -205,6 +224,7 @@ impl HostRouter {
                             id: request_id,
                             phase: EventPhase::Failed,
                             data: Value::Null,
+                            output: Value::Null,
                             error: Some(e),
                         }));
                         Ok(events)
@@ -594,12 +614,16 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
                 "properties": { "messages": { "type": "array" } }
             }),
             output_schema: object_schema.clone(),
+            supports_stream: true,
+            cancelable: true,
         }],
         ExtensionCapability::SessionHistory => vec![CapabilityDescriptor {
             name: "astrcode.session.read_events".into(),
             description: "Read session event log".into(),
             input_schema: object_schema.clone(),
             output_schema: object_schema.clone(),
+            supports_stream: false,
+            cancelable: false,
         }],
         ExtensionCapability::SessionControl => vec![
             CapabilityDescriptor {
@@ -607,18 +631,24 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
                 description: "Create a child session".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
             },
             CapabilityDescriptor {
                 name: "astrcode.session.control.submit_turn".into(),
                 description: "Submit a turn to a session".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
             },
             CapabilityDescriptor {
                 name: "astrcode.session.control.dispose".into(),
                 description: "Dispose a session".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
             },
         ],
         ExtensionCapability::SessionState => vec![
@@ -627,12 +657,16 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
                 description: "Read extension namespaced state".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
             },
             CapabilityDescriptor {
                 name: "astrcode.session.state.write".into(),
                 description: "Write extension namespaced state".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
             },
         ],
         ExtensionCapability::EmitEvents => vec![CapabilityDescriptor {
@@ -640,12 +674,16 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
             description: "Emit a declared extension event".into(),
             input_schema: object_schema.clone(),
             output_schema: object_schema.clone(),
+            supports_stream: false,
+            cancelable: false,
         }],
         ExtensionCapability::WorkspaceRead => vec![CapabilityDescriptor {
             name: "astrcode.workspace.read".into(),
             description: "Read a file under the session working directory".into(),
             input_schema: object_schema.clone(),
             output_schema: object_schema.clone(),
+            supports_stream: false,
+            cancelable: false,
         }],
         ExtensionCapability::ProcessSpawn | ExtensionCapability::NetworkClient => vec![],
     }

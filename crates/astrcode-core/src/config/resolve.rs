@@ -85,14 +85,14 @@ fn resolve_llm_settings(
 }
 
 impl Config {
-    /// 将原始配置解析为 [`EffectiveConfig`]，填充所有默认值。
+    /// 将原始配置解析为 [`EffectiveConfig`]（借用版本，不消耗 [`Config`]）。
     ///
     /// 解析流程：
     /// 1. 根据 `active_profile` 查找对应的配置文件
     /// 2. 根据 `active_model` 查找对应的模型配置
     /// 3. 解析 API 密钥（支持 `env:` 前缀和环境变量名）
     /// 4. 合并运行时配置段的超时/重试参数与默认值
-    pub fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
+    pub fn effective_from(&self) -> Result<EffectiveConfig, ResolveError> {
         let llm = resolve_llm_settings(
             &self.profiles,
             &self.active_profile,
@@ -175,10 +175,15 @@ impl Config {
                     .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
             },
             extensions: ExtensionSettings {
-                extension_states: self.runtime.extension_states.unwrap_or_default(),
-                extension_configs: self.extensions.unwrap_or_default(),
+                extension_states: self.runtime.extension_states.clone().unwrap_or_default(),
+                extension_configs: self.extensions.clone().unwrap_or_default(),
             },
         })
+    }
+
+    /// 消耗 [`Config`] 并解析为 [`EffectiveConfig`]。
+    pub fn into_effective(self) -> Result<EffectiveConfig, ResolveError> {
+        self.effective_from()
     }
 }
 

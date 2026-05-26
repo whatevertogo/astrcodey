@@ -45,8 +45,10 @@ pub mod types {
 
 pub mod builder;
 pub mod manifest;
+pub mod runtime;
 pub mod s5r;
 pub mod session;
+pub mod worker;
 
 /// Namespaced persistence locations for session-scoped extension data.
 pub mod state {
@@ -58,11 +60,7 @@ pub mod state {
     }
 }
 
-/// Imports commonly needed when writing an extension.
-///
-/// ```ignore
-/// use astrcode_extension_sdk::prelude::*;
-/// ```
+/// 进程内（bundled）扩展：实现 [`extension::Extension`] trait，使用 [`builder::handler_fn`]。
 pub mod prelude {
     pub use crate::{
         builder::{handler_fn, tool},
@@ -77,6 +75,24 @@ pub mod prelude {
             SlashCommand, StopReason, ToolHandler,
         },
         manifest::validate_manifest,
+        s5r::effects::HandlerResult,
         tool::{ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolResult},
+        worker::{HostClient, Worker, WorkerCallContext, tool_text},
+    };
+}
+
+/// s5r 子进程磁盘扩展：[`Worker`]、handler 辅助函数、[`HostClient`]。
+pub mod worker_prelude {
+    pub use crate::{
+        builder::tool,
+        s5r::{
+            ErrorPayload,
+            effects::{CallContinuation, HandlerResult},
+        },
+        worker::{
+            HostApi, HostClient, ManifestCatalog, Worker, WorkerCallContext, command_handler,
+            handler_err, hook_handler, hook_handler_args, inject_host_api, parse_hook_input,
+            parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
+        },
     };
 }

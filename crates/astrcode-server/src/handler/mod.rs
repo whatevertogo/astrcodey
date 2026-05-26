@@ -151,7 +151,7 @@ impl CommandHandler {
         let snapshot = session_snapshot(&state);
         self.event_bus
             .send_notification(ClientNotification::SessionResumed {
-                session_id: new_sid.clone().into_string(),
+                session_id: new_sid.as_str().to_owned(),
                 snapshot,
             });
 

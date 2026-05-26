@@ -1,6 +1,4 @@
-//! 扩展线缆协议共享类型 — IPC 子进程与宿主之间的 JSON 载荷契约。
-//!
-//! 命名保留历史 `s5r` 前缀；传输层现为 stdio JSON-RPC / JSONL（`protocol.ipc`）。
+//! 扩展线缆协议共享类型 — s5r Peer 线协议（stdio 长度前缀帧 + JSON）。
 
 pub mod capabilities;
 pub mod effects;
@@ -12,7 +10,8 @@ pub use capabilities::{
 };
 pub use effects::{CallContinuation, HandlerResult};
 pub use messages::{
-    CAP_HANDLER_INVOKE, CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase,
+    CAP_HANDLER_INVOKE, CancelMsg, CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase,
     HandlerDescriptor, InitializeMsg, InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg,
-    S5R_STACK, S5R_VERSION, WireMessage, event_from_name, event_to_name, mode_from_name,
+    S5R_STACK, S5R_VERSION, WIRE_CODEC_JSON, WIRE_CODEC_METADATA_KEY, WireMessage,
+    encode_wire_message, event_from_name, event_to_name, mode_from_name, parse_wire_message,
 };

@@ -40,8 +40,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
-      - name: Build IPC guest binary (E2E)
-        run: cargo build --release --manifest-path crates/astrcode-extensions/tests/ipc-guest/Cargo.toml
+      - name: Build s5r guest binary (E2E)
+        run: cargo build --release --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml
       - run: cargo test --workspace --all-features --exclude astrcode-desktop
 
   audit:
