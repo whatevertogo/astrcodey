@@ -22,7 +22,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
-    types::{new_message_id, new_session_id, new_turn_id, SessionId},
+    types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{
@@ -428,9 +428,7 @@ async fn auto_compact_persist_conflict_keeps_ssot_and_provider_history() {
     let model = session.read_model().await.unwrap();
     let provider_messages = model.provider_messages();
     assert!(
-        !provider_messages
-            .iter()
-            .any(is_compact_summary_message),
+        !provider_messages.iter().any(is_compact_summary_message),
         "projection must not expose compact summary after persist conflict"
     );
     assert!(

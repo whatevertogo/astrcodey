@@ -114,10 +114,7 @@ assert.throws(
   ProtocolDecodeError
 )
 
-assert.throws(
-  () => decodeConversationStreamEnvelope(null),
-  ProtocolDecodeError
-)
+assert.throws(() => decodeConversationStreamEnvelope(null), ProtocolDecodeError)
 
 assert.throws(
   () =>
