@@ -584,11 +584,10 @@ async fn repair_stale_runs_for_state(
         session
             .emit_durable(
                 None,
-                EventPayload::AgentSessionFailed {
-                    child_session_id: link.child_session_id.clone(),
-                    final_session_id: link.child_session_id.clone(),
-                    error: "interrupted".into(),
-                },
+                astrcode_session::payload::agent_session_failed_payload(
+                    link.child_session_id.clone(),
+                    "interrupted".into(),
+                ),
             )
             .await
             .map_err(TurnScheduleError::EventEmit)?;

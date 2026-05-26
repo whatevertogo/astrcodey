@@ -98,9 +98,9 @@ pub enum EventPayload {
     /// 写入父 Session 的事件日志，表达"从父看子"的关系。
     /// 子侧通过 `SessionStarted.parent_session_id` 表达"从子看父"。
     ///
-    /// 注意：`child_session_id` 指向最初被委托的子 Session，
-    /// 而非 compact continuation 后的 leaf Session。
-    /// `SpawnResult.child_session_id` 才指向最终完成输出的 leaf Session。
+    /// `child_session_id` 为最初委托的子 session，父侧投影用其作为稳定锚点。
+    /// 若子 session 经跨 session continuation 产生 leaf，见
+    /// [`AgentSessionCompleted::final_session_id`](EventPayload::AgentSessionCompleted)。
     AgentSessionSpawned {
         child_session_id: SessionId,
         agent_name: String,
@@ -125,11 +125,16 @@ pub enum EventPayload {
 
     /// 子 Agent 会话成功完成。
     ///
-    /// 由 `ServerSessionSpawner` 在子会话 agent turn 正常结束后追加到父会话。
+    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    ///
+    /// **双 `SessionId` 说明（勿删其一）**：`child_session_id` 锚定
+    /// `AgentSessionSpawned`；`final_session_id` 为结果所在 leaf。当前 compact 为
+    /// 同 session 原地续写（`append_compact_boundary` 不换 id），故二者恒等；
+    /// 构造载荷请用 `astrcode_session::payload::agent_session_completed_payload`。
     AgentSessionCompleted {
-        /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。
+        /// 初始子会话 ID（与 `AgentSessionSpawned` 一致；compact 不会改此锚点）。
         child_session_id: SessionId,
-        /// 最终完成输出的 leaf Session ID（compact 后可能不同）。
+        /// 产出结果的 leaf session；**当前实现**与 `child_session_id` 相同。
         final_session_id: SessionId,
         /// 子 Agent 输出摘要。
         summary: String,
@@ -137,11 +142,12 @@ pub enum EventPayload {
 
     /// 子 Agent 会话失败。
     ///
-    /// 由 `ServerSessionSpawner` 在子会话 agent turn 出错后追加到父会话。
+    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    /// 双 `SessionId` 语义同 [`AgentSessionCompleted`]。
     AgentSessionFailed {
-        /// 初始子会话 ID。
+        /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。
         child_session_id: SessionId,
-        /// 最终 leaf Session ID。
+        /// leaf session；**当前实现**与 `child_session_id` 相同。
         final_session_id: SessionId,
         /// 错误描述。
         error: String,
@@ -311,7 +317,8 @@ pub enum EventPayload {
         /// compact 前 transcript snapshot 的可读路径。
         #[serde(skip_serializing_if = "Option::is_none")]
         transcript_path: Option<String>,
-        /// 接续对话的子会话 ID。
+        /// 接续对话的 session id。生产路径 `append_compact_boundary` 中为 **当前 session**
+        ///（原地 compact，不换 id）；仅跨 session continuation 设计下才指向另一 session。
         continued_session_id: SessionId,
         /// compact 基于的事件 seq（replay 后、compact 前锁定），用于幂等校验。
         base_event_seq: u64,
@@ -319,9 +326,12 @@ pub enum EventPayload {
         strategy: crate::extension::CompactStrategy,
     },
 
-    /// 子会话从父会话的 compact 边界继续。
+    /// 同一条 session log 上的 compact 续写投影（摘要 + 保留消息替换 transcript）。
+    ///
+    /// 生产路径中 `parent_session_id` 为 **本 session**（与 `Event.session_id` 相同），
+    /// 并非另开子 session；与 `CompactBoundaryCreated` 成对追加。
     SessionContinuedFromCompaction {
-        /// 父会话 ID。
+        /// compact 前的 session（原地续写时等于本 log 的 `session_id`）。
         parent_session_id: SessionId,
         /// 父会话 compact 前的 durable cursor。
         parent_cursor: Cursor,

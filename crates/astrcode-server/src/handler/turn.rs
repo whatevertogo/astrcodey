@@ -73,11 +73,11 @@ impl CommandHandler {
 
     /// 中止当前活跃会话的 Turn。
     pub(in crate::handler) async fn abort_active_turn(&self) -> Result<(), HandlerError> {
-        let Some(sid) = self.active_session_id.clone() else {
+        let Some(sid) = self.active_session_id.as_ref() else {
             self.send_error(40400, "No active turn");
             return Ok(());
         };
-        self.abort_session(&sid).await
+        self.abort_session(sid).await
     }
 
     /// 修复遗留状态。

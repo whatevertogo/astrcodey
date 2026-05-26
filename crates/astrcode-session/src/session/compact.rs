@@ -14,6 +14,10 @@ pub(crate) fn normalize_extra_system_prompt(extra_system_prompt: Option<&str>) -
 }
 
 impl Session {
+    /// 在同一条 session log 上追加 compact 边界（**不**分配新 `session_id`）。
+    ///
+    /// `continued_session_id` 与 `SessionContinuedFromCompaction.parent_session_id` 均为
+    /// `self.id`。子 agent 与主 session 共用此路径；勿假设 compact 会产生 leaf session。
     #[allow(clippy::too_many_arguments)]
     pub async fn append_compact_boundary(
         &self,

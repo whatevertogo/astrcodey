@@ -271,9 +271,12 @@ pub enum AgentSessionStatus {
 /// 父会话派生的子 Agent 会话链接。
 ///
 /// 由 `AgentSessionSpawned` 事件投影而来，表达"从父看子"的关系。
+///
+/// `child_session_id` 为稳定锚点；`final_session_id` 在终态事件写入后填充。
+/// 当前 compact 为原地续写、不换 session id，故完成后二者相同。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSessionLinkView {
-    /// 子会话 ID。
+    /// 最初委托的子 session（`AgentSessionSpawned`；compact 不修改此 id）。
     pub child_session_id: SessionId,
     /// 触发此子会话的工具调用 ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,7 +288,7 @@ pub struct AgentSessionLinkView {
     /// 子会话运行状态。
     #[serde(default)]
     pub status: AgentSessionStatus,
-    /// 最终完成输出的 leaf Session ID。
+    /// 产出结果的 leaf session；当前实现与 `child_session_id` 相同。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_session_id: Option<SessionId>,
     /// 子 Agent 完成摘要。
