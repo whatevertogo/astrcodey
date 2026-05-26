@@ -101,9 +101,22 @@ impl ServerEventBus {
                 // 先判断是否需要异步处理（避免后续克隆 event）
                 let needs_task_step =
                     matches!(event.payload, EventPayload::BackgroundTaskCompleted { .. });
+                let needs_child_completion = matches!(
+                    event.payload,
+                    EventPayload::AgentSessionCompleted { .. }
+                        | EventPayload::AgentSessionFailed { .. }
+                );
 
                 // 发送 event（消耗所有权，避免克隆）
                 tx.send(ClientNotification::Event(event));
+
+                if needs_child_completion {
+                    let scheduler = Arc::clone(&scheduler);
+                    let sid = session_id.clone();
+                    tokio::spawn(async move {
+                        scheduler.process_child_completions(&sid).await;
+                    });
+                }
 
                 // 排队输入在 completion watcher 于 registry 清理后调用
                 // `TurnScheduler::on_turn_completed`，避免与 registry 竞态。

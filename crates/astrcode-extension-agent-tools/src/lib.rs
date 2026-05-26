@@ -264,7 +264,7 @@ impl ToolHandler for AgentToolHandler {
             .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
 
         // 2. 提交 turn
-        let result = session_ops
+        let submit = session_ops
             .submit_turn(
                 ctx.session_id.as_str(),
                 SubmitTurnRequest {
@@ -284,8 +284,20 @@ impl ToolHandler for AgentToolHandler {
                     tool_call_id: ctx.tool_call_id.clone(),
                 },
             )
-            .await
-            .map_err(|e| ExtensionError::Internal(format!("submit_turn: {e}")))?;
+            .await;
+        if let Err(ref e) = submit {
+            if let Err(recycle_err) = session_ops
+                .recycle_session(ctx.session_id.as_str(), &handle.session_id)
+                .await
+            {
+                tracing::warn!(
+                    child_session_id = %handle.session_id,
+                    error = %recycle_err,
+                    "failed to recycle child session after submit_turn error: {e}"
+                );
+            }
+        }
+        let result = submit.map_err(|e| ExtensionError::Internal(format!("submit_turn: {e}")))?;
 
         // 3. 构造 ToolResult
         let mut metadata = tool_metadata([

@@ -50,8 +50,8 @@ pub fn compact_boundary_payload(
 ///
 /// - `child_session_id`：与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link。
 /// - `final_session_id`：应打开/订阅的 leaf；**仅**在未实现的跨 session continuation
-///   落地后才可能与前者不同。勿手写双字段，统一走
-///   [`agent_session_completed_payload`] / [`agent_session_failed_payload`]。
+///   落地后才可能与前者不同。勿手写双字段，统一走 [`agent_session_completed_payload`] /
+///   [`agent_session_failed_payload`]。
 ///
 /// [`AgentSessionSpawned`]: astrcode_core::event::EventPayload::AgentSessionSpawned
 fn agent_session_terminal_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
@@ -59,7 +59,8 @@ fn agent_session_terminal_ids(child_session_id: SessionId) -> (SessionId, Sessio
     (child_session_id, final_session_id)
 }
 
-/// 构造写入父 session 的 `AgentSessionCompleted` 载荷（双 session id 见 [`agent_session_terminal_ids`]）。
+/// 构造写入父 session 的 `AgentSessionCompleted` 载荷（双 session id 见
+/// [`agent_session_terminal_ids`]）。
 pub fn agent_session_completed_payload(
     child_session_id: SessionId,
     summary: String,
@@ -72,7 +73,8 @@ pub fn agent_session_completed_payload(
     }
 }
 
-/// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 见 [`agent_session_terminal_ids`]）。
+/// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 见
+/// [`agent_session_terminal_ids`]）。
 pub fn agent_session_failed_payload(child_session_id: SessionId, error: String) -> EventPayload {
     let (child_session_id, final_session_id) = agent_session_terminal_ids(child_session_id);
     EventPayload::AgentSessionFailed {

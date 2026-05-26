@@ -81,12 +81,12 @@ const sparseAgentSession = decodeConversationStreamEnvelope({
     kind: 'agentSessionUpdated',
     agentSession: {
       childSessionId: 'child-session',
-      status: 'running',
       phase: 'thinking',
     },
   },
 })
 assert.equal(sparseAgentSession.delta.kind, 'agentSessionUpdated')
+assert.equal(sparseAgentSession.delta.agentSession.status, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)

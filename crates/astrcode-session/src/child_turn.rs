@@ -56,7 +56,7 @@ pub struct ChildTurnConfig {
 /// 内部 spawn 一个后台任务等待 turn 完成，完成后通过
 /// [`crate::payload::agent_session_completed_payload`] /
 /// [`crate::payload::agent_session_failed_payload`] 写终态到父 session
-///（`child_session_id` 与 `final_session_id` 当前相同，见该模块注释），
+/// （`child_session_id` 与 `final_session_id` 当前相同，见该模块注释），
 /// 并通过 `completed_tx` 发信号供 server 层处理回收和通知。
 ///
 /// **first-write-wins**：所有路径统一通过 `try_set_outcome` 写入，
@@ -112,6 +112,12 @@ impl ChildTurnGuard {
                     // handle.abort() 被调用。后台任务自己也写 Aborted——
                     // 外部 abort() 和这里没有顺序保证，谁先写谁赢。
                     try_set_outcome(&outcome_tx_for_task, ChildOutcome::Aborted);
+                    let _ = parent_session
+                        .emit_durable(
+                            None,
+                            agent_session_failed_payload(child_sid.clone(), "aborted".into()),
+                        )
+                        .await;
                     let _ = completed_tx.send(parent_sid);
                     return;
                 },
@@ -123,22 +129,30 @@ impl ChildTurnGuard {
             match outcome {
                 ChildOutcome::Completed { summary } => {
                     let _ = parent_session
-                        .emit_durable(
-                            None,
-                            agent_session_completed_payload(child_sid, summary),
-                        )
+                        .emit_durable(None, agent_session_completed_payload(child_sid, summary))
                         .await;
                 },
                 ChildOutcome::Failed { error } => {
                     let _ = parent_session
+                        .emit_durable(None, agent_session_failed_payload(child_sid, error))
+                        .await;
+                },
+                ChildOutcome::Aborted => {
+                    let _ = parent_session
                         .emit_durable(
                             None,
-                            agent_session_failed_payload(child_sid, error),
+                            agent_session_failed_payload(child_sid, "aborted".into()),
                         )
                         .await;
                 },
-                ChildOutcome::Aborted => {},
-                ChildOutcome::TimedOut => unreachable!("TimedOut only set by external timeout"),
+                ChildOutcome::TimedOut => {
+                    let _ = parent_session
+                        .emit_durable(
+                            None,
+                            agent_session_failed_payload(child_sid, "timed out".into()),
+                        )
+                        .await;
+                },
             }
 
             let _ = completed_tx.send(parent_sid);

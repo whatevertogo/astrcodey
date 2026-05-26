@@ -4,6 +4,7 @@ import { consumeSseStream } from '../services/sse-stream'
 import { resolveHostBridge } from '../lib/hostBridge'
 import type {
   AgentSessionLink,
+  AgentSessionStatus,
   ConversationBlock,
   ConversationControlState,
   ConversationDelta,
@@ -111,11 +112,20 @@ function upsertBlock(
   return next
 }
 
+function isTerminalAgentStatus(
+  status: AgentSessionStatus | undefined
+): boolean {
+  return status === 'completed' || status === 'failed'
+}
+
 function mergeAgentSession(
   current: AgentSessionLink,
   incoming: AgentSessionLink
 ): AgentSessionLink {
-  const running = incoming.status === 'running'
+  const status =
+    incoming.status ??
+    (isTerminalAgentStatus(current.status) ? current.status : 'running')
+  const running = status === 'running'
   const phaseProvided = incoming.phase !== undefined
   const currentTool = running
     ? phaseProvided
@@ -126,6 +136,7 @@ function mergeAgentSession(
   return {
     ...current,
     ...incoming,
+    status,
     agentName: incoming.agentName?.trim()
       ? incoming.agentName
       : current.agentName,

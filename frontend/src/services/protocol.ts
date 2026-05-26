@@ -355,7 +355,10 @@ function decodeAgentSessionLink(value: unknown): AgentSessionLink {
     toolCallId: optionalString(object, 'toolCallId'),
     agentName: optionalString(object, 'agentName'),
     task: optionalString(object, 'task'),
-    status: decodeAgentSessionStatus(object.status),
+    status:
+      object.status == null
+        ? undefined
+        : decodeAgentSessionStatus(object.status),
     finalSessionId: optionalString(object, 'finalSessionId'),
     summary: optionalString(object, 'summary'),
     error: optionalString(object, 'error'),

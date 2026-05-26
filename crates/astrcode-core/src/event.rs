@@ -318,7 +318,7 @@ pub enum EventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         transcript_path: Option<String>,
         /// 接续对话的 session id。生产路径 `append_compact_boundary` 中为 **当前 session**
-        ///（原地 compact，不换 id）；仅跨 session continuation 设计下才指向另一 session。
+        /// （原地 compact，不换 id）；仅跨 session continuation 设计下才指向另一 session。
         continued_session_id: SessionId,
         /// compact 基于的事件 seq（replay 后、compact 前锁定），用于幂等校验。
         base_event_seq: u64,

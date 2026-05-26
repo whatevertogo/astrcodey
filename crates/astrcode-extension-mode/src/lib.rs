@@ -25,10 +25,9 @@ use std::{path::PathBuf, sync::Arc};
 use astrcode_extension_sdk::{
     extension::{
         CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
-        StatusItemUpdatePayload,
         ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
         ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-        ToolHandler,
+        StatusItemUpdatePayload, ToolHandler,
     },
     llm::LlmMessage,
     state,

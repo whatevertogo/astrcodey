@@ -99,7 +99,8 @@ export interface AgentSessionLink {
   toolCallId?: string
   agentName?: string
   task?: string
-  status: AgentSessionStatus
+  /** 省略时表示仅更新 phase/currentTool，不改动终态 status */
+  status?: AgentSessionStatus
   finalSessionId?: string
   summary?: string
   error?: string
