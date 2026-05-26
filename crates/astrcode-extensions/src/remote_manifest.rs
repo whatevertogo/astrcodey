@@ -197,12 +197,16 @@ pub fn parse_compact_result(resp: &HandlerResult) -> Result<CompactResult, Exten
 }
 
 pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, ExtensionError> {
-    if resp.ok {
-        Ok(HookResult::Allow)
-    } else {
-        Ok(HookResult::Block {
+    if !resp.ok {
+        return Ok(HookResult::Block {
             reason: resp.error.clone().unwrap_or_default(),
-        })
+        });
+    }
+    match resp.effect_name() {
+        "block" => Ok(HookResult::Block {
+            reason: resp.data_str("reason").to_string(),
+        }),
+        _ => Ok(HookResult::Allow),
     }
 }
 

@@ -156,7 +156,7 @@ export default function TopBar({
                       <span className="shrink-0 text-[11px] text-text-secondary">
                         {agent.status === 'running' && agent.phase
                           ? PHASE_LABELS[agent.phase]
-                          : STATUS_LABELS[agent.status]}
+                          : STATUS_LABELS[agent.status ?? 'running']}
                       </span>
                     </span>
                     <span className="block truncate text-text-secondary">

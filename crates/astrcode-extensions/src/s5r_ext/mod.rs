@@ -97,8 +97,11 @@ fn parse_command(manifest: &Value, ext_dir: &Path) -> Result<(String, Vec<String
         .as_str()
         .ok_or("command[0] must be a string")?
         .to_string();
-    let program = if program.contains('/') || program.contains('\\') {
-        ext_dir.join(&program).to_string_lossy().into_owned()
+    let program_path = Path::new(&program);
+    let program = if program_path.is_absolute() {
+        program
+    } else if program.contains('/') || program.contains('\\') {
+        ext_dir.join(program_path).to_string_lossy().into_owned()
     } else {
         program
     };

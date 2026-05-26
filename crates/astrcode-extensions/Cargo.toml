@@ -23,4 +23,4 @@ tokio-util = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
-tempfile = "3"
+tempfile = { workspace = true }

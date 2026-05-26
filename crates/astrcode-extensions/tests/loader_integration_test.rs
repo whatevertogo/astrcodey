@@ -3,8 +3,32 @@
 use astrcode_extension_sdk::extension::{ExtensionCapability, ExtensionManifest};
 use astrcode_extensions::loader::ExtensionLoader;
 
+struct IsolatedTestHome {
+    _temp: tempfile::TempDir,
+    prev: Option<String>,
+}
+
+impl IsolatedTestHome {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("ASTRCODE_TEST_HOME").ok();
+        std::env::set_var("ASTRCODE_TEST_HOME", temp.path());
+        Self { _temp: temp, prev }
+    }
+}
+
+impl Drop for IsolatedTestHome {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(value) => std::env::set_var("ASTRCODE_TEST_HOME", value),
+            None => std::env::remove_var("ASTRCODE_TEST_HOME"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn loader_returns_empty_result_when_no_extensions_dir() {
+    let _home = IsolatedTestHome::new();
     let result = ExtensionLoader::load_all(Some("/nonexistent/path"), None).await;
     assert!(result.extensions.is_empty());
     assert!(result.errors.is_empty());
@@ -12,7 +36,9 @@ async fn loader_returns_empty_result_when_no_extensions_dir() {
 
 #[tokio::test]
 async fn loader_returns_empty_result_for_none_working_dir() {
+    let _home = IsolatedTestHome::new();
     let result = ExtensionLoader::load_all(None, None).await;
+    assert!(result.extensions.is_empty());
     assert!(result.errors.is_empty());
 }
 
