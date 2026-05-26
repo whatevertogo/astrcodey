@@ -70,9 +70,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   const queuedMessages = useAppStore((s) => s.queuedMessages)
 
   const distanceFromBottom = useCallback((container: HTMLDivElement) => {
-    return (
-      container.scrollHeight - container.scrollTop - container.clientHeight
-    )
+    return container.scrollHeight - container.scrollTop - container.clientHeight
   }, [])
 
   const scrollContainerToBottom = useCallback(
