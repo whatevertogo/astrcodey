@@ -1,4 +1,4 @@
-# AstrCode 设计概述
+# AstrCode 架构设计
 
 Rust 实现的 AI coding agent，~74k 行（Rust ~67.6k + TypeScript ~6.3k），`crates/` 下 21 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
@@ -43,13 +43,72 @@ Session::emit / Session::append_event
 `ServerEventBus` 不写 EventStore，只做"session broadcast → 客户端通知"的桥接。
 broadcast 发生 lag 时，forwarder 主动推送 `SessionResumed` 快照触发客户端 rehydrate。
 
+### 事件日志格式
+
+每行一个 JSON 对象（JSONL），通过 `EventPayload` 枚举序列化：
+
+```jsonl
+{"type":"SessionStarted","session_id":"abc123","timestamp":"...","working_dir":"/project","model_id":"deepseek-chat"}
+{"type":"UserMessage","event_id":"evt1","turn_id":"turn1","timestamp":"...","text":"explain main.rs"}
+{"type":"TurnStarted","turn_id":"turn1","timestamp":"..."}
+{"type":"AssistantMessageStarted","event_id":"evt2","turn_id":"turn1","message_id":"msg1","timestamp":"..."}
+{"type":"AssistantTextDelta","event_id":"evt3","delta":"..."}
+{"type":"AssistantMessageCompleted","event_id":"evt4","text":"..."}
+{"type":"TurnCompleted","turn_id":"turn1","timestamp":"...","finish_reason":"stop"}
+```
+
+### Session 树与快照恢复
+
+```
+session-A (root)
+├── session-B (fork at cursor 42)
+│   └── session-D (fork at cursor 15)
+└── session-C (fork at cursor 58)
+```
+
+每个 fork 创建独立的事件日志。父 session 引用存储在 fork 事件中。
+
+恢复时：加载最近快照 → 从快照偏移量 + 1 重放事件 → 到达当前状态。
+
 ---
 
-## 2. Compact 设计
+## 2. Server 架构
+
+### 三层状态
+
+| 层 | 位置 | 含义 |
+|---|---|---|
+| Durable | `EventStore` / session `phase` | 持久化、可重放、进程重启后仍成立 |
+| 进程 | `TurnRegistry` | 当前是否有活跃 turn 任务（优化索引，需 `repair_stale` 对齐） |
+| 传输 | `CommandHandler.active_session_id` | stdio/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
+
+### 下一 turn 输入队列（唯一）
+
+所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::notify_turn` → `pending_queues`。
+`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
+
+### 启动顺序
+
+```
+bootstrap_with → TurnScheduler + TurnRegistry
+              → ServerEventBus::new(fanout, scheduler)
+              → SessionManager::bind_event_bus
+              → CommandHandle::spawn
+```
+
+### 命令路径
+
+- **写**：`ClientCommand` / HTTP POST → `CommandHandle` → `CommandHandler`（Actor 串行）
+- **Turn**：`start_turn` / `notify_turn` → `TurnScheduler::submit`
+- **读（HTTP）**：`ServerRuntime::session_manager()` / `event_store()` → projection DTO
+
+---
+
+## 3. Compact 设计
 
 ### 结构化输出 contract
 
-Compact是一个**严格的 XML contract**：
+Compact 是一个**严格的 XML contract**：
 
 - 模型必须返回 `<analysis>` scratchpad + `<summary>` 块，顺序固定
 - Summary 必须包含 9 个固定段标题（Primary Request、Files、Errors 等），缺一则拒绝
@@ -88,7 +147,7 @@ Compact 会丢失操作上下文。`post_compact_context` 自动恢复：
 
 ---
 
-## 3. Prompt 工程
+## 4. Prompt 工程
 
 ### 管道式组装
 
@@ -113,7 +172,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ---
 
-## 4. 工具设计
+## 5. 工具设计
 
 ### 分层工具而非全 bash
 
@@ -133,7 +192,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ---
 
-## 5. 扩展 / Hook 系统
+## 6. 扩展 / Hook 系统
 
 ### 生命周期钩子
 
@@ -166,15 +225,15 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 插件化模式系统
 
-Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `/mode` 斜杠命令、`Shift+Tab` 快捷键和状态栏项。这种模式表明核心系统不硬编码任何业务逻辑，一切行为能力都通过扩展注册。
+Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `/mode` 斜杠命令、`Shift+Tab` 快捷键和状态栏项。核心系统不硬编码任何业务逻辑，一切行为能力都通过扩展注册。
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过基于 wasmtime 的 WASM 沙箱运行时加载，并使用 manifest 声明宿主能力。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过 IPC 子进程加载，并在 initialize 握手中声明宿主能力。
 
 ---
 
-## 6. 前后端分离
+## 7. 前后端分离
 
 借鉴 OpenCode 的架构：
 
@@ -197,20 +256,6 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 - **通信方式**：HTTP API + SSE（本地动态端口），通过 `tauri-plugin-http` 绕过 webkit2gtk 网络栈
 - **技术栈**：Tauri v2 + React 19 + TypeScript + Tailwind CSS v4
 - **状态管理**：Zustand
-- **安全**：CSP 配置限制外部连接
-
----
-
-## 7. Eval 框架（未实现复杂eval tasks）
-
-`astrcode-eval` 提供自动化评测能力，用于量化 Agent 在不同任务上的表现：
-
-- **测试用例**（`eval-tasks/cases/`）：TOML 格式定义，包含 prompt、setup fixture、judge 规则
-- **HTTP 服务器控制**：自动启动/停止 `astrcode-server`，隔离评测环境
-- **事件日志指标提取**：从 JSONL 事件流中提取 turn 数、工具调用次数、耗时等指标
-- **Judge 机制**：通过规则判定任务完成质量（文件存在性、内容匹配等）
-- **结构化报告**：汇总所有用例结果，输出通过率和指标统计
-- **CLI 集成**：通过 `cargo run --features dev-mode -- eval` 运行，`dev-mode` feature gate 控制
 
 ---
 
@@ -234,27 +279,11 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ---
 
-## 9. 项目统计
-
-| 指标 | 数值 |
-|------|------|
-| Rust 代码行数（`crates/`） | ~66.9k（含测试） |
-| Rust 代码行数（`src-tauri/`） | ~690 |
-| Rust 合计 | ~67.6k |
-| TypeScript/TSX 代码行数 | ~6.3k |
-| Workspace 成员 | 22（21 个 `crates/` + `src-tauri`） |
-| Rust 源文件数量 | 261 |
-| 内置工具数量 | 9 |
-| 第一方扩展 crate | 6（mode / skill / todo / agent-tools / mcp / memory） |
-| 扩展基础设施 | `extension-sdk`、`bundled-extensions`、`extensions`（宿主） |
-
----
-
-## 10. 关键设计决策
+## 9. 关键设计决策
 
 ### Session-First 事件溯源
 
-Session 是唯一的持久事实来源。所有状态变化都以不可变事件形式写入 JSONL。恢复时从事件重放重建状态，支持 fork/branch/replay。
+Session 是唯一的持久事实来源。所有状态变化都以不可变事件形式写入 JSONL。恢复时从事件重放重建状态，支持 fork/branch/replay。Agent 是临时的——从 Session 事件重建，处理后写回事件，可随时丢弃和重建。
 
 ### Extension-First 架构
 
@@ -267,26 +296,3 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 ### 前后端分离
 
 前端不负责业务逻辑，只负责交互和渲染。后端通过 HTTP/SSE 提供标准化 API，支持多种前端形态（TUI/GUI/Headless）。
-
----
-
-## 11. CI/CD 与发行
-
-- **CI**（`ci.yml`）：Rust fmt/clippy/test + 前端 lint/typecheck/format，跨平台检查（Linux/macOS/Windows）
-- **Release**（`release.yml`）：版本标签触发，构建 6 平台 CLI 二进制 + 4 平台桌面包，发布到 GitHub Release + NPM
-- **Weekly Release**（`weekly-release.yml`）：每周一自动计算版本号并推送标签
-- **NPM 分发**：跨平台 CLI 二进制自动发布
-
----
-
-## 12. LLM Provider 支持
-
-`astrcode-ai` 支持三个 Provider：
-
-| Provider | 模块 | 协议 |
-|----------|------|------|
-| Anthropic | `providers/anthropic.rs` | Messages API (native) |
-| OpenAI | `providers/openai.rs` | Chat Completions + Responses API |
-| Google GenAI | `providers/google_genai.rs` | Gemini API |
-
-所有 Provider 共享 `Utf8StreamDecoder` 和 `SseLineReader` 基础设施，通过 `RetryPolicy` 统一处理错误重试。

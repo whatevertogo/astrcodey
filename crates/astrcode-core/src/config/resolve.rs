@@ -174,18 +174,6 @@ impl Config {
                     .shell_timeout_secs
                     .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
             },
-            wasm: WasmSettings {
-                fuel: self
-                    .runtime
-                    .wasm_fuel
-                    .unwrap_or(super::defaults::DEFAULT_WASM_FUEL),
-                memory_bytes: self
-                    .runtime
-                    .wasm_memory_mb
-                    .unwrap_or(super::defaults::DEFAULT_WASM_MEMORY_MB)
-                    * 1024
-                    * 1024,
-            },
             extensions: ExtensionSettings {
                 extension_states: self.runtime.extension_states.unwrap_or_default(),
                 extension_configs: self.extensions.unwrap_or_default(),

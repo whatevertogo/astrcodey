@@ -344,7 +344,7 @@ impl ExtensionTasks {
 
 /// 扩展运行时可用的宿主服务。
 ///
-/// 只注入给 trusted bundled extension，不暴露给 untrusted source（disk/wasm）。
+/// 只注入给 trusted bundled extension，不暴露给 untrusted source（磁盘 IPC 扩展）。
 pub struct ExtensionHostServices {
     /// 可信内置扩展可用的只读会话投影数据源。
     ///
@@ -435,10 +435,10 @@ pub enum ExtensionEvent {
 
 /// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
 ///
-/// **当前 loader 行为（s5r）**：`protocol.s5r`（须为 `"1.0"`）与 **`library`**（WASM
-/// 相对路径）为必填； 扩展的真实 `id`、能力、工具与 hook 均由 guest 的 `extension_init` 握手返回。
-/// 本结构中的 `id` / `name` / `capabilities` 等字段可被 serde 解析，供 UI、诊断或
-/// 未来校验使用，但**不会**替代 WASM manifest。磁盘路径仅支持 `.wasm`，无 native dlopen。
+/// **当前 loader 行为（IPC）**：`protocol.ipc`（须为 `"1.0"`）与 **`command`**
+///（启动子进程的 argv 数组）为必填。扩展的真实 `id`、能力、工具与 hook 均由
+/// `extension/initialize` 握手返回。本结构中的 `id` / `name` / `capabilities` 等字段
+/// 可被 serde 解析，供 UI、诊断或未来校验使用，但**不会**替代 IPC 握手 manifest。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     /// 扩展唯一标识符。
@@ -457,8 +457,6 @@ pub struct ExtensionManifest {
     /// 宿主必须授予此扩展的能力。
     #[serde(default)]
     pub capabilities: Vec<ExtensionCapability>,
-    /// 原生库路径（相对于扩展目录，`.dll` / `.so` / `.wasm`）。
-    pub library: String,
 }
 
 // ─── extension Event System ────────────────────────────────────────────────
@@ -827,7 +825,7 @@ pub struct PreToolUseContext {
     pub available_tools: Vec<ToolDefinition>,
     /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
-    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
+    /// 插件事件发射器（按扩展 id 绑定，内置与磁盘 IPC 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// session 在存储层的真实目录路径。
     pub session_store_dir: Option<std::path::PathBuf>,
@@ -858,7 +856,7 @@ pub struct PostToolUseContext {
     pub is_error: bool,
     /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
-    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
+    /// 插件事件发射器（按扩展 id 绑定，内置与磁盘 IPC 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// session 在存储层的真实目录路径。
     pub session_store_dir: Option<std::path::PathBuf>,
@@ -926,7 +924,7 @@ pub struct LifecycleContext {
     pub model: ModelSelection,
     /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
-    /// 插件事件发射器（按扩展 id 绑定，内置与 WASM 扩展共用）。
+    /// 插件事件发射器（按扩展 id 绑定，内置与磁盘 IPC 扩展共用）。
     pub extension_event_sink: Option<std::sync::Arc<dyn ExtensionEventSink>>,
     /// 仅 TurnEnd 事件填充：当轮最后一条 user 和 assistant 消息文本。
     pub last_exchange: Option<ExchangeSummary>,

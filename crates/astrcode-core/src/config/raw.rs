@@ -179,15 +179,10 @@ pub struct RuntimeSection {
     pub agent_tool_max_parallel_calls: Option<usize>,
     /// Shell 工具默认超时时间（秒）。
     pub shell_timeout_secs: Option<u64>,
-    // ── WASM 扩展 ─────────────────────────────────────────────────────
-    /// WASM 扩展单次调用的 fuel 上限（指令数）。
-    pub wasm_fuel: Option<u64>,
-    /// WASM 扩展线性内存上限（MB）。
-    pub wasm_memory_mb: Option<usize>,
     // ── Extensions ───────────────────────────────────────────────────
     /// 通用扩展启停覆盖。适用于内置扩展和磁盘扩展。
     ///
-    /// 例：`{ "astrcode.memory": false, "my.wasm.extension": false }`
+    /// 例：`{ "astrcode.memory": false, "my.ipc.extension": false }`
     pub extension_states: Option<BTreeMap<String, bool>>,
 }
 

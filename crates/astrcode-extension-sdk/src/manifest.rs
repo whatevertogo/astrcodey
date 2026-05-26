@@ -9,8 +9,6 @@ pub enum ManifestError {
     MissingId,
     /// `name` 字段为空或纯空白。
     MissingName { id: String },
-    /// `library` 字段为空或纯空白。
-    MissingLibrary { id: String },
 }
 
 impl fmt::Display for ManifestError {
@@ -18,14 +16,13 @@ impl fmt::Display for ManifestError {
         match self {
             ManifestError::MissingId => write!(f, "manifest id is required"),
             ManifestError::MissingName { id } => write!(f, "manifest {id} name is required"),
-            ManifestError::MissingLibrary { id } => write!(f, "manifest {id} library is required"),
         }
     }
 }
 
 impl std::error::Error for ManifestError {}
 
-/// 验证扩展清单的必填字段。
+/// 验证扩展清单的必填字段（`extension/initialize` 握手 manifest）。
 ///
 /// 插件作者打包时和宿主加载时都应调用此函数。
 pub fn validate_manifest(
@@ -36,11 +33,6 @@ pub fn validate_manifest(
     }
     if manifest.name.trim().is_empty() {
         return Err(ManifestError::MissingName {
-            id: manifest.id.clone(),
-        });
-    }
-    if manifest.library.trim().is_empty() {
-        return Err(ManifestError::MissingLibrary {
             id: manifest.id.clone(),
         });
     }

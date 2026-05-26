@@ -112,7 +112,7 @@ impl Default for TurnRegistry {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
+        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::EventStore,
         tool::ToolDefinition,
@@ -190,7 +190,6 @@ mod tests {
                 },
                 context: Default::default(),
                 agent: Default::default(),
-                wasm: WasmSettings::default(),
                 extensions: ExtensionSettings::default(),
             },
         ))

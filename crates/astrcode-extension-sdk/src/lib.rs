@@ -47,7 +47,6 @@ pub mod builder;
 pub mod manifest;
 pub mod s5r;
 pub mod session;
-pub mod wasm_abi;
 
 /// Namespaced persistence locations for session-scoped extension data.
 pub mod state {

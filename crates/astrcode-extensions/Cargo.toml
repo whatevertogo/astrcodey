@@ -9,7 +9,8 @@ description = "Extension/hook system: lifecycle events, hook modes, extension lo
 astrcode-core = { path = "../astrcode-core" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-support = { path = "../astrcode-support" }
-tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
+astrcode-protocol = { path = "../astrcode-protocol" }
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -18,12 +19,8 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true }
-wasmtime = { workspace = true }
-wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
-astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
-wasm-encoder = "0.245"
-wat = "1"
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
+astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
+tempfile = "3"

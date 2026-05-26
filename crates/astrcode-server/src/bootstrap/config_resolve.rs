@@ -56,7 +56,7 @@ async fn resolve_from_last_known_good_or_default(
 /// 所有配置来源均失败时的兜底：LLM 不可用，HTTP API 仍可工作。
 fn fallback_default_effective() -> EffectiveConfig {
     use astrcode_core::config::{
-        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, WasmSettings,
+        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings,
     };
 
     EffectiveConfig {
@@ -64,7 +64,6 @@ fn fallback_default_effective() -> EffectiveConfig {
         small_llm: dummy_llm_settings(),
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
-        wasm: WasmSettings::default(),
         extensions: ExtensionSettings::default(),
     }
 }

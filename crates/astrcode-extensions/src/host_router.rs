@@ -44,8 +44,8 @@ pub struct InvokeContext {
     pub cancel_token: Option<CancellationToken>,
     pub event_declarations: HashMap<String, ExtensionEventDecl>,
     pub declared_capabilities: Vec<ExtensionCapability>,
-    /// 当前调用是否在 WASM guest 专用线程上（同步 host import）。
-    pub on_wasm_peer_thread: bool,
+    /// 当前调用是否在 peer 专用 I/O 线程上（同步 host import；IPC 子进程共用）。
+    pub on_peer_io_thread: bool,
 }
 
 const MAX_READ_EVENTS_LIMIT: usize = 500;
@@ -112,7 +112,7 @@ impl HostRouter {
         }
     }
 
-    /// 同步 invoke（WASM guest 线程调用）。流式能力在内部收集后一次性返回。
+    /// 同步 invoke（IPC guest 线程调用）。流式能力在内部收集后一次性返回。
     pub fn invoke_sync(
         &self,
         cap: &str,
@@ -370,23 +370,23 @@ impl HostRouter {
         input: &Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
+        let mut wait_for_result = input["wait_for_result"].as_bool().unwrap_or(true);
+        if ctx.on_peer_io_thread && wait_for_result {
+            return Err(ErrorPayload::new(
+                "invalid_request",
+                "wait_for_result cannot be used from peer synchronous host invokes (deadlock \
+                 risk); set wait_for_result to false",
+            ));
+        }
+        if ctx.on_peer_io_thread {
+            wait_for_result = false;
+        }
         let ops = ctx.session_ops.as_ref().ok_or_else(|| {
             ErrorPayload::new(
                 "backend_unavailable",
                 "session_ops not available in context",
             )
         })?;
-        let mut wait_for_result = input["wait_for_result"].as_bool().unwrap_or(true);
-        if ctx.on_wasm_peer_thread && wait_for_result {
-            return Err(ErrorPayload::new(
-                "invalid_request",
-                "wait_for_result cannot be used from WASM guest synchronous host invokes \
-                 (deadlock risk); set wait_for_result to false",
-            ));
-        }
-        if ctx.on_wasm_peer_thread {
-            wait_for_result = false;
-        }
         let req = SubmitTurnRequest {
             target_session_id: input["target_session_id"]
                 .as_str()
@@ -716,7 +716,7 @@ fn safe_filename(key: &str) -> String {
         .collect()
 }
 
-/// 供 runner 内 `ExtensionEventSink` 与 WASM 路径复用。
+/// 供 runner 内 `ExtensionEventSink` 与 IPC 路径复用。
 pub fn emit_for_sink(
     extension_id: &str,
     declarations: &HashMap<String, ExtensionEventDecl>,
@@ -807,6 +807,30 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, "cancelled");
+    }
+
+    #[test]
+    fn invoke_session_submit_rejects_wait_for_result_on_peer_io_thread() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            session_id: Some("parent".into()),
+            on_peer_io_thread: true,
+            ..Default::default()
+        };
+        let err = router
+            .invoke_sync(
+                "astrcode.session.control.submit_turn",
+                &json!({
+                    "target_session_id": "child",
+                    "user_prompt": "hello",
+                    "wait_for_result": true
+                })
+                .to_string(),
+                &ctx,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_request");
     }
 
     #[test]

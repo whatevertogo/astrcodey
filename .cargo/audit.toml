@@ -1,7 +1,4 @@
 # Workspace security audit policy (CI: `cargo audit`).
-#
-# wasmtime / wasmtime-wasi: pinned in root Cargo.toml workspace.dependencies (>=44.0.2).
-# Desktop (Tauri/Wry on Linux) still pulls GTK3 bindings marked unmaintained by RustSec;
 # those are transitive and accepted until the Tauri stack upgrades.
 
 [advisories]

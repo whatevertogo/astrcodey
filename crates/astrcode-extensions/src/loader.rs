@@ -1,8 +1,4 @@
-//! 扩展加载器 — 从全局和项目目录发现并加载扩展。
-//!
-//! 灵感来源于 pi-mono 的 `discoverAndLoadExtensions()`。
-//! 支持从 `~/.astrcode/extensions/`（全局）和 `.astrcode/extensions/`（项目级）
-//! 两个位置发现并加载原生扩展。
+//! 扩展加载器 — 从全局和项目目录发现并加载 IPC 子进程扩展。
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -19,40 +15,28 @@ use crate::{host_router::HostRouter, runner::ExtensionRunner};
 /// 从磁盘加载所有扩展的结果。
 #[derive(Default)]
 pub struct LoadExtensionsResult {
-    /// 成功加载的扩展列表
     pub extensions: Vec<Arc<dyn Extension>>,
-    /// 加载过程中的错误信息列表
     pub errors: Vec<String>,
 }
 
-/// WASM 扩展资源限制，从配置系统传入。
-pub struct WasmLimits {
-    pub fuel: u64,
-    pub memory_bytes: usize,
-}
-
-/// Extension source loading context.
+/// 扩展加载上下文。
 pub struct ExtensionLoadContext {
     pub working_dir: Option<String>,
-    pub wasm_limits: WasmLimits,
-    /// s5r 宿主能力路由；WASM 扩展加载时必需。
+    /// 磁盘 IPC 扩展加载时必需。
     pub host_router: Option<Arc<HostRouter>>,
 }
 
-/// A source of extensions that can contribute to one [`ExtensionRunner`].
 #[async_trait::async_trait]
 pub trait ExtensionSource: Send + Sync {
     async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult;
 }
 
-/// Runtime container for loaded extensions.
 pub struct ExtensionRuntime {
     pub runner: Arc<ExtensionRunner>,
     pub load_errors: Vec<String>,
 }
 
 impl ExtensionRuntime {
-    /// Load sources in order and register their extensions into one runner.
     pub async fn load(
         ctx: ExtensionLoadContext,
         timeout: Duration,
@@ -60,16 +44,12 @@ impl ExtensionRuntime {
     ) -> Self {
         let runner = Arc::new(ExtensionRunner::new(timeout));
         let load_errors = Self::sync_sources(&runner, &ctx, sources).await;
-
         Self {
             runner,
             load_errors,
         }
     }
 
-    /// 将 sources 的当前加载结果同步到现有 runner：新增的注册，消失的卸载。
-    ///
-    /// 适用于“source-managed” runner，例如 server 启动和配置热更新路径。
     pub async fn sync_sources(
         runner: &Arc<ExtensionRunner>,
         ctx: &ExtensionLoadContext,
@@ -90,7 +70,6 @@ impl ExtensionRuntime {
             .collect();
         let current_ids = runner.registered_extension_ids().await;
 
-        // 先卸载同名扩展，再按 source 顺序注册，保证替换与优先级语义稳定。
         for id in current_ids.iter().filter(|id| desired_ids.contains(*id)) {
             if let Err(e) = runner.unregister(id, StopReason::Reload).await {
                 load_errors.push(format!("failed to reload extension {id}: {e}"));
@@ -115,7 +94,7 @@ impl ExtensionRuntime {
     }
 }
 
-/// Disk-backed extension source for global and project WASM extensions.
+/// 磁盘 IPC 扩展源（`~/.astrcode/extensions/` 与项目 `.astrcode/extensions/`）。
 pub struct DiskExtensionSource {
     extension_states: BTreeMap<String, bool>,
 }
@@ -129,12 +108,8 @@ impl DiskExtensionSource {
 #[async_trait::async_trait]
 impl ExtensionSource for DiskExtensionSource {
     async fn load(&self, ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
-        let mut result = ExtensionLoader::load_all(
-            ctx.working_dir.as_deref(),
-            &ctx.wasm_limits,
-            ctx.host_router.clone(),
-        )
-        .await;
+        let mut result =
+            ExtensionLoader::load_all(ctx.working_dir.as_deref(), ctx.host_router.clone()).await;
         result.extensions.retain(|extension| {
             self.extension_states
                 .get(extension.id())
@@ -145,43 +120,29 @@ impl ExtensionSource for DiskExtensionSource {
     }
 }
 
-/// 从全局和项目级目录加载扩展。
-///
-/// 项目级扩展优先级更高（在分发顺序中排在前面）。
 pub struct ExtensionLoader;
 
 impl ExtensionLoader {
-    /// 加载所有扩展：先加载全局扩展，再加载项目级扩展（优先级更高）。
-    ///
-    /// # 参数
-    /// - `working_dir`: 可选的项目工作目录路径，用于发现项目级扩展
-    /// - `limits`: WASM 扩展资源限制
-    ///
-    /// # 返回
-    /// 包含已加载扩展和错误信息的结果
     pub async fn load_all(
         working_dir: Option<&str>,
-        limits: &WasmLimits,
         host_router: Option<Arc<HostRouter>>,
     ) -> LoadExtensionsResult {
         let mut extensions: Vec<Arc<dyn Extension>> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
 
-        // 全局扩展: ~/.astrcode/extensions/
         let global_dir = hostpaths::extensions_dir();
         if global_dir.exists() {
-            let (exts, errs) = Self::load_from_dir(&global_dir, limits, &host_router).await;
+            let (exts, errs) =
+                Self::load_from_dir(&global_dir, &host_router, working_dir).await;
             extensions.extend(exts);
             errors.extend(errs);
         }
 
-        // 项目扩展（优先级更高）: .astrcode/extensions/
         if let Some(wd) = working_dir {
             let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
             if project_dir.exists() {
                 let (project_exts, project_errs) =
-                    Self::load_from_dir(&project_dir, limits, &host_router).await;
-                // 项目扩展在分发顺序中排在前面
+                    Self::load_from_dir(&project_dir, &host_router, working_dir).await;
                 extensions.splice(0..0, project_exts);
                 errors.extend(project_errs);
             }
@@ -190,13 +151,19 @@ impl ExtensionLoader {
         LoadExtensionsResult { extensions, errors }
     }
 
-    /// 从指定目录加载所有扩展。
-    ///
-    /// 遍历目录中的每个子目录，查找包含 `extension.json` 清单文件的扩展。
+    #[doc(hidden)]
+    pub async fn load_from_dir_for_test(
+        dir: &Path,
+        host_router: &Option<Arc<HostRouter>>,
+        working_dir: Option<&str>,
+    ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
+        Self::load_from_dir(dir, host_router, working_dir).await
+    }
+
     async fn load_from_dir(
         dir: &Path,
-        limits: &WasmLimits,
         host_router: &Option<Arc<HostRouter>>,
+        working_dir: Option<&str>,
     ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
         let mut extensions = Vec::new();
         let mut errors = Vec::new();
@@ -210,7 +177,7 @@ impl ExtensionLoader {
         };
 
         for path in paths {
-            match Self::load_extension(&path, limits, host_router.clone()).await {
+            match Self::load_extension(&path, host_router.clone(), working_dir).await {
                 Ok(ext) => extensions.push(ext),
                 Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
@@ -246,14 +213,10 @@ impl ExtensionLoader {
         Ok(paths)
     }
 
-    /// 加载单个扩展：读取 extension.json 获取 library 路径，加载 WASM 模块。
-    ///
-    /// s5r 协议下 `id` 与能力由 `extension_init` 握手返回；
-    /// `extension.json` 须声明 `protocol.s5r` 与 `library`。
     async fn load_extension(
         ext_dir: &Path,
-        limits: &WasmLimits,
         host_router: Option<Arc<HostRouter>>,
+        working_dir: Option<&str>,
     ) -> Result<Arc<dyn Extension>, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes = tokio::fs::read(&manifest_path)
@@ -261,32 +224,43 @@ impl ExtensionLoader {
             .map_err(|e| format!("read manifest: {e}"))?;
         let entry: serde_json::Value =
             serde_json::from_slice(&manifest_bytes).map_err(|e| format!("parse manifest: {e}"))?;
-        let protocol = entry
+
+        if entry
             .get("protocol")
-            .and_then(|p| p.get("s5r"))
-            .and_then(|v| v.as_str());
-        if protocol != Some("1.0") {
+            .and_then(|p| p.get("native"))
+            .is_some()
+        {
             return Err(format!(
-                "{}: extension.json must set protocol.s5r to \"1.0\" (s6r is no longer supported)",
+                "{}: protocol.native is not implemented yet; use protocol.ipc",
                 ext_dir.display()
             ));
         }
 
-        let library = entry["library"].as_str().unwrap_or("").trim().to_string();
-        if library.is_empty() {
+        let ipc_proto = entry
+            .get("protocol")
+            .and_then(|p| p.get("ipc"))
+            .and_then(|v| v.as_str());
+        if ipc_proto != Some(crate::ipc_ext::IPC_VERSION) {
             return Err(format!(
-                "{}: extension.json missing 'library' field",
+                "{}: extension.json must set protocol.ipc to \"{}\"",
+                ext_dir.display(),
+                crate::ipc_ext::IPC_VERSION
+            ));
+        }
+
+        if entry.get("command").is_none() {
+            return Err(format!(
+                "{}: extension.json missing 'command' array for IPC extension",
                 ext_dir.display()
             ));
         }
 
         let router = host_router
-            .ok_or("ExtensionLoadContext.host_router is required for WASM extensions")?;
+            .ok_or("ExtensionLoadContext.host_router is required for disk extensions")?;
 
-        let lib_path = ext_dir.join(&library);
-        crate::wasm_ext::WasmExtension::load(&lib_path, limits.fuel, limits.memory_bytes, router)
+        crate::ipc_ext::IpcExtension::load(ext_dir, &entry, router, working_dir)
+            .await
             .map(|ext| ext as Arc<dyn Extension>)
-            .map_err(|e| format!("load wasm {}: {e}", lib_path.display()))
     }
 }
 

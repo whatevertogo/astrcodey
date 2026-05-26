@@ -15,7 +15,7 @@ use astrcode_context::{
 use astrcode_core::{
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-        OpenAiApiMode, WasmSettings,
+        OpenAiApiMode,
     },
     event::EventPayload,
     extension::CompactStrategy,
@@ -102,7 +102,6 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
         },
         context,
         agent: AgentSettings::default(),
-        wasm: WasmSettings::default(),
         extensions: ExtensionSettings::default(),
     };
     Arc::new(SessionRuntimeServices::new(

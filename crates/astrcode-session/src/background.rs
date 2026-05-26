@@ -235,7 +235,7 @@ pub fn backgrounded_placeholder_result(
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode, WasmSettings},
+        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
         event::Event,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::{EventReader, EventStore, SessionReadModel, SessionSummary, StorageError},
@@ -434,7 +434,6 @@ mod tests {
                     },
                     context: Default::default(),
                     agent: Default::default(),
-                    wasm: WasmSettings::default(),
                     extensions: ExtensionSettings::default(),
                 },
             ),

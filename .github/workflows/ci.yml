@@ -39,11 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
-      - name: Build s5r guest WASM (E2E)
-        run: cargo build --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml --target wasm32-wasip1 --release
+      - name: Build IPC guest binary (E2E)
+        run: cargo build --release --manifest-path crates/astrcode-extensions/tests/ipc-guest/Cargo.toml
       - run: cargo test --workspace --all-features --exclude astrcode-desktop
 
   audit:

@@ -110,8 +110,6 @@ Each model in `models` array:
 | `postCompactMaxTokensPerFile` | number | 5000 | Maximum tokens per restored file |
 | `agentMaxDepth` | number | 3 | Maximum sub-agent nesting depth (root=0, child=1, ...) |
 | `agentToolMaxParallelCalls` | number | 5 | Maximum parallel tool calls per turn |
-| `wasmFuel` | number | 100000000 | Fuel limit for WASM extensions (instruction count) |
-| `wasmMemoryMb` | number | 128 | Memory limit for WASM extensions (MB) |
 
 ## Environment Variables
 
@@ -220,3 +218,32 @@ Extension configuration supports hot reload:
 3. Extensions receive `on_config_changed()` callback
 
 Project-level `.astrcode/config.json` can also override extension settings using the same merge rules as other config fields.
+
+### IPC Extension Capabilities
+
+Disk IPC extensions declare required host capabilities via `capabilities` (snake_case, e.g. `small_model`, `emit_events`) in the **`extension/initialize` handshake**; undeclared sensitive capabilities are rejected by `HostRouter`.
+
+`extension.json` handles discovery and process launching (**`protocol.ipc`** + **`command`** array); tools / commands / hooks are returned by the subprocess in its initialize response:
+
+```json
+{
+  "protocol": { "ipc": "1.0" },
+  "command": ["node", "dist/index.js"]
+}
+```
+
+Initialize response example (excerpt):
+
+```json
+{
+  "extension_id": "my-ext",
+  "protocol": { "ipc": "1.0" },
+  "capabilities": ["session_state"],
+  "tools": [],
+  "commands": [],
+  "hooks": [],
+  "extension_events": []
+}
+```
+
+Declorable capabilities include `session_state`, `session_control`, `small_model`, `session_history`, `emit_events`, `workspace_read`, `process_spawn`, and `network_client`. See [extension-system.md](./extension-system.md) for details.

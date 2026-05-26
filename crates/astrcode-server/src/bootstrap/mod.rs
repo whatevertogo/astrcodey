@@ -12,7 +12,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::{
     build_host_router,
-    loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime, WasmLimits},
+    loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
@@ -181,7 +181,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 7. 加载扩展。
     //
     // HostServices 从 capabilities 获取 small_llm，为 trusted bundled extension
-    // 提供运行时依赖（EventStore、small_llm）。不传给 disk/wasm source。
+    // 提供运行时依赖（EventStore、small_llm）。不传给磁盘 IPC 扩展。
     let host_services = Arc::new(ExtensionHostServices::new(
         Arc::clone(&event_store),
         Some(capabilities.small_llm()),
@@ -295,10 +295,6 @@ async fn load_extensions_into_runner(
         runner,
         &ExtensionLoadContext {
             working_dir: Some(cwd.to_string_lossy().to_string()),
-            wasm_limits: WasmLimits {
-                fuel: effective.wasm.fuel,
-                memory_bytes: effective.wasm.memory_bytes,
-            },
             host_router: Some(build_host_router(
                 Arc::clone(host_services),
                 Some(cwd.to_string_lossy().to_string()),

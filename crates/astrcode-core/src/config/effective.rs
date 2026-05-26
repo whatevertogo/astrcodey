@@ -15,8 +15,6 @@ pub struct EffectiveConfig {
     pub context: ContextSettings,
     /// Agent 行为限制（嵌套深度、并行工具调用数等）。
     pub agent: AgentSettings,
-    /// WASM 扩展资源限制（fuel、内存上限等）。
-    pub wasm: WasmSettings,
     /// 扩展加载设置。
     pub extensions: ExtensionSettings,
 }
@@ -134,26 +132,6 @@ impl Default for AgentSettings {
             max_depth: super::defaults::DEFAULT_AGENT_MAX_DEPTH,
             tool_max_parallel_calls: super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS,
             shell_timeout_secs: super::defaults::DEFAULT_SHELL_TIMEOUT_SECS,
-        }
-    }
-}
-
-// ─── WASM Settings ──────────────────────────────────────────────────────
-
-/// 已解析的 WASM 扩展资源限制配置。
-#[derive(Debug, Clone)]
-pub struct WasmSettings {
-    /// 单次 guest 调用的 fuel 预算（指令数）。
-    pub fuel: u64,
-    /// 线性内存增长上限（字节）。
-    pub memory_bytes: usize,
-}
-
-impl Default for WasmSettings {
-    fn default() -> Self {
-        Self {
-            fuel: super::defaults::DEFAULT_WASM_FUEL,
-            memory_bytes: super::defaults::DEFAULT_WASM_MEMORY_MB * 1024 * 1024,
         }
     }
 }

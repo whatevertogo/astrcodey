@@ -245,7 +245,6 @@ mod tests {
             },
             context: ContextSettings::default(),
             agent: astrcode_core::config::AgentSettings::default(),
-            wasm: astrcode_core::config::WasmSettings::default(),
             extensions: ExtensionSettings::default(),
         };
         Arc::new(SessionRuntimeServices::new(

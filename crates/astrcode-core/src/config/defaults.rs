@@ -58,13 +58,6 @@ pub const DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS: usize = 5;
 /// Shell 工具默认超时时间（秒）。足以覆盖多数构建/安装命令。
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
-// ── WASM 扩展资源限制默认值 ──────────────────────────────────────────────
-
-/// WASM 扩展单次调用的 fuel 上限（指令数）。约 200-400ms CPU 密集计算。
-pub const DEFAULT_WASM_FUEL: u64 = 10_000_000;
-/// WASM 扩展线性内存上限（MB）。
-pub const DEFAULT_WASM_MEMORY_MB: usize = 64;
-
 // ── Serde 默认值函数 ──────────────────────────────────────────────────
 
 /// serde 用：返回默认配置版本号。
