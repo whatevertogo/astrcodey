@@ -236,8 +236,8 @@ export default function InputBar() {
   }, [abortCurrentTurn])
 
   return (
-    <div className="flex-shrink-0 bg-panel-bg px-[var(--chat-content-horizontal-padding)] pb-[18px] pt-4">
-      <div className="mx-auto w-full max-w-[var(--chat-composer-max-width)] translate-x-[var(--chat-assistant-center-shift)]">
+    <div className="shrink-0 bg-panel-bg px-(--chat-content-horizontal-padding) pb-4.5 pt-4">
+      <div className="mx-auto w-full max-w-(--chat-composer-max-width) translate-x-(--chat-assistant-center-shift)">
         <div className="relative w-full">
           <div className={composerShell}>
             {workingDir && (
@@ -246,7 +246,7 @@ export default function InputBar() {
                 title={workingDir}
               >
                 <span
-                  className="inline-flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center"
+                  className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center"
                   aria-hidden="true"
                 >
                   <svg className="h-3.5 w-3.5" viewBox="0 0 20 20">
@@ -265,10 +265,10 @@ export default function InputBar() {
               </div>
             )}
             <div className="relative">
-              <div className="flex flex-col px-[var(--chat-composer-shell-padding-x)] py-3">
+              <div className="flex flex-col px-(--chat-composer-shell-padding-x) py-3">
                 <textarea
                   ref={textareaRef}
-                  className="mb-3 max-h-[240px] min-h-[50px] w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[15px] leading-[1.75] text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                  className="mb-3 max-h-60 min-h-12.5 w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[15px] leading-[1.75] text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                   placeholder="向 AstrCode 提问..."
                   value={value}
                   rows={1}
@@ -281,7 +281,7 @@ export default function InputBar() {
                   disabled={!activeSessionId}
                 />
                 <div className="flex items-center justify-between">
-                  <div className="flex flex-shrink-0 items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     <ModelSelector
                       refreshKey={modelRefreshKey}
                       getCurrentModel={api.getCurrentModel}
@@ -307,7 +307,7 @@ export default function InputBar() {
                       </span>
                     )}
                   </div>
-                  <div className="flex flex-shrink-0 items-center gap-2">
+                  <div className="flex shrink-0 items-center gap-2">
                     {isBusy && (
                       <button
                         className={composerInterruptButton}
@@ -363,7 +363,7 @@ export default function InputBar() {
           )}
         </div>
       </div>
-      <div className="mx-auto mt-2.5 w-full max-w-[var(--chat-composer-max-width)] text-center text-xs text-text-muted">
+      <div className="mx-auto mt-2.5 w-full max-w-(--chat-composer-max-width) text-center text-xs text-text-muted">
         AI 可能会产生误导性信息，请核实重要内容
       </div>
     </div>

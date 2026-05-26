@@ -23,7 +23,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             <div className="mb-2 text-[15px] font-semibold text-danger">
               渲染出错
             </div>
-            <div className="mb-4 text-[13px] text-text-secondary break-words">
+            <div className="mb-4 text-[13px] text-text-secondary wrap-break-word">
               {this.state.error.message}
             </div>
             <button

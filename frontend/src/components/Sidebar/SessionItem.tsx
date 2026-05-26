@@ -73,7 +73,7 @@ function SessionItem({
         className={cn(
           'flex w-full items-center gap-2.5 rounded-lg py-2 text-left outline-none transition-all duration-150 ease-out border',
           isActive
-            ? 'bg-surface border-border shadow-soft border-l-[3px] border-l-accent-strong pl-[7px] pr-2.5'
+            ? 'bg-surface border-border shadow-soft border-l-[3px] border-l-accent-strong pl-1.75 pr-2.5'
             : 'border-transparent px-2.5 hover:bg-surface-muted'
         )}
         onClick={() => onSelect(session.sessionId)}
@@ -102,7 +102,7 @@ function SessionItem({
       {contextMenu && (
         <div
           ref={menuRef}
-          className="fixed z-[100] rounded-xl border border-border bg-surface py-1 shadow-surface-lg"
+          className="fixed z-100 rounded-xl border border-border bg-surface py-1 shadow-surface-lg"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
           {confirmDelete ? (

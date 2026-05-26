@@ -33,7 +33,7 @@ export default function App() {
         )}
         {isOpen && (
           <div
-            className={`relative z-10 w-[5px] flex-none cursor-col-resize bg-transparent transition-colors duration-100 hover:bg-border-strong ${isResizing ? 'bg-border-strong' : ''}`}
+            className={`relative z-10 w-1.25 flex-none cursor-col-resize bg-transparent transition-colors duration-100 hover:bg-border-strong ${isResizing ? 'bg-border-strong' : ''}`}
             onPointerDown={onResizeStart}
           />
         )}

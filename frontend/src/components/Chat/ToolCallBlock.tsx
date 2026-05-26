@@ -239,7 +239,7 @@ function MetaRow({ label, value }: { label: string; value?: string | number }) {
   return (
     <div className="flex min-w-0 items-baseline gap-2">
       <dt className="shrink-0 text-text-muted">{label}</dt>
-      <dd className="min-w-0 break-words text-code-text">{value}</dd>
+      <dd className="min-w-0 wrap-break-word text-code-text">{value}</dd>
     </div>
   )
 }
@@ -458,7 +458,9 @@ function ShellToolDetails({ block }: { block: ToolCall }) {
       <div className="pb-3">
         <div className="mb-3 font-mono text-[13px] leading-relaxed text-code-text">
           <span className="select-none text-text-muted">$ </span>
-          <span className="break-words">{command || '(empty command)'}</span>
+          <span className="wrap-break-word">
+            {command || '(empty command)'}
+          </span>
         </div>
         <MetaGrid>
           <MetaRow label="cwd" value={cwd} />
@@ -614,11 +616,11 @@ function PatchToolDetails({ block }: { block: ToolCall }) {
                 >
                   {applied === false ? 'failed' : changeType}
                 </span>
-                <span className="min-w-0 flex-1 break-words text-code-text">
+                <span className="min-w-0 flex-1 wrap-break-word text-code-text">
                   {path || '(unknown path)'}
                 </span>
                 {error && (
-                  <span className="min-w-0 break-words text-danger">
+                  <span className="min-w-0 wrap-break-word text-danger">
                     {error}
                   </span>
                 )}
@@ -925,7 +927,7 @@ function ToolCallBlock({ block }: ToolCallBlockProps) {
 
   return (
     <details
-      className="group mb-1 ml-[var(--chat-assistant-content-offset)] block min-w-0 max-w-full animate-block-enter motion-reduce:animate-none"
+      className="group mb-1 ml-(--chat-assistant-content-offset) block min-w-0 max-w-full animate-block-enter motion-reduce:animate-none"
       open={block.status === 'error' || isOpen || !!agentSpec}
       onToggle={(e) => setIsOpen(e.currentTarget.open)}
     >
