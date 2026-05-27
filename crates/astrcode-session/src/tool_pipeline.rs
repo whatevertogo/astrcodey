@@ -77,7 +77,6 @@ impl ToolPipeline {
         ToolCallRuntimeContext {
             session_id: self.shared.session_id.clone(),
             working_dir: self.shared.working_dir.clone(),
-            model_id: self.shared.model_id.clone(),
             tools: tools.to_vec(),
             tool_result_reader: Some(Arc::clone(&self.session) as Arc<dyn ToolResultArtifactReader>),
             publisher,

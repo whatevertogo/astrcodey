@@ -88,7 +88,6 @@ impl ToolRuntimeCapabilities {
 pub(crate) struct ToolCallRuntimeContext {
     pub session_id: SessionId,
     pub working_dir: String,
-    pub model_id: String,
     pub tools: Vec<ToolDefinition>,
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     pub publisher: Arc<TurnPublisher>,
@@ -205,7 +204,6 @@ use crate::turn_publish::spawn_event_bridge;
 
 fn tool_capabilities_from_runtime(runtime: &ToolCallRuntimeContext) -> ToolCapabilities {
     ToolCapabilities {
-        model_id: Some(runtime.model_id.clone()),
         main_model_id: runtime.capabilities.main_model_id.clone(),
         small_model_id: runtime.capabilities.small_model_id.clone(),
         llm_models: runtime.capabilities.llm_models.clone(),

@@ -12,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~67.6k lines of Rust across 21 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~6.3k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~76.7k lines of Rust across 21 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~8.1k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -322,8 +322,8 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-core`](crates/astrcode-core) | 6.2k | Shared domain types, traits, config system, extension contracts, prompt composition |
-| [`astrcode-support`](crates/astrcode-support) | 1.1k | Host utilities: path resolution, shell detection, tool result persistence |
+| [`astrcode-core`](crates/astrcode-core) | 6.4k | Shared domain types, traits, config system, extension contracts, prompt composition |
+| [`astrcode-support`](crates/astrcode-support) | 1.5k | Host utilities: path resolution, shell detection, tool result persistence |
 | [`astrcode-log`](crates/astrcode-log) | 353 | File rotation, stderr output, env-filter logging |
 
 ### Layer 1: Domain Services
@@ -331,11 +331,11 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 | Crate | Lines | Description |
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
-| [`astrcode-tools`](crates/astrcode-tools) | 5.6k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
-| [`astrcode-storage`](crates/astrcode-storage) | 4.2k | JSONL event log, snapshots, config persistence, file locking |
-| [`astrcode-context`](crates/astrcode-context) | 3.9k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| [`astrcode-session`](crates/astrcode-session) | 7.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
-| [`astrcode-extensions`](crates/astrcode-extensions) | 4.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
+| [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
+| [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, config persistence, file locking |
+| [`astrcode-context`](crates/astrcode-context) | 4.0k | Token estimation, context window budgeting, auto-compact, prompt engine |
+| [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 5.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
 
 ### Layer 2: Extensions
 
@@ -345,8 +345,8 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 99 | Composition root that registers all first-party extension crates |
 | [`astrcode-extension-mode`](crates/astrcode-extension-mode) | 1.1k | Code / Plan mode switching, exit gate, plan artifact, keybindings & status bar |
 | [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 962 | Slash-command skill discovery and Skill tool dispatch |
-| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 876 | Progress-tracking todo list tool |
-| [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 781 | Sub-agent delegation, agent discovery (Claude Code compatible) |
+| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 860 | Progress-tracking todo list tool |
+| [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 784 | Sub-agent delegation, agent discovery (Claude Code compatible) |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | 3.0k | MCP client: stdio/HTTP transports, persistent process pool, pre-warm, health checks |
 | [`astrcode-extension-memory`](crates/astrcode-extension-memory) | 1.8k | Project-scoped markdown memory (disabled by default) |
 
@@ -354,15 +354,15 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-protocol`](crates/astrcode-protocol) | 1.5k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
-| [`astrcode-server`](crates/astrcode-server) | 11.9k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
+| [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
+| [`astrcode-server`](crates/astrcode-server) | 13.5k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
 
 ### Layer 4: Clients
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-client`](crates/astrcode-client) | 627 | Typed JSON-RPC client, transport abstraction, stream subscription |
-| [`astrcode-cli`](crates/astrcode-cli) | 8.1k | CLI entry: TUI (ratatui), headless exec, server launcher |
+| [`astrcode-client`](crates/astrcode-client) | 693 | Typed JSON-RPC client, transport abstraction, stream subscription |
+| [`astrcode-cli`](crates/astrcode-cli) | 8.3k | CLI entry: TUI (ratatui), headless exec, server launcher |
 
 ### Eval
 
@@ -375,16 +375,16 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 
 | Component | Lines | Description |
 |---|---|---|
-| [`src-tauri/`](src-tauri) | 777 | Tauri v2 shell: sidecar management, single-instance coordination, native dialogs |
+| [`src-tauri/`](src-tauri) | 1.9k | Tauri v2 shell: sidecar management, single-instance coordination, native dialogs |
 
-**Totals:** ~76.6k lines of Rust (21 crates + Tauri), **265** `.rs` files; ~7.1k lines of TypeScript in `frontend/` (~**84k** lines overall).
+**Totals:** ~78.6k lines of Rust (21 crates + Tauri), **271** `.rs` files; ~8.1k lines of TypeScript in `frontend/` (~**87k** lines overall).
 
 ### Frontend & Desktop App
 
 | Component | Lines | Description |
 |---|---|---|
-| `frontend/` (React + TS) | ~7.1k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
-| `src-tauri/` (Tauri v2) | 777 | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
+| `frontend/` (React + TS) | ~8.1k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
+| `src-tauri/` (Tauri v2) | 1.9k | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
 
 The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
 

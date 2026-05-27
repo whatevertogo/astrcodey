@@ -227,28 +227,6 @@ pub enum LlmEvent {
     Error { message: String },
 }
 
-/// LLM 调用的完整输出结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmOutput {
-    /// 累积的文本内容。
-    pub text: String,
-    /// LLM 请求的工具调用列表（如有）。
-    pub tool_calls: Vec<ParsedToolCall>,
-    /// 提供者返回的完成原因。
-    pub finish_reason: String,
-}
-
-/// 从 LLM 响应中解析出的工具调用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedToolCall {
-    /// 工具调用的唯一标识。
-    pub call_id: String,
-    /// 要调用的工具名称。
-    pub name: String,
-    /// 工具调用参数（JSON 值）。
-    pub arguments: serde_json::Value,
-}
-
 /// LLM 提供者操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
