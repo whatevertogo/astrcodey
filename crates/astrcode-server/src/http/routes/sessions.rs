@@ -23,7 +23,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::{
-    HttpState, error_response,
+    HttpState, handler_error_response, internal_error_response, not_found_response,
     projection::{
         blocks::{compact_summary_block, latest_compact_boundary, messages_to_blocks},
         live::control_from_phase,
@@ -55,7 +55,7 @@ pub(in crate::http) async fn create_session(
         },
         Err(error) => {
             tracing::error!(error = %error, "create_session failed");
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "create_failed", error)
+            internal_error_response("create_failed", error)
         },
     }
 }
@@ -66,7 +66,7 @@ pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Re
             sessions: summaries.into_iter().map(summary_to_dto).collect(),
         })
         .into_response(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "list_failed", error),
+        Err(error) => internal_error_response("list_failed", error),
     }
 }
 
@@ -92,7 +92,7 @@ pub(in crate::http) async fn conversation_snapshot(
             let streaming = state.event_bus.streaming_snapshot(&session_id);
             Json(conversation_to_dto(snapshot, streaming.as_ref())).into_response()
         },
-        Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
+        Err(error) => not_found_response("session_not_found", error),
     }
 }
 
@@ -124,27 +124,15 @@ pub(in crate::http) async fn submit_prompt(
         .into_response(),
         Err(HandlerError::TurnAlreadyRunning) => {
             tracing::warn!(session_id = %session_id, "prompt rejected: turn already running");
-            error_response(
-                StatusCode::CONFLICT,
-                "turn_running",
-                "A turn is already running",
-            )
+            handler_error_response(HandlerError::TurnAlreadyRunning, "prompt_failed")
         },
         Err(HandlerError::UnknownCommand(cmd)) => {
             tracing::warn!(session_id = %session_id, command = %cmd, "prompt rejected: unknown slash command");
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "unknown_command",
-                format!("Unknown command: /{cmd}"),
-            )
+            handler_error_response(HandlerError::UnknownCommand(cmd), "prompt_failed")
         },
         Err(error) => {
             tracing::error!(session_id = %session_id, error = %error, "prompt failed");
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "prompt_failed",
-                error.to_string(),
-            )
+            handler_error_response(error, "prompt_failed")
         },
     }
 }
@@ -187,7 +175,7 @@ pub(in crate::http) async fn list_commands(
             })
             .into_response()
         },
-        Err(error) => error_response(StatusCode::NOT_FOUND, "session_not_found", error),
+        Err(error) => not_found_response("session_not_found", error),
     }
 }
 
@@ -216,14 +204,7 @@ pub(in crate::http) async fn compact_session(
             message,
         })
         .into_response(),
-        Err(error) if matches!(error, HandlerError::CompactBlocked) => {
-            error_response(StatusCode::CONFLICT, "turn_running", error.to_string())
-        },
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "compact_failed",
-            error.to_string(),
-        ),
+        Err(error) => handler_error_response(error, "compact_failed"),
     }
 }
 
@@ -234,14 +215,7 @@ pub(in crate::http) async fn abort_session(
     let session_id = SessionId::from(session_id);
     match state.handler.abort_session(session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) if matches!(error, HandlerError::NoActiveTurn) => {
-            error_response(StatusCode::NOT_FOUND, "no_active_turn", error.to_string())
-        },
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "abort_failed",
-            error.to_string(),
-        ),
+        Err(error) => handler_error_response(error, "abort_failed"),
     }
 }
 
@@ -255,7 +229,7 @@ pub(in crate::http) async fn delete_session(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => error_response(StatusCode::NOT_FOUND, "delete_failed", error),
+        Err(error) => not_found_response("delete_failed", error),
     }
 }
 
@@ -277,11 +251,7 @@ pub(in crate::http) async fn fork_session(
         .into_response(),
         Err(error) => {
             tracing::error!(error = %error, "fork_session failed");
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "fork_failed",
-                error.to_string(),
-            )
+            handler_error_response(error, "fork_failed")
         },
     }
 }
@@ -292,7 +262,7 @@ pub(in crate::http) async fn delete_project(
 ) -> Response {
     match state.handler.delete_project(params.working_dir).await {
         Ok(deleted_count) => Json(DeleteProjectResponseDto { deleted_count }).into_response(),
-        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "delete_failed", error),
+        Err(error) => internal_error_response("delete_failed", error),
     }
 }
 

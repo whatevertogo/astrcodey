@@ -12,11 +12,10 @@ use astrcode_protocol::{
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 
-use super::super::{HttpState, error_response};
+use super::super::{HttpState, bad_request_response, internal_error_response};
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
     Json(ExtensionListResponseDto {
@@ -48,11 +47,7 @@ pub(in crate::http) async fn set_enabled(
     extension_states.insert(request.extension_id.clone(), request.enabled);
 
     if let Err(error) = candidate.clone().into_effective() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_extension_state",
-            error.to_string(),
-        );
+        return bad_request_response("invalid_extension_state", error);
     }
 
     if let Err(error) = state
@@ -62,11 +57,7 @@ pub(in crate::http) async fn set_enabled(
         .save(&candidate)
         .await
     {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "save_failed",
-            error.to_string(),
-        );
+        return internal_error_response("save_failed", error);
     }
 
     if let Err(error) = state
@@ -74,11 +65,7 @@ pub(in crate::http) async fn set_enabled(
         .config_manager
         .apply_raw_config_and_rebuild(candidate)
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_extension_state",
-            error.to_string(),
-        );
+        return bad_request_response("invalid_extension_state", error);
     }
 
     // 通知扩展配置已变更

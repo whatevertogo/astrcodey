@@ -4,18 +4,19 @@
 //! that require filesystem or tool-registry access stay here.
 
 use std::{
-    cmp::Reverse,
     fs,
     path::{Path, PathBuf},
 };
 
 use astrcode_context::{
     ContextSettings,
-    compaction::{CompactResult, PostCompactFile, PostCompactNote, recent_read_paths},
+    compaction::{
+        CompactResult, PostCompactFile, PostCompactNote, agent_status_note, recent_read_paths,
+    },
     token_budget::truncate_text_to_tokens,
 };
 use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
@@ -96,7 +97,7 @@ fn collect_post_compact_context(
     if let Some(note) = skills_note(system_prompt) {
         notes.push(note);
     }
-    if let Some(note) = agent_status_note(source_messages) {
+    if let Some(note) = agent_status_note(source_messages, 5, AGENT_NOTE_MAX_CHARS) {
         notes.push(note);
     }
     if let Some(note) = tool_delta_note(tools) {
@@ -136,7 +137,7 @@ fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote>
         .join("extension_data")
         .join("astrcode-mode")
         .join("plan");
-    let mut plans = fs::read_dir(&plans_dir)
+    let latest_plan = fs::read_dir(&plans_dir)
         .ok()?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
@@ -148,10 +149,8 @@ fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote>
             let modified = entry.metadata().ok()?.modified().ok()?;
             Some((modified, path))
         })
-        .collect::<Vec<_>>();
-    plans.sort_by_key(|entry| Reverse(entry.0));
-
-    let path = plans.into_iter().next()?.1;
+        .max_by_key(|entry| entry.0)?;
+    let path = latest_plan.1;
     let content = fs::read_to_string(&path).ok()?;
     Some(PostCompactNote {
         title: "Plan File".into(),
@@ -169,77 +168,6 @@ fn skills_note(system_prompt: Option<&str>) -> Option<PostCompactNote> {
         title: "Loaded Skill Content".into(),
         body: truncate_to_tokens(skills, SKILLS_TOKEN_BUDGET),
     })
-}
-
-fn agent_status_note(messages: &[LlmMessage]) -> Option<PostCompactNote> {
-    let agent_calls = agent_call_descriptions(messages);
-    let mut entries = Vec::new();
-    for message in messages {
-        if message.role != LlmRole::Tool || message.name.as_deref() != Some("agent") {
-            continue;
-        }
-        for content in &message.content {
-            let LlmContent::ToolResult {
-                tool_call_id,
-                content,
-                is_error,
-            } = content
-            else {
-                continue;
-            };
-            let description = agent_calls
-                .get(tool_call_id)
-                .cloned()
-                .unwrap_or_else(|| "agent task".to_string());
-            let status = if *is_error { "failed" } else { "completed" };
-            entries.push(format!(
-                "- {description}: {status}\n{}",
-                truncate_chars(content, 1200)
-            ));
-        }
-    }
-
-    if entries.is_empty() {
-        return None;
-    }
-    let start = entries.len().saturating_sub(5);
-    Some(PostCompactNote {
-        title: "Agent Task Status".into(),
-        body: truncate_chars(&entries[start..].join("\n\n"), AGENT_NOTE_MAX_CHARS),
-    })
-}
-
-fn agent_call_descriptions(messages: &[LlmMessage]) -> std::collections::HashMap<String, String> {
-    let mut calls = std::collections::HashMap::new();
-    for message in messages {
-        if message.role != LlmRole::Assistant {
-            continue;
-        }
-        for content in &message.content {
-            let LlmContent::ToolCall {
-                call_id,
-                name,
-                arguments,
-            } = content
-            else {
-                continue;
-            };
-            if name != "agent" {
-                continue;
-            }
-            let description = arguments
-                .get("description")
-                .and_then(|value| value.as_str())
-                .or_else(|| {
-                    arguments
-                        .get("subagent_type")
-                        .and_then(|value| value.as_str())
-                })
-                .unwrap_or("agent task");
-            calls.insert(call_id.clone(), description.to_string());
-        }
-    }
-    calls
 }
 
 fn tool_delta_note(tools: &[ToolDefinition]) -> Option<PostCompactNote> {

@@ -27,6 +27,9 @@ pub enum ResolveError {
     /// shell 命令执行失败（用于动态获取 API key）。
     #[error("API key command failed: {0}")]
     ApiKeyCommandFailed(String),
+    /// 配置策略禁止执行 API key shell 命令。
+    #[error("API key shell command is disabled by runtime config")]
+    ApiKeyCommandDisabled,
 }
 
 fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
@@ -79,10 +82,38 @@ fn resolve_shell_command(raw_command: &str) -> Result<String, ResolveError> {
     Ok(key)
 }
 
-fn resolve_profile_api_key(profile: &Profile) -> Result<String, ResolveError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeyInputKind {
+    EnvRef,
+    ShellCommand,
+    EnvVarLike,
+    PlainText,
+}
+
+fn classify_api_key_input(raw: &str) -> Option<(ApiKeyInputKind, &str)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(var) = trimmed.strip_prefix("env:") {
+        return Some((ApiKeyInputKind::EnvRef, var));
+    }
+    if let Some(command) = trimmed.strip_prefix('!') {
+        return Some((ApiKeyInputKind::ShellCommand, command.trim()));
+    }
+    if trimmed.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+        return Some((ApiKeyInputKind::EnvVarLike, trimmed));
+    }
+    Some((ApiKeyInputKind::PlainText, trimmed))
+}
+
+fn resolve_profile_api_key(
+    profile: &Profile,
+    allow_shell_command: bool,
+) -> Result<String, ResolveError> {
     // 1) explicit api_key in config
-    if let Some(raw) = profile.api_key.as_deref().filter(|s| !s.is_empty()) {
-        return resolve_api_key(raw);
+    if let Some(raw) = profile.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
+        return resolve_api_key_with_policy(raw, allow_shell_command);
     }
 
     // 2) fallback to known env keys (pi-mono style)
@@ -118,7 +149,10 @@ fn resolve_llm_settings(
             model: model_name.into(),
         })?;
 
-    let api_key = resolve_profile_api_key(profile)?;
+    let api_key = resolve_profile_api_key(
+        profile,
+        runtime.allow_api_key_shell_command.unwrap_or(false),
+    )?;
 
     let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
     let openai_capabilities = profile.openai_capabilities.as_ref();
@@ -181,74 +215,9 @@ impl Config {
         Ok(EffectiveConfig {
             llm,
             small_llm,
-            context: ContextSettings {
-                auto_compact_enabled: self
-                    .runtime
-                    .compact_auto_enabled
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
-                predictive_compact_enabled: self
-                    .runtime
-                    .predictive_compact_enabled
-                    .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED),
-                compact_threshold_percent: self
-                    .runtime
-                    .compact_threshold_percent
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT),
-                compact_max_retry_attempts: self
-                    .runtime
-                    .compact_max_retry_attempts
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS),
-                compact_max_output_tokens: self
-                    .runtime
-                    .compact_max_output_tokens
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
-                compact_keep_recent_turns: self
-                    .runtime
-                    .compact_keep_recent_turns
-                    .or(super::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS),
-                predictive_compact_baseline_growth_tokens: self
-                    .runtime
-                    .predictive_compact_baseline_growth_tokens
-                    .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS),
-                compact_circuit_breaker_threshold: self
-                    .runtime
-                    .compact_circuit_breaker_threshold
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD),
-                compact_circuit_breaker_cooldown_secs: self
-                    .runtime
-                    .compact_circuit_breaker_cooldown_secs
-                    .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS),
-                post_compact_max_files: self
-                    .runtime
-                    .post_compact_max_files
-                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_FILES),
-                post_compact_token_budget: self
-                    .runtime
-                    .post_compact_token_budget
-                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET),
-                post_compact_max_tokens_per_file: self
-                    .runtime
-                    .post_compact_max_tokens_per_file
-                    .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
-            },
-            agent: AgentSettings {
-                max_depth: self
-                    .runtime
-                    .agent_max_depth
-                    .unwrap_or(super::defaults::DEFAULT_AGENT_MAX_DEPTH),
-                tool_max_parallel_calls: self
-                    .runtime
-                    .agent_tool_max_parallel_calls
-                    .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
-                shell_timeout_secs: self
-                    .runtime
-                    .shell_timeout_secs
-                    .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
-            },
-            extensions: ExtensionSettings {
-                extension_states: self.runtime.extension_states.clone().unwrap_or_default(),
-                extension_configs: self.extensions.clone().unwrap_or_default(),
-            },
+            context: build_context_settings(&self.runtime),
+            agent: build_agent_settings(&self.runtime),
+            extensions: build_extension_settings(&self.runtime, self.extensions.as_ref()),
         })
     }
 
@@ -268,29 +237,39 @@ impl Config {
 ///
 /// 空字符串在此函数被调用前已由调用方（`into_effective`）拦截。
 pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
-    if let Some(var) = raw.strip_prefix("env:") {
-        // "env:VAR_NAME" 格式：必须存在该环境变量
-        std::env::var(var).map_err(|_| ResolveError::MissingEnvVar(var.into()))
-    } else if let Some(cmd) = raw.strip_prefix('!') {
-        // "!command" 格式：执行命令并使用 stdout
-        resolve_shell_command(cmd.trim())
-    } else if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-        // 全大写加下划线：尝试作为环境变量名，失败则 emit warning 后使用原始值
-        match std::env::var(raw) {
+    resolve_api_key_with_policy(raw, true)
+}
+
+fn resolve_api_key_with_policy(
+    raw: &str,
+    allow_shell_command: bool,
+) -> Result<String, ResolveError> {
+    let Some((kind, value)) = classify_api_key_input(raw) else {
+        return Ok(String::new());
+    };
+    match kind {
+        ApiKeyInputKind::EnvRef => {
+            std::env::var(value).map_err(|_| ResolveError::MissingEnvVar(value.into()))
+        },
+        ApiKeyInputKind::ShellCommand => {
+            if !allow_shell_command {
+                return Err(ResolveError::ApiKeyCommandDisabled);
+            }
+            resolve_shell_command(value)
+        },
+        ApiKeyInputKind::EnvVarLike => match std::env::var(value) {
             Ok(val) => Ok(val),
             Err(_) => {
                 tracing::warn!(
-                    key = raw,
+                    key = value,
                     "Config value looks like an env var name but the variable is not set; using \
-                     the raw value as API key. Use 'env:{raw}' prefix for explicit env var \
+                     the raw value as API key. Use 'env:{value}' prefix for explicit env var \
                      reference."
                 );
-                Ok(raw.into())
+                Ok(value.into())
             },
-        }
-    } else {
-        // 其他情况：直接作为密钥
-        Ok(raw.into())
+        },
+        ApiKeyInputKind::PlainText => Ok(value.into()),
     }
 }
 
@@ -298,23 +277,87 @@ pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
 ///
 /// 注意：此函数不会执行 `!command`，只做静态判断和 env var presence 检测。
 pub fn profile_has_resolvable_api_key(profile: &Profile) -> bool {
-    match profile.api_key.as_deref().map(str::trim) {
-        Some("") => {},
-        Some(s) => {
-            if let Some(var) = s.strip_prefix("env:") {
-                return std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+    if let Some(raw) = profile.api_key.as_deref() {
+        if let Some((kind, value)) = classify_api_key_input(raw) {
+            match kind {
+                ApiKeyInputKind::EnvRef => {
+                    return std::env::var(value).is_ok_and(|v| !v.trim().is_empty());
+                },
+                ApiKeyInputKind::ShellCommand
+                | ApiKeyInputKind::EnvVarLike
+                | ApiKeyInputKind::PlainText => return true,
             }
-            if s.starts_with('!') {
-                return true;
-            }
-            return true;
-        },
-        None => {},
+        }
     }
 
     known_env_keys_for_profile(profile)
         .iter()
         .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+fn build_context_settings(runtime: &RuntimeSection) -> ContextSettings {
+    ContextSettings {
+        auto_compact_enabled: runtime
+            .compact_auto_enabled
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_AUTO_ENABLED),
+        predictive_compact_enabled: runtime
+            .predictive_compact_enabled
+            .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_ENABLED),
+        compact_threshold_percent: runtime
+            .compact_threshold_percent
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_THRESHOLD_PERCENT),
+        compact_max_retry_attempts: runtime
+            .compact_max_retry_attempts
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_RETRY_ATTEMPTS),
+        compact_max_output_tokens: runtime
+            .compact_max_output_tokens
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_MAX_OUTPUT_TOKENS),
+        compact_keep_recent_turns: runtime
+            .compact_keep_recent_turns
+            .or(super::defaults::DEFAULT_COMPACT_KEEP_RECENT_TURNS),
+        predictive_compact_baseline_growth_tokens: runtime
+            .predictive_compact_baseline_growth_tokens
+            .unwrap_or(super::defaults::DEFAULT_PREDICTIVE_COMPACT_BASELINE_GROWTH_TOKENS),
+        compact_circuit_breaker_threshold: runtime
+            .compact_circuit_breaker_threshold
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_THRESHOLD),
+        compact_circuit_breaker_cooldown_secs: runtime
+            .compact_circuit_breaker_cooldown_secs
+            .unwrap_or(super::defaults::DEFAULT_COMPACT_CIRCUIT_BREAKER_COOLDOWN_SECS),
+        post_compact_max_files: runtime
+            .post_compact_max_files
+            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_FILES),
+        post_compact_token_budget: runtime
+            .post_compact_token_budget
+            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_TOKEN_BUDGET),
+        post_compact_max_tokens_per_file: runtime
+            .post_compact_max_tokens_per_file
+            .unwrap_or(super::defaults::DEFAULT_POST_COMPACT_MAX_TOKENS_PER_FILE),
+    }
+}
+
+fn build_agent_settings(runtime: &RuntimeSection) -> AgentSettings {
+    AgentSettings {
+        max_depth: runtime
+            .agent_max_depth
+            .unwrap_or(super::defaults::DEFAULT_AGENT_MAX_DEPTH),
+        tool_max_parallel_calls: runtime
+            .agent_tool_max_parallel_calls
+            .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
+        shell_timeout_secs: runtime
+            .shell_timeout_secs
+            .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
+    }
+}
+
+fn build_extension_settings(
+    runtime: &RuntimeSection,
+    extensions: Option<&BTreeMap<String, ExtensionRawConfig>>,
+) -> ExtensionSettings {
+    ExtensionSettings {
+        extension_states: runtime.extension_states.clone().unwrap_or_default(),
+        extension_configs: extensions.cloned().unwrap_or_default(),
+    }
 }
 
 /// 将项目级覆盖配置合并到基础配置中。

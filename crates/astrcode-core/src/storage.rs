@@ -528,13 +528,12 @@ impl SessionReadModel {
                 .len()
                 .saturating_add(self.messages.len()),
         );
-        messages.extend(self.context_messages.iter().map(|m| m.message.clone()));
-        messages.extend(self.messages.iter().map(|m| m.message.clone()));
-        messages = messages
-            .into_iter()
-            .map(LlmMessage::provider_visible)
-            .filter(LlmMessage::has_provider_visible_content)
-            .collect();
+        for sequenced in self.context_messages.iter().chain(self.messages.iter()) {
+            let visible = sequenced.message.clone().provider_visible();
+            if visible.has_provider_visible_content() {
+                messages.push(visible);
+            }
+        }
         normalize_tool_call_messages(&mut messages);
         truncate_incomplete_tool_protocol(&mut messages);
         messages
@@ -636,24 +635,28 @@ pub enum StorageError {
 /// 此函数作为防御性归一化步骤，兼容旧 snapshot 中拆分的 assistant 消息。
 fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
     use crate::llm::{LlmContent, LlmRole};
-    let mut i = 0;
-    while i + 1 < messages.len() {
-        let next_has_tool_calls = messages[i + 1].role == LlmRole::Assistant
-            && messages[i + 1]
+
+    let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        let has_tool_calls = message.role == LlmRole::Assistant
+            && message
                 .content
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. }));
-        if messages[i].role != LlmRole::Assistant || !next_has_tool_calls {
-            i += 1;
-            continue;
+        if has_tool_calls {
+            if let Some(last) = merged.last_mut() {
+                if last.role == LlmRole::Assistant {
+                    last.content.extend(message.content);
+                    if last.reasoning_content.is_none() {
+                        last.reasoning_content = message.reasoning_content;
+                    }
+                    continue;
+                }
+            }
         }
-
-        let next = messages.remove(i + 1);
-        messages[i].content.extend(next.content);
-        if messages[i].reasoning_content.is_none() {
-            messages[i].reasoning_content = next.reasoning_content;
-        }
+        merged.push(message);
     }
+    *messages = merged;
 }
 
 /// 截断不完整的 tool 协议轮。

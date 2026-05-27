@@ -43,10 +43,12 @@ pub fn recent_read_paths(
     retained_messages: &[LlmMessage],
     settings: &ContextSettings,
 ) -> Vec<String> {
-    let retained_paths = read_paths(retained_messages);
+    let retained_index = scan_tool_messages(retained_messages);
+    let retained_paths = read_paths(&retained_index);
+    let source_index = scan_tool_messages(source_messages);
     let mut seen_paths = HashSet::new();
     let mut paths = Vec::new();
-    for path in read_paths_in_order(source_messages).into_iter().rev() {
+    for path in read_paths_in_order(&source_index).into_iter().rev() {
         if retained_paths.contains(&path) || !seen_paths.insert(path.clone()) {
             continue;
         }
@@ -57,6 +59,45 @@ pub fn recent_read_paths(
     }
     paths.reverse();
     paths
+}
+
+pub fn agent_status_note(
+    messages: &[LlmMessage],
+    max_entries: usize,
+    max_chars: usize,
+) -> Option<PostCompactNote> {
+    let index = scan_tool_messages(messages);
+    let mut entries = Vec::new();
+    for result in &index.results {
+        if !is_agent_tool(result.tool_name.as_deref()) {
+            continue;
+        }
+        let Some(call_id) = result.tool_call_id.as_deref() else {
+            continue;
+        };
+        let description = index
+            .calls
+            .get(call_id)
+            .and_then(|call| call.description.as_deref())
+            .unwrap_or("agent task");
+        let status = if result.is_error {
+            "failed"
+        } else {
+            "completed"
+        };
+        entries.push(format!(
+            "- {description}: {status}\n{}",
+            truncate_chars(&result.content, 1200)
+        ));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let start = entries.len().saturating_sub(max_entries);
+    Some(PostCompactNote {
+        title: "Agent Task Status".into(),
+        body: truncate_chars(&entries[start..].join("\n\n"), max_chars),
+    })
 }
 
 pub fn post_compact_context_message(
@@ -91,63 +132,123 @@ fn budget_files(files: Vec<PostCompactFile>, settings: &ContextSettings) -> Vec<
     kept
 }
 
-fn read_paths(messages: &[LlmMessage]) -> HashSet<String> {
-    read_call_paths(messages).into_values().collect()
+fn read_paths(index: &ToolMessageIndex) -> HashSet<String> {
+    index
+        .calls
+        .values()
+        .filter(|call| is_read_tool(&call.name))
+        .filter_map(|call| call.path.clone())
+        .collect()
 }
 
-fn read_paths_in_order(messages: &[LlmMessage]) -> Vec<String> {
-    let call_paths = read_call_paths(messages);
+fn read_paths_in_order(index: &ToolMessageIndex) -> Vec<String> {
     let mut paths = Vec::new();
-
-    for message in messages {
-        if message.role != LlmRole::Tool || !message.name.as_deref().is_some_and(is_read_tool) {
+    for result in &index.results {
+        if result.is_error || !result.tool_name.as_deref().is_some_and(is_read_tool) {
             continue;
         }
-        for content in &message.content {
-            let LlmContent::ToolResult {
-                tool_call_id,
-                content: _,
-                is_error,
-            } = content
-            else {
-                continue;
-            };
-            if *is_error {
-                continue;
-            }
-            if let Some(path) = call_paths.get(tool_call_id) {
-                paths.push(path.clone());
-            }
+        let Some(call_id) = result.tool_call_id.as_deref() else {
+            continue;
+        };
+        if let Some(path) = index.calls.get(call_id).and_then(|call| call.path.as_ref()) {
+            paths.push(path.clone());
         }
     }
-
     paths
 }
 
-fn read_call_paths(messages: &[LlmMessage]) -> HashMap<String, String> {
-    let mut paths = HashMap::new();
+#[derive(Debug, Default)]
+struct ToolMessageIndex {
+    calls: HashMap<String, ToolCallInfo>,
+    results: Vec<ToolResultEntry>,
+}
+
+#[derive(Debug)]
+struct ToolCallInfo {
+    name: String,
+    path: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Debug)]
+struct ToolResultEntry {
+    tool_name: Option<String>,
+    tool_call_id: Option<String>,
+    content: String,
+    is_error: bool,
+}
+
+fn scan_tool_messages(messages: &[LlmMessage]) -> ToolMessageIndex {
+    let mut index = ToolMessageIndex::default();
     for message in messages {
-        if message.role != LlmRole::Assistant {
-            continue;
-        }
-        for content in &message.content {
-            let LlmContent::ToolCall {
-                call_id,
-                name,
-                arguments,
-            } = content
-            else {
-                continue;
-            };
-            if !is_read_tool(name) {
-                continue;
-            }
-            if let Some(path) = arguments.get("path").and_then(|value| value.as_str()) {
-                paths.insert(call_id.clone(), path.to_string());
-            }
+        match message.role {
+            LlmRole::Assistant => {
+                for content in &message.content {
+                    let LlmContent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                    } = content
+                    else {
+                        continue;
+                    };
+                    let description = arguments
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| {
+                            arguments
+                                .get("subagent_type")
+                                .and_then(|value| value.as_str())
+                        })
+                        .map(str::to_string);
+                    index.calls.insert(
+                        call_id.clone(),
+                        ToolCallInfo {
+                            name: name.clone(),
+                            path: arguments
+                                .get("path")
+                                .and_then(|value| value.as_str())
+                                .map(str::to_string),
+                            description,
+                        },
+                    );
+                }
+            },
+            LlmRole::Tool => {
+                for content in &message.content {
+                    let LlmContent::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                    } = content
+                    else {
+                        continue;
+                    };
+                    index.results.push(ToolResultEntry {
+                        tool_name: message.name.clone(),
+                        tool_call_id: Some(tool_call_id.clone()),
+                        content: content.clone(),
+                        is_error: *is_error,
+                    });
+                }
+            },
+            _ => {},
         }
     }
-    paths
+    index
+}
+
+fn is_agent_tool(name: Option<&str>) -> bool {
+    name.is_some_and(|tool_name| tool_name.eq_ignore_ascii_case("agent"))
+}
+
+fn truncate_chars(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    let mut truncated = content.chars().take(max_chars).collect::<String>();
+    truncated.push_str("\n\n[... post-compact context truncated]");
+    truncated
 }
 
 fn is_read_tool(name: &str) -> bool {

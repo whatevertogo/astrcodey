@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::bootstrap::ServerRuntime;
+use crate::{bootstrap::ServerRuntime, handler::HandlerError};
 
 mod auth;
 mod projection;
@@ -44,4 +44,37 @@ pub(crate) fn error_response(
         }),
     )
         .into_response()
+}
+
+pub(crate) fn bad_request_response(code: &'static str, message: impl ToString) -> Response {
+    error_response(StatusCode::BAD_REQUEST, code, message)
+}
+
+pub(crate) fn not_found_response(code: &'static str, message: impl ToString) -> Response {
+    error_response(StatusCode::NOT_FOUND, code, message)
+}
+
+pub(crate) fn conflict_response(code: &'static str, message: impl ToString) -> Response {
+    error_response(StatusCode::CONFLICT, code, message)
+}
+
+pub(crate) fn internal_error_response(code: &'static str, message: impl ToString) -> Response {
+    error_response(StatusCode::INTERNAL_SERVER_ERROR, code, message)
+}
+
+pub(crate) fn handler_error_response(error: HandlerError, default_code: &'static str) -> Response {
+    match error {
+        HandlerError::TurnAlreadyRunning | HandlerError::CompactBlocked => {
+            conflict_response("turn_running", "A turn is already running")
+        },
+        HandlerError::UnknownCommand(cmd) => {
+            bad_request_response("unknown_command", format!("Unknown command: /{cmd}"))
+        },
+        HandlerError::NoActiveTurn => not_found_response("no_active_turn", "No active turn"),
+        HandlerError::SessionNotFound(_) | HandlerError::NoActiveSession => {
+            not_found_response("session_not_found", "Session not found")
+        },
+        HandlerError::InvalidRequest(message) => bad_request_response(default_code, message),
+        other => internal_error_response(default_code, other.to_string()),
+    }
 }
