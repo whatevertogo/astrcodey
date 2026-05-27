@@ -1,7 +1,7 @@
-//! 进程内传输层 —— 服务器在 tokio 任务中运行，无需子进程。
+//! 进程内传输层 — server runtime 与 TUI/exec 同进程通信。
 //!
-//! 通过 mpsc 通道发送命令，通过 EventFanout 通道接收事件，
-//! 实现客户端与服务器的进程内通信。
+//! 通过 mpsc 发送 [`ClientCommand`]，通过 EventFanout 接收 [`ClientNotification`]。
+//! 外部客户端（Desktop、脚本）应连接 HTTP/SSE，不使用此路径。
 
 use std::sync::Arc;
 

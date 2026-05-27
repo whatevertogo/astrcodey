@@ -5,7 +5,7 @@
 //!
 //! ## 下一 turn 输入队列（唯一）
 //!
-//! `pending_queues` 是进程内唯一的「等当前 turn 结束再处理」队列（HTTP / stdio / Actor
+//! `pending_queues` 是进程内唯一的「等当前 turn 结束再处理」队列（HTTP / 进程内 / Actor
 //! 均通过 [`notify_turn`](TurnScheduler::notify_turn) 入队）。`on_turn_completed` 按 FIFO
 //! 每次只弹出一条并启动新 turn，保证连发 prompt 仍对应多个独立 `UserMessage` 事件。
 
@@ -253,6 +253,14 @@ impl TurnScheduler {
         if removed.is_some() {
             tracing::info!(session_id = %session_id, "cleaned up pending message queue");
         }
+    }
+
+    /// 删除 session 前的统一 turn 收尾：abort 活跃 turn + 清空 pending 队列。
+    pub async fn teardown_session(&self, session_id: &SessionId) {
+        if let Err(error) = self.abort(session_id).await {
+            tracing::warn!(session_id = %session_id, error = %error, "abort failed before session teardown");
+        }
+        self.cleanup(session_id).await;
     }
 
     /// 统一发送 turn aborted 终态事件 + 清理 bg tasks + sync durable。

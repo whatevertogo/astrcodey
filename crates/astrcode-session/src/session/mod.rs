@@ -79,33 +79,6 @@ impl Session {
         })
     }
 
-    /// 用调用方指定的 sid 创建会话（参数展开版，兼容旧调用点）。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_with_id(
-        store: Arc<dyn EventStore>,
-        sid: SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent: Option<&SessionId>,
-        tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
-        source_extension: Option<&str>,
-        runtime: Arc<SessionRuntimeState>,
-        caps: Arc<SessionRuntimeServices>,
-    ) -> Result<Self, SessionError> {
-        Self::create_with_params(SessionCreateParams {
-            store,
-            sid,
-            working_dir: working_dir.to_string(),
-            model_id: model_id.to_string(),
-            parent: parent.cloned(),
-            tool_policy: tool_policy.cloned(),
-            source_extension: source_extension.map(str::to_string),
-            runtime,
-            caps,
-        })
-        .await
-    }
-
     /// 从磁盘恢复已有会话并附带运行时/能力/事件广播。
     pub async fn open(
         store: Arc<dyn EventStore>,
@@ -206,18 +179,15 @@ impl Session {
         registry
     }
 
-    pub async fn initialize_runtime(&self, working_dir: &str) -> Result<(), SessionError> {
-        self.refresh_tools(working_dir).await;
-        self.refresh_prompt(working_dir, None, None).await?;
-        Ok(())
-    }
-
-    pub async fn ensure_runtime_ready(&self) -> Result<(), SessionError> {
+    /// 确保工具表与 system prompt 已就绪。
+    ///
+    /// `force == true` 时无条件重建（新建 / fork 会话）；否则仅在缺失时补齐（resume）。
+    pub async fn ensure_runtime_ready(&self, force: bool) -> Result<(), SessionError> {
         let state = self.read_model().await?;
-        if self.runtime.tool_registry().list_definitions().is_empty() {
+        if force || self.runtime.tool_registry().list_definitions().is_empty() {
             self.refresh_tools(&state.working_dir).await;
         }
-        if state.system_prompt.is_none() {
+        if force || state.system_prompt.is_none() {
             self.refresh_prompt(&state.working_dir, None, None).await?;
         }
         Ok(())

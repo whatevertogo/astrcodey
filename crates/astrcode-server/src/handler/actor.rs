@@ -161,6 +161,14 @@ impl CommandHandle {
         }
     }
 
+    /// 删除指定会话。
+    pub async fn delete_session(&self, session_id: SessionId) -> Result<(), HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.post(CommandMessage::DeleteSession { session_id, reply })
+            .await?;
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
+    }
+
     /// 删除指定工作目录下的所有会话，返回删除数量。
     pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
         let (reply, rx) = oneshot::channel();
@@ -231,6 +239,11 @@ pub(in crate::handler) enum CommandMessage {
         source_id: SessionId,
         at_cursor: Option<String>,
         reply: oneshot::Sender<Result<SessionId, HandlerError>>,
+    },
+    /// 删除会话
+    DeleteSession {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<(), HandlerError>>,
     },
     /// 删除指定工作目录下的所有会话
     DeleteProject {
@@ -438,6 +451,9 @@ impl CommandHandler {
                 reply,
             } => {
                 let _ = reply.send(self.fork_session(source_id, at_cursor).await);
+            },
+            CommandMessage::DeleteSession { session_id, reply } => {
+                let _ = reply.send(self.delete_session_by_id(session_id).await);
             },
             CommandMessage::DeleteProject { working_dir, reply } => {
                 let _ = reply.send(self.delete_project(working_dir).await);

@@ -107,7 +107,7 @@ pub struct SessionListItem {
     pub title: Option<String>,
 }
 
-/// 会话控制态（JSON-RPC / TUI 线缆；字段与 HTTP [`crate::http::ConversationControlStateDto`]
+/// 会话控制态（进程内 TUI 线缆；字段与 HTTP [`crate::http::ConversationControlStateDto`]
 /// 一致）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

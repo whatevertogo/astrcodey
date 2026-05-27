@@ -19,8 +19,6 @@ pub enum TransportError {
     StreamDisconnected,
     #[error("Server error: {0}")]
     Server(String),
-    #[error("Unsupported protocol version: {0}")]
-    UnsupportedVersion(u32),
     #[error("Unexpected response")]
     UnexpectedResponse,
 }

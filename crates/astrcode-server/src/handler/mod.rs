@@ -1,18 +1,17 @@
 //! 命令处理器 — 使用 ServerRuntime 处理客户端命令。
 //!
-//! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
-//! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
+//! ## 传输边界
 //!
-//! 连发 prompt 的「下一 turn」排队统一由 [`TurnScheduler::notify_turn`]
-//! 处理；stdio [`ClientCommand::SubmitPrompt`] 与 HTTP 均经 [`accept_user_input_for_session`]。
+//! - **进程内**（TUI / exec）：[`ClientCommand`] → [`CommandHandle::handle`] → 本模块
+//! - **HTTP/SSE**（Desktop / 外部）：REST 路由 → [`CommandHandle`] 显式方法
 //!
-//! JSON-RPC 为 legacy transport（TUI/exec）；新能力优先加 HTTP（见 `docs/architecture.md`）。
+//! 连发 prompt 统一经 [`accept_user_input_for_session`] → [`TurnScheduler::notify_turn`] 排队。
 
 use std::sync::Arc;
 
 use astrcode_core::types::*;
 use astrcode_protocol::{
-    commands::{ClientCommand, UiResponseValue},
+    commands::UiResponseValue,
     events::ClientNotification,
 };
 use tokio::sync::mpsc;
@@ -133,14 +132,7 @@ impl CommandHandler {
         self.active_session_id = Some(new_sid.clone());
 
         // 初始化 runtime（工具表在新 session 上需要重建）
-        let working_dir = self
-            .runtime
-            .session_manager()
-            .read_model(&new_sid)
-            .await
-            .map(|m| m.working_dir)
-            .unwrap_or_else(|_| ".".into());
-        if let Err(e) = forked.session.initialize_runtime(&working_dir).await {
+        if let Err(e) = forked.session.ensure_runtime_ready(true).await {
             tracing::warn!(session_id = %new_sid, error = %e, "fork: runtime init failed");
         }
 
@@ -182,12 +174,7 @@ impl CommandHandler {
 
         let mut deleted_count = 0usize;
         for summary in &matching {
-            match self
-                .handle(ClientCommand::DeleteSession {
-                    session_id: summary.session_id.to_string(),
-                })
-                .await
-            {
+            match self.delete_session_by_id(summary.session_id.clone()).await {
                 Ok(()) => deleted_count += 1,
                 Err(error) => {
                     tracing::warn!(

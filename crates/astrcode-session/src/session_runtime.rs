@@ -87,7 +87,7 @@ impl ChildTurns {
 /// 但所有实例必须共享同一份 `SessionRuntimeState`（含 EventFanout）才能让所有订阅者
 /// 看到全部事件。SessionRuntimeRegistry / SessionManager 保证 per-sid 唯一。
 ///
-/// 注意：直接通过 `Session::create_with_id` 而绕过 `SessionRuntimeRegistry` 创建的 session
+/// 注意：直接通过 `Session::create_with_params` 而绕过 `SessionRuntimeRegistry` 创建的 session
 /// 会得到独立 runtime，订阅者不会跨实例可见——这是给 `spawn_child` 这类「我就是要新 runtime」
 /// 的场景用的。SessionManager 走 registry 路径。
 pub struct SessionRuntimeState {
@@ -228,6 +228,11 @@ impl SessionRuntimeState {
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
         self.event_out.send(event);
+    }
+
+    /// 将已持久化的事件 fan-out 给当前订阅者（不触发 session open / resume）。
+    pub fn fanout_persisted(&self, event: Event) {
+        self.fanout(event);
     }
 
     // ── 子 agent 管理 ──────────────────────────────────────────

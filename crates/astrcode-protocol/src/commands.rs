@@ -1,10 +1,7 @@
-//! 客户端到服务器的命令类型（JSON-RPC 请求）。
+//! 客户端到服务端的命令类型（**进程内**线缆）。
 //!
-//! 本模块定义前端（TUI/客户端）可发送给服务器的所有命令。
-//! 这些命令用于实现会话管理、提示提交、配置变更、UI 响应等功能。
-//!
-//! 所有命令均采用 JSON-RPC 风格的序列化格式（通过 serde 的 tag/content 属性实现），
-//! 字段命名遵循 snake_case 规范。
+//! TUI / exec 通过 [`InProcessTransport`](../../astrcode-cli/src/transport.rs) 发送；
+//! Desktop / 外部集成请使用 HTTP API（`astrcode_protocol::http`）。
 //!
 //! # 命令分类
 //!
@@ -20,8 +17,7 @@ use serde::{Deserialize, Serialize};
 
 /// 客户端可发送给服务器的命令枚举。
 ///
-/// 每个变体代表一种具体的客户端操作请求。命令通过 JSON-RPC 风格序列化，
-/// 其中 `method` 字段标识命令类型，`params` 字段包含命令参数。
+/// 每个变体代表一种具体的客户端操作请求。命令通过 `method`/`params` tag 序列化，
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum ClientCommand {

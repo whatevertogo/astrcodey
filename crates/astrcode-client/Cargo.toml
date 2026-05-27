@@ -3,7 +3,7 @@ name = "astrcode-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Client SDK for connecting to astrcode server"
+description = "Client SDK for in-process and HTTP integration with astrcode server"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }

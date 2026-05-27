@@ -134,7 +134,7 @@ impl SessionOperations for ServerSessionOperations {
             .open(target_sid.clone())
             .await
             .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
-        if let Err(e) = session.ensure_runtime_ready().await {
+        if let Err(e) = session.ensure_runtime_ready(false).await {
             return Err(SessionApiError::Internal(format!("runtime init: {e}")));
         }
 
@@ -285,12 +285,8 @@ impl SessionOperations for ServerSessionOperations {
 
         self.verify_access(&caller_sid, &target_sid).await?;
 
-        if let Err(e) = self.scheduler.abort(&target_sid).await {
-            tracing::warn!(%target_sid, error = %e, "abort failed before session delete");
-        }
-        self.scheduler.cleanup(&target_sid).await;
         self.session_manager
-            .delete(&target_sid)
+            .delete_with_turn_teardown(self.scheduler.as_ref(), &target_sid)
             .await
             .map_err(|e| SessionApiError::Internal(e.to_string()))?;
 
@@ -375,26 +371,17 @@ impl ServerSessionOperations {
         child_sid: &SessionId,
         summary: &str,
     ) {
-        if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
-            if let Err(e) = parent_session
-                .append_event(astrcode_core::event::Event::new(
-                    parent_sid.clone(),
-                    None,
-                    astrcode_session::payload::agent_session_completed_payload(
-                        child_sid.clone(),
-                        one_line_summary(summary),
-                    ),
-                ))
-                .await
-            {
-                tracing::warn!(
-                    parent_session_id = %parent_sid,
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "failed to append AgentSessionCompleted event"
-                );
-            }
-        }
+        Self::write_agent_terminal_event(
+            session_manager,
+            parent_sid,
+            child_sid,
+            astrcode_session::payload::agent_session_completed_payload(
+                child_sid.clone(),
+                one_line_summary(summary),
+            ),
+            "AgentSessionCompleted",
+        )
+        .await;
     }
 
     /// 向父 session 写入 AgentSessionFailed 事件。
@@ -404,25 +391,34 @@ impl ServerSessionOperations {
         child_sid: &SessionId,
         error: &str,
     ) {
-        if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
-            if let Err(e) = parent_session
-                .append_event(astrcode_core::event::Event::new(
-                    parent_sid.clone(),
-                    None,
-                    astrcode_session::payload::agent_session_failed_payload(
-                        child_sid.clone(),
-                        error.to_string(),
-                    ),
-                ))
-                .await
-            {
-                tracing::warn!(
-                    parent_session_id = %parent_sid,
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "failed to append AgentSessionFailed event"
-                );
-            }
+        Self::write_agent_terminal_event(
+            session_manager,
+            parent_sid,
+            child_sid,
+            astrcode_session::payload::agent_session_failed_payload(
+                child_sid.clone(),
+                error.to_string(),
+            ),
+            "AgentSessionFailed",
+        )
+        .await;
+    }
+
+    async fn write_agent_terminal_event(
+        session_manager: &Arc<SessionManager>,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+        payload: astrcode_core::event::EventPayload,
+        event_name: &'static str,
+    ) {
+        let event = astrcode_core::event::Event::new(parent_sid.clone(), None, payload);
+        if let Err(e) = session_manager.append_durable_event(parent_sid, event).await {
+            tracing::warn!(
+                parent_session_id = %parent_sid,
+                child_session_id = %child_sid,
+                error = %e,
+                "failed to append {event_name} event"
+            );
         }
     }
 
@@ -442,24 +438,24 @@ impl ServerSessionOperations {
             );
             return;
         }
-        if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
-            if let Err(e) = parent_session
-                .append_event(astrcode_core::event::Event::new(
-                    parent_sid.clone(),
-                    None,
-                    EventPayload::AgentSessionRecycled {
-                        child_session_id: child_sid.clone(),
-                    },
-                ))
-                .await
-            {
-                tracing::warn!(
-                    parent_session_id = %parent_sid,
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "failed to append AgentSessionRecycled event"
-                );
-            }
+        let event = astrcode_core::event::Event::new(
+            parent_sid.clone(),
+            None,
+            EventPayload::AgentSessionRecycled {
+                child_session_id: child_sid.clone(),
+            },
+        );
+        if let Err(e) = session_manager
+            .append_durable_event(parent_sid, event)
+            .await
+        {
+            tracing::warn!(
+                parent_session_id = %parent_sid,
+                child_session_id = %child_sid,
+                error = %e,
+                "failed to append AgentSessionRecycled event"
+            );
+        } else {
             scheduler.sync_durable_events(parent_sid).await;
         }
     }

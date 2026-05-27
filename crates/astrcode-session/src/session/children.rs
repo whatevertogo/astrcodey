@@ -6,7 +6,7 @@ use astrcode_core::{
     types::*,
 };
 
-use super::Session;
+use super::{Session, SessionCreateParams};
 use crate::session_runtime::SessionRuntimeState;
 
 impl Session {
@@ -38,17 +38,17 @@ impl Session {
             child_runtime.set_tool_registry(Arc::new(child_registry));
         }
         let child_sid = new_session_id();
-        let child = Session::create_with_id(
-            Arc::clone(&self.store),
-            child_sid.clone(),
-            working_dir,
-            model_id,
-            Some(&self.id),
-            tool_policy.as_ref(),
-            source_extension,
-            child_runtime,
-            Arc::clone(&self.caps),
-        )
+        let child = Session::create_with_params(SessionCreateParams {
+            store: Arc::clone(&self.store),
+            sid: child_sid.clone(),
+            working_dir: working_dir.to_string(),
+            model_id: model_id.to_string(),
+            parent: Some(self.id.clone()),
+            tool_policy: tool_policy.clone(),
+            source_extension: source_extension.map(str::to_string),
+            runtime: child_runtime,
+            caps: Arc::clone(&self.caps),
+        })
         .await?;
 
         self.append_event(Event::new(

@@ -271,19 +271,18 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 ```
           ┌──────────┐  ┌──────────────────────┐  ┌───────────┐
           │   TUI    │  │ Web / Tauri Frontend  │  │ ACP Client│
-          │ (ratatui)│  │ React 19 + TypeScript │  │  (stdio)  │
+          │ (ratatui)│  │ React 19 + TypeScript │  │   (IDE)   │
           └────┬─────┘  └────────┬─────────────┘  └─────┬─────┘
-               │                  │ SSE / JSON-RPC       │ ACP JSON-RPC
-               │    stdio         │                      │ over stdio
-               └────────┬────────┘──────────────────────┘
-                   ┌─────┴──────┐
-                   │astrcode-cli│  TUI / exec / server launcher
-                   └─────┬──────┘
-                         │
-                   ┌─────┴──────┐
-                   │astrcode-   │  Session management, JSON-RPC + HTTP handler
-                   │server      │  ACP adapter, transport, concurrency control
-                   └─────┬──────┘
+               │ in-process      │ HTTP / SSE             │ WS /api/acp/ws
+               │ ClientCommand   │ REST + SSE deltas      │ JSON-RPC
+               └────────┬────────┴────────────┬─────────────┘
+                        │                     │
+                   ┌────┴──────┐         ┌─────┴──────┐
+                   │astrcode-cli│         │astrcode-   │  HTTP/SSE + ACP WebSocket
+                   └─────┬──────┘         │server      │  共享 CommandHandle / EventFanout
+                         │                └─────┬──────┘
+                         └──────────┬───────────┘
+                                    │
                          │
                    ┌─────┴───────┐
                    │astrcode-    │  Agent loop core: turn runner, tool pipeline
@@ -354,14 +353,14 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
-| [`astrcode-server`](crates/astrcode-server) | 13.5k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
+| [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | In-process commands/events, HTTP/SSE wire DTOs |
+| [`astrcode-server`](crates/astrcode-server) | 13.5k | Session manager, HTTP/SSE API, ACP WebSocket, projection & SSE |
 
 ### Layer 4: Clients
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-client`](crates/astrcode-client) | 693 | Typed JSON-RPC client, transport abstraction, stream subscription |
+| [`astrcode-client`](crates/astrcode-client) | 693 | Typed in-process client, transport abstraction, stream subscription |
 | [`astrcode-cli`](crates/astrcode-cli) | 8.3k | CLI entry: TUI (ratatui), headless exec, server launcher |
 
 ### Eval
@@ -386,7 +385,7 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 | `frontend/` (React + TS) | ~8.1k | Web frontend — chat view, sidebar, session management, SSE streaming, status bar |
 | `src-tauri/` (Tauri v2) | 1.9k | Desktop app shell — sidecar management, single-instance coordination, native dialogs |
 
-The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and JSON-RPC for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
+The web frontend (`frontend/`) is a React 19 + TypeScript + Tailwind CSS v4 + Vite single-page application. It connects to the `astrcode-server` backend via SSE for real-time streaming and REST for commands. The frontend supports running standalone in the browser (`npm run dev`) or packaged as a Tauri desktop app (`npm run tauri:dev`).
 
 The Tauri desktop app (`src-tauri/`) wraps the web frontend in a native window and manages the `astrcode-server` as a sidecar process — automatically launching it on startup, discovering a free port, and bridging the connection. It also provides single-instance coordination (file-lock + TCP activation) and native file dialogs via `tauri-plugin-dialog`.
 
@@ -457,9 +456,11 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 
 ### ACP Adapter
 
-The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Protocol to astrcode's internal command/broadcast architecture:
+The ACP adapter (`astrcode-server::acp`) bridges the standard Agent Client Protocol to astrcode's internal command/broadcast architecture over **HTTP WebSocket** (`GET /api/acp/ws`, same auth as REST).
 
-- Stdio JSON-RPC server implementing Initialize / NewSession / Prompt / Cancel
+For IDEs that only spawn a subprocess with stdio, use the thin **`astrcode acp` bridge** (`astrcode-cli::acp_bridge`): it owns no server state and only forwards JSON-RPC frames between stdin/stdout and the local WebSocket endpoint (discovered via `~/.astrcode/run.json` by default).
+
+- JSON-RPC over WebSocket text frames (one message per frame)
 - Real-time event streaming via broadcast channel to ACP `SessionNotification`
 - Deterministic event flushing with completion oneshot for turn lifecycle
 - Designed for IDE extensions and editor integrations
@@ -490,8 +491,8 @@ Stable sections (Identity, System, Task Guidelines) come first to leverage promp
 |---|---|---|
 | **TUI** | `cargo run -- tui` | Interactive terminal UI with message history, tool display, slash commands, status bar |
 | **Exec** | `cargo run -- exec "prompt"` | Headless single-shot execution, supports `--jsonl`|
-| **Server** | `cargo run -- server [--addr 0.0.0.0:3847]` | HTTP/SSE server with JSON-RPC, session management, real-time event streaming |
-| **ACP** | `cargo run -- acp` | ACP stdio adapter for IDE/editor integration |
+| **Server** | `cargo run -- server [--addr 0.0.0.0:3847]` | HTTP/SSE server + ACP WebSocket (`/api/acp/ws`) |
+| **ACP bridge** | `cargo run -- acp` | Stdio JSON-RPC shim → local server WebSocket (IDE subprocess compat) |
 | **Eval** | `cargo run --features dev-mode -- eval` | Run evaluation benchmarks (requires `dev-mode` feature) |
 | **Web** | `cd frontend && npm run dev` | Browser-based chat interface connected to the server via SSE |
 | **Desktop** | `cd frontend && npm run tauri:dev` | Tauri desktop app (auto-launches server as sidecar) |
@@ -546,7 +547,7 @@ Pre-built binaries are available for Linux, macOS, and Windows (x86_64 + aarch64
 This project drew inspiration and design patterns from several open-source projects:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — tool execution pipeline, system prompt design, compact design
-- **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + JSON-RPC) references OpenCode's architecture.
+- **[OpenCode](https://github.com/anomalyco/opencode)** — the frontend-backend separation (HTTP/SSE + REST) references OpenCode's architecture.
 - **[Codex CLI](https://github.com/openai/codex)** — TUI layout and terminal UI design borrow from Codex's approach to rendering agent interactions in the terminal.
 
 ## License

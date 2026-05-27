@@ -234,10 +234,7 @@ pub(in crate::http) fn event_to_deltas(
     }
 }
 
-pub(crate) fn control_from_phase(
-    phase: Phase,
-    has_messages: bool,
-) -> ConversationControlStateDto {
+pub(crate) fn control_from_phase(phase: Phase, has_messages: bool) -> ConversationControlStateDto {
     let can_submit_prompt = matches!(phase, Phase::Idle | Phase::Error);
     ConversationControlStateDto {
         phase,

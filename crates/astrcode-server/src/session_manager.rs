@@ -11,9 +11,11 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session::{
-    Session, SessionError, SessionRuntimeServices, SessionRuntimeState,
+    Session, SessionCreateParams, SessionError, SessionRuntimeServices, SessionRuntimeState,
     session::emit_lifecycle_for_read_model,
 };
+
+use crate::turn_scheduler::TurnScheduler;
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 
@@ -177,18 +179,17 @@ impl SessionManager {
         // 先在 registry 里登记 runtime，再创建 Session 让两者共享同一份。
         let sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&sid);
-        // SessionManager 调用 Session::create_with_id 而非 create_full：因为 sid 已生成。
-        let session = Session::create_with_id(
-            Arc::clone(&self.event_store),
-            sid.clone(),
-            working_dir,
-            &model_id,
-            None,
-            None,
-            None,
+        let session = Session::create_with_params(SessionCreateParams {
+            store: Arc::clone(&self.event_store),
+            sid: sid.clone(),
+            working_dir: working_dir.to_string(),
+            model_id,
+            parent: None,
+            tool_policy: None,
+            source_extension: None,
             runtime,
-            Arc::clone(&self.capabilities),
-        )
+            caps: Arc::clone(&self.capabilities),
+        })
         .await?;
 
         if let Some(bus) = self.event_bus.get() {
@@ -249,6 +250,16 @@ impl SessionManager {
         result
     }
 
+    /// 停止活跃 turn、清空待处理队列后删除 durable session。
+    pub(crate) async fn delete_with_turn_teardown(
+        &self,
+        scheduler: &TurnScheduler,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        scheduler.teardown_session(session_id).await;
+        self.delete(session_id).await
+    }
+
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
         emit_lifecycle_for_read_model(
@@ -263,6 +274,19 @@ impl SessionManager {
         // 清理本 session 关联的持久化终端。
         // 已通过 SessionResourceCleanup trait 注入，见 TerminalCleanup。
         Ok(())
+    }
+
+    /// 追加 durable 事件；若进程内 runtime 仍存在则 fan-out，不触发 `open` / `SessionResume`。
+    pub(crate) async fn append_durable_event(
+        &self,
+        session_id: &SessionId,
+        event: Event,
+    ) -> Result<Event, SessionManagerError> {
+        let stored = self.event_store.append_event(event).await?;
+        if let Some(runtime) = self.runtime_states.lock().get(session_id) {
+            runtime.fanout_persisted(stored.clone());
+        }
+        Ok(stored)
     }
 
     /// 释放 session 占用的进程内资源。
@@ -422,17 +446,17 @@ impl SessionManager {
         let model_id = self.config.read_effective().llm.model_id.clone();
         let new_sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&new_sid);
-        let session = Session::create_with_id(
-            Arc::clone(&self.event_store),
-            new_sid.clone(),
-            &source_model.working_dir,
-            &model_id,
-            None,
-            None,
-            None,
+        let session = Session::create_with_params(SessionCreateParams {
+            store: Arc::clone(&self.event_store),
+            sid: new_sid.clone(),
+            working_dir: source_model.working_dir.clone(),
+            model_id,
+            parent: None,
+            tool_policy: None,
+            source_extension: None,
             runtime,
-            Arc::clone(&self.capabilities),
-        )
+            caps: Arc::clone(&self.capabilities),
+        })
         .await?;
 
         if let Some(bus) = self.event_bus.get() {

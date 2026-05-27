@@ -77,17 +77,7 @@ impl CommandHandler {
             },
 
             ClientCommand::DeleteSession { session_id } => {
-                let session_id = SessionId::from(session_id);
-                let _ = self.scheduler.abort(&session_id).await;
-                self.scheduler.cleanup(&session_id).await;
-                match self.runtime.session_manager().delete(&session_id).await {
-                    Ok(()) => {
-                        if self.active_session_id.as_ref() == Some(&session_id) {
-                            self.active_session_id = None;
-                        }
-                    },
-                    Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
-                }
+                self.delete_session_by_id(session_id.into()).await?;
             },
 
             ClientCommand::ListExtensionCommands => {

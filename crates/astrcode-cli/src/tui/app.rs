@@ -276,14 +276,14 @@ impl App {
             control.phase,
             Phase::Thinking | Phase::Streaming | Phase::CallingTool | Phase::Compacting
         );
-        if control.can_submit_prompt && !self.is_streaming {
-            if self.status_text.starts_with("Working")
+        if control.can_submit_prompt
+            && !self.is_streaming
+            && (self.status_text.starts_with("Working")
                 || self.status_text.starts_with("Thinking")
                 || self.status_text.starts_with("Agent running")
-                || self.status_text.starts_with("Stopping")
-            {
-                self.status_text = "Ready".into();
-            }
+                || self.status_text.starts_with("Stopping"))
+        {
+            self.status_text = "Ready".into();
         }
     }
 

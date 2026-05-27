@@ -45,7 +45,7 @@ impl CommandHandler {
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
         self.broadcast_event(created.start_event);
 
-        match created.session.initialize_runtime(&working_dir).await {
+        match created.session.ensure_runtime_ready(true).await {
             Ok(()) => {
                 tracing::info!(session_id = %sid, "session fully initialized");
                 Ok(sid)
@@ -94,7 +94,7 @@ impl CommandHandler {
                 };
                 let snapshot = session_snapshot(&state);
 
-                if let Err(e) = session.ensure_runtime_ready().await {
+                if let Err(e) = session.ensure_runtime_ready(false).await {
                     self.send_error(-32603, &e.to_string());
                     return;
                 }
@@ -118,5 +118,28 @@ impl CommandHandler {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".into());
         self.create_session(wd).await
+    }
+
+    pub(in crate::handler) async fn delete_session_by_id(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<(), HandlerError> {
+        match self
+            .runtime
+            .session_manager()
+            .delete_with_turn_teardown(self.scheduler.as_ref(), &session_id)
+            .await
+        {
+            Ok(()) => {
+                if self.active_session_id.as_ref() == Some(&session_id) {
+                    self.active_session_id = None;
+                }
+                Ok(())
+            },
+            Err(e) => {
+                self.send_error(40401, &format!("Session not found: {e}"));
+                Err(HandlerError::SessionManager(e))
+            },
+        }
     }
 }

@@ -1,7 +1,6 @@
-//! 类型化的 RPC 客户端，用于与 astrcode 服务端通信。
+//! 类型化的 astrcode 客户端，用于与 server 通信。
 //!
-//! 封装了 JSON-RPC 命令的发送与响应解析，提供会话管理、提示词提交、
-//! 事件流订阅等高层 API。
+//! 封装进程内命令发送与事件流订阅；外部集成请直接使用 HTTP API。
 
 use std::sync::Arc;
 
@@ -15,9 +14,9 @@ use crate::{
     transport::{ClientTransport, TransportError},
 };
 
-/// 类型化的 astrcode JSON-RPC 客户端。
+/// 类型化的 astrcode 客户端。
 ///
-/// 通过泛型传输层 `T` 与服务端通信，支持 stdio 等多种传输方式。
+/// 通过泛型传输层 `T` 与服务端通信（TUI/exec 使用 [`InProcessTransport`](../../astrcode-cli/src/transport.rs)）。
 pub struct AstrcodeClient<T: ClientTransport> {
     /// 底层传输层实例，使用 `Arc` 共享所有权以支持事件订阅。
     transport: Arc<T>,
@@ -26,7 +25,7 @@ pub struct AstrcodeClient<T: ClientTransport> {
 impl<T: ClientTransport> AstrcodeClient<T> {
     /// 创建新的客户端实例。
     ///
-    /// - `transport`: 底层传输层实现（如 `StdioClientTransport`）。
+    /// - `transport`: 进程内传输层（如 `InProcessTransport`）。
     pub fn new(transport: T) -> Self {
         Self {
             transport: Arc::new(transport),

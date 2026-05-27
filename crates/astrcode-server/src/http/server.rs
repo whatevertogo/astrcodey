@@ -15,7 +15,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use super::{
     HttpState,
     auth::{auth_middleware, collect_allowed_origins, configured_auth_token},
-    routes::{config, extensions, lifecycle, models, sessions},
+    routes::{acp, config, extensions, lifecycle, models, sessions},
     stream,
 };
 use crate::bootstrap::ServerRuntime;
@@ -42,6 +42,7 @@ pub fn router(
         runtime,
         handler: server_system.handler,
         event_bus: server_system.event_bus,
+        event_tx: Arc::clone(&event_tx),
     };
     let expected_bearer = format!("Bearer {auth_token}");
 
@@ -96,6 +97,7 @@ pub fn router(
         )
         .route("/api/models/small/test", post(models::test_small_model))
         .route("/api/shutdown", post(lifecycle::shutdown))
+        .route("/api/acp/ws", get(acp::acp_websocket))
         .layer(middleware::from_fn_with_state(
             expected_bearer,
             auth_middleware,

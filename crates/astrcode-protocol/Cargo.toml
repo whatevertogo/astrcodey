@@ -3,7 +3,7 @@ name = "astrcode-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wire protocol: JSON-RPC 2.0 types, commands, events, UI sub-protocol"
+description = "Wire protocol: in-process commands/events, HTTP/SSE DTOs"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }

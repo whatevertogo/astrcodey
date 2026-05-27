@@ -80,12 +80,12 @@ session-A (root)
 |---|---|---|
 | Durable | `EventStore` / session `phase` | 持久化、可重放、进程重启后仍成立 |
 | 进程 | `TurnRegistry` | 当前是否有活跃 turn 任务（优化索引，需 `repair_stale` 对齐） |
-| 传输 | `CommandHandler.active_session_id` | stdio/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
+| 传输 | `CommandHandler.active_session_id` | 进程内/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
 
 ### 下一 turn 输入队列（唯一）
 
 所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::notify_turn` → `pending_queues`。
-`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP / stdio `SubmitPrompt` 行为一致。
+`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP / 进程内 `SubmitPrompt` 行为一致。
 
 TUI 在 turn 运行中连发 Enter → 同样排队（`SubmitPrompt` → `accept_user_input` → `notify_turn`）。
 用户 **ESC 中止** 且 composer 仍有内容时 → `SubmitPromptStep`（`submit_or_inject` / notify_step 语义）在 abort 完成后注入。
@@ -101,9 +101,10 @@ bootstrap_with → TurnScheduler + TurnRegistry
 
 ### 命令路径
 
-- **写**：`ClientCommand` / HTTP POST → `CommandHandle` → `CommandHandler`（Actor 串行）
-- **Turn**：`start_turn` / `notify_turn` → `TurnScheduler::submit`
-- **读（HTTP）**：`ServerRuntime::session_manager()` / `event_store()` → projection DTO
+- **写（进程内）**：`ClientCommand` → `CommandHandle::handle` → `CommandHandler`（Actor 串行）
+- **写（HTTP）**：REST → `CommandHandle` 显式方法（`create_session`、`submit_input_for_session` 等）
+- **Turn**：`accept_user_input` / `notify_turn` → `TurnScheduler::submit`
+- **读（HTTP）**：`session_manager().read_model()` → projection DTO → SSE deltas
 
 ---
 
@@ -238,22 +239,27 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ## 7. 前后端分离
 
-借鉴 OpenCode 的架构：
+借鉴 OpenCode 的架构，**两条传输路径**：
 
-- **后端**：`astrcode-server` 提供 HTTP/SSE API（Axum），JSON-RPC 2.0 协议
-- **前端**：可以是 TUI（`astrcode-cli`）、Web 浏览器、Desktop GUI（Tauri + React）或 ACP 客户端
-- HTTP 模块已拆分为 `http/` 子模块：`routes/`（REST 路由）、`projection/`（事件投影）、`stream.rs`（SSE）、`auth.rs`（认证）
-- 路由：sessions CRUD、prompt 提交、compact、abort、fork、SSE 事件流
-- SSE 流携带 `cursor`（event seq），客户端断连后可从 cursor 恢复
-- broadcast channel 溢出时发送 `RehydrateRequired` delta，通知客户端重新拉取 snapshot
+| 路径 | 使用者 | 机制 |
+|------|--------|------|
+| **进程内** | TUI、`exec` | `InProcessTransport` → `ClientCommand` → `CommandHandle` |
+| **HTTP/SSE + ACP** | Desktop、Web、IDE、外部脚本 | Axum REST + conversation SSE + `/api/acp/ws` |
 
-### 传输层
+- **后端**：`astrcode-http-server` 二进制（crate `astrcode-server`）仅启动 HTTP/SSE；`astrcode server` 子命令等价
+- **前端**：TUI 不经 HTTP；Desktop/Web 走 `/api/*`
+- HTTP 模块：`routes/`（REST + ACP WebSocket）、`projection/`（事件投影）、`stream.rs`（SSE）
+- SSE 携带 `cursor`（event seq），断连后可从 cursor 恢复
+- broadcast 溢出时发送 `RehydrateRequired` delta
 
-- `astrcode-client`：typed JSON-RPC client + stream subscription（**legacy transport**，TUI / exec）
-- `astrcode-protocol`：wire types（commands / events / framing / HTTP DTO）独立 crate
-- **新能力优先加 HTTP**；JSON-RPC 仅保留 TUI 必需命令
-- Web/Desktop 读路径：`ConversationSnapshot` / SSE `ConversationDelta`；控制态字段与 JSON-RPC `SessionControlStateDto` 对齐
-- 支持 stdio transport（`astrcode-server --stdio`）用于嵌入式场景
+### 传输层（已移除 stdio JSON-RPC 服务端）
+
+- ~~stdio JSON-RPC 外部服务端~~ 已删除；不再维护 `StdioTransport` / `StdioClientTransport`
+- `astrcode-client`：`ClientTransport` trait + 进程内实现（在 `astrcode-cli`）
+- `astrcode-protocol`：`ClientCommand` / `ClientNotification` 仍用于**进程内**线缆
+- HTTP 线缆类型在 `protocol::http`（`ConversationDelta`、`PromptRequest` 等）
+- **ACP** 经 HTTP WebSocket（`/api/acp/ws`）暴露，与 REST 共用 `CommandHandle` / `EventFanout`
+- **`astrcode acp`** 仅为 stdio↔WebSocket 转发桥（读 `~/.astrcode/run.json`），不 bootstrap server
 
 ### Desktop GUI (Tauri)
 

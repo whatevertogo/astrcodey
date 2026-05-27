@@ -31,6 +31,7 @@ pub(crate) struct HttpState {
     pub(crate) runtime: Arc<ServerRuntime>,
     pub(crate) handler: crate::handler::CommandHandle,
     pub(crate) event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+    pub(crate) event_tx: Arc<astrcode_support::event_fanout::EventFanout<astrcode_protocol::events::ClientNotification>>,
 }
 
 pub(crate) fn error_response(

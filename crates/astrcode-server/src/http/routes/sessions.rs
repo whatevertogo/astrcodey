@@ -4,15 +4,11 @@ use astrcode_core::{
     storage::{SessionReadModel, SessionSummary},
     types::SessionId,
 };
-use astrcode_protocol::{
-    commands::ClientCommand,
-    http::{
-        AgentSessionLinkDto, CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
-        ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
-        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
-        SlashCommandListResponseDto,
-    },
+use astrcode_protocol::http::{
+    AgentSessionLinkDto, CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
+    ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
+    CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
+    PromptSubmitResponse, SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto,
 };
 use axum::{
     Json,
@@ -126,13 +122,8 @@ pub(in crate::http) async fn submit_prompt(
             message,
         })
         .into_response(),
-        // 活跃 turn 时 Actor 路径会返回 Handled(queued)；此处为防御性分支。
         // TODO(web-client): 在 `frontend/src/store/conversation.ts` 用 `handled` + control 态
-        // 更新 queuedMessages，勿再依赖 TurnAlreadyRunning 409。
-        Err(HandlerError::TurnAlreadyRunning) => {
-            tracing::warn!(session_id = %session_id, "prompt rejected: turn already running");
-            handler_error_response(HandlerError::TurnAlreadyRunning, "prompt_failed")
-        },
+        // 更新 queuedMessages。
         Err(HandlerError::UnknownCommand(cmd)) => {
             tracing::warn!(session_id = %session_id, command = %cmd, "prompt rejected: unknown slash command");
             handler_error_response(HandlerError::UnknownCommand(cmd), "prompt_failed")
@@ -230,11 +221,8 @@ pub(in crate::http) async fn delete_session(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
 ) -> Response {
-    match state
-        .handler
-        .handle(ClientCommand::DeleteSession { session_id })
-        .await
-    {
+    let session_id = SessionId::from(session_id);
+    match state.handler.delete_session(session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => not_found_response("delete_failed", error),
     }

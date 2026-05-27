@@ -23,9 +23,11 @@ astrcode-eval = { path = "../astrcode-eval", optional = true }
 astrcode-log = { path = "../astrcode-log" }
 base64 = { workspace = true }
 astrcode-context = { path = "../astrcode-context" }
-tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "io-std", "io-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 async-trait = { workspace = true }
 clap = { workspace = true }
 ratatui = { workspace = true }
@@ -42,4 +44,5 @@ parking_lot = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+astrcode-server = { path = "../astrcode-server", features = ["testing"] }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }

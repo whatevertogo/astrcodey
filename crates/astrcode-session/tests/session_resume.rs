@@ -11,7 +11,9 @@ use astrcode_core::{
     types::new_session_id,
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_session::{Session, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_session::{
+    Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState,
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
@@ -100,17 +102,17 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         "mock-model".into(),
     ));
     runtime_a.set_extra_system_prompt(Some("child agent body".into()));
-    let session_a = Session::create_with_id(
-        Arc::clone(&store),
-        sid.clone(),
-        ".",
-        "mock-model",
-        None,
-        None,
-        None,
-        Arc::clone(&runtime_a),
-        Arc::clone(&caps),
-    )
+    let session_a = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        sid: sid.clone(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent: None,
+        tool_policy: None,
+        source_extension: None,
+        runtime: Arc::clone(&runtime_a),
+        caps: Arc::clone(&caps),
+    })
     .await
     .unwrap();
     session_a.refresh_tools(".").await;

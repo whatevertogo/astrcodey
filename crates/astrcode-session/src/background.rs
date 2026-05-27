@@ -529,17 +529,17 @@ mod tests {
             "mock".into(),
         ));
         let session = Arc::new(
-            crate::session::Session::create_with_id(
-                Arc::clone(&store),
-                session_id.clone(),
-                ".",
-                "mock",
-                None,
-                None,
-                None,
+            crate::session::Session::create_with_params(crate::session::SessionCreateParams {
+                store: Arc::clone(&store),
+                sid: session_id.clone(),
+                working_dir: ".".into(),
+                model_id: "mock".into(),
+                parent: None,
+                tool_policy: None,
+                source_extension: None,
                 runtime,
-                test_caps(),
-            )
+                caps: test_caps(),
+            })
             .await
             .unwrap(),
         );

@@ -2,8 +2,7 @@
 
 use astrcode_core::event::{Event, EventPayload};
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfo, SessionListItem,
-    SessionSnapshot, UiRequestKind,
+    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
 };
 use astrcode_support::text::truncate_first_line;
 

@@ -1,15 +1,17 @@
-//! ACP (Agent Client Protocol) server adapter.
+//! ACP (Agent Client Protocol) adapter — 经 HTTP WebSocket 暴露。
 //!
-//! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's internal
-//! CommandHandle / broadcast event architecture. This module is purely a
-//! DTO-mapping boundary — no session-runtime types leak through.
+//! 映射 ACP JSON-RPC 到内部 `CommandHandle` / 事件广播；不泄漏 session-runtime 类型。
 
 mod events;
+mod ws;
+
+pub(crate) use ws::serve_acp_websocket;
 
 use std::{collections::HashSet, sync::Arc};
 
 use agent_client_protocol::{
-    Agent, ByteStreams, Client, ConnectionTo, Dispatch, Error, Responder,
+    ConnectTo, ConnectionTo, Dispatch, Error, Responder,
+    role::acp::{Agent, Client},
     schema::{
         AgentCapabilities, AgentNotification, CancelNotification, InitializeRequest,
         InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
@@ -20,31 +22,34 @@ use astrcode_core::{event::Event, types::SessionId, user_prompt::UserPromptParts
 use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::{
-    bootstrap::ServerRuntime,
-    handler::{CommandHandle, HandlerError, TurnCompletion},
-};
+use crate::handler::{CommandHandle, HandlerError, TurnCompletion};
 
-/// Run the ACP server, reading from stdin and writing to stdout.
-///
-/// This function blocks until the connection is closed or an unrecoverable
-/// error occurs.
-pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
-    let command_handle = server_system.handler;
+/// 与 HTTP server 共享的 ACP 依赖。
+#[derive(Clone)]
+pub struct AcpServices {
+    pub command_handle: CommandHandle,
+    pub event_tx: Arc<EventFanout<ClientNotification>>,
+}
 
-    let result = Agent
-        .builder()
+/// 在任意 ACP 客户端传输上运行 Agent 端（WebSocket [`Channel`] 等）。
+pub async fn run_agent(
+    services: AcpServices,
+    client: impl ConnectTo<Agent> + 'static,
+) -> agent_client_protocol::Result<()> {
+    let AcpServices {
+        command_handle,
+        event_tx,
+    } = services;
+
+    Agent.builder()
         .name("astrcode")
         .on_receive_request(
             {
                 async move |req: InitializeRequest,
                             responder: Responder<InitializeResponse>,
                             _cx: ConnectionTo<Client>| {
-                    let _ = req; // accept whatever version the client sends
+                    let _ = req;
                     responder.respond(
                         InitializeResponse::new(ProtocolVersion::V1)
                             .agent_capabilities(AgentCapabilities::new())
@@ -70,7 +75,7 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
                             let acp_sid = AcpSessionId::new(session_id.to_string());
                             responder.respond(NewSessionResponse::new(acp_sid))
                         },
-                        Err(e) => responder.respond_with_internal_error(e.to_string()),
+                        Err(error) => responder.respond_with_internal_error(error.to_string()),
                     }
                 }
             },
@@ -113,13 +118,8 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
-        .connect_to(ByteStreams::new(
-            tokio::io::stdout().compat_write(),
-            tokio::io::stdin().compat(),
-        ))
-        .await;
-    runtime.shutdown_extensions().await;
-    result
+        .connect_to(client)
+        .await
 }
 
 async fn handle_prompt(
@@ -183,8 +183,6 @@ async fn handle_prompt(
     }
 }
 
-/// Deterministic flush of queued events after completion signal.
-/// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
     event_rx: &mut mpsc::Receiver<ClientNotification>,
     accepted_sessions: &mut HashSet<SessionId>,
@@ -251,9 +249,9 @@ fn prompt_to_text(blocks: &[agent_client_protocol::schema::ContentBlock]) -> Res
 
     for block in blocks {
         match block {
-            agent_client_protocol::schema::ContentBlock::Text(tc) => {
-                if !tc.text.is_empty() {
-                    parts.push(tc.text.clone());
+            agent_client_protocol::schema::ContentBlock::Text(text) => {
+                if !text.text.is_empty() {
+                    parts.push(text.text.clone());
                 }
             },
             agent_client_protocol::schema::ContentBlock::ResourceLink(link) => {
@@ -393,7 +391,6 @@ mod tests {
         let mut accepted = HashSet::new();
         accepted.insert(parent_session.clone());
 
-        // Parent session event passes
         let parent_event = Event::new(
             parent_session.clone(),
             Some(turn_id.clone()),
@@ -404,7 +401,6 @@ mod tests {
         );
         assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
 
-        // Child session event is rejected before boundary
         let child_event = Event::new(
             child_session.clone(),
             Some(turn_id.clone()),
@@ -415,7 +411,6 @@ mod tests {
         );
         assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
 
-        // After learning compact boundary, child events pass
         accepted.insert(child_session.clone());
         assert!(event_belongs_to_prompt(&child_event, &accepted, &turn_id));
     }
@@ -429,7 +424,6 @@ mod tests {
         let mut accepted = HashSet::new();
         accepted.insert(session_id);
 
-        // Event from unrelated session with None turn_id should be rejected
         let event = Event::new(unrelated_session, None, EventPayload::TurnStarted);
         assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
     }

@@ -4,8 +4,10 @@
 //! - `tui`：交互式终端（默认行为）
 //! - `exec`：无头单次执行
 //! - `server`：HTTP/SSE 后端服务器
+//! - `acp`：stdio JSON-RPC 桥（转发到本地 server `/api/acp/ws`）
 //! - `version`：版本信息
 
+mod acp_bridge;
 mod exec;
 mod transport;
 mod tui;
@@ -38,14 +40,21 @@ enum Commands {
         #[arg(long, default_value = "300")]
         timeout: u64,
     },
-    /// 启动 HTTP/SSE 后端服务器
+    /// 启动 HTTP/SSE 后端服务器（含 ACP WebSocket `/api/acp/ws`）
     Server {
         /// 监听地址
         #[arg(long, default_value = "127.0.0.1:3847")]
         addr: SocketAddr,
     },
-    /// 启动 ACP (Agent Client Protocol) stdio 服务器
-    Acp,
+    /// Stdio JSON-RPC 桥：转发到本地 server 的 `/api/acp/ws`（无 server 业务逻辑）
+    Acp {
+        /// WebSocket 目标（如 `http://127.0.0.1:3847`）；默认读 `~/.astrcode/run.json`
+        #[arg(long)]
+        server_addr: Option<String>,
+        /// Bearer token；默认读 `~/.astrcode/run.json`
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
     /// 执行自动化评测（仅 dev-mode feature 启用时可用）
     #[cfg(feature = "dev-mode")]
     Eval {
@@ -124,17 +133,21 @@ async fn main() {
                 std::process::exit(1);
             }
         },
-        Some(Commands::Acp) => {
-            let runtime = match astrcode_server::bootstrap::bootstrap().await {
-                Ok(rt) => Arc::new(rt),
-                Err(e) => {
-                    tracing::error!("Bootstrap failed: {e}");
+        Some(Commands::Acp {
+            server_addr,
+            auth_token,
+        }) => {
+            match acp_bridge::resolve_config(server_addr, auth_token) {
+                Ok(config) => {
+                    if let Err(error) = acp_bridge::run(config).await {
+                        tracing::error!("ACP bridge failed: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    tracing::error!("ACP bridge config: {error}");
                     std::process::exit(1);
                 },
-            };
-            if let Err(e) = astrcode_server::acp::run_acp_server(runtime).await {
-                tracing::error!("ACP server failed: {e}");
-                std::process::exit(1);
             }
         },
         Some(Commands::Version) => {

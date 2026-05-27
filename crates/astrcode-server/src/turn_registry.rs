@@ -203,17 +203,17 @@ mod tests {
             "mock".into(),
         ));
         Arc::new(
-            Session::create_with_id(
+            Session::create_with_params(astrcode_session::SessionCreateParams {
                 store,
-                SessionId::from(sid),
-                ".",
-                "mock",
-                None,
-                None,
-                None,
+                sid: SessionId::from(sid),
+                working_dir: ".".into(),
+                model_id: "mock".into(),
+                parent: None,
+                tool_policy: None,
+                source_extension: None,
                 runtime,
-                test_caps(),
-            )
+                caps: test_caps(),
+            })
             .await
             .unwrap(),
         )
