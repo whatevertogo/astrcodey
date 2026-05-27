@@ -3,7 +3,7 @@
 //! 定义服务器向连接的客户端推送的所有通知，
 //! 包括运行时事件、会话列表、UI 交互请求和错误信息。
 
-use astrcode_core::event::Event;
+use astrcode_core::event::{Event, Phase};
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
@@ -70,6 +70,12 @@ pub enum ClientNotification {
 
     /// 扩展注册表发生变化，客户端应清空并重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
+
+    /// 会话控制态更新（与 HTTP `ConversationControlState` 对齐，供 TUI 消费）。
+    SessionControlUpdated {
+        session_id: String,
+        control: SessionControlStateDto,
+    },
 }
 
 /// UI 交互请求的类型。
@@ -101,6 +107,36 @@ pub struct SessionListItem {
     pub title: Option<String>,
 }
 
+/// 会话控制态（JSON-RPC / TUI 线缆；字段与 HTTP [`crate::http::ConversationControlStateDto`]
+/// 一致）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionControlStateDto {
+    pub phase: Phase,
+    pub can_submit_prompt: bool,
+    pub can_request_compact: bool,
+    pub compact_pending: bool,
+    pub compacting: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_mode_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_turn_id: Option<String>,
+}
+
+impl SessionControlStateDto {
+    pub fn from_http(control: &crate::http::ConversationControlStateDto) -> Self {
+        Self {
+            phase: control.phase,
+            can_submit_prompt: control.can_submit_prompt,
+            can_request_compact: control.can_request_compact,
+            compact_pending: control.compact_pending,
+            compacting: control.compacting,
+            current_mode_id: control.current_mode_id.clone(),
+            active_turn_id: control.active_turn_id.clone(),
+        }
+    }
+}
+
 /// 会话快照，用于客户端重连或状态恢复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -112,6 +148,9 @@ pub struct SessionSnapshot {
     pub working_dir: String,
     #[serde(default)]
     pub agent_sessions: Vec<AgentSessionLinkDto>,
+    /// 由读模型投影的控制态；TUI 应据此更新 `is_streaming` 等，而非本地推断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<SessionControlStateDto>,
 }
 
 /// 快照中的单条消息。

@@ -4,7 +4,9 @@
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 //!
 //! 连发 prompt 的「下一 turn」排队统一由 [`TurnScheduler::notify_turn`]
-//! 处理，本模块不再维护独立队列。
+//! 处理；stdio [`ClientCommand::SubmitPrompt`] 与 HTTP 均经 [`accept_user_input_for_session`]。
+//!
+//! JSON-RPC 为 legacy transport（TUI/exec）；新能力优先加 HTTP（见 `docs/architecture.md`）。
 
 use std::sync::Arc;
 

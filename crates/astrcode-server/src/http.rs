@@ -16,6 +16,8 @@ use crate::{bootstrap::ServerRuntime, handler::HandlerError};
 
 mod auth;
 mod projection;
+
+pub(crate) use projection::live::control_from_phase;
 mod routes;
 mod server;
 mod stream;

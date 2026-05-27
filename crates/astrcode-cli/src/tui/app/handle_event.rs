@@ -2,7 +2,8 @@
 
 use astrcode_core::event::{Event, EventPayload};
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
+    ClientNotification, ExtensionCommandInfo, SessionListItem,
+    SessionSnapshot, UiRequestKind,
 };
 use astrcode_support::text::truncate_first_line;
 
@@ -72,6 +73,9 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             app.status_items.clear();
             app.needs_extension_refresh = true;
             app.status_text = "Extension registry changed".into();
+        },
+        ClientNotification::SessionControlUpdated { control, .. } => {
+            app.apply_session_control(control);
         },
     }
 }
@@ -612,6 +616,9 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
         };
 
         app.push_message(role, label.into(), message.content.clone(), false, None);
+    }
+    if let Some(control) = &snapshot.control {
+        app.apply_session_control(control);
     }
     app.status_text = format!("Resumed {}", short_id(session_id));
     tracing::debug!(session_id = %session_id, messages = snapshot.messages.len(), "resume_snapshot");

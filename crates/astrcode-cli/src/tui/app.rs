@@ -6,8 +6,8 @@ pub mod handle_event;
 
 use std::collections::BTreeMap;
 
-use astrcode_core::render::RenderSpec;
-use astrcode_protocol::events::ClientNotification;
+use astrcode_core::{event::Phase, render::RenderSpec};
+use astrcode_protocol::events::{ClientNotification, SessionControlStateDto};
 
 use crate::tui::{
     command::slash::{self, SlashCommandSpec},
@@ -31,6 +31,8 @@ pub struct App {
     pub error: Option<String>,
     pub is_streaming: bool,
     pub is_compacting: bool,
+    /// ESC 中止 turn 后待 [`ClientCommand::SubmitPromptStep`] 投递的 composer 内容。
+    pub steer_after_abort: Option<(String, Vec<astrcode_protocol::commands::Attachment>)>,
     pub should_quit: bool,
     /// Ctrl+C 二次确认：首次按下后等待第二次确认退出。
     pub quit_pending: bool,
@@ -112,6 +114,7 @@ impl App {
             error: None,
             is_streaming: false,
             is_compacting: false,
+            steer_after_abort: None,
             should_quit: false,
             quit_pending: false,
             extension_commands: Vec::new(),
@@ -264,6 +267,30 @@ impl App {
 
     pub fn push_user(&mut self, text: &str) {
         self.push_message(MessageRole::User, "You".into(), text.into(), false, None);
+    }
+
+    /// 从服务端 [`SessionControlStateDto`] 同步执行阶段（与 Web conversation control 一致）。
+    pub fn apply_session_control(&mut self, control: &SessionControlStateDto) {
+        self.is_compacting = control.compacting;
+        self.is_streaming = matches!(
+            control.phase,
+            Phase::Thinking | Phase::Streaming | Phase::CallingTool | Phase::Compacting
+        );
+        if control.can_submit_prompt && !self.is_streaming {
+            if self.status_text.starts_with("Working")
+                || self.status_text.starts_with("Thinking")
+                || self.status_text.starts_with("Agent running")
+                || self.status_text.starts_with("Stopping")
+            {
+                self.status_text = "Ready".into();
+            }
+        }
+    }
+
+    pub fn take_steer_after_abort(
+        &mut self,
+    ) -> Option<(String, Vec<astrcode_protocol::commands::Attachment>)> {
+        self.steer_after_abort.take()
     }
 
     pub fn find_message_mut(&mut self, key: &str) -> Option<&mut Message> {

@@ -20,6 +20,10 @@ impl CommandHandler {
                 self.submit_prompt(text, attachments).await?;
             },
 
+            ClientCommand::SubmitPromptStep { text, attachments } => {
+                self.submit_prompt_step(text, attachments).await?;
+            },
+
             ClientCommand::InjectMessage { text } => {
                 self.inject_mid_turn_message(text).await?;
             },

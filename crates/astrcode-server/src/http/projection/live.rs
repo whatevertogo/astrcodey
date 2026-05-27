@@ -8,6 +8,7 @@ use astrcode_protocol::{
         ConversationCursorDto, ConversationDeltaDto,
     },
 };
+use astrcode_storage::projection::phase_for_control_update;
 
 use super::{args::format_args_inline, blocks::completed_block_from_payload};
 
@@ -123,7 +124,10 @@ pub(in crate::http) fn event_to_deltas(
         | EventPayload::CompactionStarted
         | EventPayload::BackgroundTaskCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
-                control: control_from_phase(projected_phase(&event.payload), has_messages),
+                control: control_from_phase(
+                    phase_for_control_update(&event.payload).unwrap_or(Phase::Thinking),
+                    has_messages,
+                ),
             }]
         },
         EventPayload::ToolCallBackgrounded {
@@ -131,7 +135,10 @@ pub(in crate::http) fn event_to_deltas(
         } => {
             vec![
                 ConversationDeltaDto::UpdateControlState {
-                    control: control_from_phase(projected_phase(&event.payload), has_messages),
+                    control: control_from_phase(
+                        phase_for_control_update(&event.payload).unwrap_or(Phase::CallingTool),
+                        has_messages,
+                    ),
                 },
                 ConversationDeltaDto::ToolCallBackgrounded {
                     call_id: call_id.to_string(),
@@ -227,27 +234,7 @@ pub(in crate::http) fn event_to_deltas(
     }
 }
 
-fn projected_phase(payload: &EventPayload) -> Phase {
-    match payload {
-        EventPayload::TurnStarted
-        | EventPayload::UserMessage { .. }
-        | EventPayload::AgentRunStarted => Phase::Thinking,
-        EventPayload::AssistantMessageStarted { .. }
-        | EventPayload::AssistantTextDelta { .. }
-        | EventPayload::ThinkingDelta { .. } => Phase::Streaming,
-        EventPayload::ToolCallStarted { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. }
-        | EventPayload::ToolCallRequested { .. }
-        | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::ToolCallCompleted { .. }
-        | EventPayload::ToolCallBackgrounded { .. } => Phase::CallingTool,
-        EventPayload::CompactionStarted => Phase::Compacting,
-        EventPayload::ErrorOccurred { .. } => Phase::Error,
-        _ => Phase::Idle,
-    }
-}
-
-pub(in crate::http) fn control_from_phase(
+pub(crate) fn control_from_phase(
     phase: Phase,
     has_messages: bool,
 ) -> ConversationControlStateDto {

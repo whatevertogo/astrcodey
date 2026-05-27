@@ -85,7 +85,10 @@ session-A (root)
 ### 下一 turn 输入队列（唯一）
 
 所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::notify_turn` → `pending_queues`。
-`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
+`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP / stdio `SubmitPrompt` 行为一致。
+
+TUI 在 turn 运行中连发 Enter → 同样排队（`SubmitPrompt` → `accept_user_input` → `notify_turn`）。
+用户 **ESC 中止** 且 composer 仍有内容时 → `SubmitPromptStep`（`submit_or_inject` / notify_step 语义）在 abort 完成后注入。
 
 ### 启动顺序
 
@@ -246,8 +249,10 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 传输层
 
-- `astrcode-client`：typed JSON-RPC client + stream subscription
+- `astrcode-client`：typed JSON-RPC client + stream subscription（**legacy transport**，TUI / exec）
 - `astrcode-protocol`：wire types（commands / events / framing / HTTP DTO）独立 crate
+- **新能力优先加 HTTP**；JSON-RPC 仅保留 TUI 必需命令
+- Web/Desktop 读路径：`ConversationSnapshot` / SSE `ConversationDelta`；控制态字段与 JSON-RPC `SessionControlStateDto` 对齐
 - 支持 stdio transport（`astrcode-server --stdio`）用于嵌入式场景
 
 ### Desktop GUI (Tauri)

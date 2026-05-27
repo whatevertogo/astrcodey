@@ -149,6 +149,16 @@ impl TurnScheduler {
         Ok((turn_id, handle))
     }
 
+    /// 用户 ESC 引导输入：有活跃 turn 则 inject，否则 submit（与 [`notify_step`] 同类语义）。
+    pub async fn submit_prompt_step(
+        &self,
+        session_id: SessionId,
+        input: UserPromptParts,
+    ) -> Result<SubmitOutcome, TurnScheduleError> {
+        self.process_child_completions(&session_id).await;
+        self.submit_or_inject(session_id, input).await
+    }
+
     /// 智能路由：有活跃 turn 则 inject，否则 submit。
     pub async fn submit_or_inject(
         &self,

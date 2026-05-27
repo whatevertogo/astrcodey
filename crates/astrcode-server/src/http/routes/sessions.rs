@@ -126,6 +126,9 @@ pub(in crate::http) async fn submit_prompt(
             message,
         })
         .into_response(),
+        // 活跃 turn 时 Actor 路径会返回 Handled(queued)；此处为防御性分支。
+        // TODO(web-client): 在 `frontend/src/store/conversation.ts` 用 `handled` + control 态
+        // 更新 queuedMessages，勿再依赖 TurnAlreadyRunning 409。
         Err(HandlerError::TurnAlreadyRunning) => {
             tracing::warn!(session_id = %session_id, "prompt rejected: turn already running");
             handler_error_response(HandlerError::TurnAlreadyRunning, "prompt_failed")

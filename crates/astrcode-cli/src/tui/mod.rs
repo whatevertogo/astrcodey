@@ -28,7 +28,11 @@ pub(crate) mod tool_vocab;
 use std::{io, sync::Arc};
 
 use astrcode_client::client::AstrcodeClient;
-use astrcode_protocol::commands::{ClientCommand, UiResponseValue};
+use astrcode_core::event::EventPayload;
+use astrcode_protocol::{
+    commands::{ClientCommand, UiResponseValue},
+    events::ClientNotification,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio_stream::StreamExt;
 
@@ -100,8 +104,27 @@ pub async fn run() -> io::Result<()> {
             },
             // Server notifications
             notification = server_stream.recv() => {
-                app.apply(&notification.map_err(io_error)?);
+                let notification = notification.map_err(io_error)?;
+                if let Some(steer) = take_steer_after_abort_notification(&notification, &mut app) {
+                    client
+                        .send_command(&ClientCommand::SubmitPromptStep {
+                            text: steer.0,
+                            attachments: steer.1,
+                        })
+                        .await
+                        .map_err(io_error)?;
+                }
+                app.apply(&notification);
                 for pending in server_stream.drain_pending() {
+                    if let Some(steer) = take_steer_after_abort_notification(&pending, &mut app) {
+                        client
+                            .send_command(&ClientCommand::SubmitPromptStep {
+                                text: steer.0,
+                                attachments: steer.1,
+                            })
+                            .await
+                            .map_err(io_error)?;
+                    }
                     app.apply(&pending);
                 }
                 // Commit streaming lines
@@ -232,6 +255,9 @@ async fn handle_key(
     match key.code {
         KeyCode::Esc => {
             if app.is_streaming {
+                if app.composer.has_submittable() {
+                    app.steer_after_abort = Some(app.composer.take_submit());
+                }
                 client
                     .send_command(&ClientCommand::Abort)
                     .await
@@ -378,6 +404,28 @@ fn complete_slash_selection(app: &mut App) {
     app.set_input(slash::command_line_for(&spec));
 }
 
+fn take_steer_after_abort_notification(
+    notification: &ClientNotification,
+    app: &mut App,
+) -> Option<(String, Vec<astrcode_protocol::commands::Attachment>)> {
+    let ClientNotification::Event(event) = notification else {
+        return None;
+    };
+    let aborted = matches!(
+        &event.payload,
+        EventPayload::TurnCompleted { finish_reason }
+            if finish_reason == "aborted"
+    ) || matches!(
+        &event.payload,
+        EventPayload::AgentRunCompleted { reason } if reason == "aborted"
+    );
+    if aborted {
+        app.take_steer_after_abort()
+    } else {
+        None
+    }
+}
+
 async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result<()> {
     let (input, attachments) = app.composer.take_submit();
     if input.trim().is_empty() && attachments.is_empty() {
@@ -411,9 +459,12 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
     if app.is_streaming {
         app.remember_input(&input);
         app.push_user(&display_text);
-        app.status_text = "Message queued".into();
+        app.status_text = "Queued for next turn".into();
         client
-            .send_command(&ClientCommand::InjectMessage { text: input })
+            .send_command(&ClientCommand::SubmitPrompt {
+                text: input,
+                attachments,
+            })
             .await
             .map_err(io_error)?;
         return Ok(());

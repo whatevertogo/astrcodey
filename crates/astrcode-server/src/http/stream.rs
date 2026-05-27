@@ -534,25 +534,11 @@ fn resolve_initial_child_id(
 }
 
 fn map_child_phase(payload: &EventPayload) -> Option<ChildPhaseProjection> {
-    let (phase, current_tool) = match payload {
-        EventPayload::TurnStarted | EventPayload::AgentRunStarted => (Phase::Thinking, None),
-        EventPayload::AssistantMessageStarted { .. } | EventPayload::AssistantTextDelta { .. } => {
-            (Phase::Streaming, None)
-        },
-        EventPayload::ToolCallStarted { tool_name, .. }
-        | EventPayload::ToolCallRequested { tool_name, .. } => {
-            (Phase::CallingTool, Some(tool_name.clone()))
-        },
-        EventPayload::ToolCallCompleted { .. } => (Phase::Thinking, None),
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
-            (Phase::Idle, None)
-        },
-        EventPayload::ErrorOccurred { .. } => (Phase::Error, None),
-        _ => return None,
-    };
-    Some(ChildPhaseProjection {
-        phase,
-        current_tool,
+    astrcode_storage::projection::child_agent_phase_update(payload).map(|update| {
+        ChildPhaseProjection {
+            phase: update.phase,
+            current_tool: update.current_tool,
+        }
     })
 }
 

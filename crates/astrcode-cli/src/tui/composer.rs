@@ -194,6 +194,10 @@ impl ComposerState {
         true
     }
 
+    pub fn has_submittable(&self) -> bool {
+        !self.text.trim().is_empty() || !self.pending_images.is_empty()
+    }
+
     pub fn take_submit(&mut self) -> (String, Vec<Attachment>) {
         let text = self.take_submit_text();
         let attachments = self

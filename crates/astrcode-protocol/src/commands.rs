@@ -76,14 +76,20 @@ pub enum ClientCommand {
         attachments: Vec<Attachment>,
     },
 
-    /// 向正在执行的 turn 注入中途消息。
-    ///
-    /// 仅在 session 有 active turn 时有效。消息通过 `emit_durable` 持久化后
-    /// 由 TurnRunner 在下一个 step boundary 消费并注入 LLM 上下文。
+    /// 向正在执行的 turn 注入中途消息（legacy，优先用 [`ClientCommand::SubmitPromptStep`]）。
     ///
     /// # 参数
     /// - `text`: 要注入的消息文本
     InjectMessage { text: String },
+
+    /// TUI：用户 ESC 中止当前 turn 后，在下一 agent step 注入本条输入（`submit_or_inject`）。
+    ///
+    /// 常规连发请用 [`ClientCommand::SubmitPrompt`]（默认 `notify_turn` 排队）。
+    SubmitPromptStep {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
 
     /// 请求生成当前对话的摘要。
     ///

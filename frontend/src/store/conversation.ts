@@ -558,6 +558,9 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     }
   },
 
+  // TODO(web-client): 连发 prompt 时服务端返回 `handled` + `queued for next turn`；
+  // 应依赖 SSE `updateControlState` / snapshot.control，勿本地猜 phase。
+  // ESC 中止后 step 注入仅 TUI `SubmitPromptStep`；Web 待产品定义后再接。
   submitPrompt: async (text: string, attachments: PromptAttachment[] = []) => {
     const { activeSessionId } = get()
     if (!activeSessionId) {

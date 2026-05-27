@@ -1,7 +1,11 @@
 //! 会话快照 — 内部模型转传输层 DTO。
 
 use astrcode_core::llm::LlmMessage;
-use astrcode_protocol::events::{AgentSessionLinkDto, MessageDto, SessionSnapshot};
+use astrcode_protocol::events::{
+    AgentSessionLinkDto, MessageDto, SessionControlStateDto, SessionSnapshot,
+};
+
+use crate::http::control_from_phase;
 
 /// 构建会话快照 DTO，用于客户端同步。
 pub(crate) fn session_snapshot(
@@ -22,6 +26,10 @@ pub(crate) fn session_snapshot(
             .iter()
             .map(AgentSessionLinkDto::from_view)
             .collect(),
+        control: Some(SessionControlStateDto::from_http(&control_from_phase(
+            state.phase,
+            !state.messages.is_empty(),
+        ))),
     }
 }
 

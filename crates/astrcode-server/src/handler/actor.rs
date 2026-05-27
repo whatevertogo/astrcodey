@@ -242,7 +242,7 @@ pub(in crate::handler) enum CommandMessage {
 }
 
 impl CommandHandler {
-    async fn queue_input_for_next_turn(
+    pub(in crate::handler) async fn queue_input_for_next_turn(
         &self,
         session_id: SessionId,
         input: UserPromptParts,
@@ -390,11 +390,7 @@ impl CommandHandler {
                 input,
                 reply,
             } => {
-                let result = if self.scheduler.registry().has_active(&session_id) {
-                    self.queue_input_for_next_turn(session_id, input).await
-                } else {
-                    self.submit_input_for_session(session_id, input).await
-                };
+                let result = self.accept_user_input_for_session(session_id, input).await;
                 let _ = reply.send(result);
             },
             CommandMessage::CompactSession {

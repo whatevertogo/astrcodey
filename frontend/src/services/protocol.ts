@@ -1,3 +1,6 @@
+// TODO(web-client): 解码层与 `astrcode-protocol::http` 对齐；连发 prompt 用 SSE
+// `updateControlState` + `handled.queued for next turn`，勿依赖 409 TurnAlreadyRunning。
+
 import type {
   AgentSessionLink,
   AgentSessionStatus,

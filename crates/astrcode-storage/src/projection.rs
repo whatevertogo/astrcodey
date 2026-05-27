@@ -2,6 +2,9 @@
 //!
 //! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
 
+#[path = "projection/phase.rs"]
+mod phase;
+
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole},
@@ -12,6 +15,7 @@ use astrcode_core::{
     types::SessionId,
     user_prompt::UserPromptParts,
 };
+pub use phase::{ChildAgentPhaseUpdate, child_agent_phase_update, phase_for_control_update};
 
 /// 从事件序列重建会话读模型。
 pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
