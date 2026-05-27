@@ -104,11 +104,11 @@ const AGENT_TOOL_DESCRIPTION: &str =
     "Delegate a multi-step task to a specialized subagent. See [Agents] for available \
      types.\nWhen NOT to use:\n- Reading 1-3 known files → `read`\n- Searching for a symbol → \
      `grep`/`find`\n- Anything achievable in 2-6 direct tool calls → do it yourself\nAgent \
-     selection:\n- `explore` — search across files, trace dependencies, understand architecture\n- \
-     `execute` — make precise code changes, run targeted validation\n- `reviewer` — review \
-     changes for bugs, security, quality\nOne or multiple agents — match the task scope:\n- \
-     Single agent: focused task in one area\n- Multiple agents in parallel: broad task spanning \
-     independent areas (make all independent calls in the same tool block)\nSet \
+     selection:\n- `explore` — search across files, trace dependencies, understand \
+     architecture\n- `execute` — make precise code changes, run targeted validation\n- `reviewer` \
+     — review changes for bugs, security, quality\nOne or multiple agents — match the task \
+     scope:\n- Single agent: focused task in one area\n- Multiple agents in parallel: broad task \
+     spanning independent areas (make all independent calls in the same tool block)\nSet \
      `waitForResult=false` to background an agent and continue working.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
@@ -377,11 +377,11 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Writing a good `prompt`:\n- Brief a smart colleague who just \
-             walked in: give context up front.\n- State whether the agent should write code, \
-             explore, or only research.\n- Include relevant file paths, line numbers, and \
-             specific patterns.\n- If depending on a previous agent's output, summarize that \
-             output rather than expecting the subagent to read the whole conversation.",
+            "Writing a good `prompt`:\n- Brief a smart colleague who just walked in: give context \
+             up front.\n- State whether the agent should write code, explore, or only \
+             research.\n- Include relevant file paths, line numbers, and specific patterns.\n- If \
+             depending on a previous agent's output, summarize that output rather than expecting \
+             the subagent to read the whole conversation.",
         )
         .caveat(
             "Don't duplicate work the subagent is doing — if you delegate, stop running the same \

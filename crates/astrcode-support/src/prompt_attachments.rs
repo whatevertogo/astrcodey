@@ -1,10 +1,19 @@
-//! 将 protocol 层 `Attachment` 规范化为 [`UserPromptParts`]。
+//! 将附件输入规范化为 [`UserPromptParts`]。
+//!
+//! 边界层（server / CLI）负责将 protocol wire 类型映射为本模块的 [`PromptAttachment`]。
 
 use astrcode_core::user_prompt::{UserImagePart, UserPromptParts};
-use astrcode_protocol::commands::Attachment;
 use thiserror::Error;
 
 use crate::image_processing::{self, ImageProcessingError};
+
+/// 附件输入（与 protocol wire 解耦，由边界层映射）。
+#[derive(Debug, Clone)]
+pub struct PromptAttachment {
+    pub filename: String,
+    pub content: String,
+    pub media_type: String,
+}
 
 #[derive(Debug, Error)]
 pub enum PromptAttachmentError {
@@ -22,10 +31,10 @@ pub enum PromptAttachmentError {
     },
 }
 
-/// 从文本与 protocol attachments 构建可提交的 [`UserPromptParts`]。
+/// 从文本与附件构建可提交的 [`UserPromptParts`]。
 pub fn build_user_prompt(
     text: String,
-    attachments: &[Attachment],
+    attachments: &[PromptAttachment],
 ) -> Result<UserPromptParts, PromptAttachmentError> {
     let images = images_from_attachments(attachments)?;
     let input = UserPromptParts { text, images };
@@ -36,7 +45,7 @@ pub fn build_user_prompt(
 }
 
 fn images_from_attachments(
-    attachments: &[Attachment],
+    attachments: &[PromptAttachment],
 ) -> Result<Vec<UserImagePart>, PromptAttachmentError> {
     let mut images = Vec::new();
     for attachment in attachments {
@@ -71,7 +80,7 @@ mod tests {
     fn rejects_non_image_attachment() {
         let err = build_user_prompt(
             "hello".into(),
-            &[Attachment {
+            &[PromptAttachment {
                 filename: "notes.txt".into(),
                 content: "plain".into(),
                 media_type: "text/plain".into(),

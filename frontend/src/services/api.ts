@@ -126,7 +126,11 @@ export async function submitPrompt(
   text: string,
   attachments: PromptAttachment[] = []
 ): Promise<PromptSubmitResponse> {
-  console.log('[api] submitPrompt →', { sessionId, text, attachmentCount: attachments.length })
+  console.log('[api] submitPrompt →', {
+    sessionId,
+    text,
+    attachmentCount: attachments.length,
+  })
   try {
     const result = decodePromptSubmitResponse(
       await request(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {

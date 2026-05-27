@@ -103,9 +103,9 @@ const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";
 const TOOL_SECTION_EXTERNAL_MCP: &str = "External MCP Tools";
 const TOOL_SECTION_EXTENSION: &str = "Extension Tools";
 
-const TOOL_AGENT_COLLABORATION_GUIDANCE: &str =
-    "- Use `agent` for multi-step tasks that need a specialized subagent. For simple, directed \
-     searches, use `find`/`grep` directly.";
+const TOOL_AGENT_COLLABORATION_GUIDANCE: &str = "- Use `agent` for multi-step tasks that need a \
+                                                 specialized subagent. For simple, directed \
+                                                 searches, use `find`/`grep` directly.";
 
 const TOOL_EXTENSION_GUIDANCE: &str = "- Extension tools are already present in the \
                                        provider-visible tool list. Call them directly with their \

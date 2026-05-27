@@ -239,7 +239,11 @@ export default function InputBar() {
 
   const submit = useCallback(async () => {
     const trimmed = value.trim()
-    if ((!trimmed && pendingImages.length === 0) || !activeSessionId || !canSubmit) {
+    if (
+      (!trimmed && pendingImages.length === 0) ||
+      !activeSessionId ||
+      !canSubmit
+    ) {
       return
     }
     closeSlashTrigger()
@@ -374,7 +378,10 @@ export default function InputBar() {
                     if (!items) return
                     const files: File[] = []
                     for (const item of items) {
-                      if (item.kind === 'file' && item.type.startsWith('image/')) {
+                      if (
+                        item.kind === 'file' &&
+                        item.type.startsWith('image/')
+                      ) {
                         const file = item.getAsFile()
                         if (file) files.push(file)
                       }

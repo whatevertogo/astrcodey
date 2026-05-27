@@ -526,7 +526,6 @@ name = "astrcode-support"
 version = "0.2.4"
 dependencies = [
  "astrcode-core",
- "astrcode-protocol",
  "base64 0.22.1",
  "dirs",
  "image",

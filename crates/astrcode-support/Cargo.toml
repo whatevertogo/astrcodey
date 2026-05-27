@@ -16,4 +16,3 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 image = { workspace = true }
-astrcode-protocol = { path = "../astrcode-protocol" }

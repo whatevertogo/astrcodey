@@ -144,6 +144,14 @@ pub(crate) fn user_prompt_from_wire(
     text: String,
     attachments: Vec<Attachment>,
 ) -> Result<UserPromptParts, HandlerError> {
+    let attachments: Vec<prompt_attachments::PromptAttachment> = attachments
+        .into_iter()
+        .map(|attachment| prompt_attachments::PromptAttachment {
+            filename: attachment.filename,
+            content: attachment.content,
+            media_type: attachment.media_type,
+        })
+        .collect();
     prompt_attachments::build_user_prompt(text, &attachments).map_err(|error| match error {
         PromptAttachmentError::Empty => {
             HandlerError::InvalidRequest("prompt must include text or at least one image".into())

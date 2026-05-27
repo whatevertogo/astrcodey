@@ -22,7 +22,7 @@ astrcode-ai = { path = "../astrcode-ai" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-context = { path = "../astrcode-context" }
-astrcode-session = { path = "../astrcode-session", features = ["test-fixtures"] }
+astrcode-session = { path = "../astrcode-session" }
 astrcode-extensions = { path = "../astrcode-extensions" }
 astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
 astrcode-log = { path = "../astrcode-log" }
@@ -49,6 +49,7 @@ required-features = ["testing"]
 [dev-dependencies]
 http-body-util = { workspace = true }
 tower = { workspace = true }
+astrcode-session = { path = "../astrcode-session", features = ["test-fixtures"] }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", default-features = false }
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。

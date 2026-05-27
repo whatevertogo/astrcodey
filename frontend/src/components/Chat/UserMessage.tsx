@@ -16,7 +16,9 @@ function UserMessage({ block }: UserMessageProps) {
           'max-w-[80%] rounded-2xl rounded-br-md bg-user-bubble px-4 py-3 text-[15px] leading-[1.7] text-text-primary prose-chat'
         )}
       >
-        {block.text.trim() ? <div className="whitespace-pre-wrap">{block.text}</div> : null}
+        {block.text.trim() ? (
+          <div className="whitespace-pre-wrap">{block.text}</div>
+        ) : null}
         {images.length > 0 ? (
           <div
             className={cn(
@@ -25,7 +27,9 @@ function UserMessage({ block }: UserMessageProps) {
             )}
           >
             {images.map((image) => (
-              <figure key={`${block.id}:${image.filename}:${image.dataUrl.slice(0, 32)}`}>
+              <figure
+                key={`${block.id}:${image.filename}:${image.dataUrl.slice(0, 32)}`}
+              >
                 <img
                   src={image.dataUrl}
                   alt={image.filename}

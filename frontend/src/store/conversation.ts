@@ -45,7 +45,10 @@ interface ConversationState {
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
   refreshConversationSnapshot: () => Promise<void>
-  submitPrompt: (text: string, attachments?: PromptAttachment[]) => Promise<boolean>
+  submitPrompt: (
+    text: string,
+    attachments?: PromptAttachment[]
+  ) => Promise<boolean>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: ConversationDelta) => void
 }
@@ -573,7 +576,11 @@ export const useAppStore = create<ConversationState>((set, get) => ({
     }
 
     try {
-      const response = await api.submitPrompt(activeSessionId, text, attachments)
+      const response = await api.submitPrompt(
+        activeSessionId,
+        text,
+        attachments
+      )
       if (response.kind === 'handled') {
         if (get().activeSessionId !== response.sessionId) {
           return true
