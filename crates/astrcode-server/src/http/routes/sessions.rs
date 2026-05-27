@@ -7,11 +7,11 @@ use astrcode_core::{
 use astrcode_protocol::{
     commands::ClientCommand,
     http::{
-        CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
+        AgentSessionLinkDto, CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
         ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto,
-        HttpAgentSessionLinkDto, PromptRequest, PromptSubmitResponse, SessionListItemDto,
-        SessionListResponseDto, SlashCommandListResponseDto,
+        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
+        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
+        SlashCommandListResponseDto,
     },
 };
 use axum::{
@@ -328,18 +328,7 @@ fn conversation_to_dto(
         agent_sessions: session
             .agent_sessions
             .iter()
-            .map(|link| HttpAgentSessionLinkDto {
-                child_session_id: link.child_session_id.to_string(),
-                tool_call_id: link.tool_call_id.as_ref().map(ToString::to_string),
-                agent_name: Some(link.agent_name.clone()),
-                task: Some(link.task.clone()),
-                status: Some(link.status.into()),
-                final_session_id: link.final_session_id.as_ref().map(ToString::to_string),
-                summary: link.summary.clone(),
-                error: link.error.clone(),
-                phase: link.phase,
-                current_tool: link.current_tool.clone(),
-            })
+            .map(AgentSessionLinkDto::from_view)
             .collect(),
     }
 }

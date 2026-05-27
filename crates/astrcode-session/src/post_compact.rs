@@ -263,7 +263,10 @@ mod tests {
     };
 
     use astrcode_context::token_budget::estimate_text_tokens;
-    use astrcode_core::tool::ToolOrigin;
+    use astrcode_core::{
+        llm::{LlmContent, LlmRole},
+        tool::ToolOrigin,
+    };
     use serde_json::json;
 
     use super::*;

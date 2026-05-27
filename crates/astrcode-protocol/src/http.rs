@@ -6,7 +6,7 @@
 use astrcode_core::event::{Phase, ToolOutputStream};
 use serde::{Deserialize, Serialize};
 
-pub use crate::events::AgentSessionStatusDto;
+pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 
 /// 新建会话请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,35 +186,6 @@ pub struct ConversationCursorDto {
     pub value: String,
 }
 
-/// 父会话派生的子 Agent 会话链接（HTTP DTO，camelCase 序列化）。
-///
-/// 与 [`events::AgentSessionLinkDto`](crate::events::AgentSessionLinkDto) 字段相同，
-/// 但 serde 使用 `camelCase` 以匹配 HTTP/SSE 线缆格式。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HttpAgentSessionLinkDto {
-    pub child_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    /// 仅终态更新携带；子 session 阶段补丁省略此字段，避免覆盖 `failed`/`completed`。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<AgentSessionStatusDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<Phase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_tool: Option<String>,
-}
-
 /// conversation 全量快照响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,7 +197,7 @@ pub struct ConversationSnapshotResponseDto {
     pub control: ConversationControlStateDto,
     pub blocks: Vec<ConversationBlockDto>,
     #[serde(default)]
-    pub agent_sessions: Vec<HttpAgentSessionLinkDto>,
+    pub agent_sessions: Vec<AgentSessionLinkDto>,
 }
 
 /// conversation 控制状态。
@@ -374,7 +345,7 @@ pub enum ConversationDeltaDto {
     },
     /// Agent 子会话状态变更（新增 / 完成 / 失败）。
     AgentSessionUpdated {
-        agent_session: HttpAgentSessionLinkDto,
+        agent_session: AgentSessionLinkDto,
     },
     /// Agent 子会话已回收，前端应移除对应卡片。
     AgentSessionRemoved {
