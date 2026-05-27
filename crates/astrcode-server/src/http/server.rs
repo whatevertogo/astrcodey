@@ -23,18 +23,9 @@ use crate::bootstrap::ServerRuntime;
 /// HTTP server startup and runtime errors.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpServerError {
-    /// Failed to generate or read auth token.
-    #[error("auth token error")]
-    Auth(getrandom::Error),
     /// I/O error during server operation.
     #[error("{0}")]
     Io(#[from] std::io::Error),
-}
-
-impl From<getrandom::Error> for HttpServerError {
-    fn from(e: getrandom::Error) -> Self {
-        HttpServerError::Auth(e)
-    }
 }
 
 /// Build an axum router for the HTTP/SSE API.
@@ -45,7 +36,7 @@ pub fn router(
     runtime: Arc<ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Result<(Router, String), HttpServerError> {
-    let auth_token = configured_auth_token()?;
+    let auth_token = configured_auth_token();
     let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
     let state = HttpState {
         runtime,

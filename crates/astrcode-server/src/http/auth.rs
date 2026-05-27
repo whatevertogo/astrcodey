@@ -7,6 +7,8 @@ use axum::{
     response::Response,
 };
 
+use uuid::Uuid;
+
 use super::error_response;
 
 pub const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
@@ -30,18 +32,14 @@ pub(super) async fn auth_middleware(
     }
 }
 
-fn generate_auth_token() -> Result<String, getrandom::Error> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)?;
-
-    Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+fn generate_auth_token() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
-pub(super) fn configured_auth_token() -> Result<String, getrandom::Error> {
+pub(super) fn configured_auth_token() -> String {
     std::env::var(ASTRCODE_HTTP_TOKEN_ENV)
         .ok()
         .filter(|token| !token.trim().is_empty())
-        .map(Ok)
         .unwrap_or_else(generate_auth_token)
 }
 
