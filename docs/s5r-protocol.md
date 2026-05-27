@@ -33,6 +33,17 @@
 | `handler.invoke` | 宿主调用扩展注册的工具 / 命令 / 钩子 |
 | `astrcode.*` | 扩展调用宿主（须在 manifest 中声明 capability） |
 
+### 宿主 session 能力（摘要）
+
+| wire 名 | 需声明 capability | 说明 |
+|---------|-------------------|------|
+| `astrcode.session.control.create` | `session_control` | 创建子 session |
+| `astrcode.session.control.submit_turn` | `session_control` | 提交 turn；宿主经 `TurnScheduler` 路由（同 session 同步/后台、子 session untracked） |
+| `astrcode.session.control.dispose` | `session_control` | 销毁 session |
+| `astrcode.session.read_events` | `session_history` | 读 event log |
+
+参数与返回值示例见 [extension-author-guide.md — 外置 agent-tool](extension-author-guide.md#外置-agent-tool-类插件)；调度语义见 [architecture.md §2](architecture.md#2-server-架构)。
+
 ## extension.json（发现阶段）
 
 ```json

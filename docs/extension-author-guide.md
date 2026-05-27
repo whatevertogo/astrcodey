@@ -326,6 +326,16 @@ let submitted = HostClient::call(
 // status == "backgrounded" → 返回说明文本给主 Agent
 ```
 
+**宿主侧路由（`TurnScheduler`）：**
+
+| 场景 | 路径 |
+|------|------|
+| 同 session + `wait_for_result: true` | `submit_and_wait` — 阻塞至 `TurnSummary`，不 spawn completion watcher |
+| 同 session + 后台 | `submit_tracked` — 内部 completion watcher 处理 pending 队列与 turn 链 |
+| 子 session（caller ≠ target） | `submit_untracked` + `ChildTurnGuard` — Guard 向**父** session 写 `AgentSessionCompleted/Failed` |
+
+每次 `submit_turn` 返回前宿主都会 `process_child_completions`（回收子 session / 向父 session inject notify）；子 agent 完成事件也会经 `ServerEventBus` 再次 trigger。详见 [architecture.md §2](architecture.md#2-server-架构)。
+
 若用户传 `waitForResult: true`，外置实现应降级为 `false` 并说明「外置插件仅支持后台子 Agent」，或返回带 hint 的 `ErrorPayload`。
 
 ### Agent 定义文件从哪来？

@@ -331,9 +331,9 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
 | [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
-| [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, config persistence, file locking |
+| [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, `replay_events_through`, config persistence, file locking |
 | [`astrcode-context`](crates/astrcode-context) | 4.0k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
+| [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: `Session::submit`, turn runner, tool pipeline, LLM stream, compact, `ChildTurnGuard` |
 | [`astrcode-extensions`](crates/astrcode-extensions) | 5.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
 
 ### Layer 2: Extensions
@@ -354,7 +354,7 @@ The Cargo workspace under [`crates/`](crates/) contains **21 crates**, plus [`sr
 | Crate | Lines | Description |
 |---|---|---|
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | In-process commands/events, HTTP/SSE wire DTOs |
-| [`astrcode-server`](crates/astrcode-server) | 13.5k | Session manager, HTTP/SSE API, ACP WebSocket, projection & SSE |
+| [`astrcode-server`](crates/astrcode-server) | 13.5k | `TurnScheduler` / `TurnRegistry`, session manager, HTTP/SSE, ACP, `ServerSessionOperations`, Actor |
 
 ### Layer 4: Clients
 
@@ -462,7 +462,7 @@ For IDEs that only spawn a subprocess with stdio, use the thin **`astrcode acp` 
 
 - JSON-RPC over WebSocket text frames (one message per frame)
 - Real-time event streaming via broadcast channel to ACP `SessionNotification`
-- Deterministic event flushing with completion oneshot for turn lifecycle
+- Turn completion via `TurnScheduler` completion watcher + optional oneshot (`TurnSummary`); extension sync path uses `submit_and_wait`
 - Designed for IDE extensions and editor integrations
 
 ### Event-Sourcing Architecture
@@ -470,17 +470,29 @@ For IDEs that only spawn a subprocess with stdio, use the thin **`astrcode acp` 
 AstrCode follows a session-first event-sourcing pattern:
 
 - **EventLog is the single source of truth** — all state changes are immutable, append-only events
-- **Session is a projection** — reconstructed by replaying from the event log; fork = replay from a specific sequence number
+- **Session is a projection** — reconstructed by replaying from the event log; fork = replay through a cursor (`replay_events_through`)
 - **Agent is stateless** — `TurnRunner` is discarded after each turn; state lives in the event log
 - **Recovery is replay** — if the agent crashes, the session is intact; simply re-project from the event log
+
+### Turn scheduling (`astrcode-server`)
+
+Orchestration lives in **`TurnScheduler`**, not in the agent loop:
+
+- **`TurnRegistry`** — single in-process index: is a turn executing for this session? (`has_active_turn` API uses registry only)
+- **`pending_queues`** — single FIFO queue for prompts submitted while a turn is already running; drained by the internal completion watcher chain after each turn finishes
+- **Handler / HTTP** — `accept_user_input` → scheduler; callers do not spawn completion watchers manually
+- **Extension API** — `ServerSessionOperations::submit_turn` uses `submit_tracked`, `submit_and_wait`, or `submit_untracked` (+ `ChildTurnGuard` for child sessions)
+- **Session idle** — after the full turn chain ends, Actor receives `SessionTurnIdle` and may start auto-recap (5 min)
+
+See [docs/architecture.md](docs/architecture.md) §2 for the full server/session boundary and API table.
 
 ### Prompt Engineering
 
 System prompt assembly follows a pipeline pattern:
 
 ```
-Identity → System → Task Guidelines → Communication → Environment
-→ User Rules → Project Rules → Tool Summary → Extension → Additional
+Identity → System → Task Guidelines → Environment → Communication
+→ Rules → Tool Summary → Extension → Extra Instructions
 ```
 
 Stable sections (Identity, System, Task Guidelines) come first to leverage prompt cache prefix matching. Users can customize via `~/.astrcode/IDENTITY.md` (identity override) and project-level `AGENTS.md` (project rules, searched upward from working directory).

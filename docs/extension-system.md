@@ -84,7 +84,32 @@ E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 
 ## 5. 宿主能力
 
-见 `HostRouter`；子进程 invoke 的 capability 须以 `astrcode.` 开头，且 manifest 中已声明对应 capability。
+实现于 `HostRouter`；子进程 invoke 的 capability 须以 `astrcode.` 开头，且 manifest 中已声明对应 capability。
+
+| manifest capability | wire 名 | 说明 |
+|---------------------|---------|------|
+| `main_model` | `astrcode.llm.main_chat` | 主模型 chat（可 stream） |
+| `small_model` | `astrcode.llm.small_chat` | 小模型 chat（可 stream） |
+| `session_history` | `astrcode.session.read_events` | 读 session event log（access 校验） |
+| `session_control` | `astrcode.session.control.create` | 创建子 session |
+| `session_control` | `astrcode.session.control.submit_turn` | 提交 turn（见下） |
+| `session_control` | `astrcode.session.control.dispose` | 销毁 session |
+| `session_state` | `astrcode.session.state.read` / `.write` | 扩展命名空间 KV |
+| `emit_events` | `astrcode.event.emit` | 声明式自定义事件 |
+| `workspace_read` | `astrcode.workspace.read` | 读 working_dir 下文件 |
+| `process_spawn` / `network_client` | 预留 | 当前宿主返回 `not_implemented` |
+
+完整 descriptor 见 `host_router.rs::descriptors_for_capability`。
+
+### `submit_turn` 与 TurnScheduler
+
+扩展 API 不直接操作 `TurnHandle`；`HostRouter` → `ServerSessionOperations::submit_turn` → **`TurnScheduler`**：
+
+- **同 session 同步**（`wait_for_result: true`）→ `submit_and_wait`
+- **同 session 后台** → `submit_tracked`（completion watcher 链 + `pending_queues`）
+- **子 session**（caller ≠ target）→ `submit_untracked` + `ChildTurnGuard`
+
+进程内「是否有 turn 在跑」以 **`TurnRegistry`** 为权威（`query_session.has_active_turn` 仅看 registry，durable `phase` 可能 stale）。架构细节见 [architecture.md §2](architecture.md#2-server-架构)。
 
 ---
 

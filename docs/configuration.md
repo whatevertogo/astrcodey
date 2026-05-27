@@ -120,6 +120,8 @@ Each model in `models` array:
 | `agentMaxDepth` | number | 3 | Maximum sub-agent nesting depth (root=0, child=1, ...) |
 | `agentToolMaxParallelCalls` | number | 5 | Maximum parallel tool calls per turn |
 
+> **Compact vs turn scheduling:** Manual compact (idle) refuses to start while `TurnRegistry` has an active turn (HTTP 409). Auto/reactive compact runs inside a turn and does not occupy a separate registry slot. Extension `query_session.has_active_turn` reflects registry only; UI may still show `Compacting` during manual compact. See [architecture.md §2](architecture.md#compact-与-turn-调度).
+
 ## Environment Variables
 
 API keys can be referenced using `"env:VARIABLE_NAME"` in the `apiKey` field. The system will resolve these from the environment at runtime.

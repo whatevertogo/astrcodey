@@ -41,3 +41,4 @@
 - [ ] 文档完善
   - [ ] API 文档自动生成
   - [x] 扩展开发指南（[`extension-author-guide.md`](extension-author-guide.md)、[`extension-system.md`](extension-system.md)、[`s5r-protocol.md`](s5r-protocol.md)）
+  - [x] Turn 调度与 session/server 边界（[`architecture.md`](architecture.md) §2、`README.md` / `README_CN.md` Turn scheduling 小节）
