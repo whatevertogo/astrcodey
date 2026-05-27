@@ -231,16 +231,11 @@ fn grep_tool_definition() -> &'static ToolDefinition {
         name: "grep".into(),
         description: concat!(
             "Searches file contents by regex or literal text.\n",
-            "Usage:\n",
-            "- Supports full regex syntax (e.g., `log.*Error`, `function\\s+\\w+`). Set \
-             `literal` to true when searching for exact text that contains regex special \
-             characters.\n",
-            "- Filter by file with `glob` (e.g., `*.js`, `**/*.tsx`) or `fileType` (e.g., \
-             `rust`, `typescript`).\n",
-            "- Output modes: `content` (matching lines with context), `files_with_matches` \
-             (file paths only, default), `count` (match counts per file).\n",
-            "- For cross-line patterns, set `multiline` to true.\n",
-            "- For finding files by name, use `find`. For multi-round searches, use `agent`.",
+            "- Full regex syntax. Set `literal=true` for exact text with special characters.\n",
+            "- Filter by `glob` or `fileType`. Output modes: `content`, `files_with_matches` \
+             (default), `count`.\n",
+            "- Set `multiline=true` for cross-line patterns.\n",
+            "- For file names, use `find`.",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,

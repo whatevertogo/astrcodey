@@ -27,12 +27,16 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: ("Switch agent mode: \"code\" (default, full execution) or \"plan\" \
-                       (read-only planning).\n\nEnter plan mode for: new features, ambiguous \
-                       scope, or multi-step changes.Must switch plan mode when user asks for a \
-                       plan\n\n
-                       Set `requireApproval: true` when the user explicitly asked for a plan. The \
-                       plan will then require user review before implementation. Default: false \
-                       (proceed directly after planning).")
+                       (read-only planning).\nWhen to switch to plan mode (proactive, not only \
+                       when asked):\n- New feature or multi-file change (6+ files likely \
+                       affected)\n- Ambiguous scope: unclear which modules are involved or what \
+                       the right approach is\n- User says \"plan\", \"design\", \"how would you \
+                       approach\", \"think about\", or describes a task without saying \"just do \
+                       it\"\n- Risky changes: touching shared infrastructure, migrations, public \
+                       APIs\nWhen NOT to plan: single-file fixes, bug fixes with clear cause, \
+                       small config changes.\nSet `requireApproval: true` when the user \
+                       explicitly asked for a plan. Default: false (proceed directly after \
+                       planning).")
             .into(),
         parameters: json!({
             "type": "object",

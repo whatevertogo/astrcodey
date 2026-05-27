@@ -27,6 +27,8 @@ pub struct ChildAgentTracker {
     visible_completed: usize,
     /// 因超出窗口而被折叠的工具完成次数。
     omitted_completed: usize,
+    /// 是否至少写入过一条可见工具输出。
+    has_visible_output: bool,
 }
 
 impl ChildAgentTracker {
@@ -46,6 +48,7 @@ impl ChildAgentTracker {
         self.current_tool = None;
         if self.visible_completed < MAX_VISIBLE_TOOLS {
             self.visible_completed += 1;
+            self.has_visible_output = true;
             let mark = if is_error { "✗" } else { "✓" };
             scrollback_queue.push(ScrollbackEntry::StreamText {
                 role: MessageRole::Tool,
@@ -60,12 +63,15 @@ impl ChildAgentTracker {
     pub fn flush_on_completion(&mut self, scrollback_queue: &mut Vec<ScrollbackEntry>) {
         self.current_tool = None;
         if self.omitted_completed > 0 {
+            self.has_visible_output = true;
             scrollback_queue.push(ScrollbackEntry::StreamText {
                 role: MessageRole::Tool,
                 text: format!("  … +{} more tool use(s)", self.omitted_completed),
             });
         }
-        scrollback_queue.push(ScrollbackEntry::BlankLine);
+        if self.has_visible_output {
+            scrollback_queue.push(ScrollbackEntry::BlankLine);
+        }
     }
 }
 

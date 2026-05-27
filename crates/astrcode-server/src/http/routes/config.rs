@@ -7,11 +7,10 @@ use astrcode_protocol::http::{
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 
-use super::super::{HttpState, error_response};
+use super::super::{HttpState, bad_request_response, internal_error_response};
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
     let raw = state.runtime.config_manager().raw_config_snapshot();
@@ -68,11 +67,7 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     let config = match state.runtime.config_manager().config_store().load().await {
         Ok(c) => c,
         Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "reload_failed",
-                error.to_string(),
-            );
+            return internal_error_response("reload_failed", error);
         },
     };
     let active_profile = config.active_profile.clone();
@@ -85,8 +80,7 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
         .config_manager
         .apply_raw_config_and_rebuild(config)
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
+        return bad_request_response(
             "invalid_config",
             format!("Reloaded config is invalid: {error}"),
         );
@@ -133,11 +127,7 @@ pub(in crate::http) async fn update_active_selection(
 
     // Validate before persisting.
     if let Err(error) = candidate.clone().into_effective() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_selection",
-            error.to_string(),
-        );
+        return bad_request_response("invalid_selection", error);
     };
 
     // Persist the validated candidate.
@@ -148,11 +138,7 @@ pub(in crate::http) async fn update_active_selection(
         .save(&candidate)
         .await
     {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "save_failed",
-            error.to_string(),
-        );
+        return internal_error_response("save_failed", error);
     }
 
     // apply_raw_config_and_rebuild re-validates internally; failure here after

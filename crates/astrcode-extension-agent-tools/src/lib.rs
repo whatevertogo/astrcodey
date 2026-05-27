@@ -101,12 +101,13 @@ impl AgentShared {
 // 定义 → 参数 → 构建逻辑 → 渲染 → Handler，自上而下阅读即可理解完整流程。
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Delegate a complex, multi-step task to a specialized subagent. Each subagent type has its \
-     own tool set listed in [Agents].\nWhen NOT to use:\n- Reading 1-3 known files → use \
-     `read`\n- Searching for a symbol or pattern → use `grep`/`find` directly\n- Anything \
-     achievable in 2-6 direct tool calls → do it yourself\nMultiple agents can run in parallel \
-     for independent subtasks. Set `waitForResult=false` to background a subagent; you will be \
-     notified when it completes.";
+    "Delegate a multi-step task to a specialized subagent. See [Agents] for available \
+     types.\nWhen NOT to use:\n- Reading 1-3 known files → `read`\n- Searching for a symbol → \
+     `grep`/`find`\n- Anything achievable in 2-6 direct tool calls → do it yourself\nOne or \
+     multiple agents — match the task scope:\n- Single agent: focused task in one area (find how \
+     X is implemented, review a PR)\n- Multiple agents in parallel: broad task spanning \
+     independent areas (explore impl + tests, review while executing, investigate different \
+     modules)\nSet `waitForResult=false` to background an agent and continue working.";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
@@ -373,17 +374,19 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Delegate to a subagent only when the task needs multi-step exploration or isolated \
-             context. For directed searches (a known symbol, file, or pattern) use `find`/`grep` \
-             directly. Prefer `subagentType=explore` for broad exploration that would otherwise \
-             take more than 3 manual queries.\n\nWriting a good `prompt`:\n- Think of it as \
-             briefing a smart colleague who just walked into the room: give enough context up \
-             front.\n- State up front whether the agent should write code, explore, or only \
-             research — never assume it will infer the intent.\n- Include relevant file paths, \
-             line numbers, and specific patterns so it can act immediately.\n- If the task \
-             depends on a previous agent's output, summarize that output in the prompt rather \
-             than expecting the subagent to read the whole conversation.\n Think what you want \
-             the subagent to do",
+            "Delegate to a subagent when the task needs multi-step exploration, isolated context, \
+             or parallel execution. For directed searches (a known symbol or pattern) use \
+             `find`/`grep` directly. Prefer `subagentType=explore` for broad exploration that \
+             would take more than 3 manual queries.\nAgent count — match the scope:\n- Single \
+             agent for a focused task: investigate one area, review specific files, trace a \
+             single call chain.\n- Multiple agents in parallel for broad tasks: each agent gets a \
+             distinct concern.\nSplit examples: implementation + tests, different modules, data \
+             flow + config.\nWhen using multiple agents, make all independent `agent` calls in \
+             the same tool block.\nWriting a good `prompt`:\n- Brief a smart colleague who just \
+             walked in: give context up front.\n- State whether the agent should write code, \
+             explore, or only research.\n- Include relevant file paths, line numbers, and \
+             specific patterns.\n- If depending on a previous agent's output, summarize that \
+             output rather than expecting the subagent to read the whole conversation.",
         )
         .caveat(
             "Don't duplicate work the subagent is doing — if you delegate, stop running the same \

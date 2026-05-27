@@ -144,16 +144,11 @@ fn find_files_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "find".into(),
         description: concat!(
-            "Finds files by glob pattern. Returns matching paths sorted by modification time \
-             (most recent first).\n",
-            "Usage:\n",
-            "- Supports glob patterns: `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
-            "- Defaults to honoring .gitignore rules. Set `respectGitignore` to false to include \
-             ignored files.\n",
-            "- Hidden files are included by default. Set `includeHidden` to false to exclude \
-             them.\n",
-            "- For searching file contents, use `grep`. For multi-round open-ended searches, use \
-             `agent`.",
+            "Finds files by glob pattern, sorted by modification time (newest first).\n",
+            "- Supports patterns: `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
+            "- Honors .gitignore by default; set `respectGitignore=false` to include ignored \
+             files.\n",
+            "- For file contents, use `grep`.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

@@ -407,7 +407,6 @@ version = "0.2.4"
 dependencies = [
  "astrcode-core",
  "astrcode-extension-sdk",
- "astrcode-protocol",
  "astrcode-storage",
  "astrcode-support",
  "async-trait",
@@ -475,6 +474,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

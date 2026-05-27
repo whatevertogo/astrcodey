@@ -158,19 +158,12 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "read".into(),
         description: concat!(
-            "Reads a file and returns its content with line numbers (starting at 1).\n",
-            "Usage:\n",
-            "- ALWAYS `read` a file before editing it with `edit` — this tool will error \
-             otherwise.\n",
-            "- When editing, copy text from AFTER the line-number prefix. Never include line \
-             numbers in `oldStr` or `newStr`.\n",
-            "- For large files, use `offset`+`limit` to read a specific range, or \
-             `charOffset`+`maxChars` to continue a truncated result.\n",
-            "- First encounter with a file: read it fully when feasible. Use pagination only when \
-             you already know which part you need.\n",
-            "- Supports plain text, source code, JSON, Markdown, and other UTF-8 files. Binary \
-             and image files are handled automatically.\n",
-            "- This tool reads files only. To list a directory, use `find` or `shell ls`.",
+            "Reads a file with line numbers. You MUST read before editing.\n",
+            "- Copy text from after the line-number prefix; never include line numbers in \
+             `oldStr`/`newStr`.\n",
+            "- Large files: use `offset`+`limit` or `charOffset`+`maxChars` for pagination.\n",
+            "- Supports text, code, JSON, Markdown, and auto-detects binary/images.\n",
+            "- To list directories, use `find`.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

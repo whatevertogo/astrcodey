@@ -113,14 +113,10 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "write".into(),
         description: concat!(
-            "Creates a new file or completely overwrites an existing file.\n",
-            "Usage:\n",
-            "- You MUST `read` existing files first. This tool replaces the entire file content.\n",
-            "- Prefer `edit` for modifying existing files — it only sends the diff. ",
-            "Only use `write` to create new files or for complete rewrites.\n",
-            "- Set `createDirs` to true when the target directory may not exist yet.\n",
-            "- NEVER create documentation files (*.md) or README files unless explicitly \
-             requested.",
+            "Creates or completely overwrites a file.\n",
+            "- MUST `read` existing files first. Prefer `edit` for modifications.\n",
+            "- Set `createDirs` to create missing parent directories.\n",
+            "- NEVER create *.md/README unless explicitly requested.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

@@ -12,6 +12,7 @@ use crate::tui::{
     ext::tool::ToolRenderCtx,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     streaming::controller::StreamController,
+    tool_vocab::tool_display_name,
 };
 
 pub fn apply(app: &mut App, notification: &ClientNotification) {
@@ -213,7 +214,7 @@ fn apply_event(app: &mut App, event: &Event) {
             // Store a placeholder in messages so child-agent detection works.
             app.push_message(
                 MessageRole::Tool,
-                human_action(tool_name).to_string(),
+                tool_display_name(tool_name).to_string(),
                 String::new(),
                 true,
                 Some(call_id.to_string()),
@@ -308,7 +309,7 @@ fn apply_event(app: &mut App, event: &Event) {
                     .unwrap_or_else(|| result.content.clone());
                 app.push_message(
                     MessageRole::Error,
-                    human_action(tool_name).to_string(),
+                    tool_display_name(tool_name).to_string(),
                     format!("✗ {}", truncate_first_line(&err, 100)),
                     false,
                     None,
@@ -332,7 +333,7 @@ fn apply_event(app: &mut App, event: &Event) {
                         let fallback = tool_completion_summary(tool_name, result);
                         app.push_rendered_message(
                             MessageRole::Tool,
-                            human_action(tool_name).to_string(),
+                            tool_display_name(tool_name).to_string(),
                             spec,
                             fallback,
                             false,
@@ -347,7 +348,7 @@ fn apply_event(app: &mut App, event: &Event) {
                 let summary = tool_completion_summary(tool_name, result);
                 app.push_message(
                     MessageRole::Tool,
-                    human_action(tool_name).to_string(),
+                    tool_display_name(tool_name).to_string(),
                     summary,
                     false,
                     None,
@@ -431,14 +432,20 @@ fn apply_event(app: &mut App, event: &Event) {
             summary,
             ..
         } => {
+            let was_tracked_child = app
+                .child_session_map
+                .get(child_session_id.as_str())
+                .is_some_and(|call_id| app.child_agents.contains_key(call_id));
             let short_summary = truncate_first_line(summary, 60);
-            app.push_message(
-                MessageRole::Tool,
-                "Agent".into(),
-                format!("● Done — {short_summary}"),
-                false,
-                None,
-            );
+            if !was_tracked_child {
+                app.push_message(
+                    MessageRole::Tool,
+                    "Agent".into(),
+                    format!("● Done — {short_summary}"),
+                    false,
+                    None,
+                );
+            }
             app.child_session_map.remove(child_session_id.as_str());
             app.status_text = "Ready".into();
         },
@@ -447,13 +454,19 @@ fn apply_event(app: &mut App, event: &Event) {
             error,
             ..
         } => {
-            app.push_message(
-                MessageRole::Error,
-                "Agent".into(),
-                format!("✗ {}", truncate_first_line(error, 80)),
-                false,
-                None,
-            );
+            let was_tracked_child = app
+                .child_session_map
+                .get(child_session_id.as_str())
+                .is_some_and(|call_id| app.child_agents.contains_key(call_id));
+            if !was_tracked_child {
+                app.push_message(
+                    MessageRole::Error,
+                    "Agent".into(),
+                    format!("✗ {}", truncate_first_line(error, 80)),
+                    false,
+                    None,
+                );
+            }
             app.child_session_map.remove(child_session_id.as_str());
         },
         EventPayload::ToolCallBackgrounded {
@@ -496,7 +509,7 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
         EventPayload::ToolCallStarted { tool_name, .. } => {
             if let Some(tracker) = app.child_agents.get_mut(call_id) {
                 tracker.on_tool_started(tool_name);
-                app.status_text = format!("●Task → {tool_name}");
+                app.status_text = format!("● Task → {tool_name}");
             }
         },
         EventPayload::ToolCallCompleted {
@@ -510,7 +523,7 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
                     result.is_error,
                     &mut app.scrollback_queue,
                 );
-                app.status_text = format!("●Agent: {tool_name} done");
+                app.status_text = format!("● Agent: {tool_name} done");
             }
         },
         EventPayload::ErrorOccurred { message, .. } if app.child_agents.contains_key(call_id) => {
@@ -696,24 +709,9 @@ fn ready_status(reason: &str) -> String {
     }
 }
 
-fn human_action(tool_name: &str) -> &str {
-    match tool_name {
-        "shell" => "Bash",
-        "read" => "Read",
-        "write" => "Write",
-        "edit" => "Edit",
-        "find" => "Find",
-        "grep" => "Search",
-        "patch" => "Patch",
-        "agent" => "Task",
-        "switchMode" => "Mode",
-        other => other,
-    }
-}
-
 /// Codex-style one-line tool call summary for the status bar.
 fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> String {
-    let action = human_action(tool_name);
+    let action = tool_display_name(tool_name);
     match tool_name {
         "shell" => {
             let cmd = arguments

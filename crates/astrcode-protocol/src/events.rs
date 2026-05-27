@@ -3,8 +3,10 @@
 //! 定义服务器向连接的客户端推送的所有通知，
 //! 包括运行时事件、会话列表、UI 交互请求和错误信息。
 
-use astrcode_core::event::{Event, Phase};
+use astrcode_core::event::Event;
 use serde::{Deserialize, Serialize};
+
+pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 
 /// 服务器推送给客户端的通知枚举。
 ///
@@ -97,52 +99,6 @@ pub struct SessionListItem {
     /// 会话标题（首条用户消息摘要或工作目录名）。
     #[serde(default)]
     pub title: Option<String>,
-}
-
-/// 子 Agent 会话的运行状态。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentSessionStatusDto {
-    #[default]
-    Running,
-    Completed,
-    Failed,
-}
-
-impl From<astrcode_core::storage::AgentSessionStatus> for AgentSessionStatusDto {
-    fn from(status: astrcode_core::storage::AgentSessionStatus) -> Self {
-        match status {
-            astrcode_core::storage::AgentSessionStatus::Running => AgentSessionStatusDto::Running,
-            astrcode_core::storage::AgentSessionStatus::Completed => {
-                AgentSessionStatusDto::Completed
-            },
-            astrcode_core::storage::AgentSessionStatus::Failed => AgentSessionStatusDto::Failed,
-        }
-    }
-}
-
-/// 父会话派生的子 Agent 会话链接（JSON-RPC 线缆 DTO）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSessionLinkDto {
-    pub child_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    #[serde(default)]
-    pub status: AgentSessionStatusDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub final_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<Phase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_tool: Option<String>,
 }
 
 /// 会话快照，用于客户端重连或状态恢复。

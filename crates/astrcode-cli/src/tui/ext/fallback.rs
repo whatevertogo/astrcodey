@@ -4,6 +4,7 @@ use astrcode_core::{render::RenderSpec, tool::ToolResult};
 use astrcode_support::text::compact_inline;
 
 use super::tool::{ToolRenderCtx, ToolRenderer};
+use crate::tui::tool_vocab::tool_display_name;
 
 /// Default renderer used when no specific ToolRenderer is registered.
 pub struct DefaultToolRenderer;
@@ -35,26 +36,12 @@ impl ToolRenderer for DefaultToolRenderer {
 }
 
 fn tool_label(tool_name: &str, args: Option<&serde_json::Value>) -> String {
-    let action = human_action(tool_name);
+    let action = tool_display_name(tool_name);
     if let Some(target) = args.and_then(|a| tool_primary_target(tool_name, a)) {
         let target = target.strip_prefix("$ ").unwrap_or(&target);
         format!("{action}({})", compact_inline(target, 56))
     } else {
         action.to_string()
-    }
-}
-
-fn human_action(tool_name: &str) -> &str {
-    match tool_name {
-        "shell" => "Bash",
-        "read" => "Read",
-        "write" => "Write",
-        "edit" => "Edit",
-        "find" => "Find",
-        "grep" => "Search",
-        "patch" => "Patch",
-        "agent" => "Task",
-        other => other,
     }
 }
 

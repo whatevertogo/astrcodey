@@ -127,19 +127,11 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
         description: concat!(
-            "Performs exact string replacements in an existing file.\n",
-            "Usage:\n",
-            "- You MUST `read` the file first. This tool will error if you haven't.\n",
-            "- When editing text from `read` output, preserve the exact indentation (tabs/spaces) ",
-              "as it appears AFTER the line number prefix. ",
-              "Never include line numbers in `oldStr` or `newStr`.\n",
-            "- The edit will FAIL if `oldStr` is not unique in the file. ",
-              "Provide more surrounding context to make it unique, or use `replaceAll`.\n",
-            "- Use `replaceAll` to rename variables or replace strings across the file.\n",
-            "- Use `edits` for multiple replacements in one call — all replacements are applied \
-             atomically (all succeed or none are written). Use `patch` for multi-file changes.\n",
-            "- If the file was modified externally since your last `read`, the edit will be \
-             rejected. Re-`read` the file and retry.",
+            "Exact string replacements in an existing file. MUST `read` first.\n",
+            "- Preserve exact indentation from read output. Never include line numbers.\n",
+            "- `oldStr` must be unique. Use `replaceAll` for non-unique matches.\n",
+            "- Use `edits` for multiple atomic replacements. Use `patch` for multi-file changes.\n",
+            "- File modified externally since last read? Re-read and retry.",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,

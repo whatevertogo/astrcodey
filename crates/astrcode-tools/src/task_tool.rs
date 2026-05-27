@@ -93,11 +93,9 @@ fn task_tool_definition() -> &'static ToolDefinition {
         name: "task".into(),
         description: concat!(
             "Manages background shell tasks.\n",
-            "Usage:\n",
-            "- `action=list`: shows all running background tasks with their status and output.\n",
-            "- `action=cancel`: stops a task by ID. Use when a background task is no longer \
-             needed.\n",
-            "- After launching a background `shell`, use this tool to check progress or clean up.",
+            "- `action=list`: show running tasks with status and output.\n",
+            "- `action=cancel`: stop a task by ID.\n",
+            "- Use to check progress or clean up after `shell(runInBackground=true)`.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

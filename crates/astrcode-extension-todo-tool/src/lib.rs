@@ -23,31 +23,15 @@ use serde_json::{Value, json};
 
 pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 
-const TODO_WRITE_DESCRIPTION: &str = "\
-Update the todo list for the current session. To be used proactively to track progress and pending \
-                                      tasks.
-
-## When to Use
-- Complex multi-step tasks requiring 3 or more distinct steps
-- Non-trivial tasks that need careful planning or multiple operations
-- User provides multiple tasks (numbered or comma-separated list)
-- After receiving new instructions — immediately capture them as todos
-- When you start working on a task — mark it `in_progress` BEFORE beginning
-- After completing a task — mark it `completed` and add any follow-up tasks
-
-## When NOT to Use
-- Single, straightforward tasks
-- Trivial tasks completable in under 3 steps
-- Pure Q&A or informational requests
-
-## Rules
-- Always send the full current list, not a patch.
-- Keep exactly one item `in_progress` at a time.
-- Each item must have `content` (imperative: \"Fix auth bug\") and `activeForm` (continuous: \
-                                      \"Fixing auth bug\"). The `activeForm` is shown to the user \
-                                      as a real-time status indicator.
-- Only mark `completed` when FULLY accomplished — if tests fail or implementation is partial, keep \
-                                      `in_progress`.";
+const TODO_WRITE_DESCRIPTION: &str =
+    "\
+Update the session todo list to track multi-step task progress.\nWhen to use: 3+ distinct steps, \
+     multiple operations, or user gives a list of tasks.\nDo NOT use for simple Q&A or single \
+     straightforward tasks.\nRules:\n- Send the full list every time (not a patch). Keep exactly \
+     one `in_progress`.\n- Mark `in_progress` BEFORE starting work. Mark `completed` only when \
+     fully done (tests pass, implementation complete).\n- After receiving new instructions, \
+     immediately add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + \
+     `activeForm` (continuous: \"Fixing auth bug\").";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;

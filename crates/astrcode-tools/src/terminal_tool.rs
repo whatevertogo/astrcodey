@@ -520,17 +520,10 @@ fn terminal_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "terminal".into(),
         description: concat!(
-            "Manages long-lived PTY sessions for interactive REPLs (python, node), debuggers \
-             (gdb), or multi-step scripts.\n",
-            "Lifecycle: `start` a session → `send` input / `read` output → `close` when done.\n",
-            "`list` shows all active sessions.\n",
-            "Usage:\n",
-            "- For one-shot commands, prefer `shell`. Use `terminal` only when the process needs \
-             multi-step interactive input.\n",
-            "- Always `close` terminals when finished to free resources.\n",
-            "- Use `waitMs` (up to 10000) to wait for slower output before draining. Default: \
-             100ms.\n",
-            "- Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
+            "Manages long-lived PTY sessions for interactive REPLs/debuggers.\n",
+            "Lifecycle: `start` → `send`/`read` → `close`. `list` shows active sessions.\n",
+            "- For one-shot commands, use `shell`.\n",
+            "- Always `close` when finished. Use `waitMs` (up to 10000, default 100) for slow output.",
         )
             .into(),
         origin: ToolOrigin::Builtin,

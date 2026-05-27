@@ -30,7 +30,7 @@ mod prompt;
 pub use assemble::{CompactSummaryEnvelope, CompactSummaryRenderOptions, format_compact_summary};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
-pub use post_compact::{PostCompactFile, PostCompactNote, recent_read_paths};
+pub use post_compact::{PostCompactFile, PostCompactNote, agent_status_note, recent_read_paths};
 
 /// 压缩操作的结果。
 ///

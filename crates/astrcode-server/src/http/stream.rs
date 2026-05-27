@@ -14,11 +14,9 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_protocol::{
+    agent_session_link::AgentSessionLinkDto,
     events::ClientNotification,
-    http::{
-        ConversationCursorDto, ConversationDeltaDto, ConversationStreamEnvelopeDto,
-        HttpAgentSessionLinkDto,
-    },
+    http::{ConversationCursorDto, ConversationDeltaDto, ConversationStreamEnvelopeDto},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -575,18 +573,11 @@ fn child_phase_delta(
     projection: ChildPhaseProjection,
 ) -> ConversationDeltaDto {
     ConversationDeltaDto::AgentSessionUpdated {
-        agent_session: HttpAgentSessionLinkDto {
-            child_session_id: initial_child_id.to_string(),
-            tool_call_id: None,
-            agent_name: None,
-            task: None,
-            status: None,
-            final_session_id: None,
-            summary: None,
-            error: None,
-            phase: Some(projection.phase),
-            current_tool: projection.current_tool,
-        },
+        agent_session: AgentSessionLinkDto::phase_only(
+            initial_child_id,
+            projection.phase,
+            projection.current_tool,
+        ),
     }
 }
 

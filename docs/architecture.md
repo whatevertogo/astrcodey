@@ -111,7 +111,7 @@ bootstrap_with → TurnScheduler + TurnRegistry
 Compact 是一个**严格的 XML contract**：
 
 - 模型必须返回 `<analysis>` scratchpad + `<summary>` 块，顺序固定
-- Summary 必须包含 9 个固定段标题（Primary Request、Files、Errors 等），缺一则拒绝
+- Summary 必须包含固定段标题（Primary Request、Files、Errors 等），缺一则拒绝
 - 输出有 token 上限（`COMPACT_OUTPUT_TOKEN_CAP`）
 - 解析器容忍外层 markdown fence、大小写不敏感的 XML tag，但不容忍结构缺失
 
@@ -178,7 +178,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 9 个内置工具（read / write / edit / patch / find / grep / shell / terminal / task）：
 
-- **为什么不全用 bash**：Claude Code 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
+- **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
 - 每个工具声明 `ExecutionMode`：read-only 工具（find/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential
 - task 工具管理后台任务（list/cancel），shell 工具支持 `BackgroundPolicy::AutoAfter` 自动后台化
@@ -269,13 +269,11 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### Plan 模式
 
-- 只读工具限制（find/grep/read）
 - 专用 Plan 管理工具
-- Exit Gate 自检：完成前必须经过自我审查检查清单
 - 计划持久化到 `<session>/plan/plan.md`
 - 适合复杂任务的前期规划
 
-两种模式均通过 Mode 扩展插件实现，支持 `Shift+Tab` 快捷键切换。
+两种模式均通过 Mode 扩展插件实现
 
 ---
 

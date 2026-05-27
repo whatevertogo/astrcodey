@@ -22,6 +22,7 @@ pub(crate) mod streaming;
 pub(crate) mod terminal;
 pub(crate) mod terminal_probe;
 pub(crate) mod theme;
+pub(crate) mod tool_vocab;
 
 use std::{io, sync::Arc};
 

@@ -143,9 +143,9 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
     assert!(
         write_file
             .description
-            .contains("Creates a new file or completely overwrites")
+            .contains("Creates or completely overwrites")
     );
-    assert!(edit_file.description.contains("exact string replacements"));
+    assert!(edit_file.description.contains("string replacements"));
 }
 
 #[tokio::test]

@@ -1,9 +1,12 @@
 //! 实时 EventPayload → ConversationDeltaDto 投影 + 控制态推算。
 
 use astrcode_core::event::{Event, EventPayload, Phase};
-use astrcode_protocol::http::{
-    ConversationBlockDto, ConversationBlockStatusDto, ConversationControlStateDto,
-    ConversationCursorDto, ConversationDeltaDto, HttpAgentSessionLinkDto,
+use astrcode_protocol::{
+    agent_session_link::AgentSessionLinkDto,
+    http::{
+        ConversationBlockDto, ConversationBlockStatusDto, ConversationControlStateDto,
+        ConversationCursorDto, ConversationDeltaDto,
+    },
 };
 
 use super::{args::format_args_inline, blocks::completed_block_from_payload};
@@ -181,55 +184,33 @@ pub(in crate::http) fn event_to_deltas(
             tool_policy: _,
             tool_call_id,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
-            agent_session: HttpAgentSessionLinkDto {
-                child_session_id: child_session_id.to_string(),
-                tool_call_id: Some(tool_call_id.to_string()),
-                agent_name: Some(agent_name.clone()),
-                task: Some(task.clone()),
-                status: Some(astrcode_core::storage::AgentSessionStatus::Running.into()),
-                final_session_id: None,
-                summary: None,
-                error: None,
-                phase: Some(Phase::Thinking),
-                current_tool: None,
-            },
+            agent_session: AgentSessionLinkDto::spawned(
+                child_session_id,
+                tool_call_id,
+                agent_name,
+                task,
+            ),
         }],
 
         EventPayload::AgentSessionCompleted {
             child_session_id,
             final_session_id,
             summary,
-        }
-        | EventPayload::AgentSessionFailed {
+        } => vec![ConversationDeltaDto::AgentSessionUpdated {
+            agent_session: AgentSessionLinkDto::completed(
+                child_session_id,
+                final_session_id,
+                summary,
+            ),
+        }],
+
+        EventPayload::AgentSessionFailed {
             child_session_id,
             final_session_id,
-            error: summary,
-        } => {
-            vec![ConversationDeltaDto::AgentSessionUpdated {
-                agent_session: HttpAgentSessionLinkDto {
-                    child_session_id: child_session_id.to_string(),
-                    tool_call_id: None,
-                    agent_name: None,
-                    task: None,
-                    status: Some(match &event.payload {
-                        EventPayload::AgentSessionCompleted { .. } => {
-                            astrcode_core::storage::AgentSessionStatus::Completed.into()
-                        },
-                        EventPayload::AgentSessionFailed { .. } => {
-                            astrcode_core::storage::AgentSessionStatus::Failed.into()
-                        },
-                        _ => unreachable!(),
-                    }),
-                    final_session_id: Some(final_session_id.to_string()),
-                    summary: matches!(&event.payload, EventPayload::AgentSessionCompleted { .. })
-                        .then(|| summary.clone()),
-                    error: matches!(&event.payload, EventPayload::AgentSessionFailed { .. })
-                        .then(|| summary.clone()),
-                    phase: None,
-                    current_tool: None,
-                },
-            }]
-        },
+            error,
+        } => vec![ConversationDeltaDto::AgentSessionUpdated {
+            agent_session: AgentSessionLinkDto::failed(child_session_id, final_session_id, error),
+        }],
 
         EventPayload::AgentSessionRecycled { child_session_id } => {
             vec![ConversationDeltaDto::AgentSessionRemoved {
