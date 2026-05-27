@@ -167,7 +167,6 @@ mod tests {
     use astrcode_core::{
         event::EventPayload,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        storage::EventStore,
         tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
     };

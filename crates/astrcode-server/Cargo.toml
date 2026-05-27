@@ -22,7 +22,7 @@ astrcode-ai = { path = "../astrcode-ai" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-context = { path = "../astrcode-context" }
-astrcode-session = { path = "../astrcode-session" }
+astrcode-session = { path = "../astrcode-session", features = ["test-fixtures"] }
 astrcode-extensions = { path = "../astrcode-extensions" }
 astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
 astrcode-log = { path = "../astrcode-log" }

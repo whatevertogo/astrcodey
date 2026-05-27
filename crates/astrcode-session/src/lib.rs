@@ -28,7 +28,7 @@ pub(crate) mod turn_publish;
 pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-fixtures"))]
 pub mod test_fixtures;
 
 pub use background::{BackgroundTaskManager, spawn_background_forwarder};
