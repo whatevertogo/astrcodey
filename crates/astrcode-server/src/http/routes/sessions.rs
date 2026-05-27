@@ -398,7 +398,12 @@ mod tests {
         let mut session = SessionReadModel::empty("session-1".into());
         session.working_dir = "D:/work/project".into();
         session.latest_seq = Some(9);
-        session.messages.push(LlmMessage::user("hello"));
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::user("hello"),
+                updated_seq: 1,
+            });
 
         let dto = conversation_to_dto(session, None);
 
@@ -410,19 +415,27 @@ mod tests {
     fn conversation_snapshot_renders_tool_call_as_structured_block() {
         let mut session = SessionReadModel::empty("session-1".into());
         session.working_dir = "D:/work/project".into();
-        session.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "tool-1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({ "path": "Cargo.toml" }),
-            }],
-            name: None,
-            reasoning_content: None,
-        });
         session
             .messages
-            .push(LlmMessage::tool("read", "tool-1", "file contents", false));
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![LlmContent::ToolCall {
+                        call_id: "tool-1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({ "path": "Cargo.toml" }),
+                    }],
+                    name: None,
+                    reasoning_content: None,
+                },
+                updated_seq: 1,
+            });
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::tool("read", "tool-1", "file contents", false),
+                updated_seq: 2,
+            });
 
         let dto = conversation_to_dto(session, None);
 
@@ -454,10 +467,18 @@ mod tests {
         session.working_dir = "D:/work/project".into();
         session.latest_seq = Some(7);
         // compact 之后的 retained messages
-        session.messages.push(LlmMessage::user("recent user"));
         session
             .messages
-            .push(LlmMessage::assistant("recent assistant"));
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::user("recent user"),
+                updated_seq: 1,
+            });
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::assistant("recent assistant"),
+                updated_seq: 2,
+            });
         // compact boundary 元数据
         session.compact_boundaries.push(CompactBoundaryView {
             trigger: "manual_command".into(),
@@ -496,7 +517,12 @@ mod tests {
         let mut session = SessionReadModel::empty("session-multi-compact".into());
         session.working_dir = "D:/work/project".into();
         session.latest_seq = Some(20);
-        session.messages.push(LlmMessage::user("latest user"));
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::user("latest user"),
+                updated_seq: 1,
+            });
         session.compact_boundaries.push(CompactBoundaryView {
             trigger: "auto_threshold".into(),
             pre_tokens: 800,
@@ -535,22 +561,32 @@ mod tests {
     fn conversation_snapshot_restores_background_task_state() {
         let mut session = SessionReadModel::empty("session-1".into());
         session.working_dir = "D:/work/project".into();
-        session.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "tool-1".into(),
-                name: "shell".into(),
-                arguments: serde_json::json!({ "command": "npm run dev" }),
-            }],
-            name: None,
-            reasoning_content: None,
-        });
-        session.messages.push(LlmMessage::tool(
-            "shell",
-            "tool-1",
-            "Task moved to background (task: bg-1).",
-            false,
-        ));
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![LlmContent::ToolCall {
+                        call_id: "tool-1".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({ "command": "npm run dev" }),
+                    }],
+                    name: None,
+                    reasoning_content: None,
+                },
+                updated_seq: 1,
+            });
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage::tool(
+                    "shell",
+                    "tool-1",
+                    "Task moved to background (task: bg-1).",
+                    false,
+                ),
+                updated_seq: 2,
+            });
         session.background_tool_calls.insert(
             "tool-1".into(),
             BackgroundToolCallView {

@@ -5,7 +5,7 @@
 //! - [`resolve_api_key()`]：解析 API 密钥（支持环境变量引用）
 //! - [`merge_overlay()`]：合并项目级覆盖配置
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, process::Command};
 
 use crate::config::{effective::*, raw::*};
 
@@ -24,6 +24,77 @@ pub enum ResolveError {
     /// 缺少必需的环境变量。
     #[error("Missing environment variable: {0}")]
     MissingEnvVar(String),
+    /// shell 命令执行失败（用于动态获取 API key）。
+    #[error("API key command failed: {0}")]
+    ApiKeyCommandFailed(String),
+}
+
+fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
+    // Note: keep this list intentionally small and stable. It is a fallback when
+    // the user does not specify `api_key` in config.json.
+    match profile.name.as_str() {
+        "openai" => &["OPENAI_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        // astrcode historically uses GOOGLE_API_KEY; pi-mono uses GEMINI_API_KEY.
+        // Accept both (prefer the one that's set).
+        "gemini" | "google" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        _ => match profile.provider_kind.as_str() {
+            "anthropic" => &["ANTHROPIC_API_KEY"],
+            "google_genai" | "gemini" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+            // openai-compatible providers vary widely; do not guess here.
+            _ => &[],
+        },
+    }
+}
+
+fn resolve_shell_command(raw_command: &str) -> Result<String, ResolveError> {
+    let output = if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", raw_command])
+            .output()
+            .map_err(|e| ResolveError::ApiKeyCommandFailed(e.to_string()))?
+    } else {
+        Command::new("sh")
+            .args(["-lc", raw_command])
+            .output()
+            .map_err(|e| ResolveError::ApiKeyCommandFailed(e.to_string()))?
+    };
+
+    if !output.status.success() {
+        return Err(ResolveError::ApiKeyCommandFailed(format!(
+            "exit_code={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let key = stdout.trim().to_string();
+    if key.is_empty() {
+        return Err(ResolveError::ApiKeyCommandFailed(
+            "command returned empty stdout".into(),
+        ));
+    }
+    Ok(key)
+}
+
+fn resolve_profile_api_key(profile: &Profile) -> Result<String, ResolveError> {
+    // 1) explicit api_key in config
+    if let Some(raw) = profile.api_key.as_deref().filter(|s| !s.is_empty()) {
+        return resolve_api_key(raw);
+    }
+
+    // 2) fallback to known env keys (pi-mono style)
+    for key in known_env_keys_for_profile(profile) {
+        if let Ok(val) = std::env::var(key) {
+            if !val.trim().is_empty() {
+                return Ok(val);
+            }
+        }
+    }
+
+    Err(ResolveError::MissingField("api_key".into()))
 }
 
 /// 解析单个 profile + model 对为 [`LlmSettings`]。
@@ -47,13 +118,13 @@ fn resolve_llm_settings(
             model: model_name.into(),
         })?;
 
-    let api_key = match profile.api_key.as_deref() {
-        Some(s) if !s.is_empty() => resolve_api_key(s)?,
-        _ => return Err(ResolveError::MissingField("api_key".into())),
-    };
+    let api_key = resolve_profile_api_key(profile)?;
 
     let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
     let openai_capabilities = profile.openai_capabilities.as_ref();
+    let options = model.model_options.as_ref();
+    let reasoning = options.and_then(|o| o.reasoning).unwrap_or(false);
+    let thinking_level = options.and_then(|o| o.thinking_level);
 
     Ok(LlmSettings {
         provider_kind: profile.provider_kind.clone(),
@@ -79,8 +150,8 @@ fn resolve_llm_settings(
             .and_then(|c| c.supports_prompt_cache_key)
             .unwrap_or(false),
         prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
-        reasoning: model.reasoning.unwrap_or(false),
-        reasoning_split: model.reasoning_split.unwrap_or(false),
+        reasoning,
+        thinking_level,
     })
 }
 
@@ -191,6 +262,7 @@ impl Config {
 ///
 /// 解析规则：
 /// - `env:VAR_NAME` 前缀：从环境变量 `VAR_NAME` 读取，不存在则报错
+/// - `!command` 前缀：执行 shell 命令，使用 stdout 作为 key（trim 后不能为空）
 /// - 全大写加下划线的字符串：尝试作为环境变量名，不存在时 emit warning 后使用原始值
 /// - 其他字符串：直接作为密钥使用
 ///
@@ -199,6 +271,9 @@ pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
     if let Some(var) = raw.strip_prefix("env:") {
         // "env:VAR_NAME" 格式：必须存在该环境变量
         std::env::var(var).map_err(|_| ResolveError::MissingEnvVar(var.into()))
+    } else if let Some(cmd) = raw.strip_prefix('!') {
+        // "!command" 格式：执行命令并使用 stdout
+        resolve_shell_command(cmd.trim())
     } else if !raw.is_empty() && raw.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
         // 全大写加下划线：尝试作为环境变量名，失败则 emit warning 后使用原始值
         match std::env::var(raw) {
@@ -217,6 +292,29 @@ pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
         // 其他情况：直接作为密钥
         Ok(raw.into())
     }
+}
+
+/// 用于 UI 展示：profile 是否“看起来”能解析出 API key。
+///
+/// 注意：此函数不会执行 `!command`，只做静态判断和 env var presence 检测。
+pub fn profile_has_resolvable_api_key(profile: &Profile) -> bool {
+    match profile.api_key.as_deref().map(str::trim) {
+        Some("") => {},
+        Some(s) => {
+            if let Some(var) = s.strip_prefix("env:") {
+                return std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+            }
+            if s.starts_with('!') {
+                return true;
+            }
+            return true;
+        },
+        None => {},
+    }
+
+    known_env_keys_for_profile(profile)
+        .iter()
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
 }
 
 /// 将项目级覆盖配置合并到基础配置中。
@@ -269,6 +367,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_api_key_shell_command() {
+        // use a minimal cross-platform command that prints a known token
+        let key = if cfg!(windows) {
+            resolve_api_key("!echo sk-test-123").unwrap()
+        } else {
+            resolve_api_key("!printf 'sk-test-123'").unwrap()
+        };
+        assert_eq!(key, "sk-test-123");
+    }
+
+    #[test]
     fn test_resolve_api_key_empty_not_treated_as_env_var() {
         // 空字符串走明文路径（全大写的空真条件由 !is_empty() 守卫）。
         // 调用方（into_effective）在到达此函数之前已拦截缺失的密钥。
@@ -277,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_missing_api_key_returns_error() {
-        // 没有 api_key 的 Config 应产生 MissingField 错误
+        // 没有 api_key 且无可用 env fallback 的 Config 应产生 MissingField 错误
         let config = Config {
             profiles: vec![Profile {
                 name: "test".into(),
@@ -290,8 +399,7 @@ mod tests {
                     id: "test-model".into(),
                     max_tokens: Some(1024),
                     context_limit: Some(4096),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 }],
             }],
             active_profile: "test".into(),
@@ -317,8 +425,7 @@ mod tests {
                     id: "deepseek-chat".into(),
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 }],
             }],
             active_profile: "deepseek".into(),
@@ -373,8 +480,7 @@ mod tests {
                         id: "deepseek-chat".into(),
                         max_tokens: Some(8192),
                         context_limit: Some(65536),
-                        reasoning: None,
-                        reasoning_split: None,
+                        model_options: None,
                     }],
                 },
                 Profile {
@@ -388,8 +494,7 @@ mod tests {
                         id: "claude-haiku-4-5-20251001".into(),
                         max_tokens: Some(8192),
                         context_limit: Some(200000),
-                        reasoning: None,
-                        reasoning_split: None,
+                        model_options: None,
                     }],
                 },
             ],
@@ -404,5 +509,38 @@ mod tests {
         assert_eq!(effective.llm.model_id, "deepseek-chat");
         assert_eq!(effective.small_llm.model_id, "claude-haiku-4-5-20251001");
         assert_eq!(effective.small_llm.provider_kind, "anthropic");
+    }
+
+    #[test]
+    fn test_model_options_are_resolved_and_override_legacy_fields() {
+        let config = Config {
+            profiles: vec![Profile {
+                name: "openai".into(),
+                provider_kind: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: Some("sk-test".into()),
+                api_mode: Some(OpenAiApiMode::Responses),
+                openai_capabilities: None,
+                models: vec![ModelConfig {
+                    id: "gpt-4.1".into(),
+                    max_tokens: Some(8192),
+                    context_limit: Some(128000),
+                    model_options: Some(ModelOptionsConfig {
+                        reasoning: Some(true),
+                        thinking_level: Some(crate::llm::ThinkingLevel::High),
+                    }),
+                }],
+            }],
+            active_profile: "openai".into(),
+            active_model: "gpt-4.1".into(),
+            ..Config::default()
+        };
+
+        let effective = config.into_effective().unwrap();
+        assert!(effective.llm.reasoning);
+        assert_eq!(
+            effective.llm.thinking_level,
+            Some(crate::llm::ThinkingLevel::High)
+        );
     }
 }

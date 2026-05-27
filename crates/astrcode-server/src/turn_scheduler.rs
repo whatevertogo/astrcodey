@@ -607,10 +607,10 @@ fn pending_requested_tool_calls(state: &SessionReadModel) -> Vec<PendingRequeste
     let mut pending = Vec::new();
 
     for message in &state.messages {
-        if message.role != LlmRole::Assistant {
+        if message.message.role != LlmRole::Assistant {
             continue;
         }
-        for content in &message.content {
+        for content in &message.message.content {
             let LlmContent::ToolCall { call_id, name, .. } = content else {
                 continue;
             };
@@ -631,10 +631,10 @@ fn find_tool_call_history(
     target_call_id: &ToolCallId,
 ) -> Option<(String, serde_json::Value)> {
     state.messages.iter().find_map(|message| {
-        if message.role != LlmRole::Assistant {
+        if message.message.role != LlmRole::Assistant {
             return None;
         }
-        message.content.iter().find_map(|content| {
+        message.message.content.iter().find_map(|content| {
             let LlmContent::ToolCall {
                 call_id,
                 name,

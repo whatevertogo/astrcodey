@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use astrcode_core::{
     event::{Event, EventPayload},
     llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{BackgroundToolCallView, CompactBoundaryView},
+    storage::{BackgroundToolCallView, CompactBoundaryView, SequencedLlmMessage},
     types::ToolCallId,
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
@@ -116,13 +116,14 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
 }
 
 pub(in crate::http) fn messages_to_blocks(
-    messages: &[LlmMessage],
+    messages: &[SequencedLlmMessage],
     background_tool_calls: &HashMap<ToolCallId, BackgroundToolCallView>,
 ) -> Vec<ConversationBlockDto> {
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 
     for (index, message) in messages.iter().enumerate() {
+        let message = &message.message;
         let id = format!("snapshot-message-{index}");
         match message.role {
             LlmRole::User => blocks.push(ConversationBlockDto::User {

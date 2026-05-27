@@ -447,8 +447,8 @@ impl SessionManager {
                 EventPayload::SessionForked {
                     source_session_id: source_id.clone(),
                     source_cursor: fork_cursor,
-                    context_messages,
-                    retained_messages,
+                    context_messages: context_messages.into_iter().map(|m| m.message).collect(),
+                    retained_messages: retained_messages.into_iter().map(|m| m.message).collect(),
                 },
             ))
             .await?;

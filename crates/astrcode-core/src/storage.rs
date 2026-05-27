@@ -335,6 +335,19 @@ pub struct CompactBoundaryView {
     pub strategy: crate::extension::CompactStrategy,
 }
 
+/// 会话读模型里带有 durable seq 的消息载体。
+///
+/// compact 需要按时间边界冻结历史前缀，并将 compact 期间到达的事件归类为尾部增量。
+/// reducer 在处理 durable 事件时自然可得 `Event.seq`，因此这里将其显式挂到消息上，
+/// 让边界切分不依赖“当前内存状态”推断。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SequencedLlmMessage {
+    /// LLM 协议消息内容（内部结构）。
+    pub message: LlmMessage,
+    /// 最近一次将该消息更新到 durable 时序中的 seq。
+    pub updated_seq: u64,
+}
+
 // ─── extension Event Index ────────────────────────────────────────────────
 
 /// 插件事件索引条目——不存 payload，按需从 event log 取。
@@ -427,9 +440,9 @@ pub struct SessionReadModel {
     /// 会话唯一标识。
     pub session_id: SessionId,
     /// 普通对话消息历史。
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<SequencedLlmMessage>,
     /// provider 可见但不展示给普通 transcript 的上下文消息。
-    pub context_messages: Vec<LlmMessage>,
+    pub context_messages: Vec<SequencedLlmMessage>,
     /// 会话工作目录。
     pub working_dir: String,
     /// 模型标识。
@@ -515,8 +528,8 @@ impl SessionReadModel {
                 .len()
                 .saturating_add(self.messages.len()),
         );
-        messages.extend(self.context_messages.clone());
-        messages.extend(self.messages.clone());
+        messages.extend(self.context_messages.iter().map(|m| m.message.clone()));
+        messages.extend(self.messages.iter().map(|m| m.message.clone()));
         messages = messages
             .into_iter()
             .map(LlmMessage::provider_visible)
@@ -538,9 +551,9 @@ impl SessionReadModel {
     pub fn first_user_message(&self) -> Option<String> {
         self.messages
             .iter()
-            .find(|m| matches!(m.role, crate::llm::LlmRole::User))
+            .find(|m| matches!(m.message.role, crate::llm::LlmRole::User))
             .and_then(|m| {
-                m.content.iter().find_map(|c| match c {
+                m.message.content.iter().find_map(|c| match c {
                     crate::llm::LlmContent::Text { text } => Some(text.clone()),
                     _ => None,
                 })
@@ -723,8 +736,14 @@ mod tests {
         let mut model = SessionReadModel::empty("session-test".into());
         model.working_dir = "D:/work/project".into();
         model.model_id = "mock-model".into();
-        model.messages.push(LlmMessage::user("hello"));
-        model.context_messages.push(LlmMessage::system("system"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("hello"),
+            updated_seq: 1,
+        });
+        model.context_messages.push(SequencedLlmMessage {
+            message: LlmMessage::system("system"),
+            updated_seq: 1,
+        });
         model.latest_seq = Some(7);
 
         let encoded = serde_json::to_string(&model).unwrap();
@@ -743,46 +762,61 @@ mod tests {
     #[test]
     fn provider_messages_merges_consecutive_tool_call_assistant_messages() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look at these files"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look at these files"),
+            updated_seq: 1,
         });
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_2".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "b.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
         });
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_1".into(),
-                content: "file a".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_2".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "b.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 3,
         });
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_2".into(),
-                content: "file b".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    content: "file a".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 4,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_2".into(),
+                    content: "file b".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 5,
         });
 
         let messages = model.provider_messages();
@@ -803,29 +837,41 @@ mod tests {
     #[test]
     fn provider_messages_merges_reasoning_assistant_with_tool_calls() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look at this"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look at this"),
+            updated_seq: 1,
+        });
         let mut thinking = LlmMessage::assistant("checking");
         thinking.reasoning_content = Some("private reasoning".into());
-        model.messages.push(thinking);
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: thinking,
+            updated_seq: 2,
         });
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_1".into(),
-                content: "file content".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 3,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    content: "file content".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 4,
         });
 
         let messages = model.provider_messages();
@@ -852,15 +898,24 @@ mod tests {
     #[test]
     fn provider_messages_preserve_reasoning_content() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("hello"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("hello"),
+            updated_seq: 1,
+        });
 
         let mut reasoning_only = LlmMessage::assistant("");
         reasoning_only.reasoning_content = Some("private reasoning".into());
-        model.messages.push(reasoning_only);
+        model.messages.push(SequencedLlmMessage {
+            message: reasoning_only,
+            updated_seq: 2,
+        });
 
         let mut visible_answer = LlmMessage::assistant("answer");
         visible_answer.reasoning_content = Some("more reasoning".into());
-        model.messages.push(visible_answer);
+        model.messages.push(SequencedLlmMessage {
+            message: visible_answer,
+            updated_seq: 3,
+        });
 
         let messages = model.provider_messages();
 
@@ -883,16 +938,22 @@ mod tests {
     #[test]
     fn provider_messages_truncates_unanswered_tool_calls() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look at this"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look at this"),
+            updated_seq: 1,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
         });
         // no tool result for call_1
 
@@ -906,34 +967,43 @@ mod tests {
     #[test]
     fn provider_messages_truncates_partially_answered_tool_calls() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![
-                LlmContent::ToolCall {
-                    call_id: "call_1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "a.rs"}),
-                },
-                LlmContent::ToolCall {
-                    call_id: "call_2".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "b.rs"}),
-                },
-            ],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look"),
+            updated_seq: 1,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![
+                    LlmContent::ToolCall {
+                        call_id: "call_1".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "a.rs"}),
+                    },
+                    LlmContent::ToolCall {
+                        call_id: "call_2".into(),
+                        name: "read".into(),
+                        arguments: serde_json::json!({"path": "b.rs"}),
+                    },
+                ],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
         });
         // only call_1 has a result, call_2 is unanswered
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_1".into(),
-                content: "file a".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    content: "file a".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 3,
         });
 
         let messages = model.provider_messages();
@@ -946,19 +1016,26 @@ mod tests {
     #[test]
     fn provider_messages_truncates_orphan_tool_result() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look"));
-        model
-            .messages
-            .push(LlmMessage::assistant("previous complete answer"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_orphan".into(),
-                content: "orphan result".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look"),
+            updated_seq: 1,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("previous complete answer"),
+            updated_seq: 2,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_orphan".into(),
+                    content: "orphan result".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 3,
         });
 
         let messages = model.provider_messages();
@@ -971,20 +1048,27 @@ mod tests {
     #[test]
     fn provider_messages_truncates_non_tool_after_pending_tool_calls() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look"),
+            updated_seq: 1,
         });
-        model
-            .messages
-            .push(LlmMessage::assistant("late text after aborted tool call"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("late text after aborted tool call"),
+            updated_seq: 3,
+        });
 
         let messages = model.provider_messages();
 
@@ -995,28 +1079,40 @@ mod tests {
     #[test]
     fn provider_messages_keeps_fully_answered_tool_calls() {
         let mut model = SessionReadModel::empty("session-test".into());
-        model.messages.push(LlmMessage::user("look"));
-        model.messages.push(LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look"),
+            updated_seq: 1,
         });
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "call_1".into(),
-                content: "file a".into(),
-                is_error: false,
-            }],
-            name: Some("read".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
         });
-        model.messages.push(LlmMessage::assistant("done"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "call_1".into(),
+                    content: "file a".into(),
+                    is_error: false,
+                }],
+                name: Some("read".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 3,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("done"),
+            updated_seq: 4,
+        });
 
         let messages = model.provider_messages();
 

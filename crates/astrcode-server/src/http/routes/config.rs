@@ -1,7 +1,7 @@
 //! 配置查看 / 重载 / 激活选择路由。
 
 use astrcode_protocol::http::{
-    ConfigReloadResponseDto, ConfigViewResponseDto, ModelDto, ProfileDto,
+    ConfigReloadResponseDto, ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto,
     UpdateActiveSelectionRequest, UpdateActiveSelectionResponseDto,
 };
 use axum::{
@@ -29,7 +29,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
             name: p.name.clone(),
             provider_kind: p.provider_kind.clone(),
             base_url: p.base_url.clone(),
-            has_api_key: p.api_key.as_ref().is_some_and(|k| !k.is_empty()),
+            has_api_key: astrcode_core::config::profile_has_resolvable_api_key(p),
             models: p
                 .models
                 .iter()
@@ -37,6 +37,10 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                     id: m.id.clone(),
                     max_tokens: m.max_tokens,
                     context_limit: m.context_limit,
+                    model_options: m.model_options.as_ref().map(|o| ModelOptionsDto {
+                        reasoning: o.reasoning,
+                        thinking_level: o.thinking_level,
+                    }),
                 })
                 .collect(),
         })

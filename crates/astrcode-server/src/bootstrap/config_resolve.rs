@@ -86,6 +86,6 @@ fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
         supports_prompt_cache_key: false,
         prompt_cache_retention: None,
         reasoning: false,
-        reasoning_split: false,
+        thinking_level: None,
     }
 }

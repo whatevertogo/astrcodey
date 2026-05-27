@@ -81,8 +81,45 @@ impl ConfigStore for FileConfigStore {
                 return Ok(config);
             }
             let data = std::fs::read_to_string(&path)?;
-            let config: Config =
-                serde_json::from_str(&data).map_err(|e| friendly_deser_error(&e, &path))?;
+            let config: Config = match serde_json::from_str(&data) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Break-glass: when config schema changes in a non-backward-compatible way
+                    // (e.g. removing fields), old config.json may fail to deserialize.
+                    // The user explicitly asked for "覆盖一次": back up and overwrite with defaults.
+                    let msg = e.to_string();
+                    if msg.contains("unknown field") {
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let backup = path.with_file_name(format!(
+                            "config.json.bak-{}",
+                            ts
+                        ));
+                        let _ = std::fs::write(&backup, &data);
+
+                        let config = Config::default();
+                        if let Ok(json) = serde_json::to_string_pretty(&config) {
+                            let tmp = path.with_extension("json.tmp");
+                            if std::fs::write(&tmp, &json).is_ok() {
+                                let _ = std::fs::rename(&tmp, &path);
+                            }
+                        }
+                        tracing::warn!(
+                            path = %path.display(),
+                            backup = %backup.display(),
+                            "Config file failed to deserialize due to unknown fields; backed up and rewrote defaults"
+                        );
+                        return Ok(config);
+                    }
+
+                    return Err(friendly_deser_error(&e, &path));
+                }
+            };
             // Re-serialize to backfill any new fields added since the file was written.
             if let Ok(json) = serde_json::to_string_pretty(&config) {
                 let tmp = path.with_extension("json.tmp");

@@ -38,9 +38,9 @@ fn build_provider_from_settings(settings: &LlmSettings) -> Arc<dyn LlmProvider> 
         retry_base_delay_ms: settings.retry_base_delay_ms,
         reasoning: settings.reasoning,
         extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
-            reasoning_split: settings.reasoning_split,
             supports_prompt_cache_key: settings.supports_prompt_cache_key,
             prompt_cache_retention: settings.prompt_cache_retention,
+            thinking_level: settings.thinking_level,
         }),
         extra_headers: Default::default(),
     };

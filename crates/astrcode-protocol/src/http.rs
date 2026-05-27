@@ -477,6 +477,14 @@ pub struct ProfileDto {
     pub models: Vec<ModelDto>,
 }
 
+/// Profile 中的模型选项（与 config.json 的 `modelOptions` 对齐）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOptionsDto {
+    pub reasoning: Option<bool>,
+    pub thinking_level: Option<astrcode_core::llm::ThinkingLevel>,
+}
+
 /// Profile 中的模型信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -484,6 +492,8 @@ pub struct ModelDto {
     pub id: String,
     pub max_tokens: Option<u32>,
     pub context_limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_options: Option<ModelOptionsDto>,
 }
 
 /// POST /api/config/active-selection 请求。

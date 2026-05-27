@@ -44,7 +44,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         small_llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -61,7 +61,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
@@ -311,8 +311,8 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
     let messages = session.read_model().await.unwrap().messages;
     assert!(
         messages.iter().any(|message| {
-            message.role == LlmRole::Assistant
-                && message.content.iter().any(|content| {
+            message.message.role == LlmRole::Assistant
+                && message.message.content.iter().any(|content| {
                     matches!(
                         content,
                         LlmContent::ToolCall { call_id, .. } if call_id == "call-delay"
@@ -353,8 +353,8 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
     let model = session.read_model().await.unwrap();
     assert!(
         model.messages.iter().any(|message| {
-            message.role == LlmRole::User
-                && message.content.iter().any(|content| {
+            message.message.role == LlmRole::User
+                && message.message.content.iter().any(|content| {
                     matches!(
                         content,
                         LlmContent::Text { text } if text == "mid-turn inject"

@@ -7,7 +7,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     storage::{
         AgentSessionLinkView, AgentSessionStatus, BackgroundToolCallView, CompactBoundaryView,
-        SessionReadModel,
+        SequencedLlmMessage, SessionReadModel,
     },
     types::SessionId,
 };
@@ -24,8 +24,12 @@ pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
 /// 将单个持久事件归约到读模型。
 pub fn reduce(event: &Event, model: &mut SessionReadModel) {
     // seq=None 的非持久/异常事件不推进 durable cursor。
-    model.latest_seq = event.seq.or(model.latest_seq);
+    // durable seq 必须单调递增：即使 reducer 被重复调用或遇到乱序输入，也不得回退。
+    if let Some(seq) = event.seq {
+        model.latest_seq = Some(model.latest_seq.map_or(seq, |current| current.max(seq)));
+    }
     model.updated_at = event.timestamp.to_rfc3339();
+    let event_seq = event.seq.unwrap_or_default();
 
     match &event.payload {
         EventPayload::SessionStarted {
@@ -53,10 +57,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.messages.clear();
             model.context_messages.clear();
             model.system_prompt = None;
+            model.extra_system_prompt = None;
+            model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
             model.background_tool_calls.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
+            model.extension_events = Default::default();
         },
         EventPayload::AgentSessionSpawned {
             child_session_id,
@@ -129,7 +136,10 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
             model.phase = Phase::Thinking;
             if let EventPayload::UserMessage { text, .. } = &event.payload {
-                model.messages.push(LlmMessage::user(text));
+                model.messages.push(SequencedLlmMessage {
+                    message: LlmMessage::user(text),
+                    updated_seq: event_seq,
+                });
             }
         },
         EventPayload::TurnCompleted { .. } => {
@@ -146,7 +156,10 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         } => {
             let mut msg = LlmMessage::assistant(text);
             msg.reasoning_content = reasoning_content.clone();
-            model.messages.push(msg);
+            model.messages.push(SequencedLlmMessage {
+                message: msg,
+                updated_seq: event_seq,
+            });
             model.phase = Phase::Thinking;
         },
         EventPayload::ToolCallRequested {
@@ -164,22 +177,29 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             // DeepSeek thinking mode requires reasoning_content and tool_calls to
             // be replayed on the same assistant message after tool use.
             if let Some(last) = model.messages.last_mut() {
-                if last.role == LlmRole::Assistant {
-                    last.content.push(tool_call);
+                if last.message.role == LlmRole::Assistant {
+                    last.message.content.push(tool_call);
+                    last.updated_seq = event_seq;
                 } else {
-                    model.messages.push(LlmMessage {
+                    model.messages.push(SequencedLlmMessage {
+                        message: LlmMessage {
+                            role: LlmRole::Assistant,
+                            content: vec![tool_call],
+                            name: None,
+                            reasoning_content: None,
+                        },
+                        updated_seq: event_seq,
+                    });
+                }
+            } else {
+                model.messages.push(SequencedLlmMessage {
+                    message: LlmMessage {
                         role: LlmRole::Assistant,
                         content: vec![tool_call],
                         name: None,
                         reasoning_content: None,
-                    });
-                }
-            } else {
-                model.messages.push(LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: vec![tool_call],
-                    name: None,
-                    reasoning_content: None,
+                    },
+                    updated_seq: event_seq,
                 });
             }
             model.phase = Phase::CallingTool;
@@ -208,15 +228,18 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     },
                 );
             }
-            model.messages.push(LlmMessage {
-                role: LlmRole::Tool,
-                content: vec![LlmContent::ToolResult {
-                    tool_call_id: call_id.to_string(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                }],
-                name: Some(tool_name.clone()),
-                reasoning_content: None,
+            model.messages.push(SequencedLlmMessage {
+                message: LlmMessage {
+                    role: LlmRole::Tool,
+                    content: vec![LlmContent::ToolResult {
+                        tool_call_id: call_id.to_string(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                    }],
+                    name: Some(tool_name.clone()),
+                    reasoning_content: None,
+                },
+                updated_seq: event_seq,
             });
             model.phase = if model.pending_tool_calls.is_empty() {
                 Phase::Thinking
@@ -251,12 +274,36 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             }
         },
         EventPayload::SessionContinuedFromCompaction {
+            parent_cursor,
             context_messages,
             retained_messages,
             ..
         } => {
-            model.context_messages = context_messages.clone();
-            model.messages = retained_messages.clone();
+            let base_event_seq = parent_cursor.parse::<u64>().unwrap_or(0);
+            let tail_messages: Vec<SequencedLlmMessage> = model
+                .messages
+                .iter()
+                .filter(|m| m.updated_seq > base_event_seq)
+                .cloned()
+                .collect();
+            model.context_messages = context_messages
+                .iter()
+                .cloned()
+                .map(|message| SequencedLlmMessage {
+                    message,
+                    updated_seq: event_seq,
+                })
+                .collect();
+            let mut messages: Vec<SequencedLlmMessage> = retained_messages
+                .iter()
+                .cloned()
+                .map(|message| SequencedLlmMessage {
+                    message,
+                    updated_seq: event_seq,
+                })
+                .collect();
+            messages.extend(tail_messages);
+            model.messages = messages;
             // 不改变 phase，保留之前的状态。
             // auto compact 在 turn 期间发生，phase 应保持 Thinking/Streaming。
             // 手动 compact 时 phase 已经是 Idle（由 CompactBoundaryCreated 设置）。
@@ -266,8 +313,22 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             retained_messages,
             ..
         } => {
-            model.context_messages = context_messages.clone();
-            model.messages = retained_messages.clone();
+            model.context_messages = context_messages
+                .iter()
+                .cloned()
+                .map(|message| SequencedLlmMessage {
+                    message,
+                    updated_seq: event_seq,
+                })
+                .collect();
+            model.messages = retained_messages
+                .iter()
+                .cloned()
+                .map(|message| SequencedLlmMessage {
+                    message,
+                    updated_seq: event_seq,
+                })
+                .collect();
             model.phase = Phase::Idle;
         },
         EventPayload::ErrorOccurred { .. } => {
@@ -388,7 +449,10 @@ mod tests {
 
         let full = replay(session_id.clone(), &events);
         assert_eq!(
-            full.messages,
+            full.messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
             vec![
                 LlmMessage::user("old user"),
                 LlmMessage::assistant("old assistant"),
@@ -430,8 +494,22 @@ mod tests {
         ]);
 
         let compacted = replay(session_id.clone(), &events);
-        assert_eq!(compacted.context_messages, context_messages);
-        assert_eq!(compacted.messages, retained_messages);
+        assert_eq!(
+            compacted
+                .context_messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
+            context_messages
+        );
+        assert_eq!(
+            compacted
+                .messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
+            retained_messages
+        );
         assert_eq!(compacted.compact_boundaries[0].base_event_seq, 4);
 
         events.push(event(
@@ -445,7 +523,11 @@ mod tests {
 
         let continued = replay(session_id, &events);
         assert_eq!(
-            continued.messages,
+            continued
+                .messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
             vec![
                 LlmMessage::user("recent user"),
                 LlmMessage::user("after compact"),

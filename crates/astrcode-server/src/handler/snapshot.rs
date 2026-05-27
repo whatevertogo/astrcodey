@@ -10,7 +10,11 @@ pub(crate) fn session_snapshot(
     SessionSnapshot {
         session_id: state.session_id.to_string(),
         cursor: state.cursor(),
-        messages: state.messages.iter().map(message_to_dto).collect(),
+        messages: state
+            .messages
+            .iter()
+            .map(|m| message_to_dto(&m.message))
+            .collect(),
         model_id: state.model_id.clone(),
         working_dir: state.working_dir.clone(),
         agent_sessions: state

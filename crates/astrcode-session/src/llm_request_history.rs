@@ -16,8 +16,8 @@ pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<Ll
             .len()
             .saturating_add(model.messages.len()),
     );
-    messages.extend(model.context_messages.clone());
-    messages.extend(model.messages.clone());
+    messages.extend(model.context_messages.iter().map(|m| m.message.clone()));
+    messages.extend(model.messages.iter().map(|m| m.message.clone()));
     messages.retain(|message| message.role != LlmRole::System);
     messages
 }
@@ -52,7 +52,7 @@ pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usi
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole},
-        storage::SessionReadModel,
+        storage::{SequencedLlmMessage, SessionReadModel},
         types::new_session_id,
     };
 
@@ -60,11 +60,18 @@ mod tests {
 
     fn sample_model() -> SessionReadModel {
         let mut model = SessionReadModel::empty(new_session_id());
-        model.messages.push(LlmMessage::user("hello"));
-        model
-            .messages
-            .push(LlmMessage::system("stale system in store"));
-        model.context_messages.push(LlmMessage::assistant("ctx"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("hello"),
+            updated_seq: 1,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::system("stale system in store"),
+            updated_seq: 2,
+        });
+        model.context_messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("ctx"),
+            updated_seq: 3,
+        });
         model
     }
 
@@ -106,17 +113,23 @@ mod tests {
     #[test]
     fn committed_tool_result_content_len_sums_tool_messages() {
         let mut model = SessionReadModel::empty(new_session_id());
-        model.messages.push(LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: "c1".into(),
-                content: "abcdef".into(),
-                is_error: false,
-            }],
-            name: Some("tool".into()),
-            reasoning_content: None,
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Tool,
+                content: vec![LlmContent::ToolResult {
+                    tool_call_id: "c1".into(),
+                    content: "abcdef".into(),
+                    is_error: false,
+                }],
+                name: Some("tool".into()),
+                reasoning_content: None,
+            },
+            updated_seq: 1,
         });
-        model.messages.push(LlmMessage::user("hi"));
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("hi"),
+            updated_seq: 2,
+        });
         assert_eq!(committed_tool_result_content_len(&model), 6);
     }
 }

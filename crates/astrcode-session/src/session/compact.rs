@@ -29,7 +29,10 @@ impl Session {
         base_event_seq: u64,
         strategy: astrcode_core::extension::CompactStrategy,
     ) -> Result<Vec<Event>, super::SessionError> {
-        let cursor = self.latest_cursor().await?.unwrap_or_else(|| "0".into());
+        // compact 语义：冻结 base_event_seq 之前的历史前缀。
+        // 即使 compact 计算期间有新事件写入，也必须以 base_event_seq 作为边界标记，
+        // 后续 replay 会将这些新事件归类为 tail delta 追加，不覆盖它们。
+        let cursor = base_event_seq.to_string();
         let extra_system_prompt = normalize_extra_system_prompt(extra_system_prompt.as_deref());
         let mut events = Vec::with_capacity(3);
         events.push(

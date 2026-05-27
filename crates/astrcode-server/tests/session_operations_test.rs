@@ -76,7 +76,7 @@ fn build_test_ops(
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         small_llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -93,7 +93,7 @@ fn build_test_ops(
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         context: Default::default(),
         agent: Default::default(),
@@ -260,7 +260,12 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
 
     // notify_parent_on_complete 消息应存在
     let has_notify = parent_model.messages.iter().any(|m| {
-        m.content.iter().any(|c| matches!(c, astrcode_core::llm::LlmContent::Text { text } if text.contains("[done]")))
+        m.message.content.iter().any(|c| {
+            matches!(
+                c,
+                astrcode_core::llm::LlmContent::Text { text } if text.contains("[done]")
+            )
+        })
     });
     assert!(
         has_notify,

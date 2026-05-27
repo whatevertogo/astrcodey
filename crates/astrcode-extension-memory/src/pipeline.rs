@@ -203,12 +203,13 @@ fn extract_conversation(model: &SessionReadModel) -> String {
         .messages
         .iter()
         .filter_map(|msg| {
-            let role = match msg.role {
+            let role = match msg.message.role {
                 astrcode_extension_sdk::llm::LlmRole::User => "User",
                 astrcode_extension_sdk::llm::LlmRole::Assistant => "Assistant",
                 _ => return None,
             };
             let text: String = msg
+                .message
                 .content
                 .iter()
                 .filter_map(|c| match c {

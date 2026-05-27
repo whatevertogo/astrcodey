@@ -27,7 +27,7 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{
     Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState,
-    compact::{PersistCompactError, persist_compact_result},
+    compact::persist_compact_result,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
 use astrcode_support::hash::hex_fingerprint;
@@ -81,7 +81,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         small_llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -98,7 +98,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
             supports_prompt_cache_key: false,
             prompt_cache_retention: None,
             reasoning: false,
-            reasoning_split: false,
+            thinking_level: None,
         },
         context,
         agent: AgentSettings::default(),
@@ -293,7 +293,7 @@ impl LlmProvider for RaceOnCompactLlm {
 }
 
 #[tokio::test]
-async fn persist_compact_result_rejects_stale_cursor() {
+async fn persist_compact_result_accepts_new_tail_events() {
     let (session, store) = spawn_session(Arc::new(StaticOkLlm), ContextSettings::default()).await;
     configure_system_prompt(&session).await;
     seed_history(&session, 2).await;
@@ -316,7 +316,8 @@ async fn persist_compact_result_rejects_stale_cursor() {
         .await
         .unwrap();
 
-    let error = persist_compact_result(
+    // Even if new events arrive after `base_event_seq` was observed, persist should succeed.
+    let persisted = persist_compact_result(
         &session,
         &sample_compaction(),
         "auto_threshold",
@@ -326,28 +327,31 @@ async fn persist_compact_result_rejects_stale_cursor() {
         stale_seq,
         CompactStrategy::Auto,
     )
-    .await;
-
-    assert!(
-        matches!(error, Err(PersistCompactError::Conflict(_))),
-        "expected CAS conflict"
-    );
+    .await
+    .expect("persist should tolerate new tail events");
+    assert_eq!(persisted.base_event_seq, stale_seq);
     assert_eq!(
         compact_boundary_event_count(store.as_ref(), session.id()).await,
-        0,
-        "stale persist must not append compact boundary events"
+        1,
+        "persist should append compact boundary events once"
     );
     let provider_messages = session.read_model().await.unwrap().provider_messages();
     assert!(
         provider_messages
             .iter()
-            .any(|m| m.joined_display_text("\n").contains("old user 0")),
-        "history remains intact after conflict"
+            .any(|m| m.joined_display_text("\n").contains("kept tail")),
+        "retained messages should be queryable after persist"
+    );
+    assert!(
+        provider_messages
+            .iter()
+            .any(|m| m.joined_display_text("\n").contains("race event")),
+        "tail delta events must be preserved after compaction"
     );
 }
 
 #[tokio::test]
-async fn auto_compact_persist_conflict_keeps_ssot_and_provider_history() {
+async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
     let main_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let llm = Arc::new(RaceOnCompactLlm {
@@ -387,14 +391,14 @@ async fn auto_compact_persist_conflict_keeps_ssot_and_provider_history() {
         .pop()
         .expect("main provider request should be captured");
     assert!(
-        !main_messages.iter().any(is_compact_summary_message),
-        "provider request must not use in-memory compact summary when persist failed"
+        main_messages.iter().any(is_compact_summary_message),
+        "provider request should use compact summary"
     );
     assert!(
-        main_messages
+        !main_messages
             .iter()
             .any(|m| m.joined_display_text("\n").contains("old user 0")),
-        "provider request should retain pre-compact history"
+        "provider request should not contain compacted-away history"
     );
     assert!(
         main_messages
@@ -405,21 +409,26 @@ async fn auto_compact_persist_conflict_keeps_ssot_and_provider_history() {
 
     assert_eq!(
         compact_boundary_event_count(store.as_ref(), session.id()).await,
-        0,
-        "persist conflict must not append compact boundary events"
+        1,
+        "persist should append compact boundary events"
     );
     let model = session.read_model().await.unwrap();
     let provider_messages = model.provider_messages();
     assert!(
-        !provider_messages.iter().any(is_compact_summary_message),
-        "projection must not expose compact summary after persist conflict"
+        provider_messages.iter().any(is_compact_summary_message),
+        "projection should expose compact summary after persist"
+    );
+    assert!(
+        provider_messages.iter().any(|m| m
+            .joined_display_text("\n")
+            .contains("concurrent race during compact")),
+        "projection must preserve tail delta user message that arrived during compact"
     );
     assert!(
         provider_messages
             .iter()
-            .filter(|m| m.role == LlmRole::User)
-            .any(|m| m.joined_display_text("\n").contains("old user 2")),
-        "seeded history should remain in projection"
+            .any(|m| m.joined_display_text("\n").contains("current turn")),
+        "active user turn should be in projection"
     );
     assert!(
         provider_messages
@@ -506,13 +515,21 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, IdleCompactionOutcome::Skipped { .. }),
-        "idle compact should skip persist on cursor race, got {outcome:?}"
+        matches!(outcome, IdleCompactionOutcome::Compacted { .. }),
+        "idle compact should persist even when cursor races, got {outcome:?}"
     );
     assert_eq!(
         compact_boundary_event_count(store.as_ref(), session.as_ref().id()).await,
-        0,
-        "no compact boundary should be written after conflict"
+        1,
+        "compact boundary should be written after persist"
+    );
+    let model = session.read_model().await.unwrap();
+    let provider_messages = model.provider_messages();
+    assert!(
+        provider_messages.iter().any(|m| m
+            .joined_display_text("\n")
+            .contains("race during idle compact")),
+        "projection must preserve tail delta user message that arrived during compact"
     );
 }
 

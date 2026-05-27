@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::llm::PromptCacheRetention;
+use crate::llm::{PromptCacheRetention, ThinkingLevel};
 
 /// 扩展配置的原始 JSON 值类型。
 /// 用户可在 `config.json` 的 `extensions.<id>` 下写入任意 JSON，
@@ -125,12 +125,19 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// 上下文窗口大小限制（token 数）。
     pub context_limit: Option<usize>,
-    /// 是否启用推理模式（如 DeepSeek reasoner）。启用后会正确回传 reasoning_content。
+    /// 统一模型选项（推荐）：集中承载模型能力参数。
     #[serde(default)]
+    pub model_options: Option<ModelOptionsConfig>,
+}
+
+/// 模型能力选项（按模型粒度）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelOptionsConfig {
+    /// 是否启用推理模式（如 DeepSeek reasoner）。
     pub reasoning: Option<bool>,
-    /// 是否请求 provider 分离 reasoning/thinking 到独立字段（如 MiniMax reasoning_split）。
-    #[serde(default)]
-    pub reasoning_split: Option<bool>,
+    /// 推理强度级别（如 OpenAI Responses reasoning.effort）。
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 // ─── Runtime Section (placeholder for future use) ────────────────────────
@@ -264,15 +271,19 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "deepseek-v4-pro".into(),
                     max_tokens: Some(393216),
                     context_limit: Some(1000000),
-                    reasoning: Some(true),
-                    reasoning_split: None,
+                    model_options: Some(ModelOptionsConfig {
+                        reasoning: Some(true),
+                        thinking_level: None,
+                    }),
                 },
                 ModelConfig {
                     id: "deepseek-v4-flash".into(),
                     max_tokens: Some(393216),
                     context_limit: Some(1000000),
-                    reasoning: Some(true),
-                    reasoning_split: None,
+                    model_options: Some(ModelOptionsConfig {
+                        reasoning: Some(true),
+                        thinking_level: None,
+                    }),
                 },
             ],
         },
@@ -291,8 +302,7 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                 id: "gpt-4.1".into(),
                 max_tokens: Some(16384),
                 context_limit: Some(128000),
-                reasoning: None,
-                reasoning_split: None,
+                model_options: None,
             }],
         },
         Profile {
@@ -307,15 +317,13 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "claude-sonnet-4-6".into(),
                     max_tokens: Some(64000),
                     context_limit: Some(1000000),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 },
                 ModelConfig {
                     id: "claude-opus-4-7".into(),
                     max_tokens: Some(128000),
                     context_limit: Some(1000000),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 },
             ],
         },
@@ -331,15 +339,13 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
                     id: "gemini-2.5-pro".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(1_048_576),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 },
                 ModelConfig {
                     id: "gemini-2.5-flash".into(),
                     max_tokens: Some(16384),
                     context_limit: Some(1_048_576),
-                    reasoning: None,
-                    reasoning_split: None,
+                    model_options: None,
                 },
             ],
         },

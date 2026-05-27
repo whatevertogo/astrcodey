@@ -141,11 +141,6 @@ pub async fn compact_idle_session(
     .await
     {
         Ok(persisted) => persisted,
-        Err(PersistCompactError::Conflict(_)) => {
-            return Ok(IdleCompactionOutcome::Skipped {
-                message: "Compaction skipped: session changed during compact".into(),
-            });
-        },
         Err(error) => return Err(error.into()),
     };
 

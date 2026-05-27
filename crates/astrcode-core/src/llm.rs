@@ -293,15 +293,35 @@ impl PromptCacheRetention {
     }
 }
 
-/// OpenAI 兼容 API 的 provider 特有选项（MiniMax reasoning_split、prompt cache 等）。
+/// 推理强度级别（跨模型选项的标准化抽象）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingLevel {
+    /// 返回 OpenAI Responses `reasoning.effort` 的 wire 值。
+    pub fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// OpenAI 兼容 API 的 provider 特有选项（prompt cache、thinking level 等）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpenAiProviderExtras {
-    /// 是否请求 provider 分离 reasoning/thinking 到独立字段（如 MiniMax reasoning_split）。
-    pub reasoning_split: bool,
     /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
     pub supports_prompt_cache_key: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<PromptCacheRetention>,
+    /// 可选的推理强度（用于 OpenAI Responses `reasoning.effort`）。
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 /// Provider 特有配置；通用字段留在 [`LlmClientConfig`]。
@@ -344,10 +364,6 @@ impl LlmClientConfig {
         }
     }
 
-    pub fn reasoning_split(&self) -> bool {
-        self.openai_extras().is_some_and(|e| e.reasoning_split)
-    }
-
     pub fn supports_prompt_cache_key(&self) -> bool {
         self.openai_extras()
             .is_some_and(|e| e.supports_prompt_cache_key)
@@ -355,6 +371,10 @@ impl LlmClientConfig {
 
     pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
         self.openai_extras().and_then(|e| e.prompt_cache_retention)
+    }
+
+    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
+        self.openai_extras().and_then(|e| e.thinking_level)
     }
 }
 

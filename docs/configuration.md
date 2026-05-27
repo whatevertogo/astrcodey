@@ -34,13 +34,16 @@ null in runtime is default
       "name": "openai",
       "providerKind": "openai",
       "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "OPENAI_API_KEY",
+      "apiKey": "env:OPENAI_API_KEY",
       "models": [
         {
           "id": "gpt-4o",
           "maxTokens": 128000,
           "contextLimit": 128000,
-          "reasoning": false
+          "modelOptions": {
+            "reasoning": false,
+            "thinkingLevel": "medium"
+          }
         }
       ],
       "apiMode": "chat_completions"
@@ -72,7 +75,7 @@ Each profile in `profiles` array represents an LLM provider configuration:
 | `name` | string | Profile identifier (referenced by `activeProfile`) |
 | `providerKind` | string | Provider type: `openai`, `anthropic`, `google` |
 | `baseUrl` | string | API endpoint URL. For Anthropic profiles, `/v1/messages` is auto-appended if the URL does not already include a version segment (e.g., `/v1`). So both `https://api.anthropic.com/v1` and `https://api.anthropic.com` work. |
-| `apiKey` | string | API key or environment variable reference (e.g., `${OPENAI_API_KEY}`) |
+| `apiKey` | string | API key resolver expression. Supported formats: `"env:VAR_NAME"`, `"!command"`, or a literal key string |
 | `models` | array | Available models for this profile |
 | `apiMode` | string | API mode: `chat_completions` or `responses` (only for `openai` providerKind) |
 
@@ -85,8 +88,14 @@ Each model in `models` array:
 | `id` | string | Model identifier |
 | `maxTokens` | number | Maximum output tokens |
 | `contextLimit` | number | Context window size |
-| `reasoning` | boolean | Whether the model supports extended reasoning |
-| `reasoningSplit` | boolean | Request separated reasoning/thinking fields |
+| `modelOptions` | object | Model capability options (see below) |
+
+### Model Options (`modelOptions`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reasoning` | boolean (optional) | Enable reasoning mode (provider-dependent) |
+| `thinkingLevel` | `"low" \| "medium" \| "high"` (optional) | Reasoning effort level (currently wired to OpenAI Responses `reasoning.effort`) |
 
 ### Runtime Fields
 
@@ -113,7 +122,13 @@ Each model in `models` array:
 
 ## Environment Variables
 
-API keys can be referenced using `${VARIABLE_NAME}` syntax in the `apiKey` field. The system will resolve these from the environment at runtime.
+API keys can be referenced using `"env:VARIABLE_NAME"` in the `apiKey` field. The system will resolve these from the environment at runtime.
+
+You can also use `"!command"` to run a command and use stdout as the key, for example:
+
+```json
+{ "apiKey": "!security find-generic-password -ws 'openai'" }
+```
 
 Supported environment variables:
 - `OPENAI_API_KEY` - OpenAI API key

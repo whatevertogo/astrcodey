@@ -55,8 +55,8 @@ pub struct LlmSettings {
     pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
     /// 是否启用推理模式（如 DeepSeek reasoner）。
     pub reasoning: bool,
-    /// 是否请求 provider 分离 reasoning/thinking 到独立字段。
-    pub reasoning_split: bool,
+    /// 推理强度级别（provider 支持时生效）。
+    pub thinking_level: Option<crate::llm::ThinkingLevel>,
 }
 
 // ─── Context Settings ────────────────────────────────────────────────────

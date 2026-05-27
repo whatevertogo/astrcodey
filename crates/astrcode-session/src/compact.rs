@@ -131,27 +131,19 @@ pub struct PersistedCompaction {
     pub messages_removed: usize,
 }
 
-/// compare-and-append 冲突：compact LLM 调用期间有新事件写入。
-#[derive(Debug, thiserror::Error)]
-#[error("compaction conflict: expected seq {expected}, actual {actual}")]
-pub struct CompactionConflict {
-    pub expected: u64,
-    pub actual: u64,
-}
-
 /// persist_compact_result 的错误类型。
 #[derive(Debug, thiserror::Error)]
 pub enum PersistCompactError {
     #[error("{0}")]
-    Conflict(#[from] CompactionConflict),
-    #[error("{0}")]
     Session(#[from] SessionError),
 }
 
-/// 纯持久化：校验 expected seq → append compact boundary events。
+/// 纯持久化：append compact boundary events。
 ///
 /// 不发 live event。`base_event_seq` 由调用方在 prepare 阶段产生并传入。
-/// 若当前 cursor 与 `base_event_seq` 不一致则返回 conflict（调用方可选择放弃持久化）。
+///
+/// 注意：允许 compact LLM 调用期间有新事件写入。
+/// replay 时会按 `base_event_seq` 将这些事件归类为 tail delta，保证不会被 compact 覆盖。
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_compact_result(
     session: &Session,
@@ -163,19 +155,6 @@ pub async fn persist_compact_result(
     base_event_seq: u64,
     strategy: CompactStrategy,
 ) -> Result<PersistedCompaction, PersistCompactError> {
-    // compare-and-append: 校验当前 cursor 与预期一致
-    let current_seq = session
-        .latest_cursor()
-        .await?
-        .and_then(|c| c.parse::<u64>().ok())
-        .unwrap_or(0);
-    if current_seq != base_event_seq {
-        return Err(PersistCompactError::Conflict(CompactionConflict {
-            expected: base_event_seq,
-            actual: current_seq,
-        }));
-    }
-
     let events = session
         .append_compact_boundary(
             system_prompt.to_owned(),

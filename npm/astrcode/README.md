@@ -24,7 +24,7 @@ astrcode
 
 ## 功能特性
 
-- 🤖 **AI 驱动**：支持多种 LLM 提供商（Anthropic、OpenAI、Google）
+- 🤖 **AI 驱动**：支持多 Provider（Anthropic、OpenAI 兼容、Google GenAI）
 - 📝 **智能编辑**：read、write、edit、patch 等结构化工具
 - 🔍 **代码搜索**：find、grep 快速定位代码
 - 🖥️ **多种前端**：TUI、Web、Desktop GUI
@@ -33,9 +33,9 @@ astrcode
 
 ## 更多信息
 
-- GitHub: https://github.com/whatevertogo/astrcodey
-- 文档: https://github.com/whatevertogo/astrcodey/blob/main/docs/AstrCode-Design.md
+- GitHub: https://github.com/whatevertogo/astrcode
+- 文档: https://github.com/whatevertogo/astrcode/tree/main/docs
 
 ## License
 
-MIT
+AGPL-3.0

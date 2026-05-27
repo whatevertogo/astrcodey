@@ -63,7 +63,7 @@ pub struct StandardAccumulator {
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
     done_sent: bool,
     cache_usage_reported: bool,
-    /// MiniMax reasoning_split 模式下累计的 reasoning 文本，用于 diff 提取增量。
+    /// 累计的 reasoning 文本，用于 diff 提取增量。
     reasoning_accumulated: String,
 }
 
@@ -212,7 +212,7 @@ impl ChatAccumulator for StandardAccumulator {
                             delta: reasoning.to_string(),
                         });
                     }
-                    // MiniMax reasoning_split: reasoning_details[].text is cumulative
+                    // Some providers emit cumulative reasoning_details[].text.
                     if let Some(details) = delta.get("reasoning_details").and_then(|v| v.as_array())
                     {
                         let latest = details
@@ -487,10 +487,6 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             body["tool_choice"] = serde_json::json!("auto");
         }
         self.apply_prompt_cache_fields(&mut body, messages, tools);
-        if self.config.reasoning_split() {
-            body["reasoning_split"] = serde_json::json!(true);
-        }
-
         body
     }
 
@@ -527,6 +523,11 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         if !tools.is_empty() {
             body["parallel_tool_calls"] = serde_json::json!(true);
             body["tools"] = responses_tools_json(tools);
+        }
+        if let Some(level) = self.config.thinking_level() {
+            body["reasoning"] = serde_json::json!({
+                "effort": level.as_wire_value()
+            });
         }
         self.apply_prompt_cache_fields(&mut body, messages, tools);
 
@@ -952,7 +953,11 @@ mod tests {
         events
     }
 
-    fn provider(api_mode: OpenAiApiMode, supports_cache_key: bool) -> StandardProvider {
+    fn provider(
+        api_mode: OpenAiApiMode,
+        supports_cache_key: bool,
+        thinking_level: Option<ThinkingLevel>,
+    ) -> StandardProvider {
         use astrcode_core::llm::{OpenAiProviderExtras, ProviderExtras};
         let config = LlmClientConfig {
             base_url: "https://api.test/v1".into(),
@@ -961,7 +966,7 @@ mod tests {
                 supports_prompt_cache_key: supports_cache_key,
                 prompt_cache_retention: supports_cache_key
                     .then_some(PromptCacheRetention::TwentyFourHours),
-                ..OpenAiProviderExtras::default()
+                thinking_level,
             }),
             ..LlmClientConfig::default()
         };
@@ -984,7 +989,7 @@ mod tests {
 
     #[test]
     fn chat_request_includes_prompt_cache_key() {
-        let p = provider(OpenAiApiMode::ChatCompletions, true);
+        let p = provider(OpenAiApiMode::ChatCompletions, true, None);
         let body = p.build_request_body(
             &[LlmMessage::system("s"), LlmMessage::user("hi")],
             &[sample_tool()],
@@ -999,14 +1004,14 @@ mod tests {
 
     #[test]
     fn request_omits_prompt_cache_fields_when_unsupported() {
-        let p = provider(OpenAiApiMode::ChatCompletions, false);
+        let p = provider(OpenAiApiMode::ChatCompletions, false, None);
         let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
         assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[test]
     fn cache_key_identical_for_same_system() {
-        let p = provider(OpenAiApiMode::Responses, true);
+        let p = provider(OpenAiApiMode::Responses, true, None);
         let t = vec![sample_tool()];
         let a = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("a")], &t);
         let b = p.build_request_body(
@@ -1022,7 +1027,7 @@ mod tests {
 
     #[test]
     fn cache_key_differs_when_tools_differ() {
-        let p = provider(OpenAiApiMode::Responses, true);
+        let p = provider(OpenAiApiMode::Responses, true, None);
         let messages = [LlmMessage::system("s"), LlmMessage::user("hi")];
         let mut other = sample_tool();
         other.name = "other".into();
@@ -1030,6 +1035,13 @@ mod tests {
         let a = p.build_request_body(&messages, &[sample_tool()]);
         let b = p.build_request_body(&messages, &[other]);
         assert_ne!(a["prompt_cache_key"], b["prompt_cache_key"]);
+    }
+
+    #[test]
+    fn responses_request_includes_reasoning_effort_when_thinking_level_set() {
+        let p = provider(OpenAiApiMode::Responses, false, Some(ThinkingLevel::High));
+        let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
+        assert_eq!(body["reasoning"]["effort"], "high");
     }
 
     #[test]
