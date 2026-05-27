@@ -1340,7 +1340,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     assert_eq!(state.phase, Phase::Idle);
     assert!(state.pending_tool_calls.is_empty());
     assert!(state.messages.iter().any(|message| {
-        message.content.iter().any(|content| {
+        message.message.content.iter().any(|content| {
             matches!(
                 content,
                 LlmContent::ToolResult {
@@ -1453,7 +1453,7 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
             .completed
     );
     assert!(state.messages.iter().any(|message| {
-        message.content.iter().any(|content| {
+        message.message.content.iter().any(|content| {
             matches!(
                 content,
                 LlmContent::ToolResult {
@@ -1899,7 +1899,7 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
             .contains("<compact_summary>")
     }));
     assert!(state.messages.iter().all(|message| {
-        !message_to_dto(message)
+        !message_to_dto(&message.message)
             .content
             .contains("<compact_summary>")
     }));
@@ -1941,7 +1941,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         state
             .messages
             .iter()
-            .all(|message| message_to_dto(message).content != "/compact")
+            .all(|message| message_to_dto(&message.message).content != "/compact")
     );
 
     let following = handler
@@ -2034,9 +2034,12 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
         .await
         .unwrap();
     assert!(
-        state.messages.iter().any(|message| message_to_dto(message)
-            .content
-            .contains("<skill-name>reviewnow</skill-name>")),
+        state
+            .messages
+            .iter()
+            .any(|message| message_to_dto(&message.message)
+                .content
+                .contains("<skill-name>reviewnow</skill-name>")),
         "transcript should contain resolved skill content"
     );
     let _ = fs::remove_dir_all(workspace);
@@ -2125,7 +2128,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
             .session_read_model(&session_id)
             .await
             .unwrap();
-        message_to_dto(&state.context_messages[0]).content
+        message_to_dto(&state.context_messages[0].message).content
     };
 
     handler
@@ -2149,7 +2152,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    let second_summary = message_to_dto(&state.context_messages[0]).content;
+    let second_summary = message_to_dto(&state.context_messages[0].message).content;
     assert!(
         second_summary.contains("Compacted conversation summary"),
         "second compact should preserve a provider summary"
@@ -2403,7 +2406,7 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
     let visible = state
         .messages
         .iter()
-        .map(|message| message_to_dto(message).content)
+        .map(|message| message_to_dto(&message.message).content)
         .collect::<Vec<_>>()
         .join("\n");
 

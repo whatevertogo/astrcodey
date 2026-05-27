@@ -10,7 +10,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// 保留的最大快照数量。创建新快照后自动清理超出数量的旧快照。
 const MAX_SNAPSHOTS: usize = 4;
@@ -22,10 +22,14 @@ const MAX_SNAPSHOTS: usize = 4;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SessionProjectionSnapshot {
     pub(crate) version: u32,
-    pub(crate) cursor: String,
-    pub(crate) latest_seq: Option<u64>,
     pub(crate) created_at: String,
     pub(crate) model: SessionReadModel,
+}
+
+impl SessionProjectionSnapshot {
+    pub(crate) fn model(&self) -> &SessionReadModel {
+        &self.model
+    }
 }
 
 /// 快照管理器，负责创建和列出会话恢复点。
@@ -56,8 +60,6 @@ impl SnapshotManager {
             .join(format!(".snapshot-{}-{}.tmp", cursor, Uuid::new_v4()));
         let snapshot = SessionProjectionSnapshot {
             version: SNAPSHOT_VERSION,
-            cursor,
-            latest_seq: model.latest_seq,
             created_at: Utc::now().to_rfc3339(),
             model: model.clone(),
         };
@@ -155,7 +157,6 @@ impl SnapshotManager {
             };
             candidates.push(SnapshotCandidate {
                 cursor,
-                name: name_str.to_owned(),
                 path: entry.path(),
             });
         }
@@ -179,7 +180,6 @@ impl SnapshotManager {
 #[derive(Debug)]
 struct SnapshotCandidate {
     cursor: u64,
-    name: String,
     path: PathBuf,
 }
 
@@ -198,23 +198,12 @@ fn validate_snapshot(
         return Err(format!("unsupported version {}", snapshot.version));
     }
     let file_cursor = candidate.cursor.to_string();
-    if snapshot.cursor != file_cursor {
+    if file_cursor != snapshot.model.cursor() {
         return Err(format!(
-            "snapshot cursor {} does not match file {}",
-            snapshot.cursor, candidate.name
-        ));
-    }
-    if snapshot.cursor != snapshot.model.cursor() {
-        return Err(format!(
-            "snapshot cursor {} does not match model cursor {}",
-            snapshot.cursor,
-            snapshot.model.cursor()
-        ));
-    }
-    if snapshot.latest_seq != snapshot.model.latest_seq {
-        return Err(format!(
-            "snapshot latest_seq {:?} does not match model latest_seq {:?}",
-            snapshot.latest_seq, snapshot.model.latest_seq
+            "snapshot cursor {} does not match model cursor {} (created_at={})",
+            file_cursor,
+            snapshot.model.cursor(),
+            snapshot.created_at
         ));
     }
     Ok(())

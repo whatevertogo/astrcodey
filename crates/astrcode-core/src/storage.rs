@@ -1020,12 +1020,10 @@ mod tests {
             message: LlmMessage::user("look"),
             updated_seq: 1,
         });
-        model
-            .messages
-            .push(SequencedLlmMessage {
-                message: LlmMessage::assistant("previous complete answer"),
-                updated_seq: 2,
-            });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("previous complete answer"),
+            updated_seq: 2,
+        });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
                 role: LlmRole::Tool,
@@ -1067,12 +1065,10 @@ mod tests {
             },
             updated_seq: 2,
         });
-        model
-            .messages
-            .push(SequencedLlmMessage {
-                message: LlmMessage::assistant("late text after aborted tool call"),
-                updated_seq: 3,
-            });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::assistant("late text after aborted tool call"),
+            updated_seq: 3,
+        });
 
         let messages = model.provider_messages();
 

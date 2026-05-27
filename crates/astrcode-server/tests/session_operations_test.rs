@@ -260,7 +260,12 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
 
     // notify_parent_on_complete 消息应存在
     let has_notify = parent_model.messages.iter().any(|m| {
-        m.content.iter().any(|c| matches!(c, astrcode_core::llm::LlmContent::Text { text } if text.contains("[done]")))
+        m.message.content.iter().any(|c| {
+            matches!(
+                c,
+                astrcode_core::llm::LlmContent::Text { text } if text.contains("[done]")
+            )
+        })
     });
     assert!(
         has_notify,

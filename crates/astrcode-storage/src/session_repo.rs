@@ -279,11 +279,11 @@ async fn restore_from_snapshot(
     log: &EventLog,
     snapshot: crate::snapshot::SessionProjectionSnapshot,
 ) -> Result<SessionReadModel, StorageError> {
-    // Snapshot must include the highest event sequence it is based on so we
-    // can safely replay only the later tail of the event log.
-    let Some(latest_seq) = snapshot.latest_seq else {
+    // For v2 snapshots, `latest_seq` is derived from the embedded model.
+    // For v1 snapshots, it's duplicated in the payload and validated by snapshot.rs.
+    let Some(latest_seq) = snapshot.model().latest_seq else {
         return Err(StorageError::InvalidId(
-            "snapshot latest_seq is missing".into(),
+            "snapshot model.latest_seq is missing".into(),
         ));
     };
 
@@ -294,7 +294,7 @@ async fn restore_from_snapshot(
         )));
     }
 
-    let mut model = snapshot.model;
+    let mut model = snapshot.model().clone();
     // Reapply only the events that occurred after the snapshot. The snapshot
     // serves as a recovery checkpoint, not as an authoritative source of truth.
     for event in log.replay_after(latest_seq).await? {
@@ -1044,7 +1044,7 @@ mod tests {
         let model = repo.session_read_model(&session_id).await.unwrap();
         assert_eq!(model.latest_seq, Some(1));
         assert_eq!(model.messages.len(), 1);
-        assert_eq!(model.messages[0].role, LlmRole::User);
+        assert_eq!(model.messages[0].message.role, LlmRole::User);
     }
 
     #[tokio::test]
@@ -1074,7 +1074,7 @@ mod tests {
 
         assert_eq!(model.latest_seq, Some(1));
         assert_eq!(model.messages.len(), 1);
-        assert_eq!(model.messages[0].role, LlmRole::Assistant);
+        assert_eq!(model.messages[0].message.role, LlmRole::Assistant);
     }
 
     #[tokio::test]
@@ -1107,10 +1107,9 @@ mod tests {
             .join("snapshot-1.json");
         let snapshot: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(snapshot_path).unwrap()).unwrap();
-        assert_eq!(snapshot["version"], 1);
-        assert_eq!(snapshot["cursor"], "1");
-        assert_eq!(snapshot["latest_seq"], 1);
+        assert_eq!(snapshot["version"], 2);
         assert_eq!(snapshot["model"]["session_id"], session_id.as_str());
+        assert_eq!(snapshot["model"]["latest_seq"], 1);
         assert_eq!(snapshot["model"]["messages"].as_array().unwrap().len(), 1);
     }
 
@@ -1482,10 +1481,21 @@ mod tests {
 
         let state = repo.session_read_model(&session_id).await.unwrap();
         assert_eq!(
-            state.context_messages,
+            state
+                .context_messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
             vec![LlmMessage::system("hidden summary")]
         );
-        assert_eq!(state.messages, vec![LlmMessage::user("recent")]);
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
+            vec![LlmMessage::user("recent")]
+        );
         let provider = state.provider_messages();
         assert_eq!(provider.len(), 2);
         assert_eq!(provider[0].role, LlmRole::System);
@@ -1496,10 +1506,21 @@ mod tests {
         let reopened = test_repo(base_path);
         let restored = reopened.session_read_model(&session_id).await.unwrap();
         assert_eq!(
-            restored.context_messages,
+            restored
+                .context_messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
             vec![LlmMessage::system("hidden summary")]
         );
-        assert_eq!(restored.messages, vec![LlmMessage::user("recent")]);
+        assert_eq!(
+            restored
+                .messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
+            vec![LlmMessage::user("recent")]
+        );
         assert_eq!(restored.provider_messages().len(), 2);
     }
 
@@ -1557,17 +1578,18 @@ mod tests {
 
         assert_eq!(model.messages.len(), 2);
         let assistant = &model.messages[1];
-        assert_eq!(assistant.role, LlmRole::Assistant);
+        assert_eq!(assistant.message.role, LlmRole::Assistant);
         assert_eq!(
-            assistant.reasoning_content.as_deref(),
+            assistant.message.reasoning_content.as_deref(),
             Some("private reasoning")
         );
         assert!(matches!(
-            &assistant.content[0],
+            &assistant.message.content[0],
             LlmContent::Text { text } if text == "checking"
         ));
         assert!(
             assistant
+                .message
                 .content
                 .iter()
                 .any(|content| matches!(content, LlmContent::ToolCall { .. }))
@@ -1687,11 +1709,12 @@ mod tests {
 
         // Expected: [user] [assistant(tool_call_1, tool_call_2)] [tool_result_1] [tool_result_2]
         assert_eq!(model.messages.len(), 4);
-        assert_eq!(model.messages[0].role, LlmRole::User);
-        assert_eq!(model.messages[1].role, LlmRole::Assistant);
+        assert_eq!(model.messages[0].message.role, LlmRole::User);
+        assert_eq!(model.messages[1].message.role, LlmRole::Assistant);
 
         // The assistant message must contain both tool calls merged into one message.
         let tool_call_count = model.messages[1]
+            .message
             .content
             .iter()
             .filter(|c| matches!(c, LlmContent::ToolCall { .. }))
@@ -1701,8 +1724,8 @@ mod tests {
             "parallel tool calls must be merged into one assistant message"
         );
 
-        assert_eq!(model.messages[2].role, LlmRole::Tool);
-        assert_eq!(model.messages[3].role, LlmRole::Tool);
+        assert_eq!(model.messages[2].message.role, LlmRole::Tool);
+        assert_eq!(model.messages[3].message.role, LlmRole::Tool);
 
         // provider_messages should also be well-formed
         let provider_msgs = model.provider_messages();

@@ -24,7 +24,10 @@ pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
 /// 将单个持久事件归约到读模型。
 pub fn reduce(event: &Event, model: &mut SessionReadModel) {
     // seq=None 的非持久/异常事件不推进 durable cursor。
-    model.latest_seq = event.seq.or(model.latest_seq);
+    // durable seq 必须单调递增：即使 reducer 被重复调用或遇到乱序输入，也不得回退。
+    if let Some(seq) = event.seq {
+        model.latest_seq = Some(model.latest_seq.map_or(seq, |current| current.max(seq)));
+    }
     model.updated_at = event.timestamp.to_rfc3339();
     let event_seq = event.seq.unwrap_or_default();
 
@@ -54,10 +57,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.messages.clear();
             model.context_messages.clear();
             model.system_prompt = None;
+            model.extra_system_prompt = None;
+            model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
             model.background_tool_calls.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
+            model.extension_events = Default::default();
         },
         EventPayload::AgentSessionSpawned {
             child_session_id,
@@ -277,8 +283,8 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             let tail_messages: Vec<SequencedLlmMessage> = model
                 .messages
                 .iter()
-                .cloned()
                 .filter(|m| m.updated_seq > base_event_seq)
+                .cloned()
                 .collect();
             model.context_messages = context_messages
                 .iter()
@@ -443,7 +449,10 @@ mod tests {
 
         let full = replay(session_id.clone(), &events);
         assert_eq!(
-            full.messages.iter().map(|m| m.message.clone()).collect::<Vec<_>>(),
+            full.messages
+                .iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>(),
             vec![
                 LlmMessage::user("old user"),
                 LlmMessage::assistant("old assistant"),

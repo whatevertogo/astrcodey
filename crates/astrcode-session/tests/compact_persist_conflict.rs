@@ -27,7 +27,7 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{
     Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState,
-    compact::{PersistCompactError, persist_compact_result},
+    compact::persist_compact_result,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
 use astrcode_support::hash::hex_fingerprint;
@@ -419,9 +419,9 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
         "projection should expose compact summary after persist"
     );
     assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("concurrent race during compact")),
+        provider_messages.iter().any(|m| m
+            .joined_display_text("\n")
+            .contains("concurrent race during compact")),
         "projection must preserve tail delta user message that arrived during compact"
     );
     assert!(

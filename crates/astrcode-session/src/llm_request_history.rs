@@ -52,7 +52,7 @@ pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usi
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole},
-        storage::SessionReadModel,
+        storage::{SequencedLlmMessage, SessionReadModel},
         types::new_session_id,
     };
 
