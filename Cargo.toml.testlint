@@ -1,0 +1,9 @@
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pub_use = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "warn"
