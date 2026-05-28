@@ -12,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~76.7k lines of Rust across 22 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~6.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~75.7k lines of Rust across 22 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~6.8k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -332,10 +332,10 @@ The Cargo workspace under [`crates/`](crates/) contains **22 crates**, plus [`sr
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
 | [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
-| [`astrcode-storage`](crates/astrcode-storage) | 4.2k | JSONL event log, snapshots, config persistence, file locking |
+| [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, config persistence, file locking |
 | [`astrcode-context`](crates/astrcode-context) | 4.0k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| [`astrcode-session`](crates/astrcode-session) | 7.8k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
-| [`astrcode-extensions`](crates/astrcode-extensions) | 4.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
+| [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 5.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
 
 ### Layer 2: Extensions
 
@@ -355,13 +355,13 @@ The Cargo workspace under [`crates/`](crates/) contains **22 crates**, plus [`sr
 | Crate | Lines | Description |
 |---|---|---|
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
-| [`astrcode-server`](crates/astrcode-server) | 11.8k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
+| [`astrcode-server`](crates/astrcode-server) | 13.4k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
 
 ### Layer 4: Clients
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-client`](crates/astrcode-client) | 627 | Typed JSON-RPC client, transport abstraction, stream subscription |
+| [`astrcode-client`](crates/astrcode-client) | 693 | Typed JSON-RPC client, transport abstraction, stream subscription |
 | [`astrcode-cli`](crates/astrcode-cli) | 8.1k | CLI entry: TUI (ratatui), headless exec, server launcher |
 
 ### Eval
@@ -377,7 +377,7 @@ The Cargo workspace under [`crates/`](crates/) contains **22 crates**, plus [`sr
 |---|---|---|
 | [`src-tauri/`](src-tauri) | 780 | Tauri v2 shell: sidecar management, single-instance coordination, native dialogs |
 
-**Totals:** ~76.7k lines of Rust (22 crates + Tauri), **272** `.rs` files; ~6.8k lines of TypeScript in `frontend/` (~**83.5k** lines overall).
+**Totals:** ~76.7k lines of Rust (22 crates + Tauri), **269** `.rs` files; ~6.8k lines of TypeScript in `frontend/` (~**83.5k** lines overall).
 
 ## Key Design Decisions
 

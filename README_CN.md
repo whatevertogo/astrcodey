@@ -332,10 +332,10 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **22 个 crate**，另有 [`s
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | 多 Provider LLM 层（Anthropic、OpenAI 兼容、Google GenAI）、SSE 流式、重试 |
 | [`astrcode-tools`](crates/astrcode-tools) | 5.5k | 内置工具：read、write、edit、patch、find、grep、shell、terminal、task |
-| [`astrcode-storage`](crates/astrcode-storage) | 4.2k | JSONL 事件日志、快照、配置持久化、文件锁 |
+| [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL 事件日志、快照、配置持久化、文件锁 |
 | [`astrcode-context`](crates/astrcode-context) | 4.0k | Token 估算、上下文窗口预算、自动压缩、提示词引擎 |
-| [`astrcode-session`](crates/astrcode-session) | 7.8k | Agent 循环：turn runner、工具管线、LLM 流、压缩编排、运行时服务 |
-| [`astrcode-extensions`](crates/astrcode-extensions) | 4.4k | 扩展生命周期、钩子分发、能力门控、磁盘 IPC 扩展加载 |
+| [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent 循环：turn runner、工具管线、LLM 流、压缩编排、运行时服务 |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 5.4k | 扩展生命周期、钩子分发、能力门控、磁盘 IPC 扩展加载 |
 
 ### Layer 2：扩展层
 
@@ -355,13 +355,13 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **22 个 crate**，另有 [`s
 | Crate | 行数 | 说明 |
 |---|---|---|
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.7k | JSON-RPC 2.0 线协议类型、命令、事件、HTTP/UI DTO |
-| [`astrcode-server`](crates/astrcode-server) | 11.8k | 会话管理、JSON-RPC/HTTP/ACP、transport、HTTP 投影与 SSE |
+| [`astrcode-server`](crates/astrcode-server) | 13.4k | 会话管理、JSON-RPC/HTTP/ACP、transport、HTTP 投影与 SSE |
 
 ### Layer 4：客户端层
 
 | Crate | 行数 | 说明 |
 |---|---|---|
-| [`astrcode-client`](crates/astrcode-client) | 627 | 类型化 JSON-RPC 客户端、传输抽象、流订阅 |
+| [`astrcode-client`](crates/astrcode-client) | 693 | 类型化 JSON-RPC 客户端、传输抽象、流订阅 |
 | [`astrcode-cli`](crates/astrcode-cli) | 8.1k | CLI 入口：TUI（ratatui）、无头 exec、server 启动器 |
 
 ### 评测层
@@ -376,7 +376,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **22 个 crate**，另有 [`s
 |---|---|---|
 | [`src-tauri/`](src-tauri) | 780 | Tauri v2 壳：sidecar 管理、单实例协调、原生对话框 |
 
-**合计：** Rust 约 7.67 万行（22 个 crate + Tauri），**272** 个 `.rs` 文件；`frontend/` 约 6800 行 TypeScript（整体约 **8.35 万行**）。
+**合计：** Rust 约 7.67 万行（22 个 crate + Tauri），**269** 个 `.rs` 文件；`frontend/` 约 6800 行 TypeScript（整体约 **8.35 万行**）。
 
 ## 核心设计
 
