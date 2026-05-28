@@ -724,5 +724,3 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
         duration_ms: None,
     }
 }
-
-

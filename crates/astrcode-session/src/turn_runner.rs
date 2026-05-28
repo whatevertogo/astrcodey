@@ -91,9 +91,10 @@ fn has_unsettled_background_tool_calls(model: &SessionReadModel) -> bool {
 }
 
 fn ends_with_background_notification(model: &SessionReadModel) -> bool {
-    model.messages.last().is_some_and(|msg| {
-        msg.source.as_deref() == Some("background_task")
-    })
+    model
+        .messages
+        .last()
+        .is_some_and(|msg| msg.source.as_deref() == Some("background_task"))
 }
 
 fn is_background_settlement_event(payload: &EventPayload) -> bool {

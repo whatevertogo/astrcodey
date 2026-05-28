@@ -140,7 +140,10 @@ pub(in crate::http) fn event_to_deltas(
             ]
         },
         EventPayload::BackgroundTaskNotification {
-            call_id, summary, tool_name, ..
+            call_id,
+            summary,
+            tool_name,
+            ..
         } => vec![
             // Append notification as User block with source marker (frontend hides)
             ConversationDeltaDto::AppendBlock {
