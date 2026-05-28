@@ -63,9 +63,11 @@ impl ToolRuntimeCapabilities {
     ) -> Self {
         let runtime = session.runtime();
         let caps = session.caps();
-        let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> = Some(Arc::new(
-            crate::background::BackgroundTaskReaderImpl::new(runtime.background_tasks()),
-        ));
+        let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> =
+            Some(Arc::new(crate::background::BackgroundTaskReaderImpl::new(
+                runtime.background_tasks(),
+                session_store_dir.clone(),
+            )));
         let effective = caps.read_effective();
         let main_model_id = effective.llm.model_id.clone();
         let small_model_id = effective.small_llm.model_id.clone();
@@ -469,6 +471,7 @@ async fn background_tool_call(
     let bg_result_tx = runtime.capabilities.background_result_tx.clone();
     let bg_manager = runtime.capabilities.background_tasks.clone();
     let register_task_id = task_id.clone();
+    let bg_store_dir = runtime.capabilities.session_store_dir.clone();
     let bg_arguments = call.tool_input.to_string();
     let bg_arguments_json = Some(call.tool_input.clone());
 
@@ -499,15 +502,67 @@ async fn background_tool_call(
             .metadata
             .insert("task_id".into(), serde_json::json!(bg_task_id.to_string()));
 
+        // 持久化输出到磁盘，让 LLM 按 task_id 按需读取
+        let original_content = result.content.clone();
+        let output_bytes = if let Some(ref dir) = bg_store_dir {
+            let bg_dir = dir.join("background-tasks");
+            match astrcode_storage::tool_artifacts::write_background_task_file(
+                &bg_dir,
+                bg_task_id.as_str(),
+                &original_content,
+            ) {
+                Ok(bytes) => {
+                    tracing::debug!(
+                        task_id = %bg_task_id,
+                        bytes,
+                        "background task output persisted"
+                    );
+                    Some(bytes)
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %bg_task_id,
+                        error = %e,
+                        "failed to persist background task output; keeping inline"
+                    );
+                    None
+                },
+            }
+        } else {
+            None
+        };
+
+        // 将 result.content 替换为轻量摘要（持久化成功时）
+        if let Some(bytes) = output_bytes {
+            let status = if result.is_error {
+                "failed"
+            } else {
+                "completed"
+            };
+            let duration = result
+                .duration_ms
+                .map(|ms| format!(" ({ms}ms)"))
+                .unwrap_or_default();
+            result.content = format!(
+                "Background task {status} (task: {bg_task_id}, output: {bytes} \
+                 bytes){duration}.\nUse `task action=result taskId=\"{bg_task_id}\"` to read the \
+                 output."
+            );
+            result
+                .metadata
+                .insert("outputPersisted".into(), serde_json::json!(true));
+        }
+
         tracing::info!(
             tool_name = bg_tool_name,
             call_id = bg_call_id,
             task_id = %bg_task_id,
             is_error = result.is_error,
+            output_persisted = output_bytes.is_some(),
             "background task completed"
         );
 
-        // 通过 background_result_tx 通知 handler 进行持久化和广播
+        // 通过 background_result_tx 通知 forwarder 进行持久化和广播
         if let Some(tx) = bg_result_tx {
             let _ = tx.send(BackgroundTaskCompletion {
                 session_id: bg_session_id,

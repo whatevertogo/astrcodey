@@ -409,6 +409,21 @@ pub enum EventPayload {
         delta: String,
     },
 
+    /// 后台任务完成通知（durable）。
+    ///
+    /// 替代之前 forwarder 发射的第二次 ToolCallCompleted。
+    /// Projection 将其追加为带 `source: "background_task"` 的 User 消息。
+    BackgroundTaskNotification {
+        /// 后台任务 ID。
+        task_id: crate::types::BackgroundTaskId,
+        /// 原始工具调用 ID。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 给 LLM 和 UI 的完成摘要。
+        summary: String,
+    },
+
     /// 后台任务已完成。
     BackgroundTaskCompleted {
         /// 后台任务 ID。

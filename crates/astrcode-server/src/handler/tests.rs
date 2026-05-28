@@ -1470,19 +1470,15 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
             .unwrap()
             .completed
     );
+    // repair emits BackgroundTaskNotification → projection appends User message
     assert!(state.messages.iter().any(|message| {
-        message.message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmContent::ToolResult {
-                    tool_call_id,
+        message.source.as_deref() == Some("background_task")
+            && message.message.content.iter().any(|content| {
+                matches!(
                     content,
-                    is_error
-                } if tool_call_id == "call-bg"
-                    && *is_error
-                    && content.contains("Background task interrupted")
-            )
-        })
+                    LlmContent::Text { text } if text.contains("interrupted")
+                )
+            })
     }));
 }
 

@@ -137,7 +137,12 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
 
   switch (kind) {
     case 'user':
-      return { kind, id, text: requiredString(object, 'text') }
+      return {
+        kind,
+        id,
+        text: requiredString(object, 'text'),
+        source: optionalString(object, 'source'),
+      }
     case 'assistant':
       return {
         kind,

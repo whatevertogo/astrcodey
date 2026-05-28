@@ -84,11 +84,11 @@ function mergeBlock(
   if (current.kind === 'toolCall' && incoming.kind === 'toolCall') {
     return {
       ...incoming,
-      name: incoming.name ?? current.name,
+      name: incoming.name.trim() ? incoming.name : current.name,
       arguments: incoming.arguments.trim()
         ? incoming.arguments
         : current.arguments,
-      text: incoming.text ?? current.text,
+      text: incoming.text.trim() ? incoming.text : current.text,
       // taskId 不随 FinalizeBlock 返回，保留当前值
       taskId: incoming.taskId ?? current.taskId,
       metadata: incoming.metadata ?? current.metadata,

@@ -7,7 +7,8 @@ use std::{
 };
 
 use astrcode_core::storage::{
-    ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
+    BackgroundTaskOutputSlice, ToolResultArtifactInput, ToolResultArtifactRef,
+    ToolResultArtifactSlice,
 };
 
 /// 生成 artifact 文件名。
@@ -84,6 +85,53 @@ fn sanitize_for_filename(input: &str) -> String {
     } else {
         sanitized
     }
+}
+
+/// 写入后台任务输出到 `{dir}/{task_id}.output`。
+///
+/// `task_id` 被视为全局唯一，不做碰撞处理。
+/// 如果文件已存在则覆盖（允许重写）。
+pub fn write_background_task_file(
+    dir: &Path,
+    task_id: &str,
+    content: &str,
+) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dir)?;
+    let safe_id = sanitize_for_filename(task_id);
+    let file_name = format!("{safe_id}.output");
+    let path = dir.join(file_name);
+    std::fs::write(&path, content.as_bytes())?;
+    Ok(content.len())
+}
+
+/// 读取后台任务输出的分页切片。
+///
+/// 复用已有的 `slice_tool_result` 函数进行字符级分页。
+/// 文件不存在时返回 `io::ErrorKind::NotFound`。
+pub fn read_background_task_file(
+    dir: &Path,
+    task_id: &str,
+    char_offset: usize,
+    max_chars: usize,
+) -> std::io::Result<BackgroundTaskOutputSlice> {
+    let safe_id = sanitize_for_filename(task_id);
+    let file_name = format!("{safe_id}.output");
+    let path = dir.join(file_name);
+    let content = std::fs::read_to_string(&path)?;
+    let bytes = content.len();
+    let mut iter = content.chars().skip(char_offset);
+    let text: String = iter.by_ref().take(max_chars).collect();
+    let returned_chars = text.chars().count();
+    let has_more = iter.next().is_some();
+    Ok(BackgroundTaskOutputSlice {
+        task_id: task_id.to_string(),
+        bytes,
+        char_offset,
+        returned_chars,
+        next_char_offset: has_more.then_some(char_offset.saturating_add(returned_chars)),
+        has_more,
+        content: text,
+    })
 }
 
 fn tool_result_file_name_with_suffix(tool_name: &str, call_id: &str, suffix: usize) -> String {

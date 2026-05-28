@@ -90,6 +90,7 @@ fn payload_type(payload: &EventPayload) -> &'static str {
         EventPayload::Custom { .. } => "custom",
         EventPayload::ToolCallBackgrounded { .. } => "tool_call_backgrounded",
         EventPayload::BackgroundTaskOutput { .. } => "background_task_output",
+        EventPayload::BackgroundTaskNotification { .. } => "background_task_notification",
         EventPayload::BackgroundTaskCompleted { .. } => "background_task_completed",
         EventPayload::ExtensionEvent { .. } => "extension_event",
     }
@@ -140,6 +141,9 @@ fn payload_details(payload: &EventPayload) -> String {
             call_id, tool_name, ..
         }
         | EventPayload::BackgroundTaskCompleted {
+            call_id, tool_name, ..
+        }
+        | EventPayload::BackgroundTaskNotification {
             call_id, tool_name, ..
         } => {
             format!("tool={tool_name} call={call_id}")

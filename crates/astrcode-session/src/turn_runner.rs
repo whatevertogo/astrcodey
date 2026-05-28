@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::{compaction::CompactResult, context_assembler::ContextPrepareInput};
 use astrcode_core::{
-    event::EventPayload,
+    event::{Event, EventPayload},
     extension::{CompactStrategy, CompactTrigger, ExtensionEvent, ProviderEvent, ProviderResult},
     llm::{LlmError, LlmEvent, LlmMessage},
     storage::SessionReadModel,
@@ -70,6 +70,103 @@ pub(crate) struct CompactionStageMeta {
     pub(crate) trigger: CompactTrigger,
     pub(crate) strategy: CompactStrategy,
     pub(crate) llm_api_failed: bool,
+}
+
+const BACKGROUND_TASK_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn has_active_background_tasks(session: &Session) -> bool {
+    !session
+        .runtime()
+        .background_tasks()
+        .lock()
+        .list_active(session.id())
+        .is_empty()
+}
+
+fn has_unsettled_background_tool_calls(model: &SessionReadModel) -> bool {
+    model
+        .background_tool_calls
+        .values()
+        .any(|view| !view.completed)
+}
+
+fn ends_with_background_notification(model: &SessionReadModel) -> bool {
+    model.messages.last().is_some_and(|msg| {
+        msg.source.as_deref() == Some("background_task")
+    })
+}
+
+fn is_background_settlement_event(payload: &EventPayload) -> bool {
+    matches!(
+        payload,
+        EventPayload::BackgroundTaskNotification { .. }
+            | EventPayload::BackgroundTaskCompleted { .. }
+    )
+}
+
+/// 等待后台任务从 manager 移除且读模型中的 placeholder 已被 notification 结算。
+async fn wait_for_background_settlement(
+    session: &Session,
+    event_rx: &mut mpsc::Receiver<Event>,
+) -> Result<(), TurnError> {
+    let deadline = tokio::time::Instant::now() + BACKGROUND_TASK_WAIT_TIMEOUT;
+    loop {
+        let model = session
+            .read_model()
+            .await
+            .map_err(|e| TurnError::SessionReadFailed(e.to_string()))?;
+        if !has_active_background_tasks(session) && !has_unsettled_background_tool_calls(&model) {
+            return Ok(());
+        }
+
+        match tokio::time::timeout_at(deadline, event_rx.recv()).await {
+            Ok(Some(event)) if is_background_settlement_event(&event.payload) => {},
+            Ok(Some(_)) => {},
+            Ok(None) => {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    "session event stream closed while waiting for background settlement"
+                );
+                return Ok(());
+            },
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    "timed out waiting for background settlement; ending wait"
+                );
+                return Ok(());
+            },
+        }
+    }
+}
+
+/// LLM 宣告 turn 完成时，判断是否应继续 agent loop 以处理后台任务结果。
+async fn background_work_requires_agent_continue(
+    session: &Session,
+    event_rx: &mut mpsc::Receiver<Event>,
+) -> Result<bool, TurnError> {
+    let model = session
+        .read_model()
+        .await
+        .map_err(|e| TurnError::SessionReadFailed(e.to_string()))?;
+    if has_active_background_tasks(session) || has_unsettled_background_tool_calls(&model) {
+        tracing::info!(
+            session_id = %session.id(),
+            active = has_active_background_tasks(session),
+            unsettled = has_unsettled_background_tool_calls(&model),
+            "LLM completed but background work unsettled; waiting for settlement"
+        );
+        wait_for_background_settlement(session, event_rx).await?;
+        return Ok(true);
+    }
+    if ends_with_background_notification(&model) {
+        tracing::info!(
+            session_id = %session.id(),
+            "LLM completed with pending background notification; continuing agent loop"
+        );
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 impl TurnRunner {
@@ -257,62 +354,13 @@ impl TurnRunner {
                     }
                     on_step_end_best_effort(&extension_runner, &lifecycle_ctx).await;
 
-                    // LLM 决定结束 turn，但后台任务可能仍在运行。
-                    // 如果不等它们完成，子 agent 回收时会 abort 这些任务导致结果丢失。
-                    //
-                    // 利用 session 已有的事件流：forwarder 在写完 durable ToolCallCompleted 后
-                    // 会 emit_live(BackgroundTaskCompleted)，subscribe 能直接收到。
-                    // 先订阅再检查，避免 subscribe 和 list_active 之间的竞态。
+                    // LLM 决定结束 turn，但后台任务可能仍在运行或 notification 尚在落盘。
+                    // 先 subscribe 再读 manager / 读模型，避免与 forwarder 之间的竞态；
+                    // 读模型是 durable notification 的 SSOT，不依赖固定延迟 catch-up。
                     let mut event_rx = self.session().subscribe();
-                    let active_bg = self
-                        .session()
-                        .runtime()
-                        .background_tasks()
-                        .lock()
-                        .list_active(&self.shared.session_id);
-
-                    if !active_bg.is_empty() {
-                        tracing::info!(
-                            session_id = %self.shared.session_id,
-                            active_bg_count = active_bg.len(),
-                            "LLM completed but background tasks still running; waiting via session events"
-                        );
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-                        loop {
-                            match tokio::time::timeout_at(deadline, event_rx.recv()).await {
-                                Ok(Some(event)) => {
-                                    if matches!(
-                                        event.payload,
-                                        EventPayload::BackgroundTaskCompleted { .. }
-                                    ) {
-                                        let remaining = self
-                                            .session()
-                                            .runtime()
-                                            .background_tasks()
-                                            .lock()
-                                            .list_active(&self.shared.session_id);
-                                        if remaining.is_empty() {
-                                            break;
-                                        }
-                                    }
-                                },
-                                Ok(None) => {
-                                    tracing::warn!(
-                                        session_id = %self.shared.session_id,
-                                        "session event stream closed while waiting for background tasks"
-                                    );
-                                    break;
-                                },
-                                Err(_) => {
-                                    tracing::warn!(
-                                        session_id = %self.shared.session_id,
-                                        "timed out waiting for background tasks; ending turn"
-                                    );
-                                    break;
-                                },
-                            }
-                        }
-                        // 如果仍有任务（超时/流关闭），也 continue 让下一轮再处理。
+                    if background_work_requires_agent_continue(self.session(), &mut event_rx)
+                        .await?
+                    {
                         continue;
                     }
 

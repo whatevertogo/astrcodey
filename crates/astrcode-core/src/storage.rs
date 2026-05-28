@@ -255,6 +255,25 @@ pub struct ToolResultArtifactSlice {
     pub content: String,
 }
 
+/// 后台任务输出的分页读取结果。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackgroundTaskOutputSlice {
+    /// 后台任务 ID。
+    pub task_id: String,
+    /// 输出正文 UTF-8 字节数。
+    pub bytes: usize,
+    /// 本次读取的字符偏移。
+    pub char_offset: usize,
+    /// 本次返回的字符数。
+    pub returned_chars: usize,
+    /// 下一次读取的字符偏移；没有更多内容时为 `None`。
+    pub next_char_offset: Option<usize>,
+    /// 是否还有更多内容。
+    pub has_more: bool,
+    /// 本次读取的正文片段。
+    pub content: String,
+}
+
 /// 子 Agent 会话的运行状态。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -346,6 +365,14 @@ pub struct SequencedLlmMessage {
     pub message: LlmMessage,
     /// 最近一次将该消息更新到 durable 时序中的 seq。
     pub updated_seq: u64,
+    /// 消息来源标记，用于前端区分渲染。
+    ///
+    /// - `None`：正常消息（用户输入、LLM 回复等）
+    /// - `Some("background_task")`：后台任务完成通知（前端隐藏或特殊渲染）
+    ///
+    /// `source` 本身不进入 LLM payload；对应 `.message` 会作为 User 消息送入 provider。
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 // ─── extension Event Index ────────────────────────────────────────────────
@@ -742,10 +769,12 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
+            source: None,
         });
         model.context_messages.push(SequencedLlmMessage {
             message: LlmMessage::system("system"),
             updated_seq: 1,
+            source: None,
         });
         model.latest_seq = Some(7);
 
@@ -768,6 +797,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look at these files"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -781,6 +811,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 2,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -794,6 +825,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 3,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -807,6 +839,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 4,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -820,6 +853,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 5,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -843,12 +877,14 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look at this"),
             updated_seq: 1,
+            source: None,
         });
         let mut thinking = LlmMessage::assistant("checking");
         thinking.reasoning_content = Some("private reasoning".into());
         model.messages.push(SequencedLlmMessage {
             message: thinking,
             updated_seq: 2,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -862,6 +898,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 3,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -875,6 +912,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 4,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -904,6 +942,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
+            source: None,
         });
 
         let mut reasoning_only = LlmMessage::assistant("");
@@ -911,6 +950,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: reasoning_only,
             updated_seq: 2,
+            source: None,
         });
 
         let mut visible_answer = LlmMessage::assistant("answer");
@@ -918,6 +958,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: visible_answer,
             updated_seq: 3,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -944,6 +985,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look at this"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -957,6 +999,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 2,
+            source: None,
         });
         // no tool result for call_1
 
@@ -973,6 +1016,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -993,6 +1037,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 2,
+            source: None,
         });
         // only call_1 has a result, call_2 is unanswered
         model.messages.push(SequencedLlmMessage {
@@ -1007,6 +1052,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 3,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -1022,10 +1068,12 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("previous complete answer"),
             updated_seq: 2,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -1039,6 +1087,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 3,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -1054,6 +1103,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -1067,10 +1117,12 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 2,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("late text after aborted tool call"),
             updated_seq: 3,
+            source: None,
         });
 
         let messages = model.provider_messages();
@@ -1085,6 +1137,7 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("look"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -1098,6 +1151,7 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 2,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage {
@@ -1111,10 +1165,12 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 3,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("done"),
             updated_seq: 4,
+            source: None,
         });
 
         let messages = model.provider_messages();

@@ -63,14 +63,17 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::system("stale system in store"),
             updated_seq: 2,
+            source: None,
         });
         model.context_messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("ctx"),
             updated_seq: 3,
+            source: None,
         });
         model
     }
@@ -125,10 +128,12 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hi"),
             updated_seq: 2,
+            source: None,
         });
         assert_eq!(committed_tool_result_content_len(&model), 6);
     }

@@ -139,6 +139,31 @@ pub(in crate::http) fn event_to_deltas(
                 },
             ]
         },
+        EventPayload::BackgroundTaskNotification {
+            call_id, summary, tool_name, ..
+        } => vec![
+            // Append notification as User block with source marker (frontend hides)
+            ConversationDeltaDto::AppendBlock {
+                block: ConversationBlockDto::User {
+                    id: event.id.to_string(),
+                    text: summary.clone(),
+                    source: Some("background_task".into()),
+                },
+            },
+            // Finalize the Tool block: update status Backgrounded → Complete
+            ConversationDeltaDto::FinalizeBlock {
+                block: ConversationBlockDto::ToolCall {
+                    id: call_id.to_string(),
+                    name: tool_name.clone(),
+                    arguments: String::new(),
+                    text: String::new(),
+                    status: ConversationBlockStatusDto::Complete,
+                    task_id: None,
+                    metadata: None,
+                    arguments_json: None,
+                },
+            },
+        ],
         EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_phase(Phase::Idle, has_messages),

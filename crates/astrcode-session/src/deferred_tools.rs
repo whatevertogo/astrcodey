@@ -171,7 +171,8 @@ pub(crate) fn unavailable_tool_guidance(
 
     let mut message = format!("Tool `{requested}` is not available in this session.");
     if requested.eq_ignore_ascii_case("find") {
-        message.push_str(" The file-path tool was renamed to `glob`; call `glob` with a `pattern`.");
+        message
+            .push_str(" The file-path tool was renamed to `glob`; call `glob` with a `pattern`.");
     }
     message.push_str(&visible_tool_names_hint(visible_tools));
     message.push_str(" Use exact tool names from the provider tool list.");

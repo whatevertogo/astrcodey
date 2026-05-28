@@ -362,6 +362,7 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("hello"),
                 updated_seq: 1,
+                source: None,
             });
 
         let dto = conversation_to_dto(session, None);
@@ -388,12 +389,14 @@ mod tests {
                     reasoning_content: None,
                 },
                 updated_seq: 1,
+                source: None,
             });
         session
             .messages
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
                 updated_seq: 2,
+                source: None,
             });
 
         let dto = conversation_to_dto(session, None);
@@ -431,12 +434,14 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("recent user"),
                 updated_seq: 1,
+                source: None,
             });
         session
             .messages
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::assistant("recent assistant"),
                 updated_seq: 2,
+                source: None,
             });
         // compact boundary 元数据
         session.compact_boundaries.push(CompactBoundaryView {
@@ -481,6 +486,7 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
+                source: None,
             });
         session.compact_boundaries.push(CompactBoundaryView {
             trigger: "auto_threshold".into(),
@@ -534,6 +540,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 updated_seq: 1,
+                source: None,
             });
         session
             .messages
@@ -545,6 +552,7 @@ mod tests {
                     false,
                 ),
                 updated_seq: 2,
+                source: None,
             });
         session.background_tool_calls.insert(
             "tool-1".into(),

@@ -43,6 +43,7 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
         EventPayload::UserMessage { message_id, text } => Some(ConversationBlockDto::User {
             id: message_id.to_string(),
             text: text.clone(),
+            source: None,
         }),
         EventPayload::AssistantMessageCompleted {
             message_id,
@@ -111,6 +112,13 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
             id: event.id.to_string(),
             text: text.clone(),
         }),
+        EventPayload::BackgroundTaskNotification { summary, .. } => {
+            Some(ConversationBlockDto::User {
+                id: event.id.to_string(),
+                text: summary.clone(),
+                source: Some("background_task".into()),
+            })
+        },
         _ => None,
     }
 }
@@ -122,13 +130,15 @@ pub(in crate::http) fn messages_to_blocks(
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 
-    for (index, message) in messages.iter().enumerate() {
-        let message = &message.message;
+    for (index, seq_msg) in messages.iter().enumerate() {
+        let message = &seq_msg.message;
+        let source = &seq_msg.source;
         let id = format!("snapshot-message-{index}");
         match message.role {
             LlmRole::User => blocks.push(ConversationBlockDto::User {
                 id,
                 text: visible_message_text(message),
+                source: source.clone(),
             }),
             LlmRole::Assistant => {
                 let text = visible_message_text(message);

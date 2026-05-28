@@ -10,7 +10,7 @@
 //! 每次只弹出一条并启动新 turn，保证连发 prompt 仍对应多个独立 `UserMessage` 事件。
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::Duration,
 };
@@ -604,7 +604,7 @@ async fn repair_stale_background_tasks_for_state(
         if background.completed || active_tasks.contains(&background.task_id) {
             continue;
         }
-        let Some((tool_name, arguments_json)) = find_tool_call_history(state, call_id) else {
+        let Some((tool_name, _arguments_json)) = find_tool_call_history(state, call_id) else {
             tracing::warn!(
                 session_id = %session_id,
                 call_id = %call_id,
@@ -613,16 +613,18 @@ async fn repair_stale_background_tasks_for_state(
             );
             continue;
         };
-        let result = interrupted_background_tool_result(call_id.as_str(), &background.task_id);
+        let summary = format!(
+            "Background task interrupted before completion (task: {})",
+            background.task_id
+        );
         session
             .emit_durable(
                 None,
-                EventPayload::ToolCallCompleted {
+                EventPayload::BackgroundTaskNotification {
+                    task_id: background.task_id.clone(),
                     call_id: call_id.clone(),
                     tool_name,
-                    result,
-                    arguments: arguments_json.to_string(),
-                    arguments_json: Some(arguments_json),
+                    summary,
                 },
             )
             .await
@@ -723,16 +725,4 @@ fn interrupted_tool_result(call_id: &str) -> ToolResult {
     }
 }
 
-fn interrupted_background_tool_result(call_id: &str, task_id: &BackgroundTaskId) -> ToolResult {
-    let content = "Background task interrupted before completion".to_string();
-    let mut metadata = BTreeMap::new();
-    metadata.insert("task_id".into(), serde_json::json!(task_id.to_string()));
-    ToolResult {
-        call_id: call_id.to_string(),
-        content: content.clone(),
-        is_error: true,
-        error: Some(content),
-        metadata,
-        duration_ms: None,
-    }
-}
+

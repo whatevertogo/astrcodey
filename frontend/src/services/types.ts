@@ -123,7 +123,12 @@ export interface ConversationControlState {
 }
 
 export type ConversationBlock =
-  | { kind: 'user'; id: string; text: string }
+  | {
+      kind: 'user'
+      id: string
+      text: string
+      source?: string
+    }
   | {
       kind: 'assistant'
       id: string

@@ -7,6 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     event::EventPayload,
+    storage::{BackgroundTaskOutputSlice, StorageError},
     tool::{BackgroundTaskReader, ToolResult},
     types::{BackgroundTaskId, SessionId, ToolCallId},
 };
@@ -24,18 +25,6 @@ pub struct BackgroundTaskCompletion {
 }
 
 impl BackgroundTaskCompletion {
-    /// 从完成通知派生 `ToolCallCompleted` 和 `BackgroundTaskCompleted` 事件载荷。
-    pub fn to_tool_call_completed_event(&self) -> EventPayload {
-        let call_id = ToolCallId::from(self.result.call_id.clone());
-        EventPayload::ToolCallCompleted {
-            call_id,
-            tool_name: self.tool_name.clone(),
-            result: self.result.clone(),
-            arguments: self.arguments.clone(),
-            arguments_json: self.arguments_json.clone(),
-        }
-    }
-
     pub fn to_background_task_completed_event(&self) -> EventPayload {
         EventPayload::BackgroundTaskCompleted {
             task_id: self.task_id.clone(),
@@ -137,11 +126,18 @@ impl BackgroundTaskManager {
 /// 而不暴露 `BackgroundTaskManager` 的内部方法（如 `register`、`cleanup_session`）。
 pub struct BackgroundTaskReaderImpl {
     manager: Arc<Mutex<BackgroundTaskManager>>,
+    session_store_dir: Option<std::path::PathBuf>,
 }
 
 impl BackgroundTaskReaderImpl {
-    pub fn new(manager: Arc<Mutex<BackgroundTaskManager>>) -> Self {
-        Self { manager }
+    pub fn new(
+        manager: Arc<Mutex<BackgroundTaskManager>>,
+        session_store_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            manager,
+            session_store_dir,
+        }
     }
 }
 
@@ -162,6 +158,35 @@ impl BackgroundTaskReader for BackgroundTaskReaderImpl {
             false
         }
     }
+
+    fn read_output(
+        &self,
+        _session_id: &SessionId,
+        task_id: &BackgroundTaskId,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<BackgroundTaskOutputSlice, StorageError> {
+        let dir = self
+            .session_store_dir
+            .as_ref()
+            .ok_or_else(|| {
+                StorageError::Unsupported("session store directory not available".into())
+            })?
+            .join("background-tasks");
+        astrcode_storage::tool_artifacts::read_background_task_file(
+            &dir,
+            task_id.as_str(),
+            char_offset,
+            max_chars,
+        )
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                StorageError::NotFound(_session_id.clone())
+            } else {
+                StorageError::Io(e)
+            }
+        })
+    }
 }
 
 impl Default for BackgroundTaskManager {
@@ -181,8 +206,8 @@ pub fn complete_background_task(
 /// 后台任务完成事件的统一转发器。
 ///
 /// 监听 `rx`，把每个 `BackgroundTaskCompletion` 翻译成
-/// `(ToolCallCompleted, BackgroundTaskCompleted)` 两个事件，
-/// 通过 `Session::emit` 写入（store + runtime 广播）。
+/// `BackgroundTaskNotification`（durable）+ `BackgroundTaskCompleted`（live），
+/// 通过 `Session::emit_*` 写入 store 并 fanout。
 ///
 /// 后台任务完成后的事件由 TurnScheduler 监听处理，无需回调唤醒 agent。
 pub fn spawn_background_forwarder(
@@ -191,12 +216,23 @@ pub fn spawn_background_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(completion) = rx.recv().await {
-            let tool_call_event = completion.to_tool_call_completed_event();
-            let bg_event = completion.to_background_task_completed_event();
-            if let Err(e) = session.emit_durable(None, tool_call_event.clone()).await {
-                tracing::warn!(session_id = %session.id(), error = %e, "background forwarder: persist tool_call_completed failed; sending live fallback");
-                session.emit_live(None, tool_call_event).await;
+            let notification = EventPayload::BackgroundTaskNotification {
+                task_id: completion.task_id.clone(),
+                call_id: ToolCallId::from(completion.result.call_id.clone()),
+                tool_name: completion.tool_name.clone(),
+                summary: completion.result.content.clone(),
+            };
+
+            if let Err(e) = session.emit_durable(None, notification.clone()).await {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    error = %e,
+                    "background forwarder: persist notification failed; sending live fallback"
+                );
+                session.emit_live(None, notification).await;
             }
+
+            let bg_event = completion.to_background_task_completed_event();
             session.emit_live(None, bg_event).await;
         }
     })
@@ -211,8 +247,8 @@ pub fn backgrounded_placeholder_result(
     command: Option<&str>,
 ) -> ToolResult {
     let mut content = format!(
-        "Task moved to background (task: {task_id}). The result will be available in the next \
-         turn."
+        "Task moved to background (task: {task_id}). Output will be persisted on completion.\nUse \
+         `task action=result taskId=\"{task_id}\"` to read the output once done."
     );
     if let Some(cmd) = command {
         content = format!("{content} Command: {cmd}");
@@ -366,7 +402,10 @@ mod tests {
         }
 
         async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
-            if matches!(event.payload, EventPayload::ToolCallCompleted { .. }) {
+            if matches!(
+                event.payload,
+                EventPayload::BackgroundTaskNotification { .. }
+            ) {
                 return Err(StorageError::Unsupported("forced append failure".into()));
             }
             self.inner.append_event(event).await
@@ -520,7 +559,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwarder_sends_live_tool_completion_when_durable_write_fails() {
+    async fn forwarder_sends_live_notification_when_durable_write_fails() {
         let store: Arc<dyn EventStore> = Arc::new(FailToolCompletionStore::new());
         let session_id = SessionId::from("session-forwarder-fallback");
         let runtime = Arc::new(crate::session_runtime::SessionRuntimeState::new(
@@ -566,7 +605,7 @@ mod tests {
         })
         .unwrap();
 
-        let mut saw_tool_completion = false;
+        let mut saw_notification = false;
         let mut saw_background_completion = false;
         for _ in 0..2 {
             let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
@@ -574,8 +613,8 @@ mod tests {
                 .expect("fallback events should arrive")
                 .expect("session event channel should remain open");
             match event.payload {
-                EventPayload::ToolCallCompleted { call_id, .. } => {
-                    saw_tool_completion = call_id.as_str() == "call-1";
+                EventPayload::BackgroundTaskNotification { task_id, .. } => {
+                    saw_notification = task_id.as_str() == "task-1";
                 },
                 EventPayload::BackgroundTaskCompleted { task_id, .. } => {
                     saw_background_completion = task_id.as_str() == "task-1";
@@ -585,8 +624,8 @@ mod tests {
         }
 
         assert!(
-            saw_tool_completion,
-            "live ToolCallCompleted should finalize UI"
+            saw_notification,
+            "live BackgroundTaskNotification should finalize UI when durable write fails"
         );
         assert!(saw_background_completion);
         assert_eq!(
@@ -597,14 +636,14 @@ mod tests {
                 .messages
                 .len(),
             0,
-            "fallback is live-only when durable write fails"
+            "durable notification failed; no messages persisted"
         );
     }
 
     #[tokio::test]
     async fn reader_cancel_rejects_wrong_session() {
         let manager = Arc::new(Mutex::new(BackgroundTaskManager::new()));
-        let reader = BackgroundTaskReaderImpl::new(Arc::clone(&manager));
+        let reader = BackgroundTaskReaderImpl::new(Arc::clone(&manager), None);
 
         let task_id = BackgroundTaskId::from("task-x");
         let session_correct = SessionId::from("correct");

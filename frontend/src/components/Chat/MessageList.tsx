@@ -99,7 +99,11 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     const items: { type: 'block'; block: ConversationBlock; index: number }[] =
       []
     for (let i = 0; i < blocks.length; i++) {
-      items.push({ type: 'block', block: blocks[i], index: i })
+      const block = blocks[i]
+      if (block.kind === 'user' && block.source === 'background_task') {
+        continue
+      }
+      items.push({ type: 'block', block, index: i })
     }
     return items
   }, [blocks])

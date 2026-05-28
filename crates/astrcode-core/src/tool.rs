@@ -31,6 +31,18 @@ pub trait BackgroundTaskReader: Send + Sync {
 
     /// 取消指定任务。返回 true 表示成功取消。
     fn cancel(&self, session_id: &SessionId, task_id: &crate::types::BackgroundTaskId) -> bool;
+
+    /// 读取后台任务输出的分页切片。
+    ///
+    /// 返回 `Err(StorageError::NotFound)` 如果任务输出文件不存在
+    /// （任务可能仍在运行，或 task_id 无效）。
+    fn read_output(
+        &self,
+        session_id: &SessionId,
+        task_id: &crate::types::BackgroundTaskId,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<crate::storage::BackgroundTaskOutputSlice, crate::storage::StorageError>;
 }
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
