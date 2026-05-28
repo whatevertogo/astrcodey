@@ -1,4 +1,8 @@
 //! Background task management tool — list running tasks, cancel them, and read output.
+//!
+//! TODO: 目前只展示 shell 后台任务（BackgroundTaskManager），agent 后台的子会话不可见。
+//! 考虑在 list 中也展示 wait_for_result=false 的 agent 子会话状态，
+//! 让 LLM 能统一查询所有后台活动。
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
