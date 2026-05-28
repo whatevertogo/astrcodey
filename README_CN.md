@@ -378,17 +378,6 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **21 个 crate**，另有 [`s
 
 **合计：** Rust 约 7.22 万行（21 个 crate + Tauri），**251** 个 `.rs` 文件；`frontend/` 约 6800 行 TypeScript（整体约 **7.9 万行**）。
 
-### 前端与桌面应用
-
-| 组件 | 行数 | 说明 |
-|---|---|---|
-| `frontend/`（React + TS） | ~7.1k | Web 前端——聊天视图、侧边栏、会话管理、SSE 流式传输、状态栏 |
-| `src-tauri/`（Tauri v2） | 777 | 桌面应用外壳——sidecar 管理、单实例协调、原生对话框 |
-
-Web 前端（`frontend/`）是 React 19 + TypeScript + Tailwind CSS v4 + Vite 单页应用，通过 SSE 实时接收流式事件，通过 JSON-RPC 发送命令。支持浏览器独立运行（`npm run dev`）或打包为 Tauri 桌面应用（`npm run tauri:dev`）。
-
-Tauri 桌面应用（`src-tauri/`）将 Web 前端包装在原生窗口中，自动管理 `astrcode-server` 作为 sidecar 进程——启动时自动拉起、发现空闲端口、桥接连接。还提供单实例协调（文件锁 + TCP 激活）和通过 `tauri-plugin-dialog` 的原生文件对话框。
-
 ## 核心设计
 
 ### Agent 循环
