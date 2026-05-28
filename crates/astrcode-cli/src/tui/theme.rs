@@ -31,9 +31,6 @@ pub struct Theme {
     pub composer: Style,
     /// 输入编辑器占位提示样式
     pub composer_placeholder: Style,
-    /// 弹窗边框样式
-    #[allow(dead_code)]
-    pub popup_border: Style,
     /// 弹窗选中项样式
     pub popup_selected: Style,
 }
@@ -97,7 +94,6 @@ impl Theme {
                 Color::Rgb(24, 24, 22)
             }),
             composer_placeholder: Style::default().fg(muted),
-            popup_border: Style::default().fg(accent),
             popup_selected: Style::default().fg(accent).add_modifier(Modifier::BOLD),
         }
     }

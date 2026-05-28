@@ -348,7 +348,6 @@ impl McpProcessPool {
 // ─── Stdio helpers ─────────────────────────────────────────────────────
 
 async fn shutdown_stdio_ref(client: &StdioPooledClient) {
-    let _ = client.stdin.lock().await.shutdown().await;
     let child_opt = {
         let Ok(mut guard) = client.child.lock() else {
             return;
@@ -529,8 +528,6 @@ async fn stderr_tail_stdio(client: &StdioPooledClient) -> String {
 }
 
 async fn shutdown_stdio(client: StdioPooledClient) {
-    // Shut down stdin first
-    let _ = client.stdin.lock().await.shutdown().await;
     // Take the child out of the Mutex and drop the guard before any await
     let child_opt = {
         let Ok(mut guard) = client.child.lock() else {

@@ -16,7 +16,7 @@ use astrcode_extension_sdk::{
         PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{CreateSessionRequest, ExecutionMode, SubmitTurnRequest, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
 use astrcode_support::text::compact_inline;
 use serde::Deserialize;
@@ -241,7 +241,6 @@ impl ToolHandler for AgentToolHandler {
             })?;
 
         // 1. 创建子会话
-        use astrcode_extension_sdk::tool::{CreateSessionRequest, SubmitTurnRequest};
         let handle = session_ops
             .create_session(
                 ctx.session_id.as_str(),
@@ -464,7 +463,6 @@ mod tests {
             id: String::from("code-reviewer"),
             name: String::from("code-reviewer"),
             description: String::from("Use for behavior-focused code review"),
-            model: Some(String::from("opus")),
             body: String::from("Review carefully."),
         }];
 

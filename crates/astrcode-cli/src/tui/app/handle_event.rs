@@ -159,10 +159,7 @@ fn apply_event(app: &mut App, event: &Event) {
                 .find_message_mut(message_id.as_str())
                 .is_some_and(|msg| msg.body.is_empty());
             if is_first_delta {
-                app.scrollback_queue.push(ScrollbackEntry::StreamHeader {
-                    role: MessageRole::Assistant,
-                    label: "Astrcode".into(),
-                });
+                app.scrollback_queue.push(ScrollbackEntry::StreamHeader);
                 app.status_text = "Working".into();
             }
             if let Some(msg) = app.find_message_mut(message_id.as_str()) {
@@ -231,10 +228,7 @@ fn apply_event(app: &mut App, event: &Event) {
                     call_id.to_string(),
                     crate::tui::store::child_agent::ChildAgentTracker::default(),
                 );
-                app.scrollback_queue.push(ScrollbackEntry::StreamHeader {
-                    role: MessageRole::Tool,
-                    label: "Task".into(),
-                });
+                app.scrollback_queue.push(ScrollbackEntry::StreamHeader);
             }
             tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_open");
         },
@@ -317,19 +311,8 @@ fn apply_event(app: &mut App, event: &Event) {
             } else {
                 // Try custom tool renderer for rich display.
                 if let Some(renderer) = app.tool_renderers.get(tool_name) {
-                    let mut state: Box<dyn std::any::Any + Send> = Box::new(());
-                    let mut ctx = ToolRenderCtx {
-                        call_id: call_id.as_str(),
-                        tool_name,
-                        args: None,
-                        args_complete: true,
-                        execution_started: true,
-                        is_partial: false,
-                        is_error: false,
-                        expanded: false,
-                        state: &mut state,
-                    };
-                    if let Some(spec) = renderer.render_result(result, &mut ctx) {
+                    let ctx = ToolRenderCtx { tool_name };
+                    if let Some(spec) = renderer.render_result(result, &ctx) {
                         let fallback = tool_completion_summary(tool_name, result);
                         app.push_rendered_message(
                             MessageRole::Tool,
@@ -829,7 +812,7 @@ mod tests {
         assert_eq!(app.messages[0].body.plain_text(), "first line\nsecond");
         assert!(matches!(
             app.scrollback_queue.first(),
-            Some(ScrollbackEntry::StreamHeader { label, .. }) if label == "Astrcode"
+            Some(ScrollbackEntry::StreamHeader)
         ));
         assert!(
             app.scrollback_queue

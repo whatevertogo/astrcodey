@@ -12,7 +12,6 @@ pub use builder::{
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
 pub use host::{HostApi, HostClient, inject_host_api};
-pub use manifest::{CommandManifestEntry, HookManifestEntry, ManifestCatalog};
 pub use registry::{CommandHandlerFn, HookHandlerFn, ToolHandlerFn, WorkerCallContext};
 use serde_json::{Value, json};
 
@@ -22,6 +21,7 @@ use crate::{
     tool::ToolDefinition,
     worker::{
         host::{PeerHostApi, set_host_api},
+        manifest::ManifestCatalog,
         registry::{HandlerRegistry, registration_metadata},
     },
 };
@@ -51,13 +51,13 @@ impl Worker {
 
     /// 声明 manifest 能力（wire 名，如 `small_model`）。
     pub fn capability(mut self, cap: impl Into<String>) -> Self {
-        self.registry.catalog_mut().capabilities.push(cap.into());
+        self.registry.declare_capability(cap);
         self
     }
 
     /// 声明可发射的扩展事件 schema。
     pub fn extension_event(mut self, event: Value) -> Self {
-        self.registry.catalog_mut().extension_events.push(event);
+        self.registry.declare_extension_event(event);
         self
     }
 

@@ -9,11 +9,8 @@ use astrcode_core::{
     render::{RenderKeyValue, RenderSpec, RenderTone},
     tool::ToolResult,
 };
-use astrcode_support::text::compact_inline;
-
 use super::{
     fallback::DefaultToolRenderer,
-    message::MessageRendererRegistry,
     tool::{ToolRenderCtx, ToolRenderer, ToolRendererRegistry},
 };
 
@@ -26,11 +23,7 @@ impl ToolRenderer for ReadRenderer {
         "read"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -66,11 +59,7 @@ impl ToolRenderer for WriteRenderer {
         "write"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -136,11 +125,7 @@ impl ToolRenderer for EditRenderer {
         "edit"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -192,11 +177,7 @@ impl ToolRenderer for ShellRenderer {
         "shell"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         let exit_code = result
             .metadata
             .get("exitCode")
@@ -267,11 +248,7 @@ impl ToolRenderer for GrepRenderer {
         "grep"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -336,11 +313,7 @@ impl ToolRenderer for FindRenderer {
         "find"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -410,11 +383,7 @@ impl ToolRenderer for PatchRenderer {
         "patch"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -457,27 +426,7 @@ impl ToolRenderer for AgentRenderer {
         "agent"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        let args = ctx.args;
-        let description = args
-            .and_then(|a| a["description"].as_str())
-            .filter(|s| !s.trim().is_empty());
-        let subagent_type = args
-            .and_then(|a| a["subagent_type"].as_str())
-            .filter(|s| !s.trim().is_empty());
-        let label = match (description, subagent_type) {
-            (Some(d), Some(t)) => format!("Task({}) [{}]", compact_inline(d, 56), t),
-            (Some(d), None) => format!("Task({})", compact_inline(d, 56)),
-            (None, Some(t)) => format!("Task [{}]", t),
-            (None, None) => "Task".into(),
-        };
-        RenderSpec::Text {
-            text: label,
-            tone: Default::default(),
-        }
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         let mut children = Vec::new();
         if let Some(sid) = result
             .metadata
@@ -538,11 +487,7 @@ impl ToolRenderer for SwitchModeRenderer {
         "switchMode"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -596,11 +541,7 @@ impl ToolRenderer for UpsertSessionPlanRenderer {
         "upsertSessionPlan"
     }
 
-    fn render_call(&self, ctx: &mut ToolRenderCtx) -> RenderSpec {
-        DefaultToolRenderer.render_call(ctx)
-    }
-
-    fn render_result(&self, result: &ToolResult, _ctx: &mut ToolRenderCtx) -> Option<RenderSpec> {
+    fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {
         if result.is_error {
             return None;
         }
@@ -626,12 +567,8 @@ impl ToolRenderer for UpsertSessionPlanRenderer {
 
 // ─── Registration ─────────────────────────────────────────────────────────
 
-/// Register all built-in renderers into the provided registries.
-/// TODO：使用 MessageRenderer 验证端到端渲染
-pub fn register_builtin(
-    tool_reg: &mut ToolRendererRegistry,
-    _msg_reg: &mut MessageRendererRegistry,
-) {
+/// Register all built-in tool renderers.
+pub fn register_builtin(tool_reg: &mut ToolRendererRegistry) {
     tool_reg.register(Arc::new(ReadRenderer));
     tool_reg.register(Arc::new(WriteRenderer));
     tool_reg.register(Arc::new(EditRenderer));

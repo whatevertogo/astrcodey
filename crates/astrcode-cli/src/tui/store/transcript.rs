@@ -65,7 +65,7 @@ impl MessageBody {
 
     /// 创建携带自定义类型的消息体，供 `MessageRendererRegistry` 分发渲染。
     ///
-    /// `custom_type` 对应已注册的 `MessageRenderer::custom_type()`。
+    /// `custom_type` 对应 [`MessageRendererRegistry`] 中注册的键。
     /// `payload` 是传给渲染器的 JSON 数据。
     /// `fallback` 是渲染器不可用时的纯文本降级内容。
     pub fn with_custom(custom_type: String, payload: serde_json::Value, fallback: String) -> Self {
@@ -90,12 +90,7 @@ pub struct Message {
 #[derive(Debug, Clone)]
 pub enum ScrollbackEntry {
     Message(Message),
-    StreamHeader {
-        #[allow(dead_code)]
-        role: MessageRole,
-        #[allow(dead_code)]
-        label: String,
-    },
+    StreamHeader,
     StreamText {
         role: MessageRole,
         text: String,

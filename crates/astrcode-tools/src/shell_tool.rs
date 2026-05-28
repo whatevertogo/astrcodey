@@ -56,16 +56,6 @@ struct ShellArgs {
     /// `wc -l` 统计行数等），避免在 command 中做复杂的 shell 转义。
     #[serde(default)]
     stdin: Option<String>,
-    /// 是否立即在后台执行，不阻塞 agent loop。
-    ///
-    /// 设为 true 时，命令立刻转入后台运行，agent 收到占位结果后可继续推理。
-    /// 适用于 dev server、watcher、build 等长时间运行的任务。
-    ///
-    /// 此字段由 agent loop 的工具执行调度层在反序列化前读取（从原始 tool_input JSON），
-    /// 不在 ShellTool::execute 内部使用。
-    #[serde(default)]
-    #[expect(dead_code)]
-    run_in_background: bool,
 }
 
 #[async_trait::async_trait]
@@ -336,7 +326,9 @@ fn setup_process_group(command: &mut Command) {
     // 在 fork 后 exec 前执行，让子进程成为新 session leader。
     unsafe {
         command.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }

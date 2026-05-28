@@ -11,7 +11,6 @@
 //! 则可能丢失按键。未来可考虑将消费到的多余字节推回事件队列。
 
 #[cfg(unix)]
-#[cfg_attr(test, allow(dead_code))]
 mod imp {
     use std::{
         fs::{File, OpenOptions},

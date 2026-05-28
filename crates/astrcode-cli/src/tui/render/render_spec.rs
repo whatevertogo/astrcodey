@@ -11,24 +11,6 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::tui::theme::Theme;
 
-// ─── Public API ────────────────────────────────────────────────────────────
-
-/// Convert a `RenderSpec` tree into a flat list of styled `Line`s.
-///
-/// `prefix` is prepended to every line (e.g. `"  "` for 2-space indent).
-/// `width` is the available column count (used for wrapping).
-#[allow(dead_code)] // unit tests; scrollback rich render path pending
-pub fn render_spec_to_lines(
-    spec: &RenderSpec,
-    prefix: &str,
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    render_spec_inner(spec, &mut lines, width, theme, prefix);
-    lines
-}
-
 pub(crate) fn render_spec_inner(
     spec: &RenderSpec,
     lines: &mut Vec<Line<'static>>,
@@ -535,6 +517,17 @@ pub fn layout_visual_text(text: &str, width: usize, cursor: Option<usize>) -> Vi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_spec_to_lines(
+        spec: &RenderSpec,
+        prefix: &str,
+        width: usize,
+        theme: &Theme,
+    ) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        render_spec_inner(spec, &mut lines, width, theme, prefix);
+        lines
+    }
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()

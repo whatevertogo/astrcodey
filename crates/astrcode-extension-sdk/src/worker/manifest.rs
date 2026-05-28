@@ -63,34 +63,4 @@ impl ManifestCatalog {
             "extension_events": self.extension_events,
         })
     }
-
-    pub fn validate_handlers_registered(
-        &self,
-        tools: &[String],
-        hooks: &[String],
-        commands: &[String],
-    ) -> Result<(), String> {
-        for name in tools {
-            if !self.tools.iter().any(|t| &t.name == name) {
-                return Err(format!(
-                    "tool handler {name} registered without manifest entry"
-                ));
-            }
-        }
-        for on in hooks {
-            if !self.hooks.iter().any(|h| &h.on == on) {
-                return Err(format!(
-                    "hook handler {on} registered without manifest entry"
-                ));
-            }
-        }
-        for name in commands {
-            if !self.commands.iter().any(|c| &c.name == name) {
-                return Err(format!(
-                    "command handler {name} registered without manifest entry"
-                ));
-            }
-        }
-        Ok(())
-    }
 }

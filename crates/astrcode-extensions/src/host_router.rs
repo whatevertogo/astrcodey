@@ -35,17 +35,28 @@ where
     });
 
     // 从 tokio 异步任务里直接 block_on 会占满 test/runtime worker，嵌套 host invoke 会死锁。
-    if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::spawn(move || {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        ) {
+            return tokio::task::block_in_place(|| {
+                let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+                rt.block_on(future)
+            });
+        }
+        match std::thread::spawn(move || {
             let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             rt.block_on(future)
         })
         .join()
-        .expect("block_on_async worker thread panicked")
-    } else {
-        let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        rt.block_on(future)
+        {
+            Ok(output) => return output,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
+    let _guard = BLOCK_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    rt.block_on(future)
 }
 
 /// 单次 guest→host invoke 的运行时上下文。

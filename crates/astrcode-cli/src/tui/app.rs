@@ -13,7 +13,7 @@ use crate::tui::{
     command::slash::{self, SlashCommandSpec},
     composer::ComposerState,
     ext::{
-        builtin::register_builtin, fallback::DefaultToolRenderer, message::MessageRendererRegistry,
+        builtin::register_builtin, message::MessageRendererRegistry,
         tool::ToolRendererRegistry,
     },
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
@@ -98,10 +98,9 @@ pub struct UiPicker {
 
 impl App {
     pub fn new(theme: Theme) -> Self {
-        let fallback = std::sync::Arc::new(DefaultToolRenderer);
-        let mut tool_renderers = ToolRendererRegistry::new(fallback);
-        let mut message_renderers = MessageRendererRegistry::new();
-        register_builtin(&mut tool_renderers, &mut message_renderers);
+        let mut tool_renderers = ToolRendererRegistry::new();
+        let message_renderers = MessageRendererRegistry::new();
+        register_builtin(&mut tool_renderers);
 
         Self {
             active_session_id: None,

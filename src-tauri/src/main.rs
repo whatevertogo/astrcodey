@@ -9,6 +9,7 @@ mod paths;
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use instance::{InstanceBootstrap, InstanceCoordinator};
 use tauri::Manager;
 
@@ -28,7 +29,10 @@ fn wait_for_dev_server() {
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
     const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-    let addr: SocketAddr = DEV_ADDR.parse().expect("invalid dev server address");
+    let Ok(addr) = DEV_ADDR.parse::<SocketAddr>() else {
+        tracing::warn!("invalid dev server address {DEV_ADDR}, showing window anyway");
+        return;
+    };
     let deadline = std::time::Instant::now() + MAX_WAIT;
 
     tracing::info!("waiting for Vite dev server at {DEV_ADDR}...");
@@ -80,15 +84,17 @@ fn run() -> anyhow::Result<()> {
 
             #[cfg(debug_assertions)]
             {
-                let window = app
-                    .get_webview_window("main")
-                    .expect("main window not found");
                 let coord_win = Arc::clone(&coord_setup);
-                std::thread::spawn(move || {
-                    wait_for_dev_server();
-                    let _ = window.show();
+                if let Some(window) = app.get_webview_window("main") {
+                    std::thread::spawn(move || {
+                        wait_for_dev_server();
+                        let _ = window.show();
+                        coord_win.mark_main_window_ready();
+                    });
+                } else {
+                    tracing::warn!("main window not found in debug setup");
                     coord_win.mark_main_window_ready();
-                });
+                }
             }
 
             #[cfg(not(debug_assertions))]
@@ -114,14 +120,14 @@ fn run() -> anyhow::Result<()> {
             commands::close_window,
         ])
         .build(tauri::generate_context!())
-        .expect("error building tauri application")
+        .context("error building tauri application")?
         .run(move |app_handle, event| match event {
             tauri::RunEvent::ExitRequested { .. } => {
                 coord_run.shutdown();
-                shutdown_sidecar(&app_handle);
+                shutdown_sidecar(app_handle);
             },
             tauri::RunEvent::Exit => {
-                shutdown_sidecar(&app_handle);
+                shutdown_sidecar(app_handle);
             },
             _ => {},
         });

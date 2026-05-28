@@ -1,8 +1,7 @@
 //! Inserts finalized history rows into terminal scrollback.
 //!
 //! Codex uses the terminal scrollback itself for finalized chat history, so inserting a history
-//! cell is an escape-sequence operation rather than a normal ratatui render. The mode determines
-//! how to create room for new history above the inline viewport.
+//! cell is an escape-sequence operation rather than a normal ratatui render.
 
 use std::{fmt, io, io::Write};
 
@@ -25,41 +24,8 @@ use ratatui_crossterm::IntoCrossterm;
 
 use super::custom_terminal::Terminal;
 
-/// Selects the terminal escape strategy for inserting history lines above the viewport.
-///
-/// Standard terminals support `DECSTBM` scroll regions and Reverse Index (`ESC M`),
-/// which let us slide existing content down without redrawing it. Zellij silently
-/// drops or mishandles those sequences, so `Zellij` mode falls back to emitting
-/// newlines at the bottom of the screen and writing lines at absolute positions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InsertHistoryMode {
-    Standard,
-    #[allow(dead_code)]
-    Zellij,
-}
-
-/// Insert `lines` above the viewport using the terminal's backend writer
-/// (avoids direct stdout references).
+/// Insert `lines` above the viewport using DECSTBM scroll regions and reverse index.
 pub fn insert_history_lines<B>(terminal: &mut Terminal<B>, lines: Vec<Line>) -> io::Result<()>
-where
-    B: ratatui::backend::Backend<Error = io::Error> + Write,
-{
-    insert_history_lines_with_mode(terminal, lines, InsertHistoryMode::Standard)
-}
-
-/// Insert `lines` above the viewport, using the escape strategy selected by `mode`.
-///
-/// In `Standard` mode this manipulates DECSTBM scroll regions to slide existing
-/// scrollback down and writes new lines into the freed space. In `Zellij` mode it
-/// emits newlines at the screen bottom to create space (since Zellij ignores scroll
-/// region escapes) and writes lines at computed absolute positions. Both modes
-/// update `terminal.viewport_area` so subsequent draw passes know where the
-/// viewport moved to.
-pub fn insert_history_lines_with_mode<B>(
-    terminal: &mut Terminal<B>,
-    lines: Vec<Line>,
-    mode: InsertHistoryMode,
-) -> io::Result<()>
 where
     B: ratatui::backend::Backend<Error = io::Error> + Write,
 {
@@ -85,89 +51,34 @@ where
     }
     let wrapped_lines = wrapped_rows as u16;
 
-    match mode {
-        InsertHistoryMode::Zellij => {
-            let space_below = screen_size.height.saturating_sub(area.bottom());
-            let shift_down = wrapped_lines.min(space_below);
-            let scroll_up_amount = wrapped_lines.saturating_sub(shift_down);
+    let cursor_top = if area.bottom() < screen_size.height {
+        let scroll_amount = wrapped_lines.min(screen_size.height - area.bottom());
 
-            if scroll_up_amount > 0 {
-                // Scroll the entire screen up by emitting \n at the bottom
-                queue!(
-                    writer,
-                    MoveTo(/* x */ 0, screen_size.height.saturating_sub(1))
-                )?;
-                for _ in 0..scroll_up_amount {
-                    queue!(writer, Print("\n"))?;
-                }
-            }
+        let top_1based = area.top() + 1;
+        queue!(writer, SetScrollRegion(top_1based..screen_size.height))?;
+        queue!(writer, MoveTo(/* x */ 0, area.top()))?;
+        for _ in 0..scroll_amount {
+            queue!(writer, Print("\x1bM"))?;
+        }
+        queue!(writer, ResetScrollRegion)?;
 
-            if shift_down > 0 {
-                area.y += shift_down;
-                should_update_area = true;
-            }
+        let cursor_top = area.top().saturating_sub(1);
+        area.y += scroll_amount;
+        should_update_area = true;
+        cursor_top
+    } else {
+        area.top().saturating_sub(1)
+    };
 
-            let cursor_top = area.top().saturating_sub(scroll_up_amount + shift_down);
-            queue!(writer, MoveTo(/* x */ 0, cursor_top))?;
+    queue!(writer, SetScrollRegion(1..area.top()))?;
+    queue!(writer, MoveTo(/* x */ 0, cursor_top))?;
 
-            for (i, line) in wrapped.iter().enumerate() {
-                if i > 0 {
-                    queue!(writer, Print("\r\n"))?;
-                }
-                write_history_line(writer, line, wrap_width)?;
-            }
-        },
-        InsertHistoryMode::Standard => {
-            let cursor_top = if area.bottom() < screen_size.height {
-                let scroll_amount = wrapped_lines.min(screen_size.height - area.bottom());
-
-                let top_1based = area.top() + 1;
-                queue!(writer, SetScrollRegion(top_1based..screen_size.height))?;
-                queue!(writer, MoveTo(/* x */ 0, area.top()))?;
-                for _ in 0..scroll_amount {
-                    queue!(writer, Print("\x1bM"))?;
-                }
-                queue!(writer, ResetScrollRegion)?;
-
-                let cursor_top = area.top().saturating_sub(1);
-                area.y += scroll_amount;
-                should_update_area = true;
-                cursor_top
-            } else {
-                area.top().saturating_sub(1)
-            };
-
-            // Limit the scroll region to the lines from the top of the screen to the
-            // top of the viewport. With this in place, when we add lines inside this
-            // area, only the lines in this area will be scrolled. We place the cursor
-            // at the end of the scroll region, and add lines starting there.
-            //
-            // ┌─Screen───────────────────────┐
-            // │┌╌Scroll region╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐│
-            // │┆                            ┆│
-            // │┆                            ┆│
-            // │┆                            ┆│
-            // │█╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘│
-            // │╭─Viewport───────────────────╮│
-            // ││                            ││
-            // │╰────────────────────────────╯│
-            // └──────────────────────────────┘
-            queue!(writer, SetScrollRegion(1..area.top()))?;
-
-            // NB: we are using MoveTo instead of set_cursor_position here to avoid messing with the
-            // terminal's last_known_cursor_position, which hopefully will still be accurate after
-            // we fetch/restore the cursor position. insert_history_lines should be
-            // cursor-position-neutral :)
-            queue!(writer, MoveTo(/* x */ 0, cursor_top))?;
-
-            for line in &wrapped {
-                queue!(writer, Print("\r\n"))?;
-                write_history_line(writer, line, wrap_width)?;
-            }
-
-            queue!(writer, ResetScrollRegion)?;
-        },
+    for line in &wrapped {
+        queue!(writer, Print("\r\n"))?;
+        write_history_line(writer, line, wrap_width)?;
     }
+
+    queue!(writer, ResetScrollRegion)?;
 
     // Restore the cursor position to where it was before we started.
     queue!(writer, MoveTo(last_cursor_pos.x, last_cursor_pos.y))?;

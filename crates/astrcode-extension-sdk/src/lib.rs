@@ -90,7 +90,7 @@ pub mod worker_prelude {
             effects::{CallContinuation, HandlerResult},
         },
         worker::{
-            HostApi, HostClient, ManifestCatalog, Worker, WorkerCallContext, command_handler,
+            HostApi, HostClient, Worker, WorkerCallContext, command_handler,
             handler_err, hook_handler, hook_handler_args, inject_host_api, parse_hook_input,
             parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
         },

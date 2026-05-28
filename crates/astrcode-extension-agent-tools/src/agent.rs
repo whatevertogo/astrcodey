@@ -15,9 +15,6 @@ pub struct AgentConfig {
     pub name: String,
     /// 描述何时应选择此 Agent（给 LLM 的选择依据）。
     pub description: String,
-    /// 预留：按 agent 指定模型档位；当前子 Agent 固定使用 small，本字段暂不读取。
-    #[allow(dead_code)]
-    pub model: Option<String>,
     /// 系统提示词正文。
     pub body: String,
 }
@@ -172,9 +169,6 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
     let description =
         mapping_str(m, "description").ok_or_else(|| format!("{path}: description is required"))?;
 
-    // "inherit" 和空字符串表示继承父级模型设置
-    let model = mapping_str(m, "model").filter(|s| s != "inherit" && !s.is_empty());
-
     // 系统提示词优先级: markdown 正文 > systemPrompt 字段 > prompt 字段 > 空
     let body = markdown_body
         .map(|b| b.trim().to_string())
@@ -187,7 +181,6 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         id,
         name,
         description,
-        model,
         body,
     })
 }

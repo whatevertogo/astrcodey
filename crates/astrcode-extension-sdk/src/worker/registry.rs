@@ -36,7 +36,7 @@ pub struct WorkerCallContext {
     pub cancel_token: CancelToken,
 }
 
-pub struct HandlerRegistry {
+pub(crate) struct HandlerRegistry {
     pub extension_id: String,
     catalog: ManifestCatalog,
     tools: HashMap<String, ToolHandlerFn>,
@@ -55,15 +55,19 @@ impl HandlerRegistry {
         }
     }
 
-    pub fn catalog(&self) -> &ManifestCatalog {
+    pub(crate) fn catalog(&self) -> &ManifestCatalog {
         &self.catalog
     }
 
-    pub fn catalog_mut(&mut self) -> &mut ManifestCatalog {
-        &mut self.catalog
+    pub(crate) fn declare_capability(&mut self, cap: impl Into<String>) {
+        self.catalog.capabilities.push(cap.into());
     }
 
-    pub fn register_tool(&mut self, def: crate::tool::ToolDefinition, handler: ToolHandlerFn) {
+    pub(crate) fn declare_extension_event(&mut self, event: Value) {
+        self.catalog.extension_events.push(event);
+    }
+
+    pub(crate) fn register_tool(&mut self, def: crate::tool::ToolDefinition, handler: ToolHandlerFn) {
         let name = def.name.clone();
         if self.tools.contains_key(&name) {
             panic!("duplicate tool registration: {name}");
@@ -72,7 +76,7 @@ impl HandlerRegistry {
         self.tools.insert(name, handler);
     }
 
-    pub fn register_hook(
+    pub(crate) fn register_hook(
         &mut self,
         on: impl Into<String>,
         mode: impl Into<String>,
@@ -89,7 +93,7 @@ impl HandlerRegistry {
         self.hooks.insert(on, handler);
     }
 
-    pub fn register_command(
+    pub(crate) fn register_command(
         &mut self,
         name: impl Into<String>,
         description: impl Into<String>,
@@ -103,43 +107,6 @@ impl HandlerRegistry {
             name: name.clone(),
             description: description.into(),
         });
-        self.commands.insert(name, handler);
-    }
-
-    /// 兼容旧 API：仅注册 handler，须已在 catalog 中存在对应条目。
-    #[allow(dead_code)]
-    pub fn register_tool_handler(&mut self, name: impl Into<String>, handler: ToolHandlerFn) {
-        let name = name.into();
-        if !self.catalog.tools.iter().any(|t| t.name == name) {
-            panic!(
-                "register_tool_handler({name}): missing tool manifest entry — use Worker::tool() \
-                 instead"
-            );
-        }
-        self.tools.insert(name, handler);
-    }
-
-    #[allow(dead_code)]
-    pub fn register_hook_handler(&mut self, on: impl Into<String>, handler: HookHandlerFn) {
-        let on = on.into();
-        if !self.catalog.hooks.iter().any(|h| h.on == on) {
-            panic!(
-                "register_hook_handler({on}): missing hook manifest entry — use Worker::hook() \
-                 instead"
-            );
-        }
-        self.hooks.insert(on, handler);
-    }
-
-    #[allow(dead_code)]
-    pub fn register_command_handler(&mut self, name: impl Into<String>, handler: CommandHandlerFn) {
-        let name = name.into();
-        if !self.catalog.commands.iter().any(|c| c.name == name) {
-            panic!(
-                "register_command_handler({name}): missing command manifest entry — use \
-                 Worker::command() instead"
-            );
-        }
         self.commands.insert(name, handler);
     }
 

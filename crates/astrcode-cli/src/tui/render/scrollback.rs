@@ -196,7 +196,7 @@ pub fn render_message(
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let opts = crate::tui::ext::message::MessageRenderOpts { expanded: false };
+            let opts = crate::tui::ext::message::MessageRenderOpts;
             if let Some(spec) = renderer.render(&payload, &opts) {
                 let mut lines = Vec::new();
                 render_spec_inner(&spec, &mut lines, content_width, theme, "  ");
