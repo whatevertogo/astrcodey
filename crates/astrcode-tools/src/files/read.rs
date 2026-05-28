@@ -163,7 +163,7 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
              `oldStr`/`newStr`.\n",
             "- Large files: use `offset`+`limit` or `charOffset`+`maxChars` for pagination.\n",
             "- Supports text, code, JSON, Markdown, and auto-detects binary/images.\n",
-            "- To list directories, use `find`.",
+            "- To list or discover paths, use `glob`.",
         )
         .into(),
         origin: ToolOrigin::Builtin,

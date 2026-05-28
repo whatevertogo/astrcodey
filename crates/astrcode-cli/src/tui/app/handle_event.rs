@@ -544,7 +544,7 @@ fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult)
             }
         },
         "write" | "edit" | "patch" => "done".into(),
-        "find" => {
+        "glob" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
             format!("{count} file(s)")
         },
@@ -710,7 +710,7 @@ fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> 
             let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
             format!("{action} {path}")
         },
-        "find" => {
+        "glob" => {
             let pattern = arguments
                 .and_then(|a| a["pattern"].as_str())
                 .unwrap_or("...");
@@ -750,7 +750,7 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
         },
         "read" => format!("● Read {} line(s)", content.lines().count().max(1)),
         "write" | "edit" | "patch" => "● Done".into(),
-        "find" => {
+        "glob" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
             format!("● Found {count} file(s)")
         },

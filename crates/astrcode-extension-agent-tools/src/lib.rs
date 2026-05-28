@@ -106,7 +106,7 @@ impl AgentShared {
 const AGENT_TOOL_DESCRIPTION: &str =
     "Delegate a multi-step task to a specialized subagent. See [Agents] for available \
      types.\nWhen NOT to use:\n- Reading 1-3 known files → `read`\n- Searching for a symbol → \
-     `grep`/`find`\n- Anything achievable in 2-6 direct tool calls → do it yourself\nOne or \
+     `grep`/`glob`\n- Anything achievable in 2-6 direct tool calls → do it yourself\nOne or \
      multiple agents — match the task scope:\n- Single agent: focused task in one area (find how \
      X is implemented, review a PR)\n- Multiple agents in parallel: broad task spanning \
      independent areas (explore impl + tests, review while executing, investigate different \
@@ -378,7 +378,7 @@ fn agent_tool_metadata()
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(
             "Delegate to a subagent when the task needs multi-step exploration, isolated context, \
              or parallel execution. For directed searches (a known symbol or pattern) use \
-             `find`/`grep` directly. Prefer `subagentType=explore` for broad exploration that \
+             `glob`/`grep` directly. Prefer `subagentType=explore` for broad exploration that \
              would take more than 3 manual queries.\nAgent count — match the scope:\n- Single \
              agent for a focused task: investigate one area, review specific files, trace a \
              single call chain.\n- Multiple agents in parallel for broad tasks: each agent gets a \

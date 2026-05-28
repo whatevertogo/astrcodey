@@ -116,7 +116,7 @@ pub struct ToolPromptMetadata {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPromptTag {
-    /// 文件系统类工具（read/write/edit/grep/find/patch）。
+    /// 文件系统类工具（read/write/edit/grep/glob/patch）。
     Filesystem,
     /// 系统类工具（shell/task）。
     System,

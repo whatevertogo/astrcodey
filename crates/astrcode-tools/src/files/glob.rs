@@ -10,22 +10,21 @@ use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{FileCollectOptions, collect_candidate_files, tool_call_id};
-// ─── find ────────────────────────────────────────────────────────────────
 
-const DEFAULT_FIND_FILES_MAX_RESULTS: usize = 100;
+const DEFAULT_GLOB_MAX_RESULTS: usize = 100;
 
-/// 文件查找工具，按 glob 模式搜索文件路径（不搜索内容）。
+/// 按 glob 模式匹配文件路径（不搜索文件内容）。
 ///
 /// 结果按修改时间倒序排列，支持 gitignore 过滤和隐藏文件控制。
-pub struct FindFilesTool {
+pub struct GlobTool {
     /// 工具的工作目录
     pub working_dir: PathBuf,
 }
 
-/// find 工具的参数。
+/// `glob` 工具的参数。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FindFilesArgs {
+struct GlobArgs {
     /// glob 匹配模式，如 `*.rs`、`**/*.ts`、`*.{json,toml}`
     pattern: String,
     /// 搜索的根目录（默认为工作目录）
@@ -45,34 +44,33 @@ struct FindFilesArgs {
     include_hidden: bool,
 }
 
-/// serde 默认值函数：返回 true。
 fn default_true() -> bool {
     true
 }
 
 #[async_trait::async_trait]
-impl Tool for FindFilesTool {
+impl Tool for GlobTool {
     fn definition(&self) -> ToolDefinition {
-        find_files_tool_definition().clone()
+        glob_tool_definition().clone()
     }
 
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
     }
-    /// 执行文件查找：解析 glob 模式 → 遍历匹配 → 过滤隐藏/gitignore → 按时间排序。
+
     async fn execute(
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
-        let args: FindFilesArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(format!("invalid find args: {e}")))?;
+        let args: GlobArgs = serde_json::from_value(args)
+            .map_err(|e| ToolError::InvalidArguments(format!("invalid glob args: {e}")))?;
         let root = match args.root {
             Some(ref raw) => resolve_path(&self.working_dir, raw),
             None => self.working_dir.clone(),
         };
-        let max_results = args.max_results.unwrap_or(DEFAULT_FIND_FILES_MAX_RESULTS);
+        let max_results = args.max_results.unwrap_or(DEFAULT_GLOB_MAX_RESULTS);
         let mut results = collect_candidate_files(
             &self.working_dir,
             &root,
@@ -85,7 +83,7 @@ impl Tool for FindFilesTool {
                 skip_build_output: true,
             },
         )
-        .map_err(|e| ToolError::Execution(format!("find: {e}")))?;
+        .map_err(|e| ToolError::Execution(format!("glob: {e}")))?;
         results.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
         let total = results.len();
         let offset = args.offset.unwrap_or(0).min(total);
@@ -139,16 +137,15 @@ impl Tool for FindFilesTool {
     }
 }
 
-fn find_files_tool_definition() -> &'static ToolDefinition {
+fn glob_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
-        name: "find".into(),
+        name: "glob".into(),
         description: concat!(
-            "Finds files by glob pattern, sorted by modification time (newest first).\n",
-            "- Supports patterns: `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
-            "- Honors .gitignore by default; set `respectGitignore=false` to include ignored \
-             files.\n",
-            "- For file contents, use `grep`.",
+            "Finds file paths by glob pattern (not file contents), newest first.\n",
+            "- Call this tool when you need paths; use `grep` to search inside files.\n",
+            "- Patterns: `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
+            "- Honors .gitignore by default; set `respectGitignore=false` to include ignored files.",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -158,7 +155,7 @@ fn find_files_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob, e.g. '*.rs', '**/*.ts', '*.{json,toml}'."
+                    "description": "Glob pattern for paths, e.g. '*.rs', '**/*.ts', '*.{json,toml}'."
                 },
                 "root": {
                     "type": "string",

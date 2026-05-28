@@ -89,11 +89,11 @@ const COMMUNICATION: &str =
 const TOOL_GUIDANCE: &str =
     "Prefer the narrowest tool. Read before you write; search before you ask.\nFile paths must \
      stay inside the working directory.\nAvoid `shell` when a dedicated tool exists.\n\n## Tool \
-     Selection\n- Read file → `read`\n- Search contents → `grep` | Find files by glob pattern → \
-     `find` (there is no separate `glob` tool)\n- Edit file → `edit` | New file → `write` | \
+     Selection\n- Read file → `read`\n- Search file contents → `grep` | Match file paths by glob \
+     → `glob` (required `pattern`, e.g. `**/*.rs`)\n- Edit file → `edit` | New file → `write` | \
      Multi-file → `patch`\n- Commands → `shell` | Background → `shell(runInBackground=true)` | \
      Interactive → `terminal`\n- Progress → `todoWrite` | Plan/Code mode → `switchMode` | Skill → \
-     `Skill`\n- External MCP only → `tool_search_tool` (not for builtin tools like `find`) | \
+     `Skill`\n- External MCP only → `tool_search_tool` (not for builtin tools like `glob`) | \
      Delegate → `agent`";
 
 const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
@@ -103,7 +103,7 @@ const TOOL_SECTION_EXTENSION: &str = "Extension Tools";
 
 const TOOL_AGENT_COLLABORATION_GUIDANCE: &str =
     "- Use `agent` to delegate multi-step work to specialized subagents. For simple, directed \
-     searches, use `find`/`grep` directly.\n- Use a single agent for focused tasks, multiple \
+     searches, use `glob`/`grep` directly.\n- Use a single agent for focused tasks, multiple \
      agents in parallel when the task spans independent areas.";
 
 const TOOL_EXTENSION_GUIDANCE: &str = "- Extension tools are already present in the \
@@ -714,7 +714,7 @@ fn push_tool_list_entries(
 fn tool_summary_rank(name: &str) -> u8 {
     match name {
         "read" => 0,
-        "find" => 1,
+        "glob" => 1,
         "grep" => 2,
         "shell" => 3,
         "tool_search_tool" => 4,
@@ -735,7 +735,7 @@ fn tool_summary_rank(name: &str) -> u8 {
 fn tool_short_description(name: &str) -> &'static str {
     match name {
         "read" => "read file content with line numbers",
-        "find" => "find files by glob pattern",
+        "glob" => "match file paths by glob pattern",
         "grep" => "search file contents by regex or literal text",
         "shell" => "execute shell commands",
         "task" => "manage background shell tasks",

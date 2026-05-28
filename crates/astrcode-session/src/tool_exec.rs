@@ -121,8 +121,8 @@ fn error_tool_result(
             } else {
                 (
                     format!("Tool `{name}` not found."),
-                    "Use an exact tool name from the provider tool list. There is no `glob` tool \
-                     — use `find` for file paths and `grep` for content search. For external MCP \
+                    "Use an exact tool name from the provider tool list. Match file paths with \
+                     `glob` (`pattern` arg) and search contents with `grep`. For external MCP \
                      tools, call `tool_search_tool` first."
                         .to_string(),
                 )
@@ -625,14 +625,14 @@ mod tests {
     }
 
     #[test]
-    fn error_tool_result_not_found_suggests_find_for_glob() {
+    fn error_tool_result_not_found_suggests_glob_for_legacy_find() {
         let result = error_tool_result(
             "call-2".into(),
-            "glob",
-            ToolError::NotFound("glob".into()),
+            "find",
+            ToolError::NotFound("find".into()),
             std::time::Duration::from_millis(10),
         );
-        assert!(result.content.contains("find"));
+        assert!(result.content.contains("glob"));
     }
 
     #[test]

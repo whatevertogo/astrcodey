@@ -182,7 +182,7 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
         Arc::new(super::files::ApplyPatchTool {
             working_dir: working_dir.clone(),
         }) as Arc<dyn Tool>,
-        Arc::new(super::files::FindFilesTool {
+        Arc::new(super::files::GlobTool {
             working_dir: working_dir.clone(),
         }) as Arc<dyn Tool>,
         Arc::new(super::files::GrepTool {
@@ -247,7 +247,7 @@ mod tests {
             registry.register(tool);
         }
 
-        for name in ["find", "grep", "read"] {
+        for name in ["glob", "grep", "read"] {
             let definition = registry.find_definition(name).unwrap();
             assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
         }

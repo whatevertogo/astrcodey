@@ -180,7 +180,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
-- 每个工具声明 `ExecutionMode`：read-only 工具（find/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential
+- 每个工具声明 `ExecutionMode`：read-only 工具（glob/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential
 - task 工具管理后台任务（list/cancel），shell 工具支持 `BackgroundPolicy::AutoAfter` 自动后台化
 
 ### 工具管线

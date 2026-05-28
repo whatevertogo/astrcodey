@@ -108,11 +108,11 @@ pub fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
 
 /// 常见误用工具名 → 本环境实际工具名。
 pub(crate) fn suggest_tool_alias(requested: &str) -> Option<&'static str> {
-    if requested.eq_ignore_ascii_case("glob")
+    if requested.eq_ignore_ascii_case("find")
         || requested.eq_ignore_ascii_case("glob_file_search")
         || requested.eq_ignore_ascii_case("list_files")
     {
-        Some("find")
+        Some("glob")
     } else if requested.eq_ignore_ascii_case("read_file")
         || requested.eq_ignore_ascii_case("readfile")
     {
@@ -170,11 +170,8 @@ pub(crate) fn unavailable_tool_guidance(
     }
 
     let mut message = format!("Tool `{requested}` is not available in this session.");
-    if requested.to_ascii_lowercase().contains("glob") {
-        message.push_str(
-            " There is no `glob` tool — use `find` with a glob `pattern` for file paths, or pass \
-             a `glob` filter parameter to `grep` when searching contents.",
-        );
+    if requested.eq_ignore_ascii_case("find") {
+        message.push_str(" The file-path tool was renamed to `glob`; call `glob` with a `pattern`.");
     }
     message.push_str(&visible_tool_names_hint(visible_tools));
     message.push_str(" Use exact tool names from the provider tool list.");
@@ -338,18 +335,18 @@ mod tests {
 
     #[test]
     fn suggest_tool_alias_maps_common_mistakes() {
-        assert_eq!(suggest_tool_alias("glob"), Some("find"));
-        assert_eq!(suggest_tool_alias("Glob"), Some("find"));
+        assert_eq!(suggest_tool_alias("find"), Some("glob"));
+        assert_eq!(suggest_tool_alias("list_files"), Some("glob"));
         assert_eq!(suggest_tool_alias("read_file"), Some("read"));
         assert_eq!(suggest_tool_alias("shell"), None);
     }
 
     #[test]
-    fn unavailable_tool_guidance_suggests_find_for_glob() {
-        let visible = vec![def("find"), def("grep"), def("read")];
+    fn unavailable_tool_guidance_suggests_glob_for_legacy_find() {
+        let visible = vec![def("glob"), def("grep"), def("read")];
         let registered = visible.clone();
-        let msg = unavailable_tool_guidance("glob", &visible, &registered);
-        assert!(msg.contains("find"));
+        let msg = unavailable_tool_guidance("find", &visible, &registered);
+        assert!(msg.contains("glob"));
         assert!(!msg.contains("tool_search_tool"));
     }
 
@@ -368,9 +365,9 @@ mod tests {
 
     #[test]
     fn unavailable_tool_guidance_lists_visible_tools_for_unknown_names() {
-        let visible = vec![def("find"), def("grep")];
+        let visible = vec![def("glob"), def("grep")];
         let msg = unavailable_tool_guidance("missing_tool", &visible, &visible);
         assert!(msg.contains("Available tools"));
-        assert!(msg.contains("find"));
+        assert!(msg.contains("glob"));
     }
 }

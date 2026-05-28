@@ -1063,7 +1063,7 @@ mod tests {
             &serde_json::json!({
                 "choices": [{"delta": {"tool_calls": [{
                     "index": 0,
-                    "function": {"name": "find", "arguments": ":\"*.rs\"}"}
+                    "function": {"name": "glob", "arguments": ":\"*.rs\"}"}
                 }]}}]
             }),
             &tx,
@@ -1072,7 +1072,7 @@ mod tests {
         let events = drain_events(&mut rx);
         assert!(events.iter().any(|e| matches!(
             e, LlmEvent::ToolCallStart { call_id, name, arguments }
-            if call_id == "call_1" && name == "find" && arguments.is_empty()
+            if call_id == "call_1" && name == "glob" && arguments.is_empty()
         )));
         let arguments = events
             .into_iter()
@@ -1146,7 +1146,7 @@ mod tests {
             &serde_json::json!({
                 "choices": [{"delta": {"tool_calls": [{
                     "index": 0,
-                    "function": {"name": "find"}
+                    "function": {"name": "glob"}
                 }]}}]
             }),
             &tx,
@@ -1180,7 +1180,7 @@ mod tests {
         acc.ingest_chat_completion(
             &serde_json::json!({
                 "choices": [{"delta": {"function_call": {
-                    "name": "find",
+                    "name": "glob",
                     "arguments": "{\"pattern\":\"*.rs\"}"
                 }}}]
             }),
@@ -1190,7 +1190,7 @@ mod tests {
         let events = drain_events(&mut rx);
         assert!(events.iter().any(|e| matches!(
             e, LlmEvent::ToolCallStart { call_id, name, arguments }
-            if call_id == "function_call" && name == "find" && arguments.is_empty()
+            if call_id == "function_call" && name == "glob" && arguments.is_empty()
         )));
         assert!(events.iter().any(|e| matches!(
             e, LlmEvent::ToolCallDelta { call_id, delta }

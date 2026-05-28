@@ -235,7 +235,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
             "- Optional path filter via the `glob` parameter or `fileType`. Output modes: \
              `content`, `files_with_matches` (default), `count`.\n",
             "- Set `multiline=true` for cross-line patterns.\n",
-            "- For file names, use `find`.",
+            "- For file paths, use the `glob` tool (not this tool's `glob` filter alone).",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,

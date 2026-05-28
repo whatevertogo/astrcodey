@@ -349,7 +349,7 @@ The Cargo workspace under [`crates/`](crates/) contains **22 crates**, plus [`sr
 | Crate | Lines | Description |
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
-| [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
+| [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, task |
 | [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, config persistence, file locking |
 | [`astrcode-context`](crates/astrcode-context) | 4.0k | Token estimation, context window budgeting, auto-compact, prompt engine |
 | [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
@@ -442,7 +442,7 @@ Tools run in parallel batches (up to 5 concurrent). The pipeline:
 2. **Execute** — parallel batch via `JoinSet`, sequential tools flush the batch first
 3. **Commit** — dispatch `PostToolUse` / `PostToolUseFailure` hooks, persist large results, enforce message budget, emit events
 
-Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (find/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
+Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (glob/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
 
 ### Extension System
 
