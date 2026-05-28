@@ -35,7 +35,7 @@ enum Commands {
         #[arg(long)]
         jsonl: bool,
         /// 超时时间（秒）
-        #[arg(long, default_value = "300")]
+        #[arg(long, default_value = "600")]
         timeout: u64,
     },
     /// 启动 HTTP/SSE 后端服务器
