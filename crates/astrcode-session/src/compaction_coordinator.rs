@@ -1,23 +1,31 @@
-//! Compaction 协调 — 统一 auto / reactive compact 的共享准备逻辑。
+//! Compaction 协调 — turn 内 auto / reactive compact 的统一入口。
 
 use std::sync::Arc;
 
-use astrcode_context::context_assembler::{
-    CompactIfNeededOutcome, CompactMessagesOptions, ContextPrepareInput,
+use astrcode_context::{
+    compaction::CompactResult,
+    context_assembler::{CompactIfNeededOutcome, CompactMessagesOptions, ContextPrepareInput},
 };
 use astrcode_core::{
+    event::EventPayload,
     extension::{CompactStrategy, CompactTrigger},
     llm::LlmMessage,
     storage::SessionReadModel,
     types::TurnId,
 };
 use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_support::{hash::hex_fingerprint, sync::lock_parking};
 
 use crate::{
-    compact::make_compact_request_fn,
+    compact::{
+        CompactHookContext, collect_compact_instructions, dispatch_post_compact,
+        make_compact_request_fn, persist_compact_result,
+    },
     deferred_tools::append_deferred_tools_reminder,
     llm_request_history::visible_messages_for_assembler,
-    turn_runner::{CompactionStageMeta, TurnRunner},
+    session::Session,
+    turn_context::{SharedTurnContext, TurnError},
+    turn_publish::TurnEvents,
     turn_stages::TurnState,
 };
 
@@ -40,29 +48,116 @@ pub(crate) struct PreparedContextMessages {
     pub compaction_applied: bool,
 }
 
-impl TurnRunner {
-    /// 调用 context assembler 准备消息，并在需要时执行 compaction 持久化。
-    pub(crate) async fn prepare_context_messages(
+#[derive(Clone)]
+pub(crate) struct CompactionStageMeta {
+    pub(crate) base_event_seq: u64,
+    pub(crate) trigger: CompactTrigger,
+    pub(crate) strategy: CompactStrategy,
+    pub(crate) llm_api_failed: bool,
+}
+
+/// Turn 内 compaction 调用所需的 session / hook 上下文。
+pub(crate) struct CompactionHost<'a> {
+    pub session: &'a Session,
+    pub llm: &'a Arc<dyn astrcode_core::llm::LlmProvider>,
+    pub shared: &'a SharedTurnContext,
+    pub extension_runner: &'a ExtensionRunner,
+}
+
+/// Turn 内 compaction 编排：system prompt 快照、assembler 调用与 persist。
+pub(crate) struct Compaction {
+    system_prompt: String,
+    extra_system_prompt: Option<String>,
+}
+
+impl Compaction {
+    pub(crate) fn new(system_prompt: String, extra_system_prompt: Option<String>) -> Self {
+        Self {
+            system_prompt,
+            extra_system_prompt,
+        }
+    }
+
+    pub(crate) fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    pub(crate) async fn refresh_system_prompt(
         &mut self,
-        extension_runner: &ExtensionRunner,
+        session: &Session,
+        shared: &SharedTurnContext,
+    ) -> Result<(), TurnError> {
+        let Some(prompt) = session.current_system_prompt().await? else {
+            return Ok(());
+        };
+        if prompt == self.system_prompt {
+            return Ok(());
+        }
+
+        tracing::info!(
+            session_id = %shared.session_id,
+            "system_prompt changed mid-turn, refreshing"
+        );
+        self.system_prompt = prompt;
+        Ok(())
+    }
+
+    pub(crate) async fn build_auto_compaction_request(
+        &self,
+        host: &CompactionHost<'_>,
+        model: &SessionReadModel,
+    ) -> Result<CompactionRequest, TurnError> {
+        let context_assembler = host.session.caps().context_assembler_arc();
+        let custom_instructions = self
+            .compact_instructions(host, model, CompactTrigger::AutoThreshold)
+            .await;
+        let probe_input = ContextPrepareInput {
+            messages: visible_messages_for_assembler(model),
+            system_prompt: Some(self.system_prompt()),
+            model_limits: host.llm.model_limits(),
+            custom_instructions,
+        };
+        let threshold_met = context_assembler.should_auto_compact(&probe_input);
+        let run_compact = context_assembler.auto_compact_enabled() && threshold_met;
+        let use_llm_for_compact = run_compact
+            && Self::should_attempt_llm_compact(host.session, CompactTrigger::AutoThreshold);
+        let base_event_seq = if run_compact {
+            Self::read_base_event_seq(host.session).await?
+        } else {
+            0
+        };
+        Ok(CompactionRequest {
+            trigger: CompactTrigger::AutoThreshold,
+            strategy: CompactStrategy::Auto,
+            run_compact,
+            use_llm_for_compact,
+            force_compact: false,
+            base_event_seq,
+            keep_recent_turns: None,
+        })
+    }
+
+    pub(crate) async fn prepare_context_messages(
+        &self,
+        host: &CompactionHost<'_>,
         state: &TurnState,
         model: &SessionReadModel,
         turn_id: &TurnId,
         request: CompactionRequest,
-    ) -> Result<PreparedContextMessages, crate::turn_context::TurnError> {
-        let llm = Arc::clone(self.llm());
-        let context_assembler = Arc::clone(self.session().caps().context_assembler());
+        publisher: &TurnEvents,
+    ) -> Result<PreparedContextMessages, TurnError> {
+        let context_assembler = host.session.caps().context_assembler_arc();
         let custom_instructions = self
-            .compact_instructions(extension_runner, model, request.trigger)
+            .compact_instructions(host, model, request.trigger)
             .await;
         let messages_before_compact = visible_messages_for_assembler(model);
         let input = ContextPrepareInput {
             messages: messages_before_compact.clone(),
             system_prompt: Some(self.system_prompt()),
-            model_limits: llm.model_limits(),
+            model_limits: host.llm.model_limits(),
             custom_instructions: custom_instructions.clone(),
         };
-        let request_fn = make_compact_request_fn(Arc::clone(&llm));
+        let request_fn = make_compact_request_fn(Arc::clone(host.llm));
         let keep_recent_turns = request
             .keep_recent_turns
             .or_else(|| context_assembler.settings().compact_keep_recent_turns);
@@ -94,22 +189,23 @@ impl TurnRunner {
                 compaction,
             } => {
                 let mut compaction_result = compaction.result;
-                let persisted = self
-                    .handle_compaction_stage(
-                        extension_runner,
-                        state,
-                        model,
-                        &mut compaction_result,
-                        context_assembler.settings(),
-                        turn_id,
-                        CompactionStageMeta {
-                            base_event_seq: request.base_event_seq,
-                            trigger: request.trigger,
-                            strategy: request.strategy,
-                            llm_api_failed: compaction.llm_api_failed,
-                        },
-                    )
-                    .await;
+                let persisted = Self::handle_compaction_stage(
+                    host,
+                    self.system_prompt(),
+                    self.extra_system_prompt.as_deref(),
+                    state,
+                    model,
+                    &mut compaction_result,
+                    context_assembler.settings(),
+                    turn_id,
+                    CompactionStageMeta {
+                        base_event_seq: request.base_event_seq,
+                        trigger: request.trigger,
+                        strategy: request.strategy,
+                        llm_api_failed: compaction.llm_api_failed,
+                    },
+                )
+                .await;
                 if persisted {
                     (messages, true)
                 } else {
@@ -128,9 +224,172 @@ impl TurnRunner {
             state.active_deferred_tools(),
         );
 
+        if compaction_applied {
+            publisher.reload_model_cache().await?;
+        }
+
         Ok(PreparedContextMessages {
             context_messages,
             compaction_applied,
         })
+    }
+
+    pub(crate) async fn run_reactive_compaction(
+        &mut self,
+        host: &CompactionHost<'_>,
+        state: &TurnState,
+        turn_id: &TurnId,
+        publisher: &TurnEvents,
+    ) -> Result<bool, TurnError> {
+        self.refresh_system_prompt(host.session, host.shared)
+            .await?;
+        let model = publisher.snapshot_model().await?;
+        let base_event_seq = Self::read_base_event_seq(host.session).await?;
+        let PreparedContextMessages {
+            compaction_applied, ..
+        } = self
+            .prepare_context_messages(
+                host,
+                state,
+                &model,
+                turn_id,
+                CompactionRequest {
+                    trigger: CompactTrigger::ReactivePromptTooLong,
+                    strategy: CompactStrategy::ReactivePromptTooLong,
+                    run_compact: true,
+                    use_llm_for_compact: true,
+                    force_compact: true,
+                    base_event_seq,
+                    keep_recent_turns: None,
+                },
+                publisher,
+            )
+            .await?;
+        Ok(compaction_applied)
+    }
+
+    pub(crate) async fn compact_instructions(
+        &self,
+        host: &CompactionHost<'_>,
+        model: &SessionReadModel,
+        trigger: CompactTrigger,
+    ) -> Vec<String> {
+        collect_compact_instructions(
+            host.extension_runner,
+            Self::compact_hook_context(host.shared, model, trigger),
+        )
+        .await
+        .unwrap_or_default()
+    }
+
+    fn should_attempt_llm_compact(session: &Session, trigger: CompactTrigger) -> bool {
+        match trigger {
+            CompactTrigger::AutoThreshold => {
+                lock_parking(session.runtime().compact_circuit_breaker()).should_attempt()
+            },
+            CompactTrigger::ManualCommand | CompactTrigger::ReactivePromptTooLong => true,
+        }
+    }
+
+    async fn read_base_event_seq(session: &Session) -> Result<u64, TurnError> {
+        let cursor = session.latest_cursor().await?;
+        Ok(crate::session::parse_base_event_seq(cursor)?)
+    }
+
+    fn compact_hook_context<'a>(
+        shared: &'a SharedTurnContext,
+        model: &'a SessionReadModel,
+        trigger: CompactTrigger,
+    ) -> CompactHookContext<'a> {
+        CompactHookContext {
+            session_id: shared.session_id.as_str(),
+            working_dir: &shared.working_dir,
+            model_id: &shared.model_id,
+            trigger,
+            message_count: model
+                .context_messages
+                .len()
+                .saturating_add(model.messages.len()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_compaction_stage(
+        host: &CompactionHost<'_>,
+        system_prompt: &str,
+        extra_system_prompt: Option<&str>,
+        state: &TurnState,
+        model: &SessionReadModel,
+        compaction: &mut CompactResult,
+        settings: &astrcode_context::ContextSettings,
+        turn_id: &TurnId,
+        meta: CompactionStageMeta,
+    ) -> bool {
+        host.session
+            .emit_live(Some(turn_id), EventPayload::CompactionStarted)
+            .await;
+        let visible_tools = state.visible_tools();
+        crate::post_compact::enrich_post_compact_context(
+            compaction,
+            host.shared.session_id.as_str(),
+            &model.provider_messages(),
+            &host.shared.working_dir,
+            Some(system_prompt),
+            &visible_tools,
+            settings,
+            host.shared.session_store_dir.clone(),
+        )
+        .await;
+        let hook_ctx = Self::compact_hook_context(host.shared, model, meta.trigger);
+        if let Err(e) = dispatch_post_compact(host.extension_runner, hook_ctx, compaction).await {
+            tracing::warn!(error = %e, "PostCompact extension dispatch failed");
+        }
+
+        if meta.trigger == CompactTrigger::AutoThreshold && meta.llm_api_failed {
+            lock_parking(host.session.runtime().compact_circuit_breaker()).record_llm_failure();
+        }
+
+        let fp = hex_fingerprint(system_prompt.as_bytes());
+        let trigger_name = meta.trigger.as_str();
+        match persist_compact_result(
+            host.session,
+            compaction,
+            trigger_name,
+            system_prompt,
+            &fp,
+            extra_system_prompt,
+            meta.base_event_seq,
+            meta.strategy,
+        )
+        .await
+        {
+            Ok(persisted) => {
+                if meta.trigger == CompactTrigger::AutoThreshold && !meta.llm_api_failed {
+                    lock_parking(host.session.runtime().compact_circuit_breaker())
+                        .record_compact_success();
+                }
+                host.session
+                    .emit_live(
+                        Some(turn_id),
+                        EventPayload::CompactionCompleted {
+                            messages_removed: persisted.messages_removed,
+                        },
+                    )
+                    .await;
+                true
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "auto-compact persist skipped");
+                host.session
+                    .emit_live(
+                        Some(turn_id),
+                        EventPayload::CompactionSkipped {
+                            reason: e.to_string(),
+                        },
+                    )
+                    .await;
+                false
+            },
+        }
     }
 }

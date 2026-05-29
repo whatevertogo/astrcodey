@@ -1,5 +1,13 @@
 //! Active execution 唯一 owner：输入投递、队列、registry、completion 收口与 stale repair。
 //!
+//! # Cancel / Abort 分层
+//!
+//! - **Abort**（用户/API）：[`Self::abort`] 表达「停止当前 turn」；先协作式 shutdown， grace period
+//!   后 force kill，必要时跑 stale repair。
+//! - **Shutdown**（机制）：[`Self::request_turn_shutdown`] 仅对本 session 发协作式停止信号。
+//! - **Force kill**（机制）：[`Self::schedule_force_kill`] 在 grace 超时后硬杀 task 并写终态。
+//! - **finish_reason**：`aborted` = 用户停止；`interrupted` = repair / 进程恢复。
+//!
 //! 对外只应使用 [`Self::deliver_input`] 与 [`Self::start_with_completion`]；低层
 //! [`Self::start_execution`] 仅供本 crate 内部使用。
 
@@ -12,10 +20,16 @@ use astrcode_core::{
     event::{EventPayload, Phase},
     llm::{LlmContent, LlmRole},
     storage::SessionReadModel,
-    tool::ToolResult,
     types::*,
 };
-use astrcode_session::{Session, SessionError, turn_handle::TurnHandle};
+use astrcode_session::{
+    Session, SessionError, interrupted_tool_result,
+    payload::{
+        TURN_FINISH_ABORTED, TURN_FINISH_INTERRUPTED, agent_run_completed_payload,
+        turn_completed_payload,
+    },
+    turn_handle::TurnHandle,
+};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -62,7 +76,8 @@ pub enum DeliveryOutcome {
     Queued { queue_len: usize },
 }
 
-pub struct ExecutionCompletion {
+/// 告诉 scheduler 要收尾哪条 execution（输入参数，不是完成结果）。
+pub struct CompletionParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
 }
@@ -85,6 +100,7 @@ pub(crate) struct PendingMessage {
 }
 
 type PendingQueue = VecDeque<PendingMessage>;
+const FORCE_KILL_GRACE_MS: u64 = 1500;
 
 #[derive(Clone)]
 pub struct TurnScheduler {
@@ -219,7 +235,7 @@ impl TurnScheduler {
         self.start_execution(session_id, text).await
     }
 
-    /// 低层启动：注册 registry 并返回 handle。调用方须走 [`Self::finish_execution`] 收尾。
+    /// 低层启动：注册 registry 并返回 handle。调用方须走 [`Self::finish_and_maybe_start_next`] 收尾。
     pub(crate) async fn start_execution(
         &self,
         session_id: SessionId,
@@ -247,20 +263,20 @@ impl TurnScheduler {
         if !self.registry.register(
             session_id,
             turn_id.clone(),
-            handle.abort_handle(),
+            handle.shutdown_handle(),
             session_arc,
         ) {
-            handle.abort();
+            handle.force_kill();
             return Err(TurnScheduleError::TurnAlreadyRunning);
         }
 
         Ok(StartedExecution { turn_id, handle })
     }
 
-    /// 唯一的 turn completion 收口：registry 清理、sync、子 session drain、队列出队。
-    pub async fn finish_execution(
+    /// Turn 收尾：registry 清理、sync、子 session drain；若队列非空且 session 空闲则启动下一条 turn。
+    pub async fn finish_and_maybe_start_next(
         &self,
-        completion: ExecutionCompletion,
+        completion: CompletionParams,
     ) -> Option<StartedExecution> {
         self.registry
             .remove_if_matches(&completion.session_id, &completion.turn_id);
@@ -293,7 +309,7 @@ impl TurnScheduler {
         }
     }
 
-    /// 若 `finish_execution` 已启动队列中的下一条 execution，挂上 detached watcher。
+    /// 若 [`Self::finish_and_maybe_start_next`] 已启动队列中的下一条 execution，挂上 detached watcher。
     pub(crate) fn watch_queued_if_any(
         &self,
         session_id: SessionId,
@@ -339,7 +355,7 @@ impl TurnScheduler {
             }
 
             let next = self
-                .finish_execution(ExecutionCompletion {
+                .finish_and_maybe_start_next(CompletionParams {
                     session_id: session_id.clone(),
                     turn_id: turn_id.clone(),
                 })
@@ -357,14 +373,14 @@ impl TurnScheduler {
         }
     }
 
-    /// 中止活跃 turn。
+    /// 中止活跃 turn（含级联子 session）。
     pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
         self.child_sessions
             .cascade_abort_children(self, session_id)
             .await;
+        self.request_turn_shutdown(session_id).await?;
 
-        if let Some((turn_id, session)) = self.registry.abort_and_remove(session_id) {
-            self.emit_turn_aborted(&turn_id, &session, session_id).await;
+        if self.registry.has_active(session_id) {
             return Ok(());
         }
 
@@ -383,6 +399,17 @@ impl TurnScheduler {
         }
 
         self.repair_stale(session_id).await
+    }
+
+    /// 仅对本 session 发起协作式 shutdown（不级联子 session、不跑 stale repair）。
+    pub(crate) async fn request_turn_shutdown(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), TurnScheduleError> {
+        if let Some((turn_id, _session)) = self.registry.request_shutdown(session_id) {
+            self.schedule_force_kill(session_id.clone(), turn_id);
+        }
+        Ok(())
     }
 
     /// 已完成 turn 的 registry / 队列 / 后台任务清理（不 abort、不写 `TurnCompleted`）。
@@ -408,7 +435,16 @@ impl TurnScheduler {
 
     /// 中止或删除 session 时的强制清理（可能 abort 活跃 turn 并写 `TurnCompleted(aborted)`）。
     pub async fn abort_and_cleanup(&self, session_id: &SessionId) {
-        if let Some((turn_id, session)) = self.registry.abort_and_remove(session_id) {
+        if self.registry.active_is_finished(session_id) {
+            self.registry.remove(session_id);
+            if let Ok(session) = self.session_manager.open(session_id.clone()).await {
+                session
+                    .runtime()
+                    .background_tasks()
+                    .lock()
+                    .cleanup_session(session_id);
+            }
+        } else if let Some((turn_id, session)) = self.registry.force_kill_current(session_id) {
             self.emit_turn_aborted(&turn_id, &session, session_id).await;
         } else if let Ok(session) = self.session_manager.open(session_id.clone()).await {
             session
@@ -423,6 +459,27 @@ impl TurnScheduler {
         }
     }
 
+    fn schedule_force_kill(&self, session_id: SessionId, turn_id: TurnId) {
+        let scheduler = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(FORCE_KILL_GRACE_MS)).await;
+            let Some((removed_turn_id, session)) = scheduler
+                .registry
+                .force_kill_and_remove_if_running(&session_id, &turn_id)
+            else {
+                return;
+            };
+            tracing::warn!(
+                session_id = %session_id,
+                turn_id = %removed_turn_id,
+                "turn did not stop after cooperative shutdown; forced kill"
+            );
+            scheduler
+                .emit_turn_aborted(&removed_turn_id, &session, &session_id)
+                .await;
+        });
+    }
+
     async fn emit_turn_aborted(&self, turn_id: &TurnId, session: &Session, session_id: &SessionId) {
         session
             .runtime()
@@ -430,13 +487,45 @@ impl TurnScheduler {
             .lock()
             .cleanup_session(session_id);
 
+        let tool_protocol_settled = match session.read_model().await {
+            Ok(state) => {
+                match emit_interrupted_tool_results(session, &state, Some(turn_id)).await {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            turn_id = %turn_id,
+                            error = %e,
+                            "failed to settle pending tool calls during abort"
+                        );
+                        false
+                    },
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    turn_id = %turn_id,
+                    error = %e,
+                    "failed to read session state during abort"
+                );
+                false
+            },
+        };
+
+        if tool_protocol_settled {
+            if let Err(e) = emit_turn_aborted_context(session, Some(turn_id)).await {
+                tracing::warn!(
+                    session_id = %session_id,
+                    turn_id = %turn_id,
+                    error = %e,
+                    "failed to write turn-aborted provider context"
+                );
+            }
+        }
+
         if let Err(e) = session
-            .emit_durable(
-                Some(turn_id),
-                EventPayload::TurnCompleted {
-                    finish_reason: "aborted".into(),
-                },
-            )
+            .emit_durable(Some(turn_id), turn_completed_payload(TURN_FINISH_ABORTED))
             .await
         {
             tracing::error!(
@@ -449,9 +538,7 @@ impl TurnScheduler {
         session
             .emit_live(
                 Some(turn_id),
-                EventPayload::AgentRunCompleted {
-                    reason: "aborted".into(),
-                },
+                agent_run_completed_payload(TURN_FINISH_ABORTED),
             )
             .await;
         self.session_manager.sync_durable_events(session_id).await;
@@ -497,13 +584,14 @@ impl TurnScheduler {
             .await
             .map_err(TurnScheduleError::Session)?;
 
-        match repair_stale_phase_for_state(session_id, &session, &state).await {
-            Ok(()) | Err(TurnScheduleError::NoActiveTurn) => {},
-            Err(e) => return Err(e),
+        if matches!(state.phase, Phase::Idle | Phase::Error) {
+            repair_incomplete_tool_protocol_for_state(&session, &state).await?;
+        } else {
+            repair_stale_phase_for_state(session_id, &session, &state).await?;
         }
 
         repair_stale_background_tasks_for_state(session_id, &session, &state).await?;
-        repair_stale_runs_for_state(&self.registry, &session, &state).await?;
+        repair_stale_runs_for_state(self, &session, &state).await?;
 
         self.session_manager.sync_durable_events(session_id).await;
         Ok(())
@@ -539,11 +627,46 @@ async fn repair_stale_phase_for_state(
         "repairing stale turn phase"
     );
 
-    for pending in pending_requested_tool_calls(state) {
-        let result = interrupted_tool_result(&pending.call_id);
+    emit_interrupted_tool_results(session, state, None).await?;
+    emit_turn_aborted_context(session, None).await?;
+
+    session
+        .emit_durable(None, turn_completed_payload(TURN_FINISH_INTERRUPTED))
+        .await
+        .map_err(TurnScheduleError::EventEmit)?;
+    session
+        .emit_live(None, agent_run_completed_payload(TURN_FINISH_INTERRUPTED))
+        .await;
+
+    Ok(())
+}
+
+async fn repair_incomplete_tool_protocol_for_state(
+    session: &Session,
+    state: &SessionReadModel,
+) -> Result<(), TurnScheduleError> {
+    let interrupted = emit_interrupted_tool_results(session, state, None).await?;
+    if interrupted > 0 {
+        emit_turn_aborted_context(session, None).await?;
+    }
+    Ok(())
+}
+
+async fn emit_interrupted_tool_results(
+    session: &Session,
+    state: &SessionReadModel,
+    turn_id: Option<&TurnId>,
+) -> Result<usize, TurnScheduleError> {
+    let mut emitted = 0;
+    for pending in state.tool_calls_needing_interruption() {
+        let result = interrupted_tool_result(
+            pending.call_id.clone(),
+            &pending.tool_name,
+            std::time::Duration::ZERO,
+        );
         session
             .emit_durable(
-                None,
+                turn_id,
                 EventPayload::ToolCallCompleted {
                     call_id: pending.call_id.into(),
                     tool_name: pending.tool_name,
@@ -554,26 +677,19 @@ async fn repair_stale_phase_for_state(
             )
             .await
             .map_err(TurnScheduleError::EventEmit)?;
+        emitted += 1;
     }
+    Ok(emitted)
+}
 
+async fn emit_turn_aborted_context(
+    session: &Session,
+    turn_id: Option<&TurnId>,
+) -> Result<(), TurnScheduleError> {
     session
-        .emit_durable(
-            None,
-            EventPayload::TurnCompleted {
-                finish_reason: "interrupted".into(),
-            },
-        )
+        .emit_durable(turn_id, EventPayload::TurnAbortedContext)
         .await
         .map_err(TurnScheduleError::EventEmit)?;
-    session
-        .emit_live(
-            None,
-            EventPayload::AgentRunCompleted {
-                reason: "interrupted".into(),
-            },
-        )
-        .await;
-
     Ok(())
 }
 
@@ -624,7 +740,7 @@ async fn repair_stale_background_tasks_for_state(
 }
 
 async fn repair_stale_runs_for_state(
-    registry: &TurnRegistry,
+    scheduler: &TurnScheduler,
     session: &Session,
     state: &SessionReadModel,
 ) -> Result<(), TurnScheduleError> {
@@ -633,14 +749,24 @@ async fn repair_stale_runs_for_state(
         .iter()
         .filter(|link| link.status == astrcode_core::storage::AgentSessionStatus::Running)
     {
-        if registry.has_active(&link.child_session_id) {
+        let child_sid = &link.child_session_id;
+        if scheduler.registry().has_active(child_sid) {
+            if let Err(e) = scheduler.request_turn_shutdown(child_sid).await {
+                tracing::debug!(
+                    parent_session_id = %session.id(),
+                    child_session_id = %child_sid,
+                    error = %e,
+                    "repair_stale: child abort returned error"
+                );
+            }
+            scheduler.abort_and_cleanup(child_sid).await;
             continue;
         }
         session
             .emit_durable(
                 None,
                 astrcode_session::payload::agent_session_failed_payload(
-                    link.child_session_id.clone(),
+                    child_sid.clone(),
                     "interrupted".into(),
                 ),
             )
@@ -648,35 +774,6 @@ async fn repair_stale_runs_for_state(
             .map_err(TurnScheduleError::EventEmit)?;
     }
     Ok(())
-}
-
-struct PendingRequestedToolCall {
-    call_id: String,
-    tool_name: String,
-}
-
-fn pending_requested_tool_calls(state: &SessionReadModel) -> Vec<PendingRequestedToolCall> {
-    let mut remaining = state.pending_tool_calls.clone();
-    let mut pending = Vec::new();
-
-    for message in &state.messages {
-        if message.message.role != LlmRole::Assistant {
-            continue;
-        }
-        for content in &message.message.content {
-            let LlmContent::ToolCall { call_id, name, .. } = content else {
-                continue;
-            };
-            if remaining.remove(&ToolCallId::from(call_id.clone())) {
-                pending.push(PendingRequestedToolCall {
-                    call_id: call_id.clone(),
-                    tool_name: name.clone(),
-                });
-            }
-        }
-    }
-
-    pending
 }
 
 fn find_tool_call_history(
@@ -699,16 +796,4 @@ fn find_tool_call_history(
             (call_id == target_call_id.as_str()).then(|| (name.clone(), arguments.clone()))
         })
     })
-}
-
-fn interrupted_tool_result(call_id: &str) -> ToolResult {
-    let content = "Tool execution interrupted before completion".to_string();
-    ToolResult {
-        call_id: call_id.to_string(),
-        content: content.clone(),
-        is_error: true,
-        error: Some(content),
-        metadata: Default::default(),
-        duration_ms: None,
-    }
 }

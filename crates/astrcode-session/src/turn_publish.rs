@@ -19,20 +19,16 @@ use crate::{
 };
 
 /// Turn 内统一的事件发布入口。
-pub(crate) struct TurnPublisher {
-    session: Arc<Session>,
+pub(crate) struct TurnEvents {
+    session: Session,
     turn_id: TurnId,
     live_tx: Option<TurnEventTx>,
     emitted_error: Arc<AtomicBool>,
     model_cache: Mutex<Option<SessionReadModel>>,
 }
 
-impl TurnPublisher {
-    pub(crate) fn new(
-        session: Arc<Session>,
-        turn_id: TurnId,
-        live_tx: Option<TurnEventTx>,
-    ) -> Self {
+impl TurnEvents {
+    pub(crate) fn new(session: Session, turn_id: TurnId, live_tx: Option<TurnEventTx>) -> Self {
         Self {
             session,
             turn_id,
@@ -51,20 +47,19 @@ impl TurnPublisher {
         *self.model_cache.lock().await = None;
     }
 
+    /// 在 bypass 本 publisher 的 durable 写入后（如 compaction persist）从 store 重载投影。
+    pub(crate) async fn reload_model_cache(&self) -> Result<(), TurnError> {
+        *self.model_cache.lock().await = Some(self.session.read_model().await?);
+        Ok(())
+    }
+
     /// 返回当前投影快照；优先使用 turn 内缓存，否则从 store 加载一次。
     pub(crate) async fn snapshot_model(&self) -> Result<SessionReadModel, TurnError> {
         let mut cache = self.model_cache.lock().await;
         if cache.is_none() {
-            *cache = Some(
-                self.session
-                    .read_model()
-                    .await
-                    .map_err(|e| TurnError::SessionReadFailed(e.to_string()))?,
-            );
+            *cache = Some(self.session.read_model().await?);
         }
-        cache
-            .clone()
-            .ok_or_else(|| TurnError::SessionReadFailed("model cache not populated".into()))
+        cache.clone().ok_or(TurnError::ModelCacheEmpty)
     }
 
     pub(crate) async fn durable(&self, payload: EventPayload) -> Result<(), TurnError> {
@@ -75,39 +70,37 @@ impl TurnPublisher {
         {
             Ok(event) => event,
             Err(error) => {
-                self.live(EventPayload::ErrorOccurred {
-                    code: -32603,
-                    message: error.to_string(),
-                    recoverable: false,
-                })
-                .await;
-                return Err(TurnError::DurableEmitFailed(error.to_string()));
+                self.live_error(-32603, error.to_string(), false).await;
+                return Err(error.into());
             },
         };
         let mut cache = self.model_cache.lock().await;
         match cache.as_mut() {
             Some(model) => projection::reduce(&stored, model),
             None => {
-                *cache = Some(
-                    self.session
-                        .read_model()
-                        .await
-                        .map_err(|e| TurnError::SessionReadFailed(e.to_string()))?,
-                );
+                *cache = Some(self.session.read_model().await?);
             },
         }
         Ok(())
     }
 
     pub(crate) async fn live(&self, payload: EventPayload) {
-        if matches!(payload, EventPayload::ErrorOccurred { .. }) {
-            self.emitted_error.store(true, Ordering::Relaxed);
-        }
         if let Some(tx) = self.live_tx.as_ref() {
             send_event(Some(tx), payload);
         } else {
             self.session.emit_live(Some(&self.turn_id), payload).await;
         }
+    }
+
+    /// 发送 live 错误事件，并标记 `emitted_error`（供 `drive_agent` 避免重复持久化）。
+    pub(crate) async fn live_error(&self, code: i32, message: String, recoverable: bool) {
+        self.emitted_error.store(true, Ordering::Relaxed);
+        self.live(EventPayload::ErrorOccurred {
+            code,
+            message,
+            recoverable,
+        })
+        .await;
     }
 
     pub(crate) async fn publish(&self, payload: EventPayload) -> Result<(), TurnError> {
@@ -120,9 +113,9 @@ impl TurnPublisher {
     }
 }
 
-/// 将扩展/钩子侧的 `event_tx.send` 转发到 [`TurnPublisher`]（durable / live 由 payload 决定）。
+/// 将扩展/钩子侧的 `event_tx.send` 转发到 [`TurnEvents`]（durable / live 由 payload 决定）。
 pub(crate) fn spawn_event_bridge(
-    publisher: Arc<TurnPublisher>,
+    publisher: Arc<TurnEvents>,
 ) -> (TurnEventTx, tokio::task::JoinHandle<()>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
@@ -136,14 +129,14 @@ pub(crate) fn spawn_event_bridge(
 }
 
 /// Turn 级扩展事件桥：在 `process_prompt` 期间为 hook 提供 `event_tx`。
-pub(crate) struct ExtensionEventBridge {
+pub(crate) struct ExtensionEvents {
     tx: TurnEventTx,
     handle: tokio::task::JoinHandle<()>,
 }
 
-impl ExtensionEventBridge {
+impl ExtensionEvents {
     pub(crate) fn start(
-        publisher: Arc<TurnPublisher>,
+        publisher: Arc<TurnEvents>,
         shared: &mut crate::turn_context::SharedTurnContext,
     ) -> Self {
         let (tx, handle) = spawn_event_bridge(publisher);
@@ -283,7 +276,7 @@ mod tests {
         session.refresh_tools(".").await;
 
         let turn_id = new_turn_id();
-        let publisher = TurnPublisher::new(Arc::new(session.clone()), turn_id, None);
+        let publisher = TurnEvents::new(session.clone(), turn_id, None);
         publisher
             .durable(EventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
@@ -332,7 +325,7 @@ mod tests {
         session.refresh_tools(".").await;
 
         let turn_id = new_turn_id();
-        let publisher = TurnPublisher::new(Arc::new(session.clone()), turn_id.clone(), None);
+        let publisher = TurnEvents::new(session.clone(), turn_id.clone(), None);
         publisher
             .durable(EventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
@@ -424,15 +417,11 @@ mod tests {
             .unwrap();
 
         let turn_id = new_turn_id();
-        let publisher = Arc::new(TurnPublisher::new(
-            Arc::new(session.clone()),
-            turn_id.clone(),
-            None,
-        ));
+        let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone(), None));
         let model = session.read_model().await.unwrap();
         let mut shared =
             crate::turn_context::SharedTurnContext::from_read_model(session.id(), &model);
-        let bridge = ExtensionEventBridge::start(Arc::clone(&publisher), &mut shared);
+        let bridge = ExtensionEvents::start(Arc::clone(&publisher), &mut shared);
 
         let ctx = PreToolUseContext {
             session_id: session.id().to_string(),

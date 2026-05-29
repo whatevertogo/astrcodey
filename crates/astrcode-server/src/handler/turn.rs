@@ -7,15 +7,20 @@ use tokio::sync::mpsc;
 
 use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_schedule_error_for_client};
 use crate::turn_scheduler::{
-    ExecutionCompletion, StartedExecution, TurnScheduleError, TurnScheduler,
+    CompletionParams, StartedExecution, TurnScheduleError, TurnScheduler,
 };
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
 pub enum TurnCompletion {
-    Completed { finish_reason: String },
-    Failed { error: String },
-    Aborted,
+    Completed {
+        finish_reason: String,
+    },
+    Failed {
+        error: String,
+    },
+    /// completion 通道关闭或 task 异常，未拿到 turn 结果。
+    Dropped,
 }
 
 impl CommandHandler {
@@ -73,7 +78,7 @@ impl CommandHandler {
     }
 
     pub(in crate::handler) async fn abort_active_turn(&self) -> Result<(), HandlerError> {
-        let Some(sid) = self.active_session_id.as_ref() else {
+        let Some(sid) = self.focused_session_id.as_ref() else {
             self.send_error(40400, "No active turn");
             return Ok(());
         };
@@ -120,62 +125,65 @@ async fn run_completion_watcher(
                     error: error.to_string(),
                 },
             },
-            None => TurnCompletion::Aborted,
+            None => TurnCompletion::Dropped,
         };
 
         let next = scheduler
-            .finish_execution(ExecutionCompletion {
+            .finish_and_maybe_start_next(CompletionParams {
                 session_id: sid.clone(),
                 turn_id: turn_id.clone(),
             })
             .await;
 
-        if let Some(StartedExecution {
+        let actor_ok = send_turn_completion(
+            &mut completion_tx,
+            &actor_tx,
+            sid.clone(),
+            turn_id.clone(),
+            completion,
+        )
+        .await;
+        if !actor_ok {
+            break;
+        }
+
+        let Some(StartedExecution {
             turn_id: next_turn_id,
             handle: next_handle,
         }) = next
-        {
-            if let Some(tx) = completion_tx.take() {
-                let _ = tx.send(completion.clone());
-            }
-            if actor_tx
-                .send(CommandMessage::AgentTurnCleanup {
-                    session_id: sid.clone(),
-                    turn_id: turn_id.clone(),
-                    completion: completion.clone(),
-                })
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    session_id = %sid,
-                    turn_id = %turn_id,
-                    "command actor queue closed; skipping turn cleanup message"
-                );
-                break;
-            }
-            turn_id = next_turn_id;
-            handle = next_handle;
-            continue;
-        }
-
-        if let Some(tx) = completion_tx.take() {
-            let _ = tx.send(completion.clone());
-        }
-        if actor_tx
-            .send(CommandMessage::AgentTurnCleanup {
-                session_id: sid,
-                turn_id: turn_id.clone(),
-                completion,
-            })
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                turn_id = %turn_id,
-                "command actor queue closed; skipping turn cleanup message"
-            );
-        }
-        break;
+        else {
+            break;
+        };
+        turn_id = next_turn_id;
+        handle = next_handle;
     }
+}
+
+/// 向 completion oneshot 与 actor 发送本轮结果；actor 通道关闭时返回 false。
+async fn send_turn_completion(
+    completion_tx: &mut Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
+    actor_tx: &mpsc::Sender<CommandMessage>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    completion: TurnCompletion,
+) -> bool {
+    if let Some(tx) = completion_tx.take() {
+        let _ = tx.send(completion.clone());
+    }
+    if actor_tx
+        .send(CommandMessage::AgentTurnCleanup {
+            session_id,
+            turn_id: turn_id.clone(),
+            completion,
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            turn_id = %turn_id,
+            "command actor queue closed; skipping turn cleanup message"
+        );
+        return false;
+    }
+    true
 }

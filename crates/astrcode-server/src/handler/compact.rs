@@ -19,7 +19,7 @@ impl CommandHandler {
         &mut self,
         keep_recent_turns: Option<usize>,
     ) -> Result<(), HandlerError> {
-        let Some(sid) = self.active_session_id.clone() else {
+        let Some(sid) = self.focused_session_id.clone() else {
             self.send_error(40400, "No active session");
             return Ok(());
         };
@@ -87,7 +87,7 @@ impl CommandHandler {
     ) -> Result<(ManualCompactOutcome, usize), HandlerError> {
         let state = session.read_model().await.map_err(HandlerError::Session)?;
         let tool_registry = {
-            let current = session.runtime().tool_registry();
+            let current = session.runtime().loaded_tool_registry();
             if current.list_definitions().is_empty() {
                 session.refresh_tools(&state.working_dir).await
             } else {

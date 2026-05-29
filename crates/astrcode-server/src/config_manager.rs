@@ -6,7 +6,10 @@
 //!
 //! 写入路径（`apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` /
 //! `set_llm_provider`）直接更新 `Capabilities` 内的 `llm` 与 `effective_config`，
-//! 正在运行的 session 在下一轮 LLM 调用前看到新值。
+//! 正在运行的 session 在下一轮 LLM 调用前看到新值；已打开的 per-session
+//! `SessionRuntimeState` 需由
+//! [`crate::session_manager::SessionManager::sync_all_model_bindings_from_config`]
+//! 在配置写入后同步。
 
 use std::sync::Arc;
 
@@ -96,7 +99,7 @@ impl ConfigManager {
         }
     }
 
-    fn extension_runner(&self) -> &Arc<ExtensionRunner> {
+    fn extension_runner(&self) -> &ExtensionRunner {
         self.capabilities.extension_runner()
     }
 

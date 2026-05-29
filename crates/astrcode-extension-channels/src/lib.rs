@@ -756,7 +756,7 @@ mod tests {
             _parent_session_id: &str,
             _request: CreateSessionRequest,
         ) -> Result<SessionHandle, SessionApiError> {
-            Err(SessionApiError::Internal("unused in channels tests".into()))
+            Err(SessionApiError::internal_msg("unused in channels tests"))
         }
 
         async fn inject_message(

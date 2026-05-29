@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use astrcode_core::{
@@ -14,7 +17,6 @@ use astrcode_session::{
     Session, SessionError, SessionRuntimeServices, SessionRuntimeState,
     session::emit_lifecycle_for_read_model,
 };
-use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 
 use crate::{config_manager::ConfigManager, server_event_bus::ServerEventBus};
@@ -144,7 +146,7 @@ impl SessionManager {
     /// event_bus 的 attach 由 TurnScheduler 在 submit 时统一处理。
     pub(crate) fn register_child_session(&self, session: &Session) {
         let sid = session.id().clone();
-        let runtime = session.runtime().clone();
+        let runtime = session.runtime_arc();
         self.runtime_registry.insert(sid, runtime);
     }
 
@@ -314,6 +316,19 @@ impl SessionManager {
         }
     }
 
+    /// 将全局 caps 中的 provider / model_id 同步到本进程内所有已打开的 session runtime。
+    ///
+    /// 配置热更新只改 `SessionRuntimeServices`；调用方在 `apply_raw_config_and_rebuild`
+    /// 之后必须调用此方法，否则非 active session 的 turn 仍会用旧的 per-session binding。
+    pub(crate) fn sync_all_model_bindings_from_config(&self) {
+        let effective = self.config.read_effective();
+        self.runtime_registry.sync_model_bindings(
+            self.capabilities.llm(),
+            self.capabilities.small_llm(),
+            effective.llm.model_id.clone(),
+        );
+    }
+
     pub(crate) async fn recycle_session(
         &self,
         session_id: &SessionId,
@@ -448,7 +463,13 @@ impl SessionManager {
 /// 保证同一 `SessionId` 在当前进程里只有一份 local runtime state。
 struct SessionRuntimeRegistry {
     states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
-    open_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+    open_locks: Mutex<HashMap<SessionId, OpenLockEntry>>,
+}
+
+struct OpenLockEntry {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// 当前进程内仍持有该 open lock 克隆的并发 open 数。
+    outstanding: AtomicUsize,
 }
 
 impl SessionRuntimeRegistry {
@@ -488,11 +509,15 @@ impl SessionRuntimeRegistry {
     }
 
     fn open_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
-        self.open_locks
-            .lock()
+        let mut open_locks = self.open_locks.lock();
+        let entry = open_locks
             .entry(session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .or_insert_with(|| OpenLockEntry {
+                lock: Arc::new(tokio::sync::Mutex::new(())),
+                outstanding: AtomicUsize::new(0),
+            });
+        entry.outstanding.fetch_add(1, Ordering::AcqRel);
+        Arc::clone(&entry.lock)
     }
 
     fn remove_open_lock_if_idle(
@@ -501,18 +526,35 @@ impl SessionRuntimeRegistry {
         expected: &Arc<tokio::sync::Mutex<()>>,
     ) {
         let mut open_locks = self.open_locks.lock();
-        if open_locks
-            .get(session_id)
-            .is_some_and(|lock| Arc::ptr_eq(lock, expected))
-            && Arc::strong_count(expected) == 2
-        {
+        let Some(entry) = open_locks.get(session_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(&entry.lock, expected) {
+            return;
+        }
+        if entry.outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
             open_locks.remove(session_id);
         }
     }
 
     fn invalidate_tool_registries(&self) {
         for runtime in self.states.lock().values() {
-            runtime.set_tool_registry(Arc::new(ToolRegistry::new()));
+            runtime.reset_tool_registry();
+        }
+    }
+
+    fn sync_model_bindings(
+        &self,
+        llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+        small_llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+        model_id: String,
+    ) {
+        for runtime in self.states.lock().values() {
+            runtime.replace_model_binding(
+                Arc::clone(&llm),
+                Arc::clone(&small_llm),
+                model_id.clone(),
+            );
         }
     }
 

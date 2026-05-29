@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
     storage::{BackgroundToolCallView, CompactBoundaryView, SequencedLlmMessage},
     types::ToolCallId,
 };
@@ -133,6 +133,9 @@ pub(in crate::http) fn messages_to_blocks(
     for (index, seq_msg) in messages.iter().enumerate() {
         let message = &seq_msg.message;
         let source = &seq_msg.source;
+        if source.as_deref() == Some(TURN_ABORTED_SOURCE) {
+            continue;
+        }
         let id = format!("snapshot-message-{index}");
         match message.role {
             LlmRole::User => blocks.push(ConversationBlockDto::User {
@@ -270,4 +273,38 @@ fn visible_message_text(message: &LlmMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{
+        llm::{LlmMessage, TURN_ABORTED_SOURCE, turn_aborted_context_message},
+        storage::SequencedLlmMessage,
+    };
+
+    use super::*;
+
+    #[test]
+    fn messages_to_blocks_hides_turn_aborted_context() {
+        let messages = vec![
+            SequencedLlmMessage {
+                message: LlmMessage::user("visible"),
+                updated_seq: 1,
+                source: None,
+            },
+            SequencedLlmMessage {
+                message: turn_aborted_context_message(),
+                updated_seq: 2,
+                source: Some(TURN_ABORTED_SOURCE.into()),
+            },
+        ];
+
+        let blocks = messages_to_blocks(&messages, &HashMap::new());
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &blocks[0],
+            ConversationBlockDto::User { text, .. } if text == "visible"
+        ));
+    }
 }

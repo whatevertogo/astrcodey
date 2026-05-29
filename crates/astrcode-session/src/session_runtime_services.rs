@@ -67,12 +67,20 @@ impl SessionRuntimeServices {
             .store(Arc::new(ProviderSlot { provider: new }));
     }
 
-    pub fn extension_runner(&self) -> &Arc<ExtensionRunner> {
+    pub fn extension_runner(&self) -> &ExtensionRunner {
         &self.extension_runner
     }
 
-    pub fn context_assembler(&self) -> &Arc<LlmContextAssembler> {
+    pub fn extension_runner_arc(&self) -> Arc<ExtensionRunner> {
+        Arc::clone(&self.extension_runner)
+    }
+
+    pub fn context_assembler(&self) -> &LlmContextAssembler {
         &self.context_assembler
+    }
+
+    pub fn context_assembler_arc(&self) -> Arc<LlmContextAssembler> {
+        Arc::clone(&self.context_assembler)
     }
 
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {

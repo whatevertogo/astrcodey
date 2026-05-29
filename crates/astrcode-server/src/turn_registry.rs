@@ -1,7 +1,7 @@
 //! TurnRegistry — 统一的活跃 turn 进程控制索引。
 //!
 //! 合并了之前的 `CommandHandler.active_turns` 和 `SessionManager.ActiveExecutionIndex`。
-//! 只存进程控制句柄（turn_id + abort_handle + session 引用），不存业务状态。
+//! 只存进程控制句柄（turn_id + shutdown handle + session 引用），不存业务状态。
 //!
 //! 注意：`has_active()` 是进程控制层的优化索引，权威状态来自事件日志的 `phase` 字段。
 //! 进程重启后 registry 为空，需通过 `TurnScheduler::repair_stale()` 从事件重建一致性。
@@ -9,13 +9,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::types::{SessionId, TurnId};
-use astrcode_session::Session;
+use astrcode_session::{Session, turn_handle::TurnShutdownHandle};
 use parking_lot::Mutex;
-use tokio::task::AbortHandle;
 
 struct TurnEntry {
     turn_id: TurnId,
-    abort_handle: AbortHandle,
+    shutdown_handle: TurnShutdownHandle,
     session: Arc<Session>,
 }
 
@@ -35,7 +34,7 @@ impl TurnRegistry {
         &self,
         session_id: SessionId,
         turn_id: TurnId,
-        abort_handle: AbortHandle,
+        shutdown_handle: TurnShutdownHandle,
         session: Arc<Session>,
     ) -> bool {
         let mut entries = self.entries.lock();
@@ -46,7 +45,7 @@ impl TurnRegistry {
             session_id,
             TurnEntry {
                 turn_id,
-                abort_handle,
+                shutdown_handle,
                 session,
             },
         );
@@ -70,14 +69,61 @@ impl TurnRegistry {
         }
     }
 
-    /// Abort 并移除活跃 turn，返回 turn_id 和 session 用于写终态事件。
-    pub fn abort_and_remove(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
-        let entry = self.entries.lock().remove(session_id)?;
-        entry.abort_handle.abort();
+    /// 请求活跃 turn 协作式 shutdown，不移除 registry。
+    pub fn request_shutdown(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
+        let entries = self.entries.lock();
+        let entry = entries.get(session_id)?;
+        entry.shutdown_handle.request_shutdown();
+        Some((entry.turn_id.clone(), Arc::clone(&entry.session)))
+    }
+
+    /// 强制 kill 并移除活跃 turn，返回 turn_id 和 session 用于兜底写终态事件。
+    pub fn force_kill_and_remove(
+        &self,
+        session_id: &SessionId,
+        expected_turn_id: &TurnId,
+    ) -> Option<(TurnId, Arc<Session>)> {
+        let mut entries = self.entries.lock();
+        if !entries
+            .get(session_id)
+            .is_some_and(|entry| &entry.turn_id == expected_turn_id)
+        {
+            return None;
+        }
+        let entry = entries.remove(session_id)?;
+        entry.shutdown_handle.force_kill();
         Some((entry.turn_id, entry.session))
     }
 
-    /// 仅移除（不 abort）。用于已完成的 turn 清理。
+    pub fn force_kill_and_remove_if_running(
+        &self,
+        session_id: &SessionId,
+        expected_turn_id: &TurnId,
+    ) -> Option<(TurnId, Arc<Session>)> {
+        let mut entries = self.entries.lock();
+        let entry = entries.get(session_id)?;
+        if &entry.turn_id != expected_turn_id || entry.shutdown_handle.is_finished() {
+            return None;
+        }
+        let entry = entries.remove(session_id)?;
+        entry.shutdown_handle.force_kill();
+        Some((entry.turn_id, entry.session))
+    }
+
+    pub fn active_is_finished(&self, session_id: &SessionId) -> bool {
+        self.entries
+            .lock()
+            .get(session_id)
+            .is_some_and(|entry| entry.shutdown_handle.is_finished())
+    }
+
+    /// 测试和强制清理用：强制 kill 当前活跃 turn，不校验 turn_id。
+    pub fn force_kill_current(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
+        let turn_id = self.active_turn_id(session_id)?;
+        self.force_kill_and_remove(session_id, &turn_id)
+    }
+
+    /// 仅移除（不 kill）。用于已完成的 turn 清理。
     pub fn remove(&self, session_id: &SessionId) {
         self.entries.lock().remove(session_id);
     }
@@ -119,6 +165,7 @@ mod tests {
     };
     use astrcode_extensions::runner::ExtensionRunner;
     use astrcode_storage::in_memory::InMemoryEventStore;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -219,22 +266,28 @@ mod tests {
         )
     }
 
+    fn test_shutdown_handle() -> TurnShutdownHandle {
+        let handle =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
+                .abort_handle();
+        TurnShutdownHandle::new(CancellationToken::new(), handle)
+    }
+
     #[tokio::test]
     async fn register_prevents_duplicate() {
         let registry = TurnRegistry::new();
         let sid = SessionId::from("session-1");
         let turn_id = TurnId::from("turn-1");
         let session = make_session("session-1").await;
-        let handle =
-            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
-                .abort_handle();
 
-        assert!(registry.register(sid.clone(), turn_id, handle, session));
-        let handle2 =
-            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
-                .abort_handle();
+        assert!(registry.register(sid.clone(), turn_id, test_shutdown_handle(), session));
         let session2 = make_session("session-1b").await;
-        assert!(!registry.register(sid.clone(), TurnId::from("turn-2"), handle2, session2));
+        assert!(!registry.register(
+            sid.clone(),
+            TurnId::from("turn-2"),
+            test_shutdown_handle(),
+            session2
+        ));
     }
 
     #[tokio::test]
@@ -243,11 +296,13 @@ mod tests {
         let sid = SessionId::from("session-1");
         let turn_id = TurnId::from("turn-1");
         let session = make_session("session-1").await;
-        let handle =
-            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
-                .abort_handle();
 
-        registry.register(sid.clone(), turn_id.clone(), handle, session);
+        registry.register(
+            sid.clone(),
+            turn_id.clone(),
+            test_shutdown_handle(),
+            session,
+        );
         assert!(registry.has_active(&sid));
 
         assert!(
@@ -262,17 +317,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_and_remove_returns_turn_id() {
+    async fn force_kill_current_returns_turn_id() {
         let registry = TurnRegistry::new();
         let sid = SessionId::from("session-1");
         let turn_id = TurnId::from("turn-1");
         let session = make_session("session-1").await;
-        let handle =
-            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
-                .abort_handle();
 
-        registry.register(sid.clone(), turn_id.clone(), handle, session);
-        let (removed_turn_id, _) = registry.abort_and_remove(&sid).unwrap();
+        registry.register(
+            sid.clone(),
+            turn_id.clone(),
+            test_shutdown_handle(),
+            session,
+        );
+        let (removed_turn_id, _) = registry.force_kill_current(&sid).unwrap();
         assert_eq!(removed_turn_id, turn_id);
         assert!(!registry.has_active(&sid));
     }

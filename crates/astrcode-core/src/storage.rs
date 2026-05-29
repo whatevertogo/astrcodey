@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     event::{Event, Phase},
-    llm::LlmMessage,
+    llm::{LlmContent, LlmMessage, LlmRole},
     types::*,
 };
 
@@ -369,6 +369,7 @@ pub struct SequencedLlmMessage {
     ///
     /// - `None`：正常消息（用户输入、LLM 回复等）
     /// - `Some("background_task")`：后台任务完成通知（前端隐藏或特殊渲染）
+    /// - `Some("turn_aborted")`：上一轮中断标记（仅 provider 可见）
     ///
     /// `source` 本身不进入 LLM payload；对应 `.message` 会作为 User 消息送入 provider。
     #[serde(default)]
@@ -456,6 +457,16 @@ impl ExtensionEventIndex {
     pub fn count_for(&self, extension_id: &str) -> usize {
         self.by_extension.get(extension_id).map_or(0, |v| v.len())
     }
+}
+
+/// 尚未得到 Tool 结果的 assistant tool call。
+///
+/// 这是从读模型推导出来的协议状态，用于 abort / repair 时补齐 provider
+/// 要求的 tool result。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredToolCall {
+    pub call_id: String,
+    pub tool_name: String,
 }
 
 /// 会话事件流的内部读模型。
@@ -555,15 +566,13 @@ impl SessionReadModel {
                 .len()
                 .saturating_add(self.messages.len()),
         );
-        for sequenced in self.context_messages.iter().chain(self.messages.iter()) {
-            let visible = sequenced.message.clone().provider_visible();
-            if visible.has_provider_visible_content() {
-                messages.push(visible);
-            }
-        }
-        normalize_tool_call_messages(&mut messages);
-        truncate_incomplete_tool_protocol(&mut messages);
-        messages
+        messages.extend(
+            self.context_messages
+                .iter()
+                .chain(self.messages.iter())
+                .map(|sequenced| sequenced.message.clone()),
+        );
+        crate::llm::provider_visible_messages(messages)
     }
 
     /// 当前快照 cursor。
@@ -577,13 +586,100 @@ impl SessionReadModel {
     pub fn first_user_message(&self) -> Option<String> {
         self.messages
             .iter()
-            .find(|m| matches!(m.message.role, crate::llm::LlmRole::User))
+            .find(|m| m.source.is_none() && matches!(m.message.role, LlmRole::User))
             .and_then(|m| {
                 m.message.content.iter().find_map(|c| match c {
-                    crate::llm::LlmContent::Text { text } => Some(text.clone()),
+                    LlmContent::Text { text } => Some(text.clone()),
                     _ => None,
                 })
             })
+    }
+
+    /// 返回 abort / repair 时必须补齐的 tool call。
+    ///
+    /// 优先使用投影中的 `pending_tool_calls`；同时检查 transcript 尾部，覆盖
+    /// 旧日志或异常恢复时 assistant tool call 已存在、pending 集合不完整的情况。
+    pub fn tool_calls_needing_interruption(&self) -> Vec<UnansweredToolCall> {
+        let mut pending = self.pending_requested_tool_calls();
+        let mut seen = pending
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect::<HashSet<_>>();
+
+        for call in self.tail_unanswered_tool_calls() {
+            if seen.insert(call.call_id.clone()) {
+                pending.push(call);
+            }
+        }
+
+        pending
+    }
+
+    fn pending_requested_tool_calls(&self) -> Vec<UnansweredToolCall> {
+        let mut remaining = self.pending_tool_calls.clone();
+        let mut pending = Vec::new();
+
+        for message in &self.messages {
+            if message.message.role != LlmRole::Assistant {
+                continue;
+            }
+            for content in &message.message.content {
+                let LlmContent::ToolCall { call_id, name, .. } = content else {
+                    continue;
+                };
+                if remaining.remove(&ToolCallId::from(call_id.clone())) {
+                    pending.push(UnansweredToolCall {
+                        call_id: call_id.clone(),
+                        tool_name: name.clone(),
+                    });
+                }
+            }
+        }
+
+        pending
+    }
+
+    fn tail_unanswered_tool_calls(&self) -> Vec<UnansweredToolCall> {
+        let Some(last_assistant_index) = self.messages.iter().rposition(|message| {
+            message.message.role == LlmRole::Assistant
+                && message
+                    .message
+                    .content
+                    .iter()
+                    .any(|content| matches!(content, LlmContent::ToolCall { .. }))
+        }) else {
+            return Vec::new();
+        };
+
+        let assistant = &self.messages[last_assistant_index].message;
+        let mut pending = assistant
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                LlmContent::ToolCall { call_id, name, .. } => Some((
+                    call_id.clone(),
+                    UnansweredToolCall {
+                        call_id: call_id.clone(),
+                        tool_name: name.clone(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        for message in self.messages.iter().skip(last_assistant_index + 1) {
+            if message.message.role != LlmRole::Tool {
+                return Vec::new();
+            }
+            for content in &message.message.content {
+                let LlmContent::ToolResult { tool_call_id, .. } = content else {
+                    continue;
+                };
+                pending.remove(tool_call_id);
+            }
+        }
+
+        pending.into_values().collect()
     }
 }
 
@@ -654,108 +750,6 @@ pub enum StorageError {
     Unsupported(String),
 }
 
-/// 将连续的 assistant/tool-call 消息合并为一条协议完整的消息。
-///
-/// OpenAI Chat Completions API 要求同一个 turn 中的所有 tool_calls
-/// 必须在一条 assistant 消息中。DeepSeek thinking mode 还要求执行过工具
-/// 的 assistant turn 在后续请求中同时带回 `reasoning_content` 和 tool_calls。
-/// 此函数作为防御性归一化步骤，兼容旧 snapshot 中拆分的 assistant 消息。
-fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
-    use crate::llm::{LlmContent, LlmRole};
-
-    let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        let has_tool_calls = message.role == LlmRole::Assistant
-            && message
-                .content
-                .iter()
-                .any(|c| matches!(c, LlmContent::ToolCall { .. }));
-        if has_tool_calls {
-            if let Some(last) = merged.last_mut() {
-                if last.role == LlmRole::Assistant {
-                    last.content.extend(message.content);
-                    if last.reasoning_content.is_none() {
-                        last.reasoning_content = message.reasoning_content;
-                    }
-                    continue;
-                }
-            }
-        }
-        merged.push(message);
-    }
-    *messages = merged;
-}
-
-/// 截断不完整的 tool 协议轮。
-///
-/// provider 侧要求每个 `tool` 消息都回应前一个 assistant 消息中的 `tool_calls`，
-/// 且这些 tool results 必须构成完整连续的一轮。遇到孤儿 tool result、部分结果或
-/// 中间插入其它消息时，裁到上一个协议完整边界。
-fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
-    use crate::llm::{LlmContent, LlmRole};
-    let mut pending: Option<(
-        usize,
-        std::collections::HashSet<String>,
-        std::collections::HashSet<String>,
-    )> = None;
-
-    for index in 0..messages.len() {
-        let message = &messages[index];
-        if message.role == LlmRole::Tool {
-            let tool_result_ids: Vec<String> = message
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    LlmContent::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            if tool_result_ids.is_empty() {
-                messages.truncate(index);
-                return;
-            }
-            let Some((_, call_ids, answered)) = pending.as_mut() else {
-                messages.truncate(index);
-                return;
-            };
-            for tool_call_id in tool_result_ids {
-                if !call_ids.contains(&tool_call_id) || answered.contains(&tool_call_id) {
-                    messages.truncate(index);
-                    return;
-                }
-                answered.insert(tool_call_id);
-            }
-            if call_ids.iter().all(|id| answered.contains(id)) {
-                pending = None;
-            }
-            continue;
-        }
-
-        if let Some((start, _, _)) = pending {
-            messages.truncate(start);
-            return;
-        }
-
-        if message.role == LlmRole::Assistant {
-            let call_ids: std::collections::HashSet<String> = message
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    LlmContent::ToolCall { call_id, .. } => Some(call_id.clone()),
-                    _ => None,
-                })
-                .collect();
-            if !call_ids.is_empty() {
-                pending = Some((index, call_ids, std::collections::HashSet::new()));
-            }
-        }
-    }
-
-    if let Some((start, _, _)) = pending {
-        messages.truncate(start);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +783,58 @@ mod tests {
         let model = SessionReadModel::empty("session-test".into());
 
         assert_eq!(model.cursor(), "0");
+    }
+
+    #[test]
+    fn first_user_message_ignores_source_marked_context() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.messages.push(SequencedLlmMessage {
+            message: crate::llm::turn_aborted_context_message(),
+            updated_seq: 1,
+            source: Some(crate::llm::TURN_ABORTED_SOURCE.into()),
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("hello"),
+            updated_seq: 2,
+            source: None,
+        });
+
+        assert_eq!(model.first_user_message().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn tool_calls_needing_interruption_uses_pending_and_tail_fallback() {
+        let mut model = SessionReadModel::empty("session-test".into());
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage::user("look"),
+            updated_seq: 1,
+            source: None,
+        });
+        model.messages.push(SequencedLlmMessage {
+            message: LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            updated_seq: 2,
+            source: None,
+        });
+
+        assert_eq!(
+            model.tool_calls_needing_interruption(),
+            vec![UnansweredToolCall {
+                call_id: "call_1".into(),
+                tool_name: "read".into(),
+            }]
+        );
+
+        model.pending_tool_calls.insert("call_1".into());
+        assert_eq!(model.tool_calls_needing_interruption().len(), 1);
     }
 
     #[test]

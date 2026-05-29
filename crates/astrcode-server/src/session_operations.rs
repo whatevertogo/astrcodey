@@ -33,7 +33,7 @@ impl SessionOperations for ServerSessionOperations {
             .session_manager
             .create(&request.working_dir)
             .await
-            .map_err(|e| SessionApiError::Internal(e.to_string()))?;
+            .map_err(SessionApiError::internal)?;
 
         Ok(SessionHandle {
             session_id: created.session.id().clone().into_string(),
@@ -77,7 +77,7 @@ impl SessionOperations for ServerSessionOperations {
                     InputDelivery::InjectIfRunningElseStart,
                 )
                 .await
-                .map_err(|e| SessionApiError::Internal(e.to_string()))?;
+                .map_err(SessionApiError::internal)?;
         } else {
             let session = self
                 .session_manager
@@ -95,7 +95,7 @@ impl SessionOperations for ServerSessionOperations {
                     },
                 )
                 .await
-                .map_err(|e| SessionApiError::Internal(e.to_string()))?;
+                .map_err(SessionApiError::internal)?;
         }
 
         self.session_manager.sync_durable_events(&target_sid).await;
@@ -219,7 +219,7 @@ impl SessionOperations for ServerSessionOperations {
         self.session_manager
             .delete(&target_sid)
             .await
-            .map_err(|e| SessionApiError::Internal(e.to_string()))?;
+            .map_err(SessionApiError::internal)?;
 
         Ok(())
     }
@@ -239,7 +239,7 @@ impl SessionOperations for ServerSessionOperations {
         self.session_manager
             .restore_session(&target_sid)
             .await
-            .map_err(|e| SessionApiError::Internal(e.to_string()))?;
+            .map_err(SessionApiError::internal)?;
 
         Ok(())
     }

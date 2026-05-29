@@ -13,7 +13,7 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, ConfigManager, DeliveryOutcome, ExecutionCompletion, InputDelivery,
+    ChildSessionCoordinator, ConfigManager, DeliveryOutcome, CompletionParams, InputDelivery,
     SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
 };
 use astrcode_session::SessionRuntimeServices;
@@ -21,6 +21,7 @@ use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
 struct StaticTextLlm;
+struct PendingLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
@@ -45,6 +46,24 @@ impl LlmProvider for StaticTextLlm {
     }
 }
 
+#[async_trait::async_trait]
+impl LlmProvider for PendingLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        std::future::pending().await
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200000,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
 async fn seed_session(store: &Arc<dyn EventStore>) -> SessionId {
     let sid = new_session_id();
     store
@@ -55,7 +74,13 @@ async fn seed_session(store: &Arc<dyn EventStore>) -> SessionId {
 }
 
 fn build_scheduler(store: Arc<dyn EventStore>) -> TurnScheduler {
-    let llm: Arc<dyn LlmProvider> = Arc::new(StaticTextLlm);
+    build_scheduler_with_llm(store, Arc::new(StaticTextLlm))
+}
+
+fn build_scheduler_with_llm(
+    store: Arc<dyn EventStore>,
+    llm: Arc<dyn LlmProvider>,
+) -> TurnScheduler {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
@@ -139,7 +164,7 @@ async fn idle_submit_emits_turn_started_and_user_message() {
         .unwrap();
     let _ = started.handle.wait().await;
     scheduler
-        .finish_execution(ExecutionCompletion {
+        .finish_and_maybe_start_next(CompletionParams {
             session_id: sid.clone(),
             turn_id: started.turn_id,
         })
@@ -272,7 +297,7 @@ async fn release_completed_execution_does_not_emit_aborted_turn() {
 }
 
 #[tokio::test]
-async fn cleanup_on_stale_registry_entry_emits_aborted_turn() {
+async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
@@ -288,8 +313,8 @@ async fn cleanup_on_stale_registry_entry_emits_aborted_turn() {
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(
         reasons,
-        vec!["stop", "aborted"],
-        "cleanup aborts registry entries and must not be used after natural turn completion"
+        vec!["stop"],
+        "cleanup of a finished registry entry must not append a second terminal event"
     );
 }
 
@@ -306,4 +331,40 @@ async fn execution_view_uses_registry_for_active_turn() {
     let turn_id = started.turn_id;
     let view = scheduler.execution_view(&sid).await.unwrap();
     assert_eq!(view.active_turn_id, Some(turn_id));
+}
+
+#[tokio::test]
+async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let started = scheduler
+        .start_with_completion(sid.clone(), "run".into())
+        .await
+        .unwrap();
+    let turn_id = started.turn_id.clone();
+
+    scheduler.abort(&sid).await.unwrap();
+    assert!(
+        scheduler.registry().has_active(&sid),
+        "cooperative abort keeps the registry entry until the runner exits"
+    );
+
+    let result = started.handle.wait().await.expect("turn result");
+    assert!(matches!(
+        result.output,
+        Err(astrcode_session::TurnError::Aborted)
+    ));
+
+    scheduler
+        .finish_and_maybe_start_next(CompletionParams {
+            session_id: sid.clone(),
+            turn_id,
+        })
+        .await;
+    assert!(!scheduler.registry().has_active(&sid));
+
+    let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
+    assert_eq!(reasons, vec!["aborted"]);
 }

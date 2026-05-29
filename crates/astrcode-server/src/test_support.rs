@@ -8,7 +8,7 @@ pub use crate::{
     session_operations::ServerSessionOperations,
     turn_registry::TurnRegistry,
     turn_scheduler::{
-        DeliveryOutcome, ExecutionCompletion, InputDelivery, StartedExecution, TurnScheduleError,
+        DeliveryOutcome, CompletionParams, InputDelivery, StartedExecution, TurnScheduleError,
         TurnScheduler,
     },
 };

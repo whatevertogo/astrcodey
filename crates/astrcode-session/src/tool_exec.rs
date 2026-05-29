@@ -15,29 +15,53 @@ use astrcode_core::{
 };
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::{
-    background::{
-        BackgroundTaskCompletion, BackgroundTaskManager, backgrounded_placeholder_result,
-    },
+    background::{BackgroundTaskCompletion, BackgroundTasks, backgrounded_placeholder_result},
     deferred_tools::suggest_tool_alias,
     session::Session,
     tool_types::ExecutableToolCall,
-    turn_publish::TurnPublisher,
+    turn_publish::TurnEvents,
 };
 
 // ─── Runtime context types ──────────────────────────────────────────────
 
-/// 会话级工具运行时能力，从 ToolPipeline 透传到 ToolExecutionContext。
-///
-/// 整合了后台任务、文件观察等按 session 生命周期存在的能力。
+/// Turn 级工具上下文：hook 共享字段 + session 基础设施能力。
+#[derive(Clone)]
+pub(crate) struct TurnToolContext {
+    pub shared: crate::turn_context::SharedTurnContext,
+    pub capabilities: ToolRuntimeCapabilities,
+}
+
+impl TurnToolContext {
+    pub(crate) fn for_turn(
+        session: &Session,
+        session_state: &astrcode_core::storage::SessionReadModel,
+        session_store_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        let shared = crate::turn_context::SharedTurnContext {
+            session_id: session.id().clone(),
+            working_dir: session_state.working_dir.clone(),
+            model_id: session_state.model_id.clone(),
+            session_store_dir: session_store_dir.clone(),
+            turn_event_tx: None,
+        };
+        let capabilities = ToolRuntimeCapabilities::from_session(session, &shared);
+        Self {
+            shared,
+            capabilities,
+        }
+    }
+}
+
+/// 会话级工具运行时能力，从 [`TurnToolContext`] 透传到 [`ToolExecutionContext`]。
 #[derive(Clone)]
 pub(crate) struct ToolRuntimeCapabilities {
-    /// 后台任务完成后的通知通道。
-    pub background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
+    /// session 运行时（后台 completion 投递、任务管理等）。
+    pub session_runtime: Arc<crate::session_runtime::SessionRuntimeState>,
     /// 后台任务管理器，用于注册 watcher handle 以支持取消。
-    pub background_tasks: Arc<parking_lot::Mutex<BackgroundTaskManager>>,
+    pub background_tasks: Arc<parking_lot::Mutex<BackgroundTasks>>,
     /// 后台任务只读接口，注入到 ToolExecutionContext 供 TaskTool 使用。
     pub background_task_reader: Option<Arc<dyn BackgroundTaskReader>>,
     /// 文件观察存储，用于 read/edit 协作的 read-before-edit 守卫。
@@ -55,30 +79,28 @@ pub(crate) struct ToolRuntimeCapabilities {
 }
 
 impl ToolRuntimeCapabilities {
-    pub(crate) fn for_turn(
+    fn from_session(
         session: &Session,
-        _shared: &crate::turn_context::SharedTurnContext,
-        background_result_tx: Option<mpsc::UnboundedSender<BackgroundTaskCompletion>>,
-        session_store_dir: Option<std::path::PathBuf>,
+        shared: &crate::turn_context::SharedTurnContext,
     ) -> Self {
-        let runtime = session.runtime();
+        let runtime = Arc::clone(&session.runtime);
         let caps = session.caps();
         let background_task_reader: Option<Arc<dyn BackgroundTaskReader>> =
             Some(Arc::new(crate::background::BackgroundTaskReaderImpl::new(
                 runtime.background_tasks(),
-                session_store_dir.clone(),
+                shared.session_store_dir.clone(),
             )));
         let effective = caps.read_effective();
-        let main_model_id = effective.llm.model_id.clone();
+        let main_model_id = shared.model_id.clone();
         let small_model_id = effective.small_llm.model_id.clone();
         Self {
-            background_result_tx,
+            session_runtime: Arc::clone(&runtime),
             background_tasks: runtime.background_tasks(),
             background_task_reader,
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: caps.session_ops(),
             small_model_id: Some(small_model_id.clone()),
-            session_store_dir,
+            session_store_dir: shared.session_store_dir.clone(),
             main_model_id: Some(main_model_id.clone()),
             llm_models: LlmModelIds {
                 main: Some(main_model_id),
@@ -89,13 +111,11 @@ impl ToolRuntimeCapabilities {
 }
 
 pub(crate) struct ToolCallRuntimeContext {
-    pub session_id: SessionId,
-    pub working_dir: String,
-    pub model_id: String,
+    pub turn: TurnToolContext,
     pub tools: Vec<ToolDefinition>,
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
-    pub publisher: Arc<TurnPublisher>,
-    pub capabilities: ToolRuntimeCapabilities,
+    pub publisher: Arc<TurnEvents>,
+    pub cancellation_token: CancellationToken,
 }
 
 fn error_tool_result(
@@ -177,6 +197,20 @@ fn error_tool_result(
     }
 }
 
+/// 工具在执行完成前被中断（取消、abort、协议修复）时的统一错误结果。
+pub fn interrupted_tool_result(
+    call_id: String,
+    tool_name: &str,
+    duration: std::time::Duration,
+) -> ToolResult {
+    error_tool_result(
+        call_id,
+        tool_name,
+        ToolError::Execution("tool execution interrupted before completion".into()),
+        duration,
+    )
+}
+
 /// 执行单个工具调用，并把异常统一转成工具错误结果。
 ///
 /// 当工具声明了 [`BackgroundPolicy::AutoAfter`] 且执行超过阈值时，
@@ -191,6 +225,12 @@ pub async fn execute_tool_call(
     runtime: ToolCallRuntimeContext,
     mut call: ExecutableToolCall,
 ) -> (usize, ToolResult) {
+    if runtime.cancellation_token.is_cancelled() {
+        return (
+            call.index,
+            interrupted_tool_result(call.call_id.clone(), &call.name, std::time::Duration::ZERO),
+        );
+    }
     let policy = tool_registry.background_policy(&call.name);
     let effective_policy = resolve_effective_policy(policy, &call.tool_input);
 
@@ -225,17 +265,18 @@ fn resolve_effective_policy(
 use crate::turn_publish::spawn_event_bridge;
 
 fn tool_capabilities_from_runtime(runtime: &ToolCallRuntimeContext) -> ToolCapabilities {
+    let capabilities = &runtime.turn.capabilities;
     ToolCapabilities {
-        model_id: Some(runtime.model_id.clone()),
-        main_model_id: runtime.capabilities.main_model_id.clone(),
-        small_model_id: runtime.capabilities.small_model_id.clone(),
-        llm_models: runtime.capabilities.llm_models.clone(),
-        session_store_dir: runtime.capabilities.session_store_dir.clone(),
+        model_id: Some(runtime.turn.shared.model_id.clone()),
+        main_model_id: capabilities.main_model_id.clone(),
+        small_model_id: capabilities.small_model_id.clone(),
+        llm_models: capabilities.llm_models.clone(),
+        session_store_dir: capabilities.session_store_dir.clone(),
         available_tools: Some(runtime.tools.clone()),
         tool_result_reader: runtime.tool_result_reader.clone(),
-        background_task_reader: runtime.capabilities.background_task_reader.clone(),
-        file_observation_store: runtime.capabilities.file_observation_store.clone(),
-        session_ops: runtime.capabilities.session_ops.clone(),
+        background_task_reader: capabilities.background_task_reader.clone(),
+        file_observation_store: capabilities.file_observation_store.clone(),
+        session_ops: capabilities.session_ops.clone(),
         extension_event_sink: None,
     }
 }
@@ -255,17 +296,19 @@ async fn execute_tool_call_blocking(
         .as_ref()
         .map(|(tool_tx, _)| tool_tx.clone());
     let tool_ctx = ToolExecutionContext {
-        session_id: runtime.session_id,
-        working_dir: runtime.working_dir,
+        session_id: runtime.turn.shared.session_id.clone(),
+        working_dir: runtime.turn.shared.working_dir.clone(),
         tool_call_id: Some(call.call_id.clone()),
         event_tx: tool_event_tx,
         capabilities,
     };
 
-    let result = match tool_registry
-        .execute(&tool_name, call.tool_input, &tool_ctx)
-        .await
-    {
+    let result = match tokio::select! {
+        _ = runtime.cancellation_token.cancelled() => {
+            Err(ToolError::Execution("tool execution interrupted before completion".into()))
+        },
+        result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => result,
+    } {
         Ok(mut result) => {
             result.call_id = call.call_id.clone();
             result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -325,8 +368,8 @@ async fn execute_tool_call_with_background(
     };
 
     let tool_ctx = ToolExecutionContext {
-        session_id: runtime.session_id.clone(),
-        working_dir: runtime.working_dir.clone(),
+        session_id: runtime.turn.shared.session_id.clone(),
+        working_dir: runtime.turn.shared.working_dir.clone(),
         tool_call_id: Some(call.call_id.clone()),
         event_tx: tool_event_tx,
         capabilities: tool_capabilities_from_runtime(&runtime),
@@ -350,7 +393,18 @@ async fn execute_tool_call_with_background(
     });
 
     // 用 timeout 等待完成通知或超时
-    match tokio::time::timeout(std::time::Duration::from_secs(threshold_secs), done_rx).await {
+    let wait_result = tokio::select! {
+        _ = runtime.cancellation_token.cancelled() => {
+            exec_handle.abort();
+            return (
+                call_index,
+                interrupted_tool_result(call_id.clone(), &tool_name, started_at.elapsed()),
+            );
+        },
+        result = tokio::time::timeout(std::time::Duration::from_secs(threshold_secs), done_rx) => result,
+    };
+
+    match wait_result {
         Ok(Ok(())) => {
             // 在阈值内完成
             match result_slot.lock().take() {
@@ -467,11 +521,11 @@ async fn background_tool_call(
     let bg_call_id = call_id.clone();
     let bg_tool_name = tool_name.clone();
     let bg_task_id = task_id.clone();
-    let bg_session_id = runtime.session_id.clone();
-    let bg_result_tx = runtime.capabilities.background_result_tx.clone();
-    let bg_manager = runtime.capabilities.background_tasks.clone();
+    let bg_session_id = runtime.turn.shared.session_id.clone();
+    let bg_session_runtime = Arc::clone(&runtime.turn.capabilities.session_runtime);
+    let bg_manager = runtime.turn.capabilities.background_tasks.clone();
     let register_task_id = task_id.clone();
-    let bg_store_dir = runtime.capabilities.session_store_dir.clone();
+    let bg_store_dir = runtime.turn.capabilities.session_store_dir.clone();
     let bg_arguments = call.tool_input.to_string();
     let bg_arguments_json = Some(call.tool_input.clone());
 
@@ -562,16 +616,29 @@ async fn background_tool_call(
             "background task completed"
         );
 
-        // 通过 background_result_tx 通知 forwarder 进行持久化和广播
-        if let Some(tx) = bg_result_tx {
-            let _ = tx.send(BackgroundTaskCompletion {
-                session_id: bg_session_id,
-                task_id: bg_task_id.clone(),
-                tool_name: bg_tool_name,
-                result,
-                arguments: bg_arguments,
-                arguments_json: bg_arguments_json,
-            });
+        // 通过 session 级 forwarder 通知持久化和广播（turn 结束后 channel 仍有效）
+        if let Some(tx) = bg_session_runtime.background_result_sender() {
+            if tx
+                .send(BackgroundTaskCompletion {
+                    session_id: bg_session_id,
+                    task_id: bg_task_id.clone(),
+                    tool_name: bg_tool_name,
+                    result,
+                    arguments: bg_arguments,
+                    arguments_json: bg_arguments_json,
+                })
+                .is_err()
+            {
+                tracing::warn!(
+                    task_id = %bg_task_id,
+                    "background completion channel closed; notification dropped"
+                );
+            }
+        } else {
+            tracing::warn!(
+                task_id = %bg_task_id,
+                "background forwarder not initialized; completion notification dropped"
+            );
         }
 
         // 完成后从管理器移除
@@ -579,10 +646,10 @@ async fn background_tool_call(
     });
 
     // 注册到后台任务管理器，支持中途取消（exec_handle + watcher_handle 都可 abort）
-    let mut mgr = runtime.capabilities.background_tasks.lock();
+    let mut mgr = runtime.turn.capabilities.background_tasks.lock();
     mgr.register(
         register_task_id,
-        runtime.session_id,
+        runtime.turn.shared.session_id.clone(),
         exec_handle,
         watcher_handle,
     );

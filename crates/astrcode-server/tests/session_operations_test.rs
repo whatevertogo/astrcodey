@@ -513,3 +513,113 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         "recycle must release registry without leaving a stale active entry"
     );
 }
+
+#[tokio::test]
+async fn parent_abort_stops_sync_child_and_recycles() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let parent_id = new_session_id();
+    store
+        .create_session(&parent_id, ".", "mock", None, None, None)
+        .await
+        .unwrap();
+
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let handle = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "sync-child".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(handle.session_id.as_str());
+
+    let ops_for_turn = Arc::clone(&ops);
+    let parent_for_turn = parent_id.clone();
+    let child_target = handle.session_id.clone();
+    let sync_turn = tokio::spawn(async move {
+        ops_for_turn
+            .submit_turn(
+                parent_for_turn.as_str(),
+                SubmitTurnRequest {
+                    target_session_id: child_target,
+                    user_prompt: "sync work".into(),
+                    wait_for_result: true,
+                    notify_parent_on_complete: None,
+                    recycle_on_complete: false,
+                    tool_call_id: None,
+                },
+            )
+            .await
+    });
+
+    for _ in 0..100 {
+        if ops.scheduler.registry().has_active(&child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        ops.scheduler.registry().has_active(&child_id),
+        "sync child turn should be active in registry"
+    );
+
+    ops.scheduler.abort(&parent_id).await.unwrap();
+    release.notify_one();
+
+    let sync_result = sync_turn.await.expect("sync turn task panicked");
+    assert!(
+        sync_result.is_err(),
+        "sync child turn should fail after parent cascade abort"
+    );
+
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !ops.scheduler.registry().has_active(&child_id),
+        "child registry entry must be cleared after cascade abort"
+    );
+
+    let parent_events = store.replay_events(&parent_id).await.unwrap();
+    assert!(
+        parent_events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                EventPayload::AgentSessionFailed {
+                    child_session_id: ref sid,
+                    ..
+                } if sid == &child_id
+            )
+        }),
+        "cascade abort should mark sync child as failed on parent"
+    );
+    assert!(
+        parent_events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                EventPayload::AgentSessionRecycled {
+                    child_session_id: ref sid,
+                } if sid == &child_id
+            )
+        }),
+        "cascade abort should recycle unguarded sync child session"
+    );
+    assert!(
+        store
+            .session_read_model(&parent_id)
+            .await
+            .unwrap()
+            .agent_sessions
+            .is_empty(),
+        "recycled child should be removed from parent agent_sessions projection"
+    );
+}

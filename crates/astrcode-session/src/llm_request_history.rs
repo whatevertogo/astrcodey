@@ -2,11 +2,9 @@
 
 use astrcode_context::prompt_engine::system_messages_from_prompt;
 use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
     storage::SessionReadModel,
 };
-
-use crate::llm_stream::provider_visible_messages;
 
 /// assembler / should_auto_compact 用的「可见历史」（无 system 行）。
 pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<LlmMessage> {

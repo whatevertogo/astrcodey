@@ -45,11 +45,11 @@ struct RunningTask {
 ///
 /// 当工具执行超过阈值时，agent loop 将其转入后台，把 exec 和 watcher 的 JoinHandle 注册到这里。
 /// cancel 会同时 abort 工具执行和 watcher。完成后 watcher 自行移除任务。
-pub struct BackgroundTaskManager {
+pub struct BackgroundTasks {
     tasks: HashMap<BackgroundTaskId, RunningTask>,
 }
 
-impl BackgroundTaskManager {
+impl BackgroundTasks {
     pub fn new() -> Self {
         Self {
             tasks: HashMap::new(),
@@ -120,18 +120,18 @@ impl BackgroundTaskManager {
     }
 }
 
-/// 将 `BackgroundTaskManager` 适配为 `BackgroundTaskReader` trait。
+/// 将 `BackgroundTasks` 适配为 `BackgroundTaskReader` trait。
 ///
 /// 这个薄包装器让 `TaskTool` 能通过 `ToolExecutionContext` 读取后台任务状态，
-/// 而不暴露 `BackgroundTaskManager` 的内部方法（如 `register`、`cleanup_session`）。
+/// 而不暴露 `BackgroundTasks` 的内部方法（如 `register`、`cleanup_session`）。
 pub struct BackgroundTaskReaderImpl {
-    manager: Arc<Mutex<BackgroundTaskManager>>,
+    manager: Arc<Mutex<BackgroundTasks>>,
     session_store_dir: Option<std::path::PathBuf>,
 }
 
 impl BackgroundTaskReaderImpl {
     pub fn new(
-        manager: Arc<Mutex<BackgroundTaskManager>>,
+        manager: Arc<Mutex<BackgroundTasks>>,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
@@ -189,17 +189,14 @@ impl BackgroundTaskReader for BackgroundTaskReaderImpl {
     }
 }
 
-impl Default for BackgroundTaskManager {
+impl Default for BackgroundTasks {
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// 完成后从管理器中移除任务。
-pub fn complete_background_task(
-    manager: &Arc<Mutex<BackgroundTaskManager>>,
-    task_id: &BackgroundTaskId,
-) {
+pub fn complete_background_task(manager: &Arc<Mutex<BackgroundTasks>>, task_id: &BackgroundTaskId) {
     manager.lock().remove(task_id);
 }
 
@@ -212,7 +209,7 @@ pub fn complete_background_task(
 /// 后台任务完成后的事件由 TurnScheduler 监听处理，无需回调唤醒 agent。
 pub fn spawn_background_forwarder(
     mut rx: mpsc::UnboundedReceiver<BackgroundTaskCompletion>,
-    session: Arc<crate::session::Session>,
+    session: crate::session::Session,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(completion) = rx.recv().await {
@@ -487,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_removes_task_and_returns_true() {
-        let mut mgr = BackgroundTaskManager::new();
+        let mut mgr = BackgroundTasks::new();
         let task_id = BackgroundTaskId::from("task-1");
         let session_id = SessionId::from("session-1");
         let (exec, watcher) = fake_handles();
@@ -499,14 +496,14 @@ mod tests {
 
     #[test]
     fn cancel_returns_false_for_unknown_task() {
-        let mut mgr = BackgroundTaskManager::new();
+        let mut mgr = BackgroundTasks::new();
         let task_id = BackgroundTaskId::from("nonexistent");
         assert!(!mgr.cancel(&task_id));
     }
 
     #[tokio::test]
     async fn cleanup_session_removes_all_tasks_for_session() {
-        let mut mgr = BackgroundTaskManager::new();
+        let mut mgr = BackgroundTasks::new();
         let session_a = SessionId::from("session-a");
         let session_b = SessionId::from("session-b");
 
@@ -534,7 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_active_returns_only_matching_session_tasks() {
-        let mut mgr = BackgroundTaskManager::new();
+        let mut mgr = BackgroundTasks::new();
         let session_1 = SessionId::from("s1");
         let session_2 = SessionId::from("s2");
 
@@ -584,7 +581,7 @@ mod tests {
         );
         let mut events = session.subscribe();
         let (tx, rx) = mpsc::unbounded_channel();
-        let _forwarder = spawn_background_forwarder(rx, Arc::clone(&session));
+        let _forwarder = spawn_background_forwarder(rx, session.as_ref().clone());
 
         let mut metadata = std::collections::BTreeMap::new();
         metadata.insert("task_id".into(), serde_json::json!("task-1"));
@@ -642,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_cancel_rejects_wrong_session() {
-        let manager = Arc::new(Mutex::new(BackgroundTaskManager::new()));
+        let manager = Arc::new(Mutex::new(BackgroundTasks::new()));
         let reader = BackgroundTaskReaderImpl::new(Arc::clone(&manager), None);
 
         let task_id = BackgroundTaskId::from("task-x");

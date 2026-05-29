@@ -171,6 +171,11 @@ pub enum EventPayload {
         finish_reason: String,
     },
 
+    /// 上一轮被用户中断的模型上下文。
+    ///
+    /// Projection 会将其追加为 provider 可见、普通 transcript 隐藏的 User 消息。
+    TurnAbortedContext,
+
     /// 用户发送的消息。
     UserMessage {
         /// 消息唯一标识。
@@ -456,8 +461,8 @@ pub enum EventPayload {
 impl EventPayload {
     /// 判断该事件是否应持久化到会话的 JSONL 事件日志中。
     ///
-    /// 增量类事件（如文本增量、参数增量、输出增量）和临时控制事件
-    /// 不需要持久化，因为它们可以从持久化事件中重建。
+    /// 采用「默认持久化」策略：仅排除 live/增量类事件；新增 [`EventPayload`] 变体若未加入
+    /// 排除列表会自动持久化（更安全，但新增 live-only 变体时须记得更新此列表）。
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
@@ -707,6 +712,10 @@ mod tests {
             }
             .is_durable(),
             "SessionContinuedFromCompaction is the durable child-session projection fact"
+        );
+        assert!(
+            EventPayload::TurnAbortedContext.is_durable(),
+            "TurnAbortedContext must be durably visible to the next provider request"
         );
     }
 

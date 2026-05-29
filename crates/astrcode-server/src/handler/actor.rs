@@ -275,7 +275,7 @@ impl CommandHandler {
             super::model_selection::ModelSelectionController::new(runtime.config_manager().clone());
         Self {
             runtime,
-            active_session_id: None,
+            focused_session_id: None,
             scheduler,
             event_bus,
             actor_tx,
@@ -323,7 +323,7 @@ impl CommandHandler {
                     _ = sleep_until(deadline) => {
                         // 空闲超时，触发自动 recap
                         recap_deadline = None;
-                        if self.active_session_id.as_ref().is_some_and(|sid| {
+                        if self.focused_session_id.as_ref().is_some_and(|sid| {
                             !self.scheduler.registry().has_active(sid)
                         }) {
                             if let Err(e) = self.recap_session().await {
@@ -360,7 +360,7 @@ impl CommandHandler {
                     ..
                 } => {
                     matches!(completion, TurnCompletion::Completed { .. })
-                        && self.active_session_id.as_ref() == Some(session_id)
+                        && self.focused_session_id.as_ref() == Some(session_id)
                         && !self.scheduler.registry().has_active(session_id)
                 },
                 _ => false,
@@ -427,7 +427,7 @@ impl CommandHandler {
                     ?completion,
                     "agent turn cleanup"
                 );
-                // 排队输入由 TurnCompleted → TurnScheduler::on_turn_completed 统一出队。
+                // 排队输入由 TurnCompleted → TurnScheduler::finish_and_maybe_start_next 统一出队。
             },
             CommandMessage::SubmitInputWithCompletion {
                 session_id,

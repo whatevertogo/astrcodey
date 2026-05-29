@@ -1380,6 +1380,93 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             )
         })
     }));
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(|message| { message.joined_display_text("").contains("<turn_aborted>") })
+    );
+}
+
+#[tokio::test]
+async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
+    let runtime = test_runtime();
+    let sid = new_session_id();
+    runtime
+        .event_store()
+        .create_session(&sid, ".", "mock", None, None, None)
+        .await
+        .unwrap();
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid.clone(),
+            Some("aborted-turn".into()),
+            EventPayload::ToolCallRequested {
+                call_id: "call-abort".into(),
+                tool_name: "shell".into(),
+                arguments: serde_json::json!({ "command": "sleep" }),
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid.clone(),
+            Some("aborted-turn".into()),
+            EventPayload::TurnCompleted {
+                finish_reason: "aborted".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let stale_state = runtime
+        .event_store()
+        .session_read_model(&sid)
+        .await
+        .unwrap();
+    assert_eq!(stale_state.phase, Phase::Idle);
+    assert!(stale_state.pending_tool_calls.is_empty());
+
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
+    let scheduler = test_scheduler(&runtime);
+    let handler = CommandHandler::new(
+        Arc::clone(&runtime),
+        Arc::clone(&scheduler),
+        test_event_bus(&runtime, event_tx, scheduler),
+        actor_tx,
+    );
+
+    handler.repair_stale_session(&sid).await.unwrap();
+
+    let state = runtime
+        .event_store()
+        .session_read_model(&sid)
+        .await
+        .unwrap();
+    assert!(state.messages.iter().any(|message| {
+        message.message.content.iter().any(|content| {
+            matches!(
+                content,
+                LlmContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error
+                } if tool_call_id == "call-abort"
+                    && *is_error
+                    && content.contains("interrupted before completion")
+            )
+        })
+    }));
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(|message| { message.joined_display_text("").contains("<turn_aborted>") })
+    );
 }
 
 #[tokio::test]
@@ -1931,7 +2018,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
         .send(CommandMessage::AgentTurnCleanup {
             session_id: sid,
             turn_id,
-            completion: TurnCompletion::Aborted,
+            completion: TurnCompletion::Dropped,
         })
         .await
         .unwrap();

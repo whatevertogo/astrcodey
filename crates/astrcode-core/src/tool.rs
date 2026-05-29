@@ -431,8 +431,40 @@ pub enum SessionApiError {
     SessionBusy(String),
     #[error("max depth exceeded: current={current}, max={max}")]
     MaxDepthExceeded { current: usize, max: usize },
-    #[error("{0}")]
-    Internal(String),
+    #[error(transparent)]
+    Internal(#[from] SessionApiInternalError),
+}
+
+/// 保留 `source` 链的内部错误，避免 API 边界 stringify 结构化错误。
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct SessionApiInternalError(Box<dyn std::error::Error + Send + Sync>);
+
+impl SessionApiInternalError {
+    fn message(text: impl Into<String>) -> Self {
+        Self(Box::new(SessionApiInternalMessage(text.into())))
+    }
+}
+
+#[derive(Debug)]
+struct SessionApiInternalMessage(String);
+
+impl std::fmt::Display for SessionApiInternalMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SessionApiInternalMessage {}
+
+impl SessionApiError {
+    pub fn internal<E: std::error::Error + Send + Sync + 'static>(error: E) -> Self {
+        Self::Internal(SessionApiInternalError(Box::new(error)))
+    }
+
+    pub fn internal_msg(msg: impl Into<String>) -> Self {
+        Self::Internal(SessionApiInternalError::message(msg))
+    }
 }
 
 /// 按档位暴露的 LLM model id（与 effective config 对齐）。

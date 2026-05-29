@@ -7,6 +7,21 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 
+pub const TURN_FINISH_ABORTED: &str = "aborted";
+pub const TURN_FINISH_INTERRUPTED: &str = "interrupted";
+
+pub fn turn_completed_payload(reason: impl Into<String>) -> EventPayload {
+    EventPayload::TurnCompleted {
+        finish_reason: reason.into(),
+    }
+}
+
+pub fn agent_run_completed_payload(reason: impl Into<String>) -> EventPayload {
+    EventPayload::AgentRunCompleted {
+        reason: reason.into(),
+    }
+}
+
 /// 构造 session 当前 system prompt 配置的持久事件载荷。
 pub fn system_prompt_configured_payload(
     text: String,

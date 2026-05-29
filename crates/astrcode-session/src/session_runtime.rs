@@ -6,13 +6,18 @@ use astrcode_core::{
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
-#[cfg(test)]
 use tokio::sync::mpsc;
 
 use crate::{
-    background::BackgroundTaskManager, compact_circuit_breaker::CompactCircuitBreaker,
+    background::{BackgroundTaskCompletion, BackgroundTasks, spawn_background_forwarder},
+    compact_circuit_breaker::CompactCircuitBreaker,
     tool_exec::InMemoryFileObservationStore,
 };
+
+struct BackgroundForwarderState {
+    tx: mpsc::UnboundedSender<BackgroundTaskCompletion>,
+    _handle: tokio::task::JoinHandle<()>,
+}
 
 /// 当前 session 使用的模型绑定；一次替换同时切换 provider 与模型标识。
 #[derive(Clone)]
@@ -23,12 +28,12 @@ pub struct SessionModelBinding {
 }
 
 impl SessionModelBinding {
-    pub fn llm(&self) -> &Arc<dyn LlmProvider> {
-        &self.llm
+    pub fn llm(&self) -> &dyn LlmProvider {
+        self.llm.as_ref()
     }
 
-    pub fn small_llm(&self) -> &Arc<dyn LlmProvider> {
-        &self.small_llm
+    pub fn small_llm(&self) -> &dyn LlmProvider {
+        self.small_llm.as_ref()
     }
 
     pub fn model_id(&self) -> &str {
@@ -40,7 +45,7 @@ impl SessionModelBinding {
 struct ToolResources {
     file_observation_store: Arc<dyn FileObservationStore>,
     registry: Mutex<Arc<ToolRegistry>>,
-    background_tasks: Arc<Mutex<BackgroundTaskManager>>,
+    background_tasks: Arc<Mutex<BackgroundTasks>>,
 }
 
 /// 参与每次 turn 装配的可变配置与其派生缓存。
@@ -79,6 +84,11 @@ pub struct SessionRuntimeState {
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_out: Arc<EventFanout<Event>>,
+    /// 后台任务完成通知转发器（session 级，跨 turn 存活）。
+    ///
+    /// 若按 turn 创建 forwarder，turn 结束后 channel 被 drop，晚到的 completion 会静默丢失，
+    /// LLM 永远看不到后台输出。
+    background_forwarder: Mutex<Option<BackgroundForwarderState>>,
 }
 
 impl SessionRuntimeState {
@@ -97,7 +107,7 @@ impl SessionRuntimeState {
             tools: ToolResources {
                 file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
                 registry: Mutex::new(Arc::new(ToolRegistry::new())),
-                background_tasks: Arc::new(Mutex::new(BackgroundTaskManager::new())),
+                background_tasks: Arc::new(Mutex::new(BackgroundTasks::new())),
             },
             configuration: TurnConfiguration {
                 extra_system_prompt: Mutex::new(None),
@@ -109,7 +119,31 @@ impl SessionRuntimeState {
                 Duration::from_secs(60),
             )),
             event_out,
+            background_forwarder: Mutex::new(None),
         }
+    }
+
+    /// 确保 session 级后台完成 forwarder 已启动（幂等）。
+    pub(crate) fn ensure_background_forwarder(&self, session: crate::session::Session) {
+        let mut guard = lock_parking(&self.background_forwarder);
+        if guard.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = spawn_background_forwarder(rx, session);
+        *guard = Some(BackgroundForwarderState {
+            tx,
+            _handle: handle,
+        });
+    }
+
+    /// 后台 watcher 完成时投递 completion 的 sender；forwarder 未初始化时返回 `None`。
+    pub(crate) fn background_result_sender(
+        &self,
+    ) -> Option<mpsc::UnboundedSender<BackgroundTaskCompletion>> {
+        lock_parking(&self.background_forwarder)
+            .as_ref()
+            .map(|state| state.tx.clone())
     }
 
     /// 返回 provider 与模型标识的一致快照。
@@ -149,32 +183,36 @@ impl SessionRuntimeState {
         Arc::clone(&self.tools.file_observation_store)
     }
 
-    pub fn tool_registry(&self) -> Arc<ToolRegistry> {
+    pub fn loaded_tool_registry(&self) -> Arc<ToolRegistry> {
         Arc::clone(&lock_parking(&self.tools.registry))
     }
 
-    pub fn set_tool_registry(&self, registry: Arc<ToolRegistry>) {
+    pub fn reset_tool_registry(&self) {
+        self.install_tool_registry(Arc::new(ToolRegistry::new()));
+    }
+
+    pub(crate) fn install_tool_registry(&self, registry: Arc<ToolRegistry>) {
         *lock_parking(&self.tools.registry) = registry;
     }
 
-    pub fn background_tasks(&self) -> Arc<Mutex<BackgroundTaskManager>> {
+    pub fn background_tasks(&self) -> Arc<Mutex<BackgroundTasks>> {
         Arc::clone(&self.tools.background_tasks)
     }
 
-    pub fn extra_system_prompt(&self) -> Option<String> {
-        lock_parking(&self.configuration.extra_system_prompt).clone()
-    }
-
-    pub fn set_extra_system_prompt(&self, prompt: Option<String>) {
-        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
-    }
-
-    pub fn tool_policy(&self) -> Option<ChildToolPolicy> {
+    pub fn child_tool_policy(&self) -> Option<ChildToolPolicy> {
         lock_parking(&self.configuration.tool_policy).clone()
     }
 
-    pub fn set_tool_policy(&self, policy: Option<ChildToolPolicy>) {
+    pub(crate) fn apply_child_tool_policy(&self, policy: Option<ChildToolPolicy>) {
         *lock_parking(&self.configuration.tool_policy) = policy;
+    }
+
+    pub fn prompt_extra(&self) -> Option<String> {
+        lock_parking(&self.configuration.extra_system_prompt).clone()
+    }
+
+    pub fn update_prompt_extra(&self, prompt: Option<String>) {
+        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
     }
 
     pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
@@ -185,11 +223,11 @@ impl SessionRuntimeState {
         lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
     }
 
-    pub fn cached_stable_prefix(&self) -> Option<(String, String)> {
+    pub fn stable_prefix_cache(&self) -> Option<(String, String)> {
         lock_parking(&self.configuration.cached_stable_prefix).clone()
     }
 
-    pub fn set_cached_stable_prefix(&self, text: String, fingerprint: String) {
+    pub(crate) fn store_stable_prefix_cache(&self, text: String, fingerprint: String) {
         *lock_parking(&self.configuration.cached_stable_prefix) = Some((text, fingerprint));
     }
 

@@ -166,7 +166,9 @@ fn create_at_path(
 ) -> Result<(EventLog, Event), StorageError> {
     initial_event.seq = Some(0);
 
-    let file = File::create(&path)?;
+    let file = File::create(&path).map_err(|e| {
+        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
+    })?;
     let mut writer = BufWriter::new(file);
     let line = serde_json::to_string(&initial_event)?;
     writeln!(writer, "{}", line)?;
@@ -310,28 +312,19 @@ impl EventLog {
     /// Called at turn boundaries to ensure all events written since the last
     /// sync are durable (power-loss-safe). No-op if nothing is pending.
     pub fn force_sync(&self) -> Result<(), StorageError> {
-        if !self.sync_pending.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let mut writer = lock_parking(&self.writer);
-        writer.flush().map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                e.kind(),
-                enhance_flush_error(&self.path, e),
-            ))
-        })?;
-        writer.get_ref().sync_all().map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                e.kind(),
-                enhance_sync_error(&self.path, e),
-            ))
-        })?;
-        self.sync_pending.store(false, Ordering::Release);
-        Ok(())
+        force_sync_shared(&self.writer, &self.path, &self.sync_pending)
+    }
+
+    /// Async wrapper around [`force_sync`] that offloads blocking fsync to a worker thread.
+    pub async fn force_sync_async(&self) -> Result<(), StorageError> {
+        let writer = Arc::clone(&self.writer);
+        let path = self.path.clone();
+        let sync_pending = Arc::clone(&self.sync_pending);
+        run_blocking_io(move || force_sync_shared(&writer, &path, &sync_pending)).await
     }
 
     /// Get the file path.
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -459,6 +452,25 @@ fn trim_ascii_whitespace(line: &[u8]) -> &[u8] {
         .rposition(|b| !b.is_ascii_whitespace())
         .map_or(start, |i| i + 1);
     &line[start..end]
+}
+
+fn force_sync_shared(
+    writer: &Arc<Mutex<BufWriter<File>>>,
+    path: &Path,
+    sync_pending: &Arc<AtomicBool>,
+) -> Result<(), StorageError> {
+    if !sync_pending.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let mut writer = lock_parking(writer);
+    writer.flush().map_err(|e| {
+        StorageError::Io(std::io::Error::new(e.kind(), enhance_flush_error(path, e)))
+    })?;
+    writer.get_ref().sync_all().map_err(|e| {
+        StorageError::Io(std::io::Error::new(e.kind(), enhance_sync_error(path, e)))
+    })?;
+    sync_pending.store(false, Ordering::Release);
+    Ok(())
 }
 
 fn enhance_open_error(path: &Path, e: std::io::Error) -> String {

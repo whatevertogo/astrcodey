@@ -4,7 +4,7 @@
 
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     storage::{
         AgentSessionLinkView, AgentSessionStatus, BackgroundToolCallView, CompactBoundaryView,
         SequencedLlmMessage, SessionReadModel,
@@ -144,6 +144,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::TurnCompleted { .. } => {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
+        },
+        EventPayload::TurnAbortedContext => {
+            model.messages.push(SequencedLlmMessage {
+                message: turn_aborted_context_message(),
+                updated_seq: event_seq,
+                source: Some(TURN_ABORTED_SOURCE.into()),
+            });
         },
         EventPayload::AssistantMessageStarted { .. } => {
             model.phase = Phase::Streaming;
@@ -422,7 +429,7 @@ mod tests {
     use astrcode_core::{
         event::{Event, EventPayload},
         extension::CompactStrategy,
-        llm::LlmMessage,
+        llm::{LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         types::{SessionId, new_message_id},
     };
 
@@ -612,10 +619,7 @@ mod tests {
 
     #[test]
     fn background_task_notification_appends_user_message_and_marks_completed() {
-        use astrcode_core::{
-            llm::LlmRole,
-            types::{BackgroundTaskId, ToolCallId},
-        };
+        use astrcode_core::types::{BackgroundTaskId, ToolCallId};
 
         let session_id = SessionId::from("session-bg-notification");
         let call_id = ToolCallId::from("call-1");
@@ -696,6 +700,51 @@ mod tests {
         assert!(
             bg_view.completed,
             "BackgroundTaskNotification should mark the task as completed"
+        );
+    }
+
+    #[test]
+    fn turn_aborted_context_is_provider_visible_but_source_marked() {
+        let session_id = SessionId::from("session-turn-aborted-context");
+        let events = vec![
+            event(
+                1,
+                &session_id,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "run a long command".into(),
+                },
+            ),
+            event(2, &session_id, EventPayload::TurnAbortedContext),
+            event(
+                3,
+                &session_id,
+                EventPayload::TurnCompleted {
+                    finish_reason: "aborted".into(),
+                },
+            ),
+        ];
+
+        let model = replay(session_id, &events);
+
+        let marker = model
+            .messages
+            .iter()
+            .find(|message| message.source.as_deref() == Some(TURN_ABORTED_SOURCE))
+            .expect("turn-aborted context should be projected");
+        assert_eq!(marker.message.role, LlmRole::User);
+        assert!(
+            marker
+                .message
+                .joined_display_text("")
+                .contains("<turn_aborted>")
+        );
+        assert!(
+            model
+                .provider_messages()
+                .iter()
+                .any(|message| message.joined_display_text("").contains("<turn_aborted>")),
+            "provider history should include the marker"
         );
     }
 }

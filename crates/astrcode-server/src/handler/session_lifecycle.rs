@@ -7,7 +7,7 @@ use super::{CommandHandler, HandlerError, snapshot::session_snapshot};
 
 impl CommandHandler {
     pub(super) async fn send_current_state(&mut self) {
-        let Some(session_id) = self.active_session_id.as_ref() else {
+        let Some(session_id) = self.focused_session_id.as_ref() else {
             self.send_error(40400, "No active session");
             return;
         };
@@ -40,7 +40,7 @@ impl CommandHandler {
             },
         };
         let sid = created.session.id().clone();
-        self.active_session_id = Some(sid.clone());
+        self.focused_session_id = Some(sid.clone());
 
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
         self.broadcast_event(created.start_event);
@@ -59,7 +59,7 @@ impl CommandHandler {
     }
 
     pub(super) async fn active_session_working_dir(&self) -> Result<String, String> {
-        let Some(sid) = self.active_session_id.as_ref() else {
+        let Some(sid) = self.focused_session_id.as_ref() else {
             return Ok(std::env::current_dir()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -98,7 +98,7 @@ impl CommandHandler {
                     self.send_error(-32603, &e.to_string());
                     return;
                 }
-                self.active_session_id = Some(session_id.clone());
+                self.focused_session_id = Some(session_id.clone());
                 self.event_bus
                     .send_notification(ClientNotification::SessionResumed {
                         session_id: session_id.into_string(),
@@ -110,7 +110,7 @@ impl CommandHandler {
     }
 
     pub(super) async fn ensure_session(&mut self) -> Result<SessionId, HandlerError> {
-        if let Some(ref sid) = self.active_session_id {
+        if let Some(ref sid) = self.focused_session_id {
             return Ok(sid.clone());
         }
 

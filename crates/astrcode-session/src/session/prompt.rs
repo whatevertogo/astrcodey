@@ -38,11 +38,11 @@ impl Session {
             .await?;
 
         if stored_fingerprint == Some(fingerprint.as_str()) {
-            self.runtime.set_extra_system_prompt(resolved_extra);
+            self.runtime.update_prompt_extra(resolved_extra);
             return Ok(false);
         }
 
-        self.runtime.set_extra_system_prompt(resolved_extra.clone());
+        self.runtime.update_prompt_extra(resolved_extra.clone());
         self.emit_durable(
             None,
             system_prompt_configured_payload(text, fingerprint, resolved_extra),
@@ -59,7 +59,7 @@ impl Session {
         if extra_system_prompt.is_some() {
             return Ok(normalize_extra_system_prompt(extra_system_prompt));
         }
-        if let Some(extra) = self.runtime.extra_system_prompt() {
+        if let Some(extra) = self.runtime.prompt_extra() {
             return Ok(Some(extra));
         }
         Ok(match cached_state {
@@ -78,7 +78,7 @@ impl Session {
             astrcode_context::prompt_engine::load_system_prompt_files(working_dir).await;
         let tools_with_meta = self
             .runtime
-            .tool_registry()
+            .loaded_tool_registry()
             .list_definitions_with_prompt_metadata();
         let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
         let tool_prompt_metadata = tools_with_meta
@@ -93,8 +93,7 @@ impl Session {
             &tools,
             tool_prompt_metadata,
         )
-        .await
-        .map_err(|e| SessionError::Other(format!("collect extension data: {e}")))?;
+        .await?;
         let prompt_input = SystemPromptInput {
             working_dir: working_dir.to_string(),
             os: std::env::consts::OS.into(),
@@ -110,7 +109,7 @@ impl Session {
         let stable_fingerprint =
             astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
 
-        let (text, fingerprint) = match self.runtime.cached_stable_prefix() {
+        let (text, fingerprint) = match self.runtime.stable_prefix_cache() {
             Some((cached_text, cached_fingerprint)) if cached_fingerprint == stable_fingerprint => {
                 let dynamic = astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
                 let text = if dynamic.is_empty() {
@@ -127,7 +126,7 @@ impl Session {
                 let stable_prefix =
                     astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
                 self.runtime
-                    .set_cached_stable_prefix(stable_prefix, stable_fingerprint);
+                    .store_stable_prefix_cache(stable_prefix, stable_fingerprint);
                 (text, fingerprint)
             },
         };

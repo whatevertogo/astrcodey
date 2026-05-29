@@ -2,8 +2,11 @@
 
 mod children;
 mod compact;
+mod cursor;
 mod events;
 mod prompt;
+mod storage;
+mod tools;
 mod turn_entry;
 
 use std::sync::Arc;
@@ -69,7 +72,7 @@ impl Session {
             )
             .await?;
         if let Some(policy) = &params.tool_policy {
-            params.runtime.set_tool_policy(Some(policy.clone()));
+            params.runtime.apply_child_tool_policy(Some(policy.clone()));
         }
         Ok(Self {
             id: params.sid,
@@ -114,10 +117,10 @@ impl Session {
         caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
-        if runtime.tool_policy().is_none() {
+        if runtime.child_tool_policy().is_none() {
             let model = store.session_read_model(&id).await?;
             if let Some(policy) = model.tool_policy {
-                runtime.set_tool_policy(Some(policy));
+                runtime.apply_child_tool_policy(Some(policy));
             }
         }
         Ok(Self {
@@ -132,12 +135,20 @@ impl Session {
         &self.id
     }
 
-    pub fn runtime(&self) -> &Arc<SessionRuntimeState> {
+    pub fn runtime(&self) -> &SessionRuntimeState {
         &self.runtime
     }
 
-    pub fn caps(&self) -> &Arc<SessionRuntimeServices> {
+    pub fn runtime_arc(&self) -> Arc<SessionRuntimeState> {
+        Arc::clone(&self.runtime)
+    }
+
+    pub fn caps(&self) -> &SessionRuntimeServices {
         &self.caps
+    }
+
+    pub fn caps_arc(&self) -> Arc<SessionRuntimeServices> {
+        Arc::clone(&self.caps)
     }
 
     pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
@@ -146,81 +157,6 @@ impl Session {
 
     pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<astrcode_core::event::Event> {
         self.runtime.subscribe()
-    }
-
-    pub async fn read_model(
-        &self,
-    ) -> Result<astrcode_core::storage::SessionReadModel, SessionError> {
-        Ok(self.store.session_read_model(&self.id).await?)
-    }
-
-    pub async fn current_system_prompt(&self) -> Result<Option<String>, SessionError> {
-        Ok(self.store.session_system_prompt(&self.id).await?)
-    }
-
-    pub async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
-        Ok(self.store.latest_cursor(&self.id).await?)
-    }
-
-    pub async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
-        Ok(self.store.checkpoint(&self.id, cursor).await?)
-    }
-
-    pub async fn write_compact_snapshot(
-        &self,
-        snapshot: astrcode_core::storage::CompactSnapshotInput,
-    ) -> Result<Option<String>, SessionError> {
-        Ok(self
-            .store
-            .write_compact_snapshot(&self.id, snapshot)
-            .await?)
-    }
-
-    pub async fn write_tool_artifact(
-        &self,
-        artifact: astrcode_core::storage::ToolResultArtifactInput,
-    ) -> Result<astrcode_core::storage::ToolResultArtifactRef, SessionError> {
-        Ok(self
-            .store
-            .write_tool_result_artifact(&self.id, artifact)
-            .await?)
-    }
-
-    pub async fn refresh_tools(
-        &self,
-        working_dir: &str,
-    ) -> Arc<astrcode_tools::registry::ToolRegistry> {
-        let caps = &self.caps;
-        let runtime = &self.runtime;
-        let timeout = caps.read_effective().agent.shell_timeout_secs;
-        let tool_policy = runtime.tool_policy();
-        let registry = crate::session_setup::build_tool_registry_snapshot(
-            caps.extension_runner(),
-            working_dir,
-            timeout,
-            tool_policy.as_ref(),
-        )
-        .await;
-        let registry = Arc::new(registry);
-        runtime.set_tool_registry(Arc::clone(&registry));
-        registry
-    }
-
-    pub async fn initialize_runtime(&self, working_dir: &str) -> Result<(), SessionError> {
-        self.refresh_tools(working_dir).await;
-        self.refresh_prompt(working_dir, None, None).await?;
-        Ok(())
-    }
-
-    pub async fn ensure_runtime_ready(&self) -> Result<(), SessionError> {
-        let state = self.read_model().await?;
-        if self.runtime.tool_registry().list_definitions().is_empty() {
-            self.refresh_tools(&state.working_dir).await;
-        }
-        if state.system_prompt.is_none() {
-            self.refresh_prompt(&state.working_dir, None, None).await?;
-        }
-        Ok(())
     }
 
     pub(crate) fn resolve_shell_name() -> String {
@@ -250,9 +186,10 @@ pub enum SessionError {
     Storage(#[from] StorageError),
     #[error("Extension error: {0}")]
     Extension(#[from] astrcode_core::extension::ExtensionError),
-    #[error("{0}")]
-    Other(String),
+    #[error("invalid session cursor (expected u64 event seq): {0}")]
+    InvalidCursor(Cursor),
 }
 
 // Re-export lifecycle helper for external callers (session_manager).
+pub(crate) use cursor::parse_base_event_seq;
 pub use events::emit_lifecycle_for_read_model;

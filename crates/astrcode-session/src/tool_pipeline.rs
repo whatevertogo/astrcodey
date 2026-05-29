@@ -1,7 +1,7 @@
 //! Tool execution pipeline — preprocessing, parallel/sequential scheduling,
 //! result commit, and persistence.
 
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use astrcode_core::{
     event::EventPayload,
@@ -12,17 +12,18 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_tools::registry::ToolRegistry;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use super::{
     deferred_tools::{discovered_deferred_tool_names, tool_is_visible, unavailable_tool_guidance},
-    tool_exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, execute_tool_call},
+    tool_exec::{ToolCallRuntimeContext, TurnToolContext, execute_tool_call},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
         CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
         PendingToolCall, PreparedToolCall, PreparedToolOutcome, ToolExecutionStep,
     },
     turn_context::{SharedTurnContext, TurnError},
-    turn_publish::TurnPublisher,
+    turn_publish::TurnEvents,
 };
 use crate::{
     llm_request_history::committed_tool_result_content_len,
@@ -34,28 +35,28 @@ use crate::{
     },
 };
 
-pub struct ToolPipeline {
-    shared: SharedTurnContext,
+pub struct ToolCalls {
+    turn: TurnToolContext,
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<ExtensionRunner>,
-    session: Arc<Session>,
-    tool_runtime_capabilities: ToolRuntimeCapabilities,
+    session: Session,
+    cancellation_token: CancellationToken,
 }
 
-impl ToolPipeline {
+impl ToolCalls {
     pub fn new(
-        shared: SharedTurnContext,
+        turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<ExtensionRunner>,
-        session: Arc<Session>,
-        tool_runtime_capabilities: ToolRuntimeCapabilities,
+        session: Session,
+        cancellation_token: CancellationToken,
     ) -> Self {
         Self {
-            shared,
+            turn,
             tool_registry,
             extension_runner,
             session,
-            tool_runtime_capabilities,
+            cancellation_token,
         }
     }
 
@@ -68,20 +69,28 @@ impl ToolPipeline {
         self.tool_registry.list_definitions_with_prompt_metadata()
     }
 
+    pub(crate) fn shared(&self) -> &SharedTurnContext {
+        &self.turn.shared
+    }
+
+    pub(crate) fn shared_mut(&mut self) -> &mut SharedTurnContext {
+        &mut self.turn.shared
+    }
+
     /// 构建工具调用的运行时上下文。
     fn make_runtime_context(
         &self,
         tools: &[ToolDefinition],
-        publisher: Arc<TurnPublisher>,
+        publisher: Arc<TurnEvents>,
     ) -> ToolCallRuntimeContext {
         ToolCallRuntimeContext {
-            session_id: self.shared.session_id.clone(),
-            working_dir: self.shared.working_dir.clone(),
-            model_id: self.shared.model_id.clone(),
+            turn: self.turn.clone(),
             tools: tools.to_vec(),
-            tool_result_reader: Some(Arc::clone(&self.session) as Arc<dyn ToolResultArtifactReader>),
+            tool_result_reader: Some(
+                Arc::new(self.session.clone()) as Arc<dyn ToolResultArtifactReader>
+            ),
             publisher,
-            capabilities: self.tool_runtime_capabilities.clone(),
+            cancellation_token: self.cancellation_token.clone(),
         }
     }
 
@@ -96,7 +105,7 @@ impl ToolPipeline {
         &self,
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
-        publisher: &TurnPublisher,
+        publisher: &TurnEvents,
     ) -> Result<Vec<PreparedToolCall>, TurnError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
@@ -130,15 +139,15 @@ impl ToolPipeline {
             }
 
             let pre_ctx = PreToolUseContext {
-                session_id: self.shared.session_id.to_string(),
-                working_dir: self.shared.working_dir.clone(),
-                model: self.shared.model_selection(),
+                session_id: self.turn.shared.session_id.to_string(),
+                working_dir: self.turn.shared.working_dir.clone(),
+                model: self.turn.shared.model_selection(),
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
                 available_tools: tools.to_vec(),
-                event_tx: self.shared.turn_event_tx.clone(),
+                event_tx: self.turn.shared.turn_event_tx.clone(),
                 extension_event_sink: None,
-                session_store_dir: self.shared.session_store_dir.clone(),
+                session_store_dir: self.turn.shared.session_store_dir.clone(),
             };
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
@@ -196,6 +205,9 @@ impl ToolPipeline {
         let mut parallel_batch_start = None;
 
         for position in 0..input.prepared.len() {
+            if self.cancellation_token.is_cancelled() {
+                return Err(TurnError::Aborted);
+            }
             let step = {
                 let call = &input.prepared[position];
                 match &call.outcome {
@@ -221,9 +233,16 @@ impl ToolPipeline {
                         )
                         .await?,
                     );
+                    let mut results = HashMap::new();
+                    results.insert(input.prepared[position].index, result);
                     discovered_tools.extend(
-                        self.commit_single_tool_result(&mut input, position, result)
-                            .await?,
+                        self.commit_tool_results(CommitToolResults {
+                            prepared: &input.prepared[position..position + 1],
+                            results,
+                            state: input.state,
+                            publisher: Arc::clone(&input.publisher),
+                        })
+                        .await?,
                     );
                 },
                 ToolExecutionStep::Parallel(executable) => {
@@ -248,7 +267,7 @@ impl ToolPipeline {
                         executable,
                     )
                     .await;
-                    let mut results = BTreeMap::new();
+                    let mut results = HashMap::new();
                     results.insert(index, result);
                     discovered_tools.extend(
                         self.commit_tool_results(CommitToolResults {
@@ -286,7 +305,7 @@ impl ToolPipeline {
         };
         let batch_len = parallel_batch.len();
         let batch_end = batch_start + batch_len;
-        let mut results = BTreeMap::new();
+        let mut results = HashMap::new();
 
         self.flush_parallel_batch(
             parallel_batch,
@@ -305,24 +324,6 @@ impl ToolPipeline {
         .await
     }
 
-    /// 将单个工具结果（通常是 Blocked 或 Sequential 调用）包装后委托给 `commit_tool_results`。
-    async fn commit_single_tool_result(
-        &self,
-        input: &mut ExecuteToolCalls<'_>,
-        position: usize,
-        result: ToolResult,
-    ) -> Result<Vec<String>, TurnError> {
-        let mut results = BTreeMap::new();
-        results.insert(input.prepared[position].index, result);
-        self.commit_tool_results(CommitToolResults {
-            prepared: &input.prepared[position..position + 1],
-            results,
-            state: input.state,
-            publisher: Arc::clone(&input.publisher),
-        })
-        .await
-    }
-
     /// 刷新并行工具调用批次。
     ///
     /// 使用 `JoinSet` 同时启动最多 `agent.tool_max_parallel_calls` 个工具调用任务，
@@ -331,8 +332,8 @@ impl ToolPipeline {
         &self,
         batch: &mut Vec<ExecutableToolCall>,
         tools: &[ToolDefinition],
-        publisher: Arc<TurnPublisher>,
-        results: &mut BTreeMap<usize, ToolResult>,
+        publisher: Arc<TurnEvents>,
+        results: &mut HashMap<usize, ToolResult>,
     ) -> Result<(), TurnError> {
         if batch.is_empty() {
             return Ok(());
@@ -357,9 +358,18 @@ impl ToolPipeline {
             self.spawn_tool_call(&mut join_set, call, tools, Arc::clone(&publisher));
         }
 
-        while let Some(joined) = join_set.join_next().await {
-            let (index, result) =
-                joined.map_err(|err| TurnError::ToolTaskJoinFailed(err.to_string()))?;
+        loop {
+            let joined = tokio::select! {
+                _ = self.cancellation_token.cancelled() => {
+                    join_set.abort_all();
+                    return Err(TurnError::Aborted);
+                },
+                joined = join_set.join_next() => joined,
+            };
+            let Some(joined) = joined else {
+                break;
+            };
+            let (index, result) = joined?;
             results.insert(index, result);
 
             if let Some(call) = pending.next() {
@@ -381,7 +391,7 @@ impl ToolPipeline {
         join_set: &mut JoinSet<(usize, ToolResult)>,
         call: ExecutableToolCall,
         tools: &[ToolDefinition],
-        publisher: Arc<TurnPublisher>,
+        publisher: Arc<TurnEvents>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
         let ctx = self.make_runtime_context(tools, publisher);
@@ -393,7 +403,7 @@ impl ToolPipeline {
     ///
     /// 对每个已执行的工具调用依次处理：
     /// 1. 分发 `PostToolUse` 扩展钩子，允许扩展修改结果内容或阻止。
-    /// 2. 通过 `TurnPublisher` 发送 durable `ToolCallCompleted`。
+    /// 2. 通过 `TurnEvents` 发送 durable `ToolCallCompleted`。
     /// 3. 将工具结果写入 turn 输出聚合（projection 为 LLM 历史 SSOT）。
     pub async fn commit_tool_results(
         &self,
@@ -412,16 +422,16 @@ impl ToolPipeline {
                 }
 
                 let post_ctx = PostToolUseContext {
-                    session_id: self.shared.session_id.to_string(),
-                    working_dir: self.shared.working_dir.clone(),
-                    model: self.shared.model_selection(),
+                    session_id: self.turn.shared.session_id.to_string(),
+                    working_dir: self.turn.shared.working_dir.clone(),
+                    model: self.turn.shared.model_selection(),
                     tool_name: call.name.clone(),
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
                     is_error: result.is_error,
-                    event_tx: self.shared.turn_event_tx.clone(),
+                    event_tx: self.turn.shared.turn_event_tx.clone(),
                     extension_event_sink: None,
-                    session_store_dir: self.shared.session_store_dir.clone(),
+                    session_store_dir: self.turn.shared.session_store_dir.clone(),
                 };
 
                 match self.extension_runner.emit_post_tool_use(post_ctx).await? {
@@ -442,9 +452,9 @@ impl ToolPipeline {
                 // PostToolUseFailure: 通知型钩子，结果不影响流程。
                 if result.is_error {
                     let fail_ctx = astrcode_core::extension::PostToolUseFailureContext {
-                        session_id: self.shared.session_id.to_string(),
-                        working_dir: self.shared.working_dir.clone(),
-                        model: self.shared.model_selection(),
+                        session_id: self.turn.shared.session_id.to_string(),
+                        working_dir: self.turn.shared.working_dir.clone(),
+                        model: self.turn.shared.model_selection(),
                         tool_name: call.name.clone(),
                         tool_input: call.tool_input.clone(),
                         error: result
@@ -464,7 +474,7 @@ impl ToolPipeline {
                 tool_name: call.name.clone(),
                 result,
                 arguments: call.tool_input.to_string(),
-                arguments_json: Some(call.tool_input.clone()),
+                arguments_json: call.tool_input.clone(),
             });
         }
 
@@ -500,7 +510,7 @@ impl ToolPipeline {
                     tool_name,
                     result: result.clone(),
                     arguments,
-                    arguments_json,
+                    arguments_json: Some(arguments_json),
                 })
                 .await?;
             input.state.push_tool_result(result);
@@ -547,8 +557,7 @@ impl ToolPipeline {
                 tool_name: tool_name.to_string(),
                 content: original_content,
             })
-            .await
-            .map_err(|error| TurnError::PersistToolResultFailed(error.to_string()))?;
+            .await?;
         result.metadata.insert(
             "persistedToolResult".into(),
             serde_json::json!({
@@ -621,7 +630,7 @@ fn is_artifact_read(result: &ToolResult) -> bool {
 // ─── Tool event & message helpers ────────────────────────────────────────
 
 async fn send_tool_requested(
-    publisher: &TurnPublisher,
+    publisher: &TurnEvents,
     tc: &PendingToolCall,
     arguments: &serde_json::Value,
 ) -> Result<(), TurnError> {

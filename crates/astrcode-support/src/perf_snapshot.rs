@@ -68,6 +68,7 @@ fn payload_type(payload: &EventPayload) -> &'static str {
         EventPayload::AgentSessionRecycled { .. } => "agent_session_recycled",
         EventPayload::TurnStarted => "turn_started",
         EventPayload::TurnCompleted { .. } => "turn_completed",
+        EventPayload::TurnAbortedContext => "turn_aborted_context",
         EventPayload::UserMessage { .. } => "user_message",
         EventPayload::RecapGenerated { .. } => "recap_generated",
         EventPayload::AssistantMessageStarted { .. } => "assistant_message_started",

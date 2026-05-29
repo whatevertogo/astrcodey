@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 // ─── Turn event channel ──────────────────────────────────────────────────
 
 /// Turn 内 live 事件发送端；新代码优先
-/// [`TurnPublisher::live`](crate::turn_publish::TurnPublisher::live)。
+/// [`TurnEvents::live`](crate::turn_publish::TurnEvents::live)。
 pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
 
 pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {
@@ -64,7 +64,7 @@ pub(crate) struct SharedTurnContext {
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
-    /// 当前 turn 的扩展事件通道（`ExtensionEventBridge` 在 `process_prompt` 期间注入）。
+    /// 当前 turn 的扩展事件通道（`ExtensionEvents` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_tx: Option<TurnEventTx>,
 }
 
@@ -138,22 +138,20 @@ pub enum TurnError {
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
     Extension(#[from] astrcode_core::extension::ExtensionError),
+    #[error("{0}")]
+    Session(#[from] crate::session::SessionError),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
-    #[error("session read failed: {0}")]
-    SessionReadFailed(String),
     #[error("LLM stream ended unexpectedly")]
     StreamEndedUnexpectedly,
+    #[error("turn aborted")]
+    Aborted,
     #[error("provider blocked request: {reason}")]
     ProviderBlocked { reason: String },
-    #[error("persist tool result failed: {0}")]
-    PersistToolResultFailed(String),
     #[error("tool task join failed: {0}")]
-    ToolTaskJoinFailed(String),
-    #[error("{0}")]
-    Internal(String),
-    #[error("durable event emit failed: {0}")]
-    DurableEmitFailed(String),
+    TaskJoin(#[from] tokio::task::JoinError),
+    #[error("turn model cache not populated")]
+    ModelCacheEmpty,
 }
 
 /// 是否应在 turn 失败时补发 `TurnEnd`（已由 `end_turn_with_error_typed` 处理的路径除外）。
@@ -165,5 +163,6 @@ pub(crate) fn turn_error_emits_turn_end(error: &TurnError) -> bool {
             | TurnError::Llm(_)
             | TurnError::Extension(_)
             | TurnError::Tool(_)
+            | TurnError::Session(_)
     )
 }

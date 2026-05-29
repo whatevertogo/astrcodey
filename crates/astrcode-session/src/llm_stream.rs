@@ -3,12 +3,13 @@
 use astrcode_context::compaction::is_prompt_too_long_message;
 use astrcode_core::{
     event::EventPayload,
-    llm::{LlmError, LlmEvent, LlmMessage},
+    llm::{LlmError, LlmEvent},
     types::*,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
-use crate::{tool_types::PendingToolCall, turn_context::TurnError, turn_publish::TurnPublisher};
+use crate::{tool_types::PendingToolCall, turn_context::TurnError, turn_publish::TurnEvents};
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
 
@@ -36,15 +37,23 @@ pub enum StreamOutcome {
 /// `AssistantMessageCompleted` 由 turn_runner 在 outcome 分支 durable 写入。
 pub async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
-    publisher: &TurnPublisher,
+    publisher: &TurnEvents,
     message_id: MessageId,
+    cancellation_token: &CancellationToken,
 ) -> Result<StreamOutcome, TurnError> {
     let mut current_text = String::new();
     let mut reasoning_content = String::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut message_started = false;
 
-    while let Some(event) = rx.recv().await {
+    loop {
+        let event = tokio::select! {
+            _ = cancellation_token.cancelled() => return Err(TurnError::Aborted),
+            event = rx.recv() => event,
+        };
+        let Some(event) = event else {
+            return Err(TurnError::StreamEndedUnexpectedly);
+        };
         match event {
             LlmEvent::ContentDelta { delta } => {
                 ensure_assistant_message_started(publisher, &message_id, &mut message_started)
@@ -141,11 +150,7 @@ pub async fn consume_llm_stream(
                 let recoverable = is_prompt_too_long_message(&message);
                 if recoverable {
                     publisher
-                        .live(EventPayload::ErrorOccurred {
-                            code: -32603,
-                            message: message.clone(),
-                            recoverable: true,
-                        })
+                        .live_error(-32603, message.clone(), true)
                         .await;
                     return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
                 }
@@ -160,12 +165,10 @@ pub async fn consume_llm_stream(
             },
         }
     }
-
-    Err(TurnError::StreamEndedUnexpectedly)
 }
 
-pub async fn ensure_assistant_message_started(
-    publisher: &TurnPublisher,
+async fn ensure_assistant_message_started(
+    publisher: &TurnEvents,
     message_id: &MessageId,
     message_started: &mut bool,
 ) {
@@ -188,17 +191,9 @@ pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> 
     }
 }
 
-pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
-    messages
-        .into_iter()
-        .map(LlmMessage::provider_visible)
-        .filter(LlmMessage::has_provider_visible_content)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::LlmMessage;
+    use astrcode_core::llm::{LlmMessage, provider_visible_messages};
 
     use super::*;
 

@@ -84,6 +84,11 @@ impl ServerRuntime {
     pub fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown_token
     }
+
+    /// 配置热更新后同步所有 session runtime 的 LLM binding。
+    pub fn sync_session_model_bindings(&self) {
+        self.session_manager.sync_all_model_bindings_from_config();
+    }
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────

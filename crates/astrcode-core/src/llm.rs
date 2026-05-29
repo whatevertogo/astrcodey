@@ -197,6 +197,122 @@ impl LlmMessage {
     }
 }
 
+pub const TURN_ABORTED_SOURCE: &str = "turn_aborted";
+pub const TURN_ABORTED_GUIDANCE: &str = concat!(
+    "The user interrupted the previous turn on purpose. ",
+    "Any running tools/commands may still be running in the background. ",
+    "If any tools/commands were aborted, they may have partially executed."
+);
+
+pub fn turn_aborted_context_message() -> LlmMessage {
+    LlmMessage::user(format!(
+        "<turn_aborted>\n{}\n</turn_aborted>",
+        TURN_ABORTED_GUIDANCE
+    ))
+}
+
+/// 返回 provider 可见且满足 tool-call 协议的消息序列。
+///
+/// OpenAI Chat Completions 要求 assistant 的 `tool_calls` 后面紧跟对应的
+/// tool result。这里是所有 provider request 的最后一道边界，负责过滤空消息、
+/// 合并旧日志中的拆分 assistant/tool-call 消息，并裁掉尚未结算的半轮工具调用。
+pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut messages = messages
+        .into_iter()
+        .map(LlmMessage::provider_visible)
+        .filter(LlmMessage::has_provider_visible_content)
+        .collect::<Vec<_>>();
+    normalize_tool_call_messages(&mut messages);
+    truncate_incomplete_tool_protocol(&mut messages);
+    messages
+}
+
+fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
+    let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
+    for message in messages.drain(..) {
+        let has_tool_calls = message.role == LlmRole::Assistant
+            && message
+                .content
+                .iter()
+                .any(|c| matches!(c, LlmContent::ToolCall { .. }));
+        if has_tool_calls {
+            if let Some(last) = merged.last_mut() {
+                if last.role == LlmRole::Assistant {
+                    last.content.extend(message.content);
+                    if last.reasoning_content.is_none() {
+                        last.reasoning_content = message.reasoning_content;
+                    }
+                    continue;
+                }
+            }
+        }
+        merged.push(message);
+    }
+    *messages = merged;
+}
+
+fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
+    use std::collections::HashSet;
+
+    let mut pending: Option<(usize, HashSet<String>, HashSet<String>)> = None;
+
+    for index in 0..messages.len() {
+        let message = &messages[index];
+        if message.role == LlmRole::Tool {
+            let tool_result_ids: Vec<String> = message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    LlmContent::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if tool_result_ids.is_empty() {
+                messages.truncate(index);
+                return;
+            }
+            let Some((_, call_ids, answered)) = pending.as_mut() else {
+                messages.truncate(index);
+                return;
+            };
+            for tool_call_id in tool_result_ids {
+                if !call_ids.contains(&tool_call_id) || answered.contains(&tool_call_id) {
+                    messages.truncate(index);
+                    return;
+                }
+                answered.insert(tool_call_id);
+            }
+            if call_ids.iter().all(|id| answered.contains(id)) {
+                pending = None;
+            }
+            continue;
+        }
+
+        if let Some((start, _, _)) = pending {
+            messages.truncate(start);
+            return;
+        }
+
+        if message.role == LlmRole::Assistant {
+            let call_ids: HashSet<String> = message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    LlmContent::ToolCall { call_id, .. } => Some(call_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !call_ids.is_empty() {
+                pending = Some((index, call_ids, HashSet::new()));
+            }
+        }
+    }
+
+    if let Some((start, _, _)) = pending {
+        messages.truncate(start);
+    }
+}
+
 /// LLM 流式输出过程中的事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -439,4 +555,31 @@ pub async fn collect_stream_text(
         }
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_visible_messages_truncates_dangling_tool_call_before_user_append() {
+        let messages = vec![
+            LlmMessage::user("start"),
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "shell".into(),
+                    arguments: serde_json::json!({"command": "sleep"}),
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::user("next request after abort"),
+        ];
+
+        let visible = provider_visible_messages(messages);
+
+        assert_eq!(visible, vec![LlmMessage::user("start")]);
+    }
 }
