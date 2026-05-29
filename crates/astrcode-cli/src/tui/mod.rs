@@ -23,6 +23,7 @@ pub(crate) mod terminal;
 pub(crate) mod terminal_probe;
 pub(crate) mod theme;
 pub(crate) mod tool_vocab;
+pub(crate) mod viewport;
 
 use std::{io, sync::Arc};
 
@@ -52,12 +53,8 @@ pub async fn run() -> io::Result<()> {
     let theme = Theme::detect();
     let mut app = App::new(theme.clone());
 
-    // Frame scheduling — draw_tx drives the event_stream's draw channel
-    let (_draw_tx, draw_rx) = tokio::sync::broadcast::channel::<()>(16);
-
-    // Input event stream
     let broker = EventBroker::new();
-    let mut event_stream = EventStream::new(broker, draw_rx);
+    let mut event_stream = EventStream::new(broker);
 
     // Streaming chunking policy
     let mut chunking_policy = AdaptiveChunkingPolicy::new();
@@ -93,7 +90,9 @@ pub async fn run() -> io::Result<()> {
                         let text = normalize_paste(&text);
                         app.composer.insert_paste(&text);
                     },
-                    TuiEvent::Draw => {},
+                    TuiEvent::Draw => {
+                        app.content_width = viewport::content_width();
+                    },
                 }
                 dirty = true;
             },
@@ -383,13 +382,7 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
         return Ok(());
     }
 
-    if let Some(command) = slash::parse(
-        &input,
-        &app.extension_commands
-            .iter()
-            .map(|c| c.name.clone())
-            .collect::<Vec<_>>(),
-    ) {
+    if let Some(command) = slash::parse(&input, &app.extension_command_names) {
         let input = app.take_input();
         app.remember_input(&input);
         execute_slash_command(command, app, client).await?;
@@ -542,10 +535,7 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
     use ratatui::text::{Line, Span};
     use render::layout_visual_text;
 
-    let width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
-        .saturating_sub(4);
+    let width = viewport::content_width();
 
     let vl = layout_visual_text(app.composer.text(), width, Some(app.composer.cursor()));
     let cursor_col = 2 + vl.cursor_column.unwrap_or(0) as u16;
@@ -583,14 +573,8 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         let selected = app.slash_selected.min(total.saturating_sub(1));
 
         // 滑动窗口：保证选中项始终可见
-        let window_start = if total <= max_visible || selected < max_visible / 2 {
-            0
-        } else if selected >= total.saturating_sub(max_visible / 2) {
-            total.saturating_sub(max_visible)
-        } else {
-            selected.saturating_sub(max_visible / 2)
-        };
-        let window_end = (window_start + max_visible).min(total);
+        let (window_start, window_end) =
+            viewport::sliding_window_range(total, selected, max_visible);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -642,14 +626,8 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         let max_visible = 10usize;
         let total = picker.items.len();
         let selected = picker.selected.min(total.saturating_sub(1));
-        let window_start = if total <= max_visible || selected < max_visible / 2 {
-            0
-        } else if selected >= total.saturating_sub(max_visible / 2) {
-            total.saturating_sub(max_visible)
-        } else {
-            selected.saturating_sub(max_visible / 2)
-        };
-        let window_end = (window_start + max_visible).min(total);
+        let (window_start, window_end) =
+            viewport::sliding_window_range(total, selected, max_visible);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(
@@ -690,14 +668,8 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
         let max_visible = 10usize;
         let total = picker.items.len();
         let selected = picker.selected.min(total.saturating_sub(1));
-        let window_start = if total <= max_visible || selected < max_visible / 2 {
-            0
-        } else if selected >= total.saturating_sub(max_visible / 2) {
-            total.saturating_sub(max_visible)
-        } else {
-            selected.saturating_sub(max_visible / 2)
-        };
-        let window_end = (window_start + max_visible).min(total);
+        let (window_start, window_end) =
+            viewport::sliding_window_range(total, selected, max_visible);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(

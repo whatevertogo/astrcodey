@@ -34,6 +34,10 @@ pub struct App {
     /// Ctrl+C 二次确认：首次按下后等待第二次确认退出。
     pub quit_pending: bool,
     pub extension_commands: Vec<SlashCommandSpec>,
+    /// Cached extension command names for `slash::parse` (refreshed with `extension_commands`).
+    pub extension_command_names: Vec<String>,
+    /// Terminal content width for streaming reflow (updated on resize).
+    pub content_width: usize,
     /// 插件注册的状态栏项（由 StatusItemUpdate 通知驱动）。
     pub status_items: BTreeMap<String, String>,
     /// 插件注册的快捷键绑定（启动时从服务端获取）。
@@ -113,6 +117,8 @@ impl App {
             should_quit: false,
             quit_pending: false,
             extension_commands: Vec::new(),
+            extension_command_names: Vec::new(),
+            content_width: crate::tui::viewport::content_width(),
             status_items: BTreeMap::new(),
             keybindings: Vec::new(),
             needs_extension_refresh: false,

@@ -68,6 +68,7 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
         },
         ClientNotification::ExtensionRegistryChanged => {
             app.extension_commands.clear();
+            app.extension_command_names.clear();
             app.keybindings.clear();
             app.status_items.clear();
             app.needs_extension_refresh = true;
@@ -138,7 +139,7 @@ fn apply_event(app: &mut App, event: &Event) {
             // Optimistically pushed on Enter; skip.
         },
         EventPayload::AssistantMessageStarted { message_id } => {
-            let width = 120; // TODO: get from terminal width
+            let width = app.content_width;
             app.stream_states
                 .insert(message_id.to_string(), StreamController::new(Some(width)));
             // 不立刻写 StreamHeader，延迟到第一个 AssistantTextDelta 时再写，
@@ -663,6 +664,11 @@ fn apply_extension_command_list(
             description: info.description.clone(),
             needs_argument: info.needs_argument,
         })
+        .collect();
+    app.extension_command_names = app
+        .extension_commands
+        .iter()
+        .map(|cmd| cmd.name.clone())
         .collect();
     // 注册插件快捷键
     app.keybindings = keybindings

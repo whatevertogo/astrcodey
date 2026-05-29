@@ -11,7 +11,7 @@ use std::{
 use crossterm::event::{Event, EventStream as CrosstermEventStream, KeyEvent, KeyEventKind};
 use futures_util::Stream;
 use parking_lot::Mutex;
-use tokio_stream::wrappers::{BroadcastStream, WatchStream};
+use tokio_stream::wrappers::WatchStream;
 
 // ─── EventBroker ─────────────────────────────────────────────────────────────
 
@@ -40,21 +40,15 @@ impl EventBroker {
         cx: &mut Context<'_>,
     ) -> Poll<Option<io::Result<Event>>> {
         let mut state = self.state.lock();
-        match &mut *state {
-            BrokerState::Start => {
-                *state = BrokerState::Running(CrosstermEventStream::new());
-                if let BrokerState::Running(stream) = &mut *state {
-                    Pin::new(stream)
-                        .poll_next(cx)
-                        .map(|r| r.map(|r| r.map_err(io::Error::other)))
-                } else {
-                    unreachable!()
-                }
-            },
-            BrokerState::Running(stream) => Pin::new(stream)
-                .poll_next(cx)
-                .map(|r| r.map(|r| r.map_err(io::Error::other))),
+        if matches!(*state, BrokerState::Start) {
+            *state = BrokerState::Running(CrosstermEventStream::new());
         }
+        let BrokerState::Running(stream) = &mut *state else {
+            return Poll::Pending;
+        };
+        Pin::new(stream)
+            .poll_next(cx)
+            .map(|r| r.map(|r| r.map_err(io::Error::other)))
     }
 
     pub(crate) fn resume_rx(&self) -> tokio::sync::watch::Receiver<()> {
@@ -75,22 +69,18 @@ pub enum TuiEvent {
 
 pub struct EventStream {
     broker: Option<EventBroker>,
-    draw_stream: BroadcastStream<()>,
     resume_stream: WatchStream<()>,
-    poll_draw_first: bool,
     _pin: std::marker::PhantomPinned,
 }
 
 impl Unpin for EventStream {}
 
 impl EventStream {
-    pub fn new(broker: EventBroker, draw_rx: tokio::sync::broadcast::Receiver<()>) -> Self {
+    pub fn new(broker: EventBroker) -> Self {
         let resume_stream = WatchStream::from_changes(broker.resume_rx());
         Self {
             broker: Some(broker),
-            draw_stream: BroadcastStream::new(draw_rx),
             resume_stream,
-            poll_draw_first: false,
             _pin: std::marker::PhantomPinned,
         }
     }
@@ -114,16 +104,6 @@ impl EventStream {
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
-        }
-    }
-
-    fn poll_draw_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
-        match Pin::new(&mut self.draw_stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(()))) | Poll::Ready(Some(Err(_))) => {
-                Poll::Ready(Some(TuiEvent::Draw))
-            },
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -156,27 +136,9 @@ impl Stream for EventStream {
     type Item = TuiEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let draw_first = self.poll_draw_first;
-        self.poll_draw_first = !self.poll_draw_first;
-
         if let Poll::Ready(ev) = self.as_mut().poll_resume_event(cx) {
             return Poll::Ready(ev);
         }
-        if draw_first {
-            if let Poll::Ready(ev) = self.as_mut().poll_draw_event(cx) {
-                return Poll::Ready(ev);
-            }
-            if let Poll::Ready(ev) = self.as_mut().poll_crossterm_event(cx) {
-                return Poll::Ready(ev);
-            }
-        } else {
-            if let Poll::Ready(ev) = self.as_mut().poll_crossterm_event(cx) {
-                return Poll::Ready(ev);
-            }
-            if let Poll::Ready(ev) = self.as_mut().poll_draw_event(cx) {
-                return Poll::Ready(ev);
-            }
-        }
-        Poll::Pending
+        self.as_mut().poll_crossterm_event(cx)
     }
 }

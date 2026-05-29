@@ -9,7 +9,9 @@ use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{StreamEventSink, build_client, send_event, stream_text_delta, stream_with_event_type},
+    common::{
+        StreamEventSink, build_client, send_event, stream_text_delta, stream_with_event_type,
+    },
     retry::RetryPolicy,
     serialization::ContentMapper,
 };
@@ -245,13 +247,9 @@ fn emit_block_stream_delta(
         return true;
     };
     let event = if is_thinking {
-        LlmEvent::ThinkingDelta {
-            delta: incremental,
-        }
+        LlmEvent::ThinkingDelta { delta: incremental }
     } else {
-        LlmEvent::ContentDelta {
-            delta: incremental,
-        }
+        LlmEvent::ContentDelta { delta: incremental }
     };
     send_event(tx, event)
 }
@@ -301,9 +299,8 @@ fn handle_anthropic_event(
                     },
                     Some("thinking") => {
                         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let mut states = block_stream_state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
+                        let mut states =
+                            block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
                         states.insert(index, BlockStreamState::default());
                         if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
                             if thinking.is_empty() {
@@ -319,9 +316,8 @@ fn handle_anthropic_event(
                     },
                     Some("text") => {
                         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let mut states = block_stream_state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
+                        let mut states =
+                            block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
                         states.insert(index, BlockStreamState::default());
                         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                             if text.is_empty() {
@@ -350,9 +346,8 @@ fn handle_anthropic_event(
                             .and_then(|v| v.as_u64())
                             .unwrap_or_default();
                         if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                            let mut states = block_stream_state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut states =
+                                block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
                             let state = states.entry(index).or_default();
                             emit_block_stream_delta(state, tx, text, false)
                         } else {
@@ -365,9 +360,8 @@ fn handle_anthropic_event(
                             .and_then(|v| v.as_u64())
                             .unwrap_or_default();
                         if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                            let mut states = block_stream_state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
+                            let mut states =
+                                block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
                             let state = states.entry(index).or_default();
                             emit_block_stream_delta(state, tx, thinking, true)
                         } else {

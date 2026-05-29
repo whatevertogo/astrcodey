@@ -213,12 +213,7 @@ impl ChatAccumulator for StandardAccumulator {
                 if let Some(delta) = choice.get("delta") {
                     if let Some(content) = delta["content"].as_str() {
                         if let Some(incremental) = stream_text_delta(&mut self.text, content) {
-                            send_event(
-                                tx,
-                                LlmEvent::ContentDelta {
-                                    delta: incremental,
-                                },
-                            );
+                            send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                         }
                     }
                     if let Some(reasoning) = delta
@@ -230,12 +225,7 @@ impl ChatAccumulator for StandardAccumulator {
                         if let Some(incremental) =
                             stream_text_delta(&mut self.reasoning_accumulated, reasoning)
                         {
-                            send_event(
-                                tx,
-                                LlmEvent::ThinkingDelta {
-                                    delta: incremental,
-                                },
-                            );
+                            send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                         }
                     }
                     // Some providers emit cumulative reasoning_details[].text.
@@ -249,12 +239,7 @@ impl ChatAccumulator for StandardAccumulator {
                         if let Some(incremental) =
                             stream_text_delta(&mut self.reasoning_accumulated, &latest)
                         {
-                            send_event(
-                                tx,
-                                LlmEvent::ThinkingDelta {
-                                    delta: incremental,
-                                },
-                            );
+                            send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                         }
                     }
                     if let Some(tool_calls) = delta["tool_calls"].as_array() {
@@ -298,12 +283,7 @@ impl ChatAccumulator for StandardAccumulator {
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
                     if let Some(incremental) = stream_text_delta(&mut self.text, delta) {
-                        send_event(
-                            tx,
-                            LlmEvent::ContentDelta {
-                                delta: incremental,
-                            },
-                        );
+                        send_event(tx, LlmEvent::ContentDelta { delta: incremental });
                     }
                 }
             },
@@ -312,12 +292,7 @@ impl ChatAccumulator for StandardAccumulator {
                     if let Some(incremental) =
                         stream_text_delta(&mut self.reasoning_accumulated, delta)
                     {
-                        send_event(
-                            tx,
-                            LlmEvent::ThinkingDelta {
-                                delta: incremental,
-                            },
-                        );
+                        send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
                     }
                 }
             },
