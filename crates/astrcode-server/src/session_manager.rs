@@ -42,19 +42,14 @@ pub enum SessionManagerError {
     InvalidCursor(String),
 }
 
-/// Server 侧的 session 生命周期门面。
+/// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
 ///
-/// durable session 仍由 [`Session`] / [`EventStore`] 负责；这里集中管理
-/// 与 session 同生灭的进程内资源，避免 handler 逐项记忆清理细节。
-///
-/// 后台任务（`BackgroundTaskManager`）现在由 `SessionRuntimeState` 持有，
-/// 跟着 session 走；SessionManager 不再持有全局副本。删除 session 时通过
-/// `runtime_states` 找到对应 runtime 并清理它的 bg_tasks。
+/// 不处理 active turn、输入队列或 child completion——那些由 [`crate::turn_scheduler`]
+/// 与 [`crate::child_session`] 负责。
 pub struct SessionManager {
     event_store: Arc<dyn EventStore>,
     config: Arc<ConfigManager>,
-    runtime_states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
-    open_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+    runtime_registry: SessionRuntimeRegistry,
     capabilities: Arc<SessionRuntimeServices>,
     event_bus: OnceLock<Arc<ServerEventBus>>,
     resource_cleanups: Mutex<Vec<Arc<dyn SessionResourceCleanup>>>,
@@ -72,19 +67,28 @@ impl SessionManager {
         Self {
             event_store,
             config,
-            runtime_states: Mutex::new(HashMap::new()),
-            open_locks: Mutex::new(HashMap::new()),
+            runtime_registry: SessionRuntimeRegistry::new(),
             capabilities,
             event_bus: OnceLock::new(),
             resource_cleanups: Mutex::new(resource_cleanups),
         }
     }
 
-    /// 绑定事件总线。SessionManager 在 create/fork/open 返回 session 时自动 attach，
-    /// 在 delete/recycle 时自动 detach，确保 session 事件流始终与广播通道连通。
+    /// 绑定事件总线（含 internal reactor）。create/fork/open 时 attach，delete/recycle 时 detach。
     pub fn bind_event_bus(&self, event_bus: Arc<ServerEventBus>) {
-        // 幂等：如果已设置则静默忽略。
         let _ = self.event_bus.set(event_bus);
+    }
+
+    fn attach_session_subscribers(&self, session: &Session) {
+        if let Some(bus) = self.event_bus.get() {
+            bus.attach(session);
+        }
+    }
+
+    fn detach_session_subscribers(&self, session_id: &SessionId) {
+        if let Some(bus) = self.event_bus.get() {
+            bus.detach(session_id);
+        }
     }
 
     /// 添加资源清理回调。
@@ -100,36 +104,24 @@ impl SessionManager {
         &self,
         session_id: &SessionId,
     ) -> (Arc<SessionRuntimeState>, bool) {
-        let mut runtime_states = self.runtime_states.lock();
-        if let Some(runtime) = runtime_states.get(session_id) {
-            return (Arc::clone(runtime), false);
-        }
         let model_id = self.config.read_effective().llm.model_id.clone();
-        let runtime = Arc::new(SessionRuntimeState::new(
-            self.capabilities.llm(),
-            self.capabilities.small_llm(),
-            model_id,
-        ));
-        runtime_states.insert(session_id.clone(), Arc::clone(&runtime));
-        (runtime, true)
+        let capabilities = Arc::clone(&self.capabilities);
+        self.runtime_registry
+            .get_or_create_with_state(session_id, || {
+                Arc::new(SessionRuntimeState::new(
+                    capabilities.llm(),
+                    capabilities.small_llm(),
+                    model_id,
+                ))
+            })
     }
 
     fn remove_runtime_if_same(&self, session_id: &SessionId, expected: &Arc<SessionRuntimeState>) {
-        let mut runtime_states = self.runtime_states.lock();
-        if runtime_states
-            .get(session_id)
-            .is_some_and(|runtime| Arc::ptr_eq(runtime, expected))
-        {
-            runtime_states.remove(session_id);
-        }
+        self.runtime_registry.remove_if_same(session_id, expected);
     }
 
     fn open_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
-        self.open_locks
-            .lock()
-            .entry(session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        self.runtime_registry.open_lock(session_id)
     }
 
     fn remove_open_lock_if_idle(
@@ -137,14 +129,8 @@ impl SessionManager {
         session_id: &SessionId,
         expected: &Arc<tokio::sync::Mutex<()>>,
     ) {
-        let mut open_locks = self.open_locks.lock();
-        if open_locks
-            .get(session_id)
-            .is_some_and(|lock| Arc::ptr_eq(lock, expected))
-            && Arc::strong_count(expected) == 2
-        {
-            open_locks.remove(session_id);
-        }
+        self.runtime_registry
+            .remove_open_lock_if_idle(session_id, expected);
     }
 
     pub(crate) fn config(&self) -> &Arc<ConfigManager> {
@@ -159,14 +145,12 @@ impl SessionManager {
     pub(crate) fn register_child_session(&self, session: &Session) {
         let sid = session.id().clone();
         let runtime = session.runtime().clone();
-        self.runtime_states.lock().insert(sid, runtime);
+        self.runtime_registry.insert(sid, runtime);
     }
 
     /// 让所有已打开 session 的工具快照失效；下一次 turn 会按当前扩展集重建。
     pub(crate) fn invalidate_tool_registries(&self) {
-        for runtime in self.runtime_states.lock().values() {
-            runtime.set_tool_registry(Arc::new(ToolRegistry::new()));
-        }
+        self.runtime_registry.invalidate_tool_registries();
     }
 
     pub(crate) async fn create(
@@ -191,9 +175,7 @@ impl SessionManager {
         )
         .await?;
 
-        if let Some(bus) = self.event_bus.get() {
-            bus.attach(&session);
-        }
+        self.attach_session_subscribers(&session);
 
         let start_event = self
             .event_store
@@ -238,9 +220,7 @@ impl SessionManager {
                     return Err(error.into());
                 }
             }
-            if let Some(bus) = self.event_bus.get() {
-                bus.attach(&session);
-            }
+            self.attach_session_subscribers(&session);
             Ok(session)
         }
         .await;
@@ -269,16 +249,8 @@ impl SessionManager {
     ///
     /// delete 和 recycle 共享同一套清理流程，确保两条路径不会出现遗漏。
     fn cleanup_session_resources(&self, session_id: &SessionId) {
-        // 清理 runtime（含 bg_tasks）后从 registry 移除。
-        if let Some(runtime) = self.runtime_states.lock().remove(session_id) {
-            runtime
-                .background_tasks()
-                .lock()
-                .cleanup_session(session_id);
-        }
-        if let Some(bus) = self.event_bus.get() {
-            bus.detach(session_id);
-        }
+        self.runtime_registry.cleanup_runtime(session_id);
+        self.detach_session_subscribers(session_id);
         // 外部资源清理（trait 注入）。
         for cleanup in self.resource_cleanups.lock().iter() {
             cleanup.cleanup(session_id);
@@ -435,9 +407,7 @@ impl SessionManager {
         )
         .await?;
 
-        if let Some(bus) = self.event_bus.get() {
-            bus.attach(&session);
-        }
+        self.attach_session_subscribers(&session);
 
         // 5. 写入 SessionForked 事件（attach 之后 append，经 fanout 自动进入 event bus）
         session
@@ -472,6 +442,87 @@ impl SessionManager {
         }
 
         Ok(ForkedSession { session })
+    }
+}
+
+/// 保证同一 `SessionId` 在当前进程里只有一份 local runtime state。
+struct SessionRuntimeRegistry {
+    states: Mutex<HashMap<SessionId, Arc<SessionRuntimeState>>>,
+    open_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl SessionRuntimeRegistry {
+    fn new() -> Self {
+        Self {
+            states: Mutex::new(HashMap::new()),
+            open_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn get_or_create_with_state(
+        &self,
+        session_id: &SessionId,
+        create: impl FnOnce() -> Arc<SessionRuntimeState>,
+    ) -> (Arc<SessionRuntimeState>, bool) {
+        let mut states = self.states.lock();
+        if let Some(runtime) = states.get(session_id) {
+            return (Arc::clone(runtime), false);
+        }
+        let runtime = create();
+        states.insert(session_id.clone(), Arc::clone(&runtime));
+        (runtime, true)
+    }
+
+    fn insert(&self, session_id: SessionId, runtime: Arc<SessionRuntimeState>) {
+        self.states.lock().insert(session_id, runtime);
+    }
+
+    fn remove_if_same(&self, session_id: &SessionId, expected: &Arc<SessionRuntimeState>) {
+        let mut states = self.states.lock();
+        if states
+            .get(session_id)
+            .is_some_and(|runtime| Arc::ptr_eq(runtime, expected))
+        {
+            states.remove(session_id);
+        }
+    }
+
+    fn open_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        self.open_locks
+            .lock()
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn remove_open_lock_if_idle(
+        &self,
+        session_id: &SessionId,
+        expected: &Arc<tokio::sync::Mutex<()>>,
+    ) {
+        let mut open_locks = self.open_locks.lock();
+        if open_locks
+            .get(session_id)
+            .is_some_and(|lock| Arc::ptr_eq(lock, expected))
+            && Arc::strong_count(expected) == 2
+        {
+            open_locks.remove(session_id);
+        }
+    }
+
+    fn invalidate_tool_registries(&self) {
+        for runtime in self.states.lock().values() {
+            runtime.set_tool_registry(Arc::new(ToolRegistry::new()));
+        }
+    }
+
+    fn cleanup_runtime(&self, session_id: &SessionId) {
+        if let Some(runtime) = self.states.lock().remove(session_id) {
+            runtime
+                .background_tasks()
+                .lock()
+                .cleanup_session(session_id);
+        }
     }
 }
 

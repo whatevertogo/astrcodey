@@ -1,7 +1,4 @@
 //! astrcode-server: Backend server runtime.
-//!
-//! Session manager, agent loop, JSON-RPC transport handler,
-//! config service, and multi-session concurrency.
 
 pub mod acp;
 pub mod bootstrap;
@@ -9,9 +6,13 @@ pub mod handler;
 pub mod http;
 pub mod transport;
 
-pub mod config_manager;
-pub mod server_event_bus;
-pub mod session_manager;
-pub mod session_operations;
-pub mod turn_registry;
-pub mod turn_scheduler;
+#[cfg(feature = "testing")]
+pub mod test_support;
+
+mod child_session;
+mod config_manager;
+mod server_event_bus;
+mod session_manager;
+mod session_operations;
+mod turn_registry;
+mod turn_scheduler;

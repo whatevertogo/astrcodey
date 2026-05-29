@@ -2,17 +2,15 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, tool::FileObservationStore,
-    types::SessionId,
 };
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
+#[cfg(test)]
 use tokio::sync::mpsc;
 
 use crate::{
-    background::BackgroundTaskManager,
-    child_turn::{ChildTurnGuard, ChildTurnManager},
-    compact_circuit_breaker::CompactCircuitBreaker,
+    background::BackgroundTaskManager, compact_circuit_breaker::CompactCircuitBreaker,
     tool_exec::InMemoryFileObservationStore,
 };
 
@@ -59,24 +57,6 @@ struct TurnConfiguration {
     cached_stable_prefix: Mutex<Option<(String, String)>>,
 }
 
-/// 派生子 agent turn 的所有权与完成通知通道。
-struct ChildTurns {
-    manager: ChildTurnManager,
-    completed_tx: mpsc::UnboundedSender<SessionId>,
-    completed_rx: Mutex<mpsc::UnboundedReceiver<SessionId>>,
-}
-
-impl ChildTurns {
-    fn new() -> Self {
-        let (completed_tx, completed_rx) = mpsc::unbounded_channel();
-        Self {
-            manager: ChildTurnManager::new(),
-            completed_tx,
-            completed_rx: Mutex::new(completed_rx),
-        }
-    }
-}
-
 /// 单个 session 在当前进程内持有的瞬态状态。
 ///
 /// 这里的状态随 session 生命周期存在，但不属于可持久化事实；此类型仅组合按职责
@@ -99,7 +79,6 @@ pub struct SessionRuntimeState {
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_out: Arc<EventFanout<Event>>,
-    children: ChildTurns,
 }
 
 impl SessionRuntimeState {
@@ -130,7 +109,6 @@ impl SessionRuntimeState {
                 Duration::from_secs(60),
             )),
             event_out,
-            children: ChildTurns::new(),
         }
     }
 
@@ -228,45 +206,6 @@ impl SessionRuntimeState {
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
         self.event_out.send(event);
-    }
-
-    // ── 子 agent 管理 ──────────────────────────────────────────
-
-    pub fn child_turn_manager(&self) -> &ChildTurnManager {
-        &self.children.manager
-    }
-
-    pub fn completed_tx(&self) -> mpsc::UnboundedSender<SessionId> {
-        self.children.completed_tx.clone()
-    }
-
-    /// 消费完成信号通道并收集已完成的子 turn guard。非阻塞。
-    /// 消费子 turn 完成通知 channel 中积压的 signal，再收集已完成的 guard。
-    /// signal 本身不含 payload，仅作唤醒；真正状态在 `ChildTurnManager` 内。
-    pub fn drain_completed(&self) -> Vec<Arc<ChildTurnGuard>> {
-        let mut rx = self.children.completed_rx.lock();
-        while rx.try_recv().is_ok() {}
-        self.children.manager.collect_completed()
-    }
-
-    /// 主清理路径：同步 abort 所有子 turn 并等完成。
-    /// 调用方需在持有 `SessionManager` 时级联递归孙子。
-    pub fn abort_all_direct(&self) -> Vec<Arc<ChildTurnGuard>> {
-        self.children.manager.abort_all_direct()
-    }
-}
-
-// ── 兜底清理 ───────────────────────────────────────────────────
-
-impl Drop for SessionRuntimeState {
-    fn drop(&mut self) {
-        let guards = self.children.manager.abort_all_direct();
-        if !guards.is_empty() {
-            tracing::warn!(
-                count = guards.len(),
-                "SessionRuntimeState dropped without prior cleanup; child turns force-aborted"
-            );
-        }
     }
 }
 

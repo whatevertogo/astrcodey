@@ -125,7 +125,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话成功完成。
     ///
-    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
     ///
     /// **双 `SessionId` 说明（勿删其一）**：`child_session_id` 锚定
     /// `AgentSessionSpawned`；`final_session_id` 为结果所在 leaf。当前 compact 为
@@ -142,7 +142,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话失败。
     ///
-    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
     /// 双 `SessionId` 语义同 [`AgentSessionCompleted`]。
     AgentSessionFailed {
         /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。

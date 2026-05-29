@@ -35,8 +35,16 @@ impl CommandHandler {
         sid: &SessionId,
         text: String,
     ) -> Result<(), HandlerError> {
+        if !self.scheduler.registry().has_active(sid) {
+            self.send_error(40400, "No active turn");
+            return Err(HandlerError::NoActiveTurn);
+        }
         self.scheduler
-            .inject(sid, text)
+            .deliver_input(
+                sid.clone(),
+                text,
+                crate::turn_scheduler::InputDelivery::InjectIfRunningElseStart,
+            )
             .await
             .map_err(HandlerError::from)?;
         Ok(())

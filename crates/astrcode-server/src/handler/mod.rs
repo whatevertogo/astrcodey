@@ -3,8 +3,8 @@
 //! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 //!
-//! 连发 prompt 的「下一 turn」排队统一由 [`TurnScheduler::notify_turn`]
-//! 处理，本模块不再维护独立队列。
+//! 连发 prompt 的「下一 turn」排队统一由
+//! [`TurnScheduler::deliver_input`]（`QueueIfRunningElseStart`） 处理，本模块不再维护独立队列。
 
 use std::sync::Arc;
 

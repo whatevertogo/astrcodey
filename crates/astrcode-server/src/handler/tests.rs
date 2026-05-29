@@ -747,9 +747,13 @@ fn test_runtime_with_settings(
         Arc::clone(&capabilities),
         vec![],
     ));
+    let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+        Arc::clone(&session_manager),
+    ));
     let scheduler = Arc::new(crate::turn_scheduler::TurnScheduler::new(
         Arc::clone(&session_manager),
         Arc::new(crate::turn_registry::TurnRegistry::new()),
+        child_sessions,
     ));
     Arc::new(ServerRuntime {
         event_store,
@@ -773,9 +777,14 @@ fn test_runtime() -> Arc<ServerRuntime> {
 }
 
 fn test_scheduler(runtime: &Arc<ServerRuntime>) -> Arc<crate::turn_scheduler::TurnScheduler> {
+    let session_manager = runtime.session_manager().clone();
+    let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+        Arc::clone(&session_manager),
+    ));
     Arc::new(crate::turn_scheduler::TurnScheduler::new(
-        runtime.session_manager().clone(),
+        session_manager,
         Arc::new(crate::turn_registry::TurnRegistry::new()),
+        child_sessions,
     ))
 }
 
@@ -1579,20 +1588,24 @@ async fn submit_prompt_queues_second_running_turn_for_next_turn() {
 }
 
 #[tokio::test]
-async fn notify_turn_started_from_idle_is_cleaned_up() {
+async fn queue_input_started_from_idle_is_cleaned_up() {
     let runtime = test_runtime_with_llm(Arc::new(MockLlm));
     let scheduler = test_scheduler(&runtime);
     let created = runtime.session_manager().create(".").await.unwrap();
     let sid = created.session.id().clone();
 
     let outcome = scheduler
-        .notify_turn(sid.clone(), "queued-after-race".into())
+        .deliver_input(
+            sid.clone(),
+            "queued-after-race".into(),
+            crate::turn_scheduler::InputDelivery::QueueIfRunningElseStart,
+        )
         .await
         .unwrap();
 
     assert!(matches!(
         outcome,
-        crate::turn_scheduler::SubmitOutcome::Started { .. }
+        crate::turn_scheduler::DeliveryOutcome::Started { .. }
     ));
     wait_until_no_active_turn(&scheduler, &sid).await;
     assert_eq!(
@@ -1607,17 +1620,25 @@ async fn notify_turn_started_from_idle_is_cleaned_up() {
 }
 
 #[tokio::test]
-async fn notify_step_started_from_idle_is_cleaned_up() {
+async fn background_step_started_from_idle_is_cleaned_up() {
     let runtime = test_runtime_with_llm(Arc::new(MockLlm));
     let scheduler = test_scheduler(&runtime);
     let created = runtime.session_manager().create(".").await.unwrap();
     let sid = created.session.id().clone();
 
-    let outcome = scheduler.notify_step(sid.clone(), "task").await.unwrap();
+    let marker = r#"<system type="background_completed" source="task">"#;
+    let outcome = scheduler
+        .deliver_input(
+            sid.clone(),
+            marker.into(),
+            crate::turn_scheduler::InputDelivery::InjectIfRunningElseStart,
+        )
+        .await
+        .unwrap();
 
     assert!(matches!(
         outcome,
-        crate::turn_scheduler::SubmitOutcome::Started { .. }
+        crate::turn_scheduler::DeliveryOutcome::Started { .. }
     ));
     wait_until_no_active_turn(&scheduler, &sid).await;
     assert_eq!(

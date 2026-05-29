@@ -50,6 +50,14 @@ agent-client-protocol = { workspace = true }
 name = "http_routes"
 required-features = ["testing"]
 
+[[test]]
+name = "session_operations_test"
+required-features = ["testing"]
+
+[[test]]
+name = "turn_scheduler_behavior_test"
+required-features = ["testing"]
+
 [dev-dependencies]
 http-body-util = { workspace = true }
 tower = { workspace = true }

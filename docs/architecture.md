@@ -84,22 +84,23 @@ session-A (root)
 
 ### 下一 turn 输入队列（唯一）
 
-所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::notify_turn` → `pending_queues`。
-`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
+所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::deliver_input(..., QueueIfRunningElseStart)` → `pending_queues`。
+Turn 结束后由 `finish_execution` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
 
 ### 启动顺序
 
 ```
-bootstrap_with → TurnScheduler + TurnRegistry
-              → ServerEventBus::new(fanout, scheduler)
-              → SessionManager::bind_event_bus
+bootstrap_with → ChildSessionCoordinator + TurnScheduler + TurnRegistry
+              → ServerEventBus::new(fanout)
+              → SessionEventReactor::new(scheduler)
+              → SessionManager::bind_event_bus + bind_event_reactor
               → CommandHandle::spawn
 ```
 
 ### 命令路径
 
 - **写**：`ClientCommand` / HTTP POST → `CommandHandle` → `CommandHandler`（Actor 串行）
-- **Turn**：`start_turn` / `notify_turn` → `TurnScheduler::submit`
+- **Turn**：`start_turn` → `TurnScheduler::submit`；连发 prompt → `deliver_input(QueueIfRunningElseStart)`
 - **读（HTTP）**：`ServerRuntime::session_manager()` / `event_store()` → projection DTO
 
 ---

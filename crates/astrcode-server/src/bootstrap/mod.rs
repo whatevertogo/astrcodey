@@ -25,8 +25,9 @@ pub use server_system::{ServerSystem, spawn_server_system};
 
 pub use crate::config_manager::ConfigManager;
 use crate::{
-    session_manager::SessionManager, session_operations::ServerSessionOperations,
-    turn_registry::TurnRegistry, turn_scheduler::TurnScheduler,
+    child_session::ChildSessionCoordinator, session_manager::SessionManager,
+    session_operations::ServerSessionOperations, turn_registry::TurnRegistry,
+    turn_scheduler::TurnScheduler,
 };
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
@@ -183,13 +184,17 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         vec![Arc::new(TerminalCleanup)],
     ));
 
+    let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
     let scheduler = Arc::new(TurnScheduler::new(
         Arc::clone(&session_manager),
         Arc::new(TurnRegistry::new()),
+        Arc::clone(&child_sessions),
     ));
+    child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
     let session_ops: Arc<dyn SessionOperations> = Arc::new(ServerSessionOperations {
         session_manager: Arc::clone(&session_manager),
         scheduler: Arc::clone(&scheduler),
+        child_sessions,
     });
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
     session_manager.add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
@@ -357,7 +362,7 @@ impl SessionResourceCleanup for TurnSchedulerCleanup {
         let scheduler = Arc::clone(&self.scheduler);
         let sid = session_id.clone();
         tokio::spawn(async move {
-            scheduler.cleanup(&sid).await;
+            scheduler.abort_and_cleanup(&sid).await;
             tracing::debug!(session_id = %sid, "turn scheduler cleanup finished");
         });
     }

@@ -1,3 +1,6 @@
+//! 子 session 创建：只负责 `spawn_child` 与 `AgentSessionSpawned` 事件。
+//! 完成等待、终态写入、回收与通知由 `astrcode-server::child_session` 编排。
+
 use std::sync::Arc;
 
 use astrcode_core::{
@@ -64,14 +67,6 @@ impl Session {
         ))
         .await?;
         Ok(child)
-    }
-
-    /// 消费已完成子 turn 的信号并返回已完成的 guards。
-    ///
-    /// 终态事件已由 `ChildTurnGuard` 后台任务写入；本方法先 drain runtime 上的
-    /// 完成通知 channel（丢弃积压 signal，避免重复处理），再收集已完成的 guard。
-    pub fn drain_completed_guards(&self) -> Vec<Arc<crate::child_turn::ChildTurnGuard>> {
-        self.runtime.drain_completed()
     }
 }
 

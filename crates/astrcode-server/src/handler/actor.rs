@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
 use crate::{
     bootstrap::ServerRuntime,
-    turn_scheduler::{SubmitOutcome, TurnScheduler},
+    turn_scheduler::{DeliveryOutcome, InputDelivery, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -248,12 +248,16 @@ impl CommandHandler {
         session_id: SessionId,
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
-        match self.scheduler.notify_turn(session_id, text).await {
-            Ok(SubmitOutcome::Queued) => Ok(PromptSubmission::Handled {
+        match self
+            .scheduler
+            .deliver_input(session_id, text, InputDelivery::QueueIfRunningElseStart)
+            .await
+        {
+            Ok(DeliveryOutcome::Queued { .. }) => Ok(PromptSubmission::Handled {
                 message: "queued for next turn".into(),
             }),
-            Ok(SubmitOutcome::Started { turn_id }) => Ok(PromptSubmission::Accepted { turn_id }),
-            Ok(SubmitOutcome::Injected) => Ok(PromptSubmission::Handled {
+            Ok(DeliveryOutcome::Started { turn_id }) => Ok(PromptSubmission::Accepted { turn_id }),
+            Ok(DeliveryOutcome::Injected { .. }) => Ok(PromptSubmission::Handled {
                 message: "injected into active turn".into(),
             }),
             Err(e) => Err(HandlerError::from(e)),
