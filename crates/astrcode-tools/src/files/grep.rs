@@ -13,7 +13,10 @@ use grep_searcher::{
 };
 use serde::Deserialize;
 
-use super::shared::{collect_grep_files, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id, trunc};
+use super::shared::{
+    collect_grep_files, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
+    trunc,
+};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。

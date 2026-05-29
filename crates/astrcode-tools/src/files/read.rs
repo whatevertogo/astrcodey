@@ -76,7 +76,13 @@ impl Tool for ReadFileTool {
         let file_observation_store = ctx.capabilities.file_observation_store.clone();
         let working_dir = self.working_dir.clone();
         run_blocking(move || {
-            read_existing_file_sync(working_dir, args, call_id, file_observation_store, started_at)
+            read_existing_file_sync(
+                working_dir,
+                args,
+                call_id,
+                file_observation_store,
+                started_at,
+            )
         })
         .await
     }

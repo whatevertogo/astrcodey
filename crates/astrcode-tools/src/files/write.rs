@@ -4,8 +4,7 @@ use astrcode_core::tool::*;
 use serde::Deserialize;
 
 use super::shared::{
-    compute_unified_diff, resolve_sandboxed_path, run_blocking, sandbox_escape_result,
-    tool_call_id,
+    compute_unified_diff, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
 };
 // ─── write ───────────────────────────────────────────────────────────────
 
@@ -76,8 +75,7 @@ fn execute_write_sync(
         let Some(parent) = path.parent() else {
             return Err(ToolError::Execution("path has no parent directory".into()));
         };
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ToolError::Execution(format!("mkdir: {e}")))?;
+        std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution(format!("mkdir: {e}")))?;
     }
 
     let old = std::fs::read_to_string(&path).ok();

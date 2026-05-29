@@ -127,13 +127,11 @@ fn execute_glob_sync(
         .collect::<Vec<_>>();
     let paths: Vec<String> = out
         .into_iter()
-        .map(|(path, _, is_dir)| {
-            if is_dir {
-                format!("{path}/")
-            } else {
-                path
-            }
-        })
+        .map(
+            |(path, _, is_dir)| {
+                if is_dir { format!("{path}/") } else { path }
+            },
+        )
         .collect();
     let mut meta = BTreeMap::new();
     meta.insert("count".into(), serde_json::json!(paths.len()));

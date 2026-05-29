@@ -6,14 +6,13 @@ use std::{
     time::Instant,
 };
 
-use sha2::{Digest, Sha256};
-
 use astrcode_core::tool::*;
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub(super) const DEFAULT_MAX_CHARS: usize = 20_000;
 pub(super) const MAX_INLINE_IMAGE_BASE64_BYTES: u64 = 1024 * 1024;
@@ -123,9 +122,7 @@ pub(super) fn collect_candidate_files(
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
-        let is_dir = entry
-            .file_type()
-            .is_some_and(|ft| ft.is_dir());
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
         let display_path = path
             .strip_prefix(working_dir)
             .map(|path| path.display().to_string())
@@ -293,10 +290,7 @@ pub(super) fn read_image_file_result(
 /// Resolve `raw` relative to `working_dir` and verify it stays within the sandbox.
 ///
 /// On failure the returned `PathBuf` is the escaped absolute path (for metadata).
-pub(super) fn resolve_sandboxed_path(
-    working_dir: &Path,
-    raw: &Path,
-) -> Result<PathBuf, PathBuf> {
+pub(super) fn resolve_sandboxed_path(working_dir: &Path, raw: &Path) -> Result<PathBuf, PathBuf> {
     let path = resolve_path(working_dir, raw);
     if is_path_within(&path, working_dir) {
         Ok(path)

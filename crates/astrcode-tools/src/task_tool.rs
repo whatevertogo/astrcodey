@@ -74,7 +74,13 @@ impl Tool for TaskTool {
                         .collect();
                     format!("Active background tasks:\n{}", lines.join("\n"))
                 };
-                Ok(task_result(call_id, started_at, content, false, BTreeMap::new()))
+                Ok(task_result(
+                    call_id,
+                    started_at,
+                    content,
+                    false,
+                    BTreeMap::new(),
+                ))
             },
             "cancel" => {
                 let task_id_str = args.task_id.unwrap_or_default();
@@ -90,7 +96,13 @@ impl Tool for TaskTool {
                 } else {
                     format!("Task {task_id} not found or already completed.")
                 };
-                Ok(task_result(call_id, started_at, content, false, BTreeMap::new()))
+                Ok(task_result(
+                    call_id,
+                    started_at,
+                    content,
+                    false,
+                    BTreeMap::new(),
+                ))
             },
             "result" => {
                 let task_id_str = args.task_id.unwrap_or_default();
@@ -120,7 +132,13 @@ impl Tool for TaskTool {
                             .expect("has_more implies next_char_offset is set")
                     ));
                 }
-                Ok(task_result(call_id, started_at, content, false, BTreeMap::new()))
+                Ok(task_result(
+                    call_id,
+                    started_at,
+                    content,
+                    false,
+                    BTreeMap::new(),
+                ))
             },
             other => Err(ToolError::InvalidArguments(format!(
                 "unknown action '{other}', expected 'list', 'cancel', or 'result'"

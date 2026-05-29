@@ -4,9 +4,9 @@ use astrcode_core::tool::*;
 use serde::Deserialize;
 
 use super::shared::{
-    clean_quotes, compute_unified_diff, find_unique_occurrence, remember_file_observation_with_store,
-    resolve_sandboxed_path, run_blocking, sandbox_escape_result, stale_file_guard_with_store,
-    tool_call_id,
+    clean_quotes, compute_unified_diff, find_unique_occurrence,
+    remember_file_observation_with_store, resolve_sandboxed_path, run_blocking,
+    sandbox_escape_result, stale_file_guard_with_store, tool_call_id,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
 
@@ -117,8 +117,8 @@ fn execute_edit_sync(
         return Ok(stale_result);
     }
 
-    let original = std::fs::read_to_string(&path)
-        .map_err(|e| ToolError::Execution(format!("read: {e}")))?;
+    let original =
+        std::fs::read_to_string(&path).map_err(|e| ToolError::Execution(format!("read: {e}")))?;
     let (updated, replacements) = apply_edit_operations(&original, &path, &operations)?;
     std::fs::write(&path, &updated).map_err(|e| ToolError::Execution(format!("write: {e}")))?;
 
