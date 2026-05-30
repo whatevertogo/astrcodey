@@ -208,7 +208,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tauriScript: node frontend/node_modules/@tauri-apps/cli/tauri.js
+          projectPath: src-tauri
+          tauriScript: node ../frontend/node_modules/@tauri-apps/cli/tauri.js
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: ${{ needs.prepare.outputs.tag }}
           releaseBody: "__INSTALLERS__"
