@@ -9,8 +9,6 @@ mod storage;
 mod tools;
 mod turn_entry;
 
-pub(crate) use compact::normalize_extra_system_prompt;
-
 use std::sync::Arc;
 
 use astrcode_core::{
@@ -18,6 +16,7 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_support::shell::resolve_shell;
+pub(crate) use compact::normalize_extra_system_prompt;
 
 use crate::{
     session_runtime::SessionRuntimeState, session_runtime_services::SessionRuntimeServices,

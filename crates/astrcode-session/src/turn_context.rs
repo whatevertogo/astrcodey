@@ -36,7 +36,9 @@ pub(crate) async fn on_step_end_best_effort(
     }
 }
 
-/// Turn 循环内的 typed early-return；`TurnEnd` 由 [`TurnLoop::finalize_turn_on_error`](crate::turn_runner::TurnLoop::finalize_turn_on_error) 统一补发。
+/// Turn 循环内的 typed early-return；`TurnEnd` 由
+/// [`TurnLoop::finalize_turn_on_error`](crate::turn_runner::TurnLoop::finalize_turn_on_error)
+/// 统一补发。
 pub(crate) fn end_turn_with_error_typed<T, E>(error: E) -> Result<T, TurnError>
 where
     E: Into<TurnError>,
@@ -145,4 +147,3 @@ pub enum TurnError {
     #[error("turn model cache not populated")]
     ModelCacheEmpty,
 }
-

@@ -272,10 +272,7 @@ impl TurnLoop {
                 .prepare_stage(&extension_runner, &state, turn_id, publisher)
                 .await?;
             let visible_tools = state.visible_tools();
-            let outcome = match self
-                .llm_stage(prepared, &visible_tools, publisher)
-                .await
-            {
+            let outcome = match self.llm_stage(prepared, &visible_tools, publisher).await {
                 Ok(outcome) => outcome,
                 Err(TurnError::Llm(LlmError::PromptTooLong(_)))
                     if !state.reactive_compact_used() =>
@@ -431,12 +428,7 @@ impl TurnLoop {
         publisher: &TurnEvents,
     ) -> Result<StreamOutcome, TurnError> {
         let rx = self
-            .start_provider_stream(
-                &prepared.llm,
-                prepared.messages,
-                tools,
-                publisher,
-            )
+            .start_provider_stream(&prepared.llm, prepared.messages, tools, publisher)
             .await?;
         let message_id = new_message_id();
         match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
