@@ -4,12 +4,7 @@
 //! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/` （`project_ctx` /
 //!   `decision` / `general`、contexts/、pipeline 状态）
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::Arc,
-    time::SystemTime,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
 
 use astrcode_support::hostpaths::{self, ensure_dir};
 use parking_lot::Mutex;
