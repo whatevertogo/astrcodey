@@ -9,7 +9,7 @@ pub const DEFAULT_VERSION: &str = "1";
 /// 默认激活的配置文件名称。
 pub const DEFAULT_ACTIVE_PROFILE: &str = "deepseek";
 /// 默认激活的模型标识。
-pub const DEFAULT_ACTIVE_MODEL: &str = "deepseek-chat";
+pub const DEFAULT_ACTIVE_MODEL: &str = "deepseek-v4-flash";
 
 // ── LLM 连接参数默认值 ─────────────────────────────────────────────────
 

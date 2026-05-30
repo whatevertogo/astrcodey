@@ -10,24 +10,24 @@ AstrCode uses a hierarchical configuration system with JSON files and environmen
 
 ## Configuration Structure
 
-null in runtime is default
-
 ```json
 {
   "version": "1",
   "activeProfile": "deepseek",
   "activeModel": "deepseek-v4-flash",
-  "activeSmallProfile": "deepseek",
-  "activeSmallModel": "deepseek-v4-flash",
+  "activeSmallProfile": null,
+  "activeSmallModel": null,
   "runtime": {
-    "llmConnectTimeoutSecs": 60,
-    "llmReadTimeoutSecs": 120,
-    "llmMaxRetries": 3,
+    "llmConnectTimeoutSecs": 10,
+    "llmReadTimeoutSecs": 90,
+    "llmMaxRetries": 2,
+    "llmRetryBaseDelayMs": 250,
     "compactAutoEnabled": true,
     "compactThresholdPercent": 83.5,
-    "compactKeepRecentTurns": null,
-    "agentMaxDepth": 3,
-    "agentToolMaxParallelCalls": 5
+    "compactKeepRecentTurns": 1,
+    "agentMaxDepth": 2,
+    "agentToolMaxParallelCalls": 5,
+    "shellTimeoutSecs": 120
   },
   "profiles": [
     {
@@ -73,11 +73,12 @@ Each profile in `profiles` array represents an LLM provider configuration:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Profile identifier (referenced by `activeProfile`) |
-| `providerKind` | string | Provider type: `openai`, `anthropic`, `google` |
+| `providerKind` | string | Provider type: `openai`, `anthropic`, `google` / `gemini` |
 | `baseUrl` | string | API endpoint URL. For Anthropic profiles, `/v1/messages` is auto-appended if the URL does not already include a version segment (e.g., `/v1`). So both `https://api.anthropic.com/v1` and `https://api.anthropic.com` work. |
 | `apiKey` | string | API key resolver expression. Supported formats: `"env:VAR_NAME"`, `"!command"`, or a literal key string |
 | `models` | array | Available models for this profile |
 | `apiMode` | string | API mode: `chat_completions` or `responses` (only for `openai` providerKind) |
+| `openaiCapabilities` | object (optional) | OpenAI-specific capabilities: `supportsPromptCacheKey`, `promptCacheRetention`, `supportsStreamUsage` |
 
 ### Model Fields
 
@@ -101,15 +102,15 @@ Each model in `models` array:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `llmConnectTimeoutSecs` | number | 60 | LLM connection timeout (seconds) |
-| `llmReadTimeoutSecs` | number | 120 | LLM read timeout (seconds) |
-| `llmMaxRetries` | number | 3 | Maximum retry attempts for failed requests |
-| `llmRetryBaseDelayMs` | number | 500 | Base delay for exponential backoff (milliseconds) |
+| `llmConnectTimeoutSecs` | number | 10 | LLM connection timeout (seconds) |
+| `llmReadTimeoutSecs` | number | 90 | LLM read timeout (seconds) |
+| `llmMaxRetries` | number | 2 | Maximum retry attempts for failed requests |
+| `llmRetryBaseDelayMs` | number | 250 | Base delay for exponential backoff (milliseconds) |
 | `compactAutoEnabled` | boolean | true | Enable automatic context compaction |
 | `compactThresholdPercent` | number | 83.5 | Trigger auto-compact when context usage exceeds this percentage |
 | `compactMaxRetryAttempts` | number | 3 | Maximum retry attempts for compaction |
 | `compactMaxOutputTokens` | number | 20000 | Maximum tokens for LLM compaction output |
-| `compactKeepRecentTurns` | number or null | null | Recent complete user-turn groups to keep for auto/reactive compaction. `null` keeps the default tail, `0` compacts as much history as possible |
+| `compactKeepRecentTurns` | number or null | 1 | Recent complete user-turn groups to keep for auto/reactive compaction. `null` keeps the default tail, `0` compacts as much history as possible |
 | `compactCircuitBreakerThreshold` | number | 3 | Consecutive auto-compact LLM failures before auto compact is temporarily skipped |
 | `compactCircuitBreakerCooldownSecs` | number | 60 | Cooldown before retrying auto compact after the circuit breaker opens |
 | `predictiveCompactEnabled` | boolean | false | Enable predictive compaction before the current turn is likely to exceed the context window |
@@ -117,8 +118,11 @@ Each model in `models` array:
 | `postCompactMaxFiles` | number | 5 | Maximum files to restore after compaction |
 | `postCompactTokenBudget` | number | 50000 | Token budget for file restoration |
 | `postCompactMaxTokensPerFile` | number | 5000 | Maximum tokens per restored file |
-| `agentMaxDepth` | number | 3 | Maximum sub-agent nesting depth (root=0, child=1, ...) |
+| `agentMaxDepth` | number | 2 | Maximum sub-agent nesting depth (root=0, child=1, ...) |
 | `agentToolMaxParallelCalls` | number | 5 | Maximum parallel tool calls per turn |
+| `shellTimeoutSecs` | number | 120 | Default timeout for shell tool execution (seconds) |
+| `allowApiKeyShellCommand` | boolean | false | Whether to allow `!command` syntax in API key resolution |
+| `extensionStates` | object or null | null | Extension enable/disable overrides, e.g. `{"astrcode.memory": false}` |
 
 ## Environment Variables
 

@@ -12,7 +12,7 @@
 
 用 Rust 从零构建的 AI 编程助手平台。
 
-AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 22 个 Rust crate（另加 Tauri 桌面壳），合计约 7.67 万行 Rust，外加 React + TypeScript 前端（约 6800 行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic、OpenAI、Google GenAI）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
+AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 22 个 Rust crate（另加 Tauri 桌面壳），合计约 7.86 万行 Rust，外加 React + TypeScript 前端（约 6900 行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic、OpenAI、Google GenAI）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
 
 ## 目录
 
@@ -396,7 +396,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **22 个 crate**，另有 [`s
 |---|---|---|
 | [`src-tauri/`](src-tauri) | 780 | Tauri v2 壳：sidecar 管理、单实例协调、原生对话框 |
 
-**合计：** Rust 约 7.67 万行（22 个 crate + Tauri），**269** 个 `.rs` 文件；`frontend/` 约 6800 行 TypeScript（整体约 **8.35 万行**）。
+**合计：** Rust 约 7.86 万行（22 个 crate + Tauri），**270** 个 `.rs` 文件；`frontend/` 约 6900 行 TypeScript（整体约 **8.55 万行**）。
 
 ## 核心设计
 

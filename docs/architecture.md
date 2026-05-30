@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~79k 行（Rust ~72.2k + TypeScript ~6.8k），`crates/` 下 21 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~85.5k 行（Rust ~78.6k + TypeScript ~6.9k），`crates/` 下 22 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -177,7 +177,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 分层工具而非全 bash
 
-9 个内置工具（read / write / edit / patch / find / grep / shell / terminal / task）：
+8 个内置工具（read / write / edit / patch / glob / grep / shell / terminal）：
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
