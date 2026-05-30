@@ -93,17 +93,18 @@ const TOOL_GUIDANCE: &str =
      → `glob` (required `pattern`, e.g. `**/*.rs`)\n- Edit file → `edit` | New file → `write` | \
      Multi-file → `patch`\n- Commands → `shell` | Interactive → `terminal`\n- Progress → \
      `todoWrite` | Plan/Code mode → `switchMode` | Skill → `Skill`\n- External MCP only → \
-     `tool_search_tool` (not for builtin tools like `glob`) | Delegate → `agent`";
+     `tool_search_tool`  | Delegate → `agent`\n\n## Delegation\nDo not use `agent` for narrow \
+     queries — handle them directly:\n- Known file path → `read`\n- Specific symbol, class, \
+     function, or string → `grep`/`glob`\n- Anything doable in a few direct tool calls → do it \
+     yourself\nUse `agent` only for genuinely multi-step work or parallel exploration across \
+     independent areas.";
 
 const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
 const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";
 const TOOL_SECTION_EXTERNAL_MCP: &str = "External MCP Tools";
 const TOOL_SECTION_EXTENSION: &str = "Extension Tools";
 
-const TOOL_AGENT_COLLABORATION_GUIDANCE: &str =
-    "- Use `agent` to delegate multi-step work to specialized subagents. For simple, directed \
-     searches, use `glob`/`grep` directly.\n- Use a single agent for focused tasks, multiple \
-     agents in parallel when the task spans independent areas.";
+const TOOL_AGENT_COLLABORATION_GUIDANCE: &str = "- Types: [Agents]. Follow Delegation rules above.";
 
 const TOOL_EXTENSION_GUIDANCE: &str = "- Extension tools are already present in the \
                                        provider-visible tool list. Call them directly with their \
