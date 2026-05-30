@@ -215,12 +215,15 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "read".into(),
         description: concat!(
-            "Reads a file with line numbers. You MUST read before editing.\n",
-            "- Copy text from after the line-number prefix; never include line numbers in \
-             `oldStr`/`newStr`.\n",
-            "- Large files: use `offset`+`limit` or `charOffset`+`maxChars` for pagination.\n",
-            "- Supports text, code, JSON, Markdown, and auto-detects binary/images.\n",
-            "- To list or discover paths, use `glob`.",
+            "Read a file with line numbers. MUST `read` before `edit`.\n\n",
+            "When NOT to use:\n",
+            "- Listing paths → `glob`\n",
+            "- Repo-wide content search without `grep` first\n\n",
+            "When to use:\n",
+            "- Known file path (or persisted tool-result path)\n",
+            "- 2–3 known paths: parallel `read` calls\n",
+            "- More as you want\n\n",
+            "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -230,22 +233,22 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path, or a persisted tool-result path from a prior result."
+                    "description": "File path, or a persisted tool-result path from a prior result. Supports text, code, images, and binary detection."
                 },
                 "maxChars": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Default 20000 (60000 for persisted results)."
+                    "description": "Default 20000 (60000 for persisted results). Use with charOffset to paginate large files."
                 },
                 "charOffset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Continue a truncated read."
+                    "description": "Continue a truncated read (character offset)."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Start line (0-based)."
+                    "description": "Start line (0-based). Use with limit for line pagination."
                 },
                 "limit": {
                     "type": "integer",

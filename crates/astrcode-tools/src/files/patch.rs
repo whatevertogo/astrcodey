@@ -197,12 +197,11 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "patch".into(),
         description: concat!(
-            "Applies a unified diff across one or more files.\n",
-            "- For single-file edits, prefer `edit`.\n",
-            "- Within a file, any hunk failure fails that file (no partial hunks).\n",
-            "- Across files, successful files still commit if others fail (partial apply).\n",
-            "- New file: `--- /dev/null` → `+++ path`. Delete: reverse.\n",
-            "- Context lines must match exactly. `a/`/`b/` prefixes are stripped.",
+            "Apply a unified diff across one or more files.\n\n",
+            "When NOT to use:\n",
+            "- Single small replacement → `edit`\n\n",
+            "When to use:\n",
+            "- One diff touching multiple files",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -212,7 +211,7 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "patch": {
                     "type": "string",
-                    "description": "Unified diff text covering one or more files."
+                    "description": "Unified diff text. Context must match exactly; a/`b/` prefixes stripped. New file: --- /dev/null → +++ path. Per-file hunk failure rolls back that file; other files may still apply."
                 }
             },
             "required": ["patch"],

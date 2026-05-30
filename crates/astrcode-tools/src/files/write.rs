@@ -126,10 +126,12 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "write".into(),
         description: concat!(
-            "Creates or completely overwrites a file.\n",
-            "- MUST `read` existing files first. Prefer `edit` for modifications.\n",
-            "- Set `createDirs` to create missing parent directories.\n",
-            "- NEVER create *.md/README unless explicitly requested.",
+            "Create or completely overwrite a file.\n\n",
+            "When NOT to use:\n",
+            "- Incremental edits to an existing file → `edit`\n\n",
+            "When to use:\n",
+            "- New files\n",
+            "- Full-file rewrite after `read`",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -143,11 +145,11 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Complete UTF-8 content. Replaces the whole file."
+                    "description": "Complete UTF-8 content. Replaces the whole file. MUST read existing files first. Do not create *.md/README unless requested."
                 },
                 "createDirs": {
                     "type": "boolean",
-                    "description": "Create missing parent dirs."
+                    "description": "Create missing parent directories."
                 }
             },
             "required": ["path", "content"],

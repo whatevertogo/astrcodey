@@ -154,11 +154,13 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
         description: concat!(
-            "Exact string replacements in an existing file. MUST `read` first.\n",
-            "- Preserve exact indentation from read output. Never include line numbers.\n",
-            "- `oldStr` must be unique. Use `replaceAll` for non-unique matches.\n",
-            "- Use `edits` for multiple atomic replacements. Use `patch` for multi-file changes.\n",
-            "- File modified externally since last read? Re-read and retry.",
+            "Exact string replacement in an existing file.\n\n",
+            "When NOT to use:\n",
+            "- New files → `write`\n",
+            "- Multi-file changes → `patch`\n",
+            "- Large rewrites of an existing file\n\n",
+            "When to use:\n",
+            "- Single-file, small, precise edits after `read`",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -171,11 +173,11 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "oldStr": {
                     "type": "string",
-                    "description": "Exact text to replace, copied verbatim from the read output."
+                    "description": "Exact text to replace, copied verbatim from read output (no line numbers). Must be unique unless replaceAll."
                 },
                 "newStr": {
                     "type": "string",
-                    "description": "Replacement text."
+                    "description": "Replacement text. Preserve indentation from read output."
                 },
                 "replaceAll": {
                     "type": "boolean",
@@ -183,7 +185,7 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Atomic ordered replacements. Do not combine with top-level oldStr/newStr.",
+                    "description": "Multiple atomic replacements in order. Re-read if the file changed externally since last read.",
                     "items": {
                         "type": "object",
                         "properties": {

@@ -170,11 +170,13 @@ fn glob_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "glob".into(),
         description: concat!(
-            "Match file and directory paths by glob pattern (not file contents), newest first. Directories end with `/`.\n",
-            "- Use when you need paths; use `grep` to search inside files.\n",
-            "- Patterns: `**/*.js`, `src/**/*.ts`, `*.{json,toml}`\n",
-            "- Honors .gitignore; skips `.git`/`target`/`node_modules`. Set `respectGitignore=false` to include ignored files.\n",
-            "- Returns files and directories by default; set `includeDirs=false` for files only.",
+            "Match file and directory paths by glob pattern (not file contents).\n\n",
+            "When NOT to use:\n",
+            "- Searching inside file contents → `grep`\n\n",
+            "When to use:\n",
+            "- Unknown path locations (e.g. `**/*.rs`, `src/**/*.ts`)\n",
+            "- Independent patterns can run in parallel",
+            "- More as you want",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -184,11 +186,11 @@ fn glob_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Glob pattern for paths, e.g. '*.rs', '**/*.ts', '*.{json,toml}'."
+                    "description": "Glob pattern for paths, e.g. '*.rs', '**/*.ts', '*.{json,toml}'. Directories end with `/`."
                 },
                 "root": {
                     "type": "string",
-                    "description": "Search root. Defaults to working directory."
+                    "description": "Search root. Defaults to working directory. Results newest first."
                 },
                 "maxResults": {
                     "type": "integer",
@@ -202,7 +204,7 @@ fn glob_tool_definition() -> &'static ToolDefinition {
                 },
                 "respectGitignore": {
                     "type": "boolean",
-                    "description": "Honor .gitignore (default true)."
+                    "description": "Honor .gitignore (default true). Skips .git/target/node_modules unless false."
                 },
                 "includeHidden": {
                     "type": "boolean",
@@ -210,7 +212,7 @@ fn glob_tool_definition() -> &'static ToolDefinition {
                 },
                 "includeDirs": {
                     "type": "boolean",
-                    "description": "Include directories in results (default true)."
+                    "description": "Include directories in results (default true). Set false for files only."
                 }
             },
             "required": ["pattern"],

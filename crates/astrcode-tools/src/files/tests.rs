@@ -137,15 +137,24 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
         .expect("edit definition should exist");
 
     assert!(glob_tool.description.contains("glob pattern"));
-    assert!(grep.description.contains("regex or literal"));
-    assert!(grep.description.contains("files_with_matches"));
-    assert!(read_file.description.contains("Reads a file"));
+    assert!(glob_tool.description.contains("When NOT to use"));
+    assert!(grep.description.contains("When NOT to use"));
+    assert!(grep.description.contains("`glob`"));
+    assert!(
+        grep.parameters["properties"]["outputMode"]["description"]
+            .as_str()
+            .expect("outputMode description")
+            .contains("files_with_matches")
+    );
+    assert!(read_file.description.contains("Read a file"));
+    assert!(read_file.description.contains("When NOT to use"));
     assert!(
         write_file
             .description
-            .contains("Creates or completely overwrites")
+            .contains("Create or completely overwrite")
     );
-    assert!(edit_file.description.contains("string replacements"));
+    assert!(edit_file.description.contains("string replacement"));
+    assert!(edit_file.description.contains("When NOT to use"));
 }
 
 #[tokio::test]

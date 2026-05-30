@@ -246,12 +246,14 @@ fn grep_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "grep".into(),
         description: concat!(
-            "Searches file contents by regex or literal text.\n",
-            "- Full regex syntax. Set `literal=true` for exact text with special characters.\n",
-            "- Optional path filter via the `glob` parameter or `fileType`. Output modes: \
-             `content`, `files_with_matches` (default), `count`.\n",
-            "- Set `multiline=true` for cross-line patterns.\n",
-            "- For file paths, use the `glob` tool (not this tool's `glob` filter alone).",
+            "Search file contents by regex or literal text.\n\n",
+            "When NOT to use:\n",
+            "- Finding paths → `glob` tool\n",
+            "- Known file path → `read`\n\n",
+            "When to use:\n",
+            "- Symbols, strings, classes, or regex patterns across files\n",
+            "- Independent searches can run in parallel",
+            "- More as you want",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
@@ -260,7 +262,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern (or literal text when literal=true)."
+                    "description": "Regex pattern, or literal text when literal=true (e.g. class Foo, exact strings with special chars)."
                 },
                 "literal": {
                     "type": "boolean",
@@ -294,7 +296,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Path filter, e.g. '*.md'."
+                    "description": "Path filter within search scope (e.g. '*.md'), not the `glob` tool."
                 },
                 "fileType": {
                     "type": "string",
@@ -313,7 +315,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                 "outputMode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
-                    "description": "Default files_with_matches."
+                    "description": "content | files_with_matches (default) | count."
                 }
             },
             "required": ["pattern"],

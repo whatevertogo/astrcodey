@@ -760,6 +760,7 @@ fn tool_short_description(name: &str) -> &'static str {
         "todoWrite" => "update session progress todo list",
         "switchMode" => "switch between code and plan modes",
         "upsertSessionPlan" => "create or update the session plan",
+        "agent" => "delegate to a specialized [Agents] subagent",
         "patch" => "apply unified diff across multiple files",
         "edit" => "exact string replacement in a file",
         "write" => "create or completely overwrite a file",
