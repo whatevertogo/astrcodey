@@ -7,9 +7,8 @@ use astrcode_core::{
     extension::{ChildToolPolicy, ExtensionEvent},
     prompt::SystemPromptInput,
     storage::{
-        CompactSnapshotInput, EventStore, SessionReadModel, StorageError,
-        ToolResultArtifactInput, ToolResultArtifactReader, ToolResultArtifactRef,
-        ToolResultArtifactSlice,
+        CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
+        ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::*,
 };
@@ -51,8 +50,8 @@ pub struct SessionCreateParams {
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
 /// 字段语义：
-/// - `runtime`：进程内瞬态资源（工具表、file_obs、event_tx）。broadcast 在 runtime
-///   上而不是 Session 上：同 sid 多次 `Session::open` / `clone` 仍共享同一个
+/// - `runtime`：进程内瞬态资源（工具表、file_obs、event_tx）。broadcast 在 runtime 上而不是 Session
+///   上：同 sid 多次 `Session::open` / `clone` 仍共享同一个
 ///   broadcast，订阅者一处订阅就能看到所有实例上发出的事件。
 /// - `caps`：跨 session 共享的基础设施（LLM、扩展、上下文组装器、配置）。
 ///

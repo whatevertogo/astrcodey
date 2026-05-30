@@ -50,10 +50,10 @@ pub(crate) fn memory_save_definition() -> ToolDefinition {
 pub(crate) fn memory_delete_definition() -> ToolDefinition {
     ToolDefinition {
         name: MEMORY_DELETE_TOOL.to_string(),
-        description: "Delete entries from long-term memory by content match.\n\nWhen NOT to use:\n\
-                      - Clearing session-local context (use normal conversation flow)\n\nWhen to \
-                      use:\n- User asks to forget specific stored facts\n- Correcting outdated \
-                      memory entries"
+        description: "Delete entries from long-term memory by content match.\n\nWhen NOT to \
+                      use:\n- Clearing session-local context (use normal conversation \
+                      flow)\n\nWhen to use:\n- User asks to forget specific stored facts\n- \
+                      Correcting outdated memory entries"
             .to_string(),
         parameters: json!({
             "type": "object",
