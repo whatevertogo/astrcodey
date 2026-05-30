@@ -16,6 +16,7 @@ pub mod session_runtime;
 pub mod session_runtime_services;
 pub mod session_setup;
 pub(crate) mod steer;
+pub(crate) mod tool_deduplicator;
 pub(crate) mod tool_exec;
 pub(crate) mod tool_json_repair;
 pub(crate) mod tool_pipeline;

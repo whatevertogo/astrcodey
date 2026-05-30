@@ -56,6 +56,8 @@ pub struct PendingCommittedToolResult {
 pub enum PreparedToolOutcome {
     Ready,
     Blocked(ToolResult),
+    /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
+    DuplicateSameStep,
 }
 
 #[derive(Clone)]

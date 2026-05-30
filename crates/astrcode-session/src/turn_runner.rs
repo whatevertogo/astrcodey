@@ -168,6 +168,7 @@ impl TurnLoop {
         // Step
         loop {
             self.check_aborted()?;
+            state.tool_deduplicator_mut().begin_step();
             self.flush_steered_inputs_at_step_start(
                 &extension_runner,
                 &lifecycle_ctx,
@@ -286,9 +287,15 @@ impl TurnLoop {
                             .await?;
                     }
 
-                    self.tools_stage(&extension_runner, &mut state, &tool_calls, publisher)
-                        .await?;
+                    self.tools_stage(
+                        &extension_runner,
+                        &mut state,
+                        &tool_calls,
+                        publisher,
+                    )
+                    .await?;
 
+                    state.tool_deduplicator_mut().end_step();
                     on_step_end_best_effort(&extension_runner, &lifecycle_ctx).await;
                 },
             }
@@ -329,6 +336,11 @@ impl TurnLoop {
             .await?;
 
         let messages = build_llm_request_messages(self.system_prompt(), context_messages);
+        let mut messages = messages;
+        if let Some(reminder) = state.tool_deduplicator().check_reminder() {
+            tracing::debug!("injecting tool deduplication system-reminder");
+            messages.push(LlmMessage::user(reminder));
+        }
         let messages = self
             .apply_before_provider_request_hook(extension_runner, messages)
             .await?;
@@ -363,9 +375,10 @@ impl TurnLoop {
             .await?;
 
         let visible_tools = state.visible_tools();
+        let deduplicator = state.tool_deduplicator_mut();
         let prepared_tool_calls = match self
             .tools
-            .prepare_tool_calls(tool_calls, &visible_tools, publisher)
+            .prepare_tool_calls(tool_calls, &visible_tools, publisher, deduplicator)
             .await
         {
             Ok(prepared_tool_calls) => prepared_tool_calls,

@@ -7,6 +7,7 @@ use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata, ToolResult};
 use crate::deferred_tools::{
     ToolSnapshot, activate_deferred_tools, clone_tools_by_index, provider_visible_tool_indexes,
 };
+use crate::tool_deduplicator::ToolCallDeduplicator;
 
 /// 每轮 turn 内 `ContinueAfterStop` 可触发的额外 step 上限。
 pub(crate) const MAX_CONTINUE_AFTER_STOP_PER_TURN: u8 = 3;
@@ -22,6 +23,7 @@ pub(crate) struct TurnState {
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
+    tool_deduplicator: ToolCallDeduplicator,
 }
 
 impl TurnState {
@@ -46,7 +48,16 @@ impl TurnState {
             active_deferred_tools,
             all_tools,
             visible_tools,
+            tool_deduplicator: ToolCallDeduplicator::new(),
         }
+    }
+
+    pub(crate) fn tool_deduplicator(&self) -> &ToolCallDeduplicator {
+        &self.tool_deduplicator
+    }
+
+    pub(crate) fn tool_deduplicator_mut(&mut self) -> &mut ToolCallDeduplicator {
+        &mut self.tool_deduplicator
     }
 
     pub(crate) fn can_continue_after_stop(&self) -> bool {

@@ -10,10 +10,7 @@
       "script": "node scripts/dev-server.mjs",
       "cwd": "../frontend"
     },
-    "beforeBuildCommand": {
-      "script": "npm run prepare:sidecar -- --release && npm run build",
-      "cwd": "../frontend"
-    }
+    "beforeBuildCommand": "npm --prefix ../frontend run prepare:sidecar -- --release && npm --prefix ../frontend run build"
   },
   "app": {
     "withGlobalTauri": true,

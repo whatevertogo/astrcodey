@@ -18,7 +18,7 @@
 
 ## Rust 实现
 
-- 函数保持小而直白，优先清晰领域命名，不滥用 `utils`/`helper`/`manager`。
+- 函数直白，优先清晰领域命名，不滥用 `utils`/`helper`/`manager`。
 - 避免过宽的 `pub`，避免不必要的 `clone`/`unwrap`/`expect`/`panic`。
 - 不要在 `.await` 时持有锁。不要启动无生命周期、无错误处理、无 tracing 的后台任务。
 

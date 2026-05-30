@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     deferred_tools::{discovered_deferred_tool_names, tool_is_visible, unavailable_tool_guidance},
+    tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_exec::{ToolCallRuntimeContext, TurnToolContext, execute_tool_call},
     tool_json_repair::parse_and_repair_json,
     tool_scheduler::ToolScheduler,
@@ -108,6 +109,7 @@ impl ToolCalls {
         tool_calls: &[PendingToolCall],
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
+        deduplicator: &mut ToolCallDeduplicator,
     ) -> Result<Vec<PreparedToolCall>, TurnError> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
 
@@ -154,7 +156,7 @@ impl ToolCalls {
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
 
-            let (tool_input, outcome) = match pre_hook_result {
+            let (tool_input, mut outcome) = match pre_hook_result {
                 PreToolUseResult::ModifyInput { tool_input } => {
                     (tool_input, PreparedToolOutcome::Ready)
                 },
@@ -172,6 +174,17 @@ impl ToolCalls {
                 PreToolUseResult::Allow => (args, PreparedToolOutcome::Ready),
             };
 
+            let same_step =
+                deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
+            outcome = match (outcome, same_step) {
+                (_, SameStepCheck::Duplicate) => PreparedToolOutcome::DuplicateSameStep,
+                (PreparedToolOutcome::Ready, SameStepCheck::Primary) => PreparedToolOutcome::Ready,
+                (blocked @ PreparedToolOutcome::Blocked(_), SameStepCheck::Primary) => blocked,
+                (PreparedToolOutcome::DuplicateSameStep, SameStepCheck::Primary) => {
+                    PreparedToolOutcome::DuplicateSameStep
+                },
+            };
+
             send_tool_requested(publisher, tc, &tool_input).await?;
 
             let accesses = match &outcome {
@@ -183,7 +196,9 @@ impl ToolCalls {
                         Path::new(&self.turn.shared.working_dir),
                     )
                     .unwrap_or_else(|_| vec![ResourceAccess::all()]),
-                PreparedToolOutcome::Blocked(_) => Vec::new(),
+                PreparedToolOutcome::Blocked(_) | PreparedToolOutcome::DuplicateSameStep => {
+                    Vec::new()
+                },
             };
 
             prepared.push(PreparedToolCall {
@@ -220,6 +235,7 @@ impl ToolCalls {
         enum ResultSource {
             Blocked(ToolResult),
             Scheduled(oneshot::Receiver<(usize, ToolResult)>),
+            DuplicateSameStep,
         }
 
         let mut sources = Vec::with_capacity(input.prepared.len());
@@ -230,6 +246,9 @@ impl ToolCalls {
             match &call.outcome {
                 PreparedToolOutcome::Blocked(result) => {
                     sources.push(ResultSource::Blocked(result.clone()));
+                },
+                PreparedToolOutcome::DuplicateSameStep => {
+                    sources.push(ResultSource::DuplicateSameStep);
                 },
                 PreparedToolOutcome::Ready => {
                     let executable = call.to_executable();
@@ -251,6 +270,13 @@ impl ToolCalls {
 
             let result = match source {
                 ResultSource::Blocked(result) => result,
+                ResultSource::DuplicateSameStep => {
+                    input
+                        .state
+                        .tool_deduplicator()
+                        .await_same_step_result(&input.prepared[position].call_id)
+                        .await
+                },
                 ResultSource::Scheduled(rx) => {
                     let (_index, result) = scheduler
                         .await_result(rx)
@@ -343,6 +369,13 @@ impl ToolCalls {
                         .emit_post_tool_use_failure(fail_ctx)
                         .await;
                 }
+            }
+
+            if !matches!(&call.outcome, PreparedToolOutcome::DuplicateSameStep) {
+                input
+                    .state
+                    .tool_deduplicator_mut()
+                    .finalize_result(&call.call_id, &result);
             }
 
             pending_results.push(PendingCommittedToolResult {
