@@ -178,11 +178,7 @@ impl TurnScheduler {
                 })
             },
             InputDelivery::InjectIfRunningElseStart => {
-                if self.registry.has_active(&session_id) {
-                    let turn_id = self
-                        .registry
-                        .active_turn_id(&session_id)
-                        .expect("has_active implies active_turn_id");
+                if let Some(turn_id) = self.registry.active_turn_id(&session_id) {
                     self.inject_internal(&session_id, text).await?;
                     Ok(DeliveryOutcome::Injected { turn_id })
                 } else {

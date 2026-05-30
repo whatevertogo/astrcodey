@@ -67,6 +67,7 @@ pub fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool
 #[derive(Debug, Default)]
 pub struct StreamEventSink {
     done_sent: bool,
+    fallback_call_id: u64,
 }
 
 impl StreamEventSink {
@@ -76,6 +77,14 @@ impl StreamEventSink {
 
     pub fn done_sent(&self) -> bool {
         self.done_sent
+    }
+
+    pub fn tool_call_id(&mut self, provider_id: Option<&str>) -> String {
+        if let Some(id) = provider_id.filter(|id| !id.is_empty()) {
+            return id.to_string();
+        }
+        self.fallback_call_id += 1;
+        format!("call_{}", self.fallback_call_id)
     }
 
     pub fn emit_done(
@@ -457,6 +466,7 @@ async fn parse_sse_response_with_event_type(
                         if !handle_event(&current_event_type, &event, tx) {
                             return Ok(());
                         }
+                        current_event_type.clear();
                     }
                 }
             }
@@ -752,6 +762,81 @@ mod tests {
 
         let lines = lines.lock().unwrap().clone();
         assert_eq!(lines, vec!["first", "second", "third"]);
+    }
+
+    #[tokio::test]
+    async fn typed_sse_event_type_resets_after_each_data_line() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      content-type: text/event-stream\r\n\
+                      connection: close\r\n\
+                      \r\n",
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(
+                    b"event: ping\n\
+                      data: {\"kind\":\"first\"}\n\
+                      \n\
+                      data: {\"kind\":\"second\"}\n\
+                      \n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = build_client(&LlmClientConfig::default()).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let response = client
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .unwrap();
+        let event_types = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&event_types);
+        parse_sse_response_with_event_type(
+            response,
+            &tx,
+            &|event_type, event, _| {
+                captured.lock().unwrap().push((
+                    event_type.to_string(),
+                    event
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                ));
+                true
+            },
+        )
+        .await
+        .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            event_types.lock().unwrap().clone(),
+            vec![
+                ("ping".into(), "first".into()),
+                (String::new(), "second".into()),
+            ]
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stream_event_sink_allocates_unique_fallback_call_ids() {
+        let mut sink = StreamEventSink::new();
+        assert_eq!(sink.tool_call_id(Some("provider-id")), "provider-id");
+        assert_eq!(sink.tool_call_id(None), "call_1");
+        assert_eq!(sink.tool_call_id(None), "call_2");
     }
 
     #[test]

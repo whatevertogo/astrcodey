@@ -269,14 +269,20 @@ impl ChannelRuntime {
         cfg: &TelegramChannelConfig,
     ) -> Result<String, ExtensionError> {
         let key = session_key(channel, external_id);
-        if let Some(session_id) = self
+        let cached_session_id = self
             .sessions_by_channel
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
-            .cloned()
-        {
-            return Ok(session_id);
+            .cloned();
+        if let Some(session_id) = cached_session_id {
+            if self.cached_session_alive(&session_id).await {
+                return Ok(session_id);
+            }
+            self.sessions_by_channel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
         }
         let working_dir = cfg
             .working_dir
@@ -297,6 +303,15 @@ impl ChannelRuntime {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, handle.session_id.clone());
         Ok(handle.session_id)
+    }
+
+    async fn cached_session_alive(&self, session_id: &str) -> bool {
+        matches!(
+            self.session_ops
+                .query_session(session_id, session_id)
+                .await,
+            Ok(status) if status.alive
+        )
     }
 
     async fn send_reply(
@@ -599,11 +614,14 @@ fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
     }
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0usize;
     for ch in text.chars() {
-        if current.chars().count() >= max_chars {
+        if current_len >= max_chars {
             chunks.push(std::mem::take(&mut current));
+            current_len = 0;
         }
         current.push(ch);
+        current_len += 1;
     }
     if !current.is_empty() {
         chunks.push(current);

@@ -557,7 +557,7 @@ impl ChildSessionCoordinator {
 
         for (parent_sid, child_sid) in pending.into_iter().rev() {
             if let Err(e) = scheduler.request_turn_shutdown(&child_sid).await {
-                tracing::debug!(
+                tracing::warn!(
                     parent_session_id = %parent_sid,
                     child_session_id = %child_sid,
                     error = %e,

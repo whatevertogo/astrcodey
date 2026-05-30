@@ -215,13 +215,13 @@ fn process_gemini_chunk(
 
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                let call_id = fc.get("id").and_then(|v| v.as_str()).unwrap_or(name);
+                let call_id = sink.tool_call_id(fc.get("id").and_then(|v| v.as_str()));
                 let args = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
                 let arguments_str = serde_json::to_string(&args).unwrap_or_default();
                 if !send_event(
                     tx,
                     LlmEvent::ToolCallStart {
-                        call_id: call_id.to_string(),
+                        call_id,
                         name: name.to_string(),
                         arguments: arguments_str,
                     },
@@ -437,5 +437,28 @@ mod tests {
             .count();
         assert_eq!(done_count, 1);
         assert!(sink.done_sent());
+    }
+
+    #[test]
+    fn gemini_fallback_call_ids_are_unique_without_provider_id() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sink = StreamEventSink::new();
+        let event = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [
+                    {"functionCall": {"name": "read", "args": {}}},
+                    {"functionCall": {"name": "read", "args": {}}}
+                ]}
+            }]
+        });
+        assert!(process_gemini_chunk(&event, &tx, &mut sink));
+
+        let call_ids: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                LlmEvent::ToolCallStart { call_id, .. } => Some(call_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_ids, vec!["call_1", "call_2"]);
     }
 }
