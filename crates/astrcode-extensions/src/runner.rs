@@ -1677,7 +1677,6 @@ mod tests {
                 ToolCapabilities {
                     paths: astrcode_core::tool::ToolSessionPaths {
                         store_dir: Some("D:/session".into()),
-                        ..Default::default()
                     },
                     ..Default::default()
                 },
