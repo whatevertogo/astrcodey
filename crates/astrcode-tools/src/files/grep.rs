@@ -7,16 +7,14 @@ use std::{
 };
 
 use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_support::hostpaths::resolve_path;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
 use serde::Deserialize;
 
-use super::shared::{
-    collect_grep_files, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
-    trunc,
-};
+use super::shared::{collect_grep_files, run_blocking, tool_call_id, trunc};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
@@ -125,10 +123,7 @@ impl Tool for GrepTool {
         let args: GrepArgs = serde_json::from_value(arguments.clone())
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
         let root = match args.path {
-            Some(ref raw) => match resolve_sandboxed_path(working_dir, raw) {
-                Ok(path) => path,
-                Err(_) => return Ok(vec![ResourceAccess::all()]),
-            },
+            Some(ref raw) => resolve_path(working_dir, raw),
             None => working_dir.to_path_buf(),
         };
         let recursive = args.recursive.unwrap_or_else(|| root.is_dir());
@@ -179,10 +174,7 @@ fn execute_grep_sync(
         ToolError::Execution(format!("regex: {e}{hint}"))
     })?;
     let root = match args.path {
-        Some(ref raw) => match resolve_sandboxed_path(&working_dir, raw) {
-            Ok(path) => path,
-            Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
-        },
+        Some(ref raw) => resolve_path(&working_dir, raw),
         None => working_dir.clone(),
     };
     let max_matches = args.max_matches.unwrap_or(250);
