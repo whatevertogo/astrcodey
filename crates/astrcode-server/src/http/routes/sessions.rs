@@ -515,5 +515,4 @@ mod tests {
         }
         assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
     }
-
 }

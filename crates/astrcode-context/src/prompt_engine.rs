@@ -91,9 +91,9 @@ const TOOL_GUIDANCE: &str =
      stay inside the working directory.\nAvoid `shell` when a dedicated tool exists.\n\n## Tool \
      Selection\n- Read file → `read`\n- Search file contents → `grep` | Match file paths by glob \
      → `glob` (required `pattern`, e.g. `**/*.rs`)\n- Edit file → `edit` | New file → `write` | \
-     Multi-file → `patch`\n- Commands → `shell` | Interactive → `terminal`\n- Progress → `todoWrite` | Plan/Code mode → `switchMode` | Skill → \
-     `Skill`\n- External MCP only → `tool_search_tool` (not for builtin tools like `glob`) | \
-     Delegate → `agent`";
+     Multi-file → `patch`\n- Commands → `shell` | Interactive → `terminal`\n- Progress → \
+     `todoWrite` | Plan/Code mode → `switchMode` | Skill → `Skill`\n- External MCP only → \
+     `tool_search_tool` (not for builtin tools like `glob`) | Delegate → `agent`";
 
 const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
 const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";

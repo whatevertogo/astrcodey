@@ -133,8 +133,7 @@ fn payload_details(payload: &EventPayload) -> String {
         }
         | EventPayload::ToolCallCompleted {
             call_id, tool_name, ..
-        }
-        => {
+        } => {
             format!("tool={tool_name} call={call_id}")
         },
         EventPayload::ToolOutputDelta {

@@ -137,5 +137,4 @@ mod tests {
         assert_eq!(update.fields.status, Some(ToolCallStatus::InProgress));
         assert!(update.fields.raw_output.is_some());
     }
-
 }

@@ -7,7 +7,9 @@ use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 
-use crate::{compact_circuit_breaker::CompactCircuitBreaker, tool_exec::InMemoryFileObservationStore};
+use crate::{
+    compact_circuit_breaker::CompactCircuitBreaker, tool_exec::InMemoryFileObservationStore,
+};
 
 /// 当前 session 使用的模型绑定；一次替换同时切换 provider 与模型标识。
 #[derive(Clone)]

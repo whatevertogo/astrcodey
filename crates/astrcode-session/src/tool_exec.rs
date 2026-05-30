@@ -14,9 +14,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    deferred_tools::suggest_tool_alias,
-    session::Session,
-    tool_types::ExecutableToolCall,
+    deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolCall,
     turn_publish::TurnEvents,
 };
 
@@ -148,8 +146,8 @@ fn error_tool_result(
         ),
         ToolError::Timeout(ms) => (
             format!("`{tool_name}` timed out after {ms}ms."),
-            "Retry with a smaller scope or a longer timeout if the command legitimately needs more \
-             time."
+            "Retry with a smaller scope or a longer timeout if the command legitimately needs \
+             more time."
                 .to_string(),
         ),
     };

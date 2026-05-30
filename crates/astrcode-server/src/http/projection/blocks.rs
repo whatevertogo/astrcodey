@@ -110,7 +110,9 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
     }
 }
 
-pub(in crate::http) fn messages_to_blocks(messages: &[SequencedLlmMessage]) -> Vec<ConversationBlockDto> {
+pub(in crate::http) fn messages_to_blocks(
+    messages: &[SequencedLlmMessage],
+) -> Vec<ConversationBlockDto> {
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 

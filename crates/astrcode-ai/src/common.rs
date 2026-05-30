@@ -802,21 +802,17 @@ mod tests {
             .unwrap();
         let event_types = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&event_types);
-        parse_sse_response_with_event_type(
-            response,
-            &tx,
-            &|event_type, event, _| {
-                captured.lock().unwrap().push((
-                    event_type.to_string(),
-                    event
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                ));
-                true
-            },
-        )
+        parse_sse_response_with_event_type(response, &tx, &|event_type, event, _| {
+            captured.lock().unwrap().push((
+                event_type.to_string(),
+                event
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ));
+            true
+        })
         .await
         .unwrap();
         drop(tx);
