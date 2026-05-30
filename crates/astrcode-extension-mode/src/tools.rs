@@ -63,11 +63,9 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
 pub fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
-        description: "Create or update the session plan (plan mode only).\n\nRequired headings: \
-                      Context, Goal, Scope, Implementation Steps, Verification, Dependencies and \
-                      Risks.\nOptional: Non-Goals, Existing Code to Reuse, Assumptions.\n\nUse \
-                      `upsertSessionPlan` with full plan markdown; see plan template for section \
-                      contracts."
+        description: "Create or update the session plan (plan mode only).\n\nProvide full plan \
+                      markdown in `content`. Structure the plan so it is concrete, ordered, and \
+                      executable for the current task."
             .into(),
         parameters: json!({
             "type": "object",
@@ -75,7 +73,7 @@ pub fn upsert_plan_tool_definition() -> ToolDefinition {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Full plan markdown including all required headings."
+                    "description": "Full plan markdown for the current session task."
                 }
             },
             "required": ["content"]
@@ -104,12 +102,7 @@ struct UpsertPlanArgs {
 /// Transition context messages for mode entry/exit.
 fn transition_context(from: &ModeId, to: &ModeId, user_initiated: bool) -> Option<String> {
     match (from.as_str(), to.as_str()) {
-        ("code", "plan") => Some(format!(
-            "{}\n\nCritical: You must ensure the plan follows the template format below \
-             exactly\n\n{}",
-            crate::prompts::plan_entry_prompt().trim(),
-            crate::prompts::plan_template().trim(),
-        )),
+        ("code", "plan") => Some(crate::prompts::plan_entry_prompt().trim().to_string()),
         ("plan", "code") if user_initiated => {
             Some(crate::prompts::plan_exit_prompt().trim().to_string())
         },
@@ -167,22 +160,7 @@ pub fn handle_switch_mode(
                     tool_metadata([("gateBlocked", json!("no_plan_artifact"))]),
                 ));
             },
-            Some(content) => {
-                let missing = store::validate_plan_headings(&content);
-                if !missing.is_empty() {
-                    return Ok(ToolResult::text(
-                        format!(
-                            "Plan artifact is incomplete. Missing headings: {}",
-                            missing.join(", ")
-                        ),
-                        true,
-                        tool_metadata([
-                            ("gateBlocked", json!("incomplete_plan")),
-                            ("missingHeadings", json!(missing)),
-                        ]),
-                    ));
-                }
-            },
+            Some(_content) => {},
         }
     }
 
@@ -246,19 +224,6 @@ pub fn handle_upsert_plan(
             ),
             true,
             tool_metadata([("currentMode", json!(state.current_mode))]),
-        ));
-    }
-
-    let missing = store::validate_plan_headings(&args.content);
-    if !missing.is_empty() {
-        return Ok(ToolResult::text(
-            format!(
-                "Plan is missing required headings: {}. Use the plan template:\n{}",
-                missing.join(", "),
-                crate::prompts::plan_template()
-            ),
-            true,
-            tool_metadata([("missingHeadings", json!(missing))]),
         ));
     }
 
@@ -365,8 +330,8 @@ mod tests {
 
         handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
-        let plan = crate::prompts::plan_template().replace("<title>", "test");
-        store::save_plan(&plan_dir, &plan).unwrap();
+        let plan = "# Plan: test\n\n## Goal\n\nDo something.\n";
+        store::save_plan(&plan_dir, plan).unwrap();
 
         let result = handle_switch_mode(json!({ "mode": "code" }), &mode_root, &plan_dir, &catalog)
             .expect("should succeed");
@@ -382,7 +347,7 @@ mod tests {
 
         handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
-        let plan = crate::prompts::plan_template().replace("<title>", "test plan");
+        let plan = "# Plan: test plan\n\n## Goal\n\nDo something.\n";
         let result = handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir)
             .expect("upsert should succeed");
 
@@ -405,9 +370,9 @@ mod tests {
     }
 
     #[test]
-    fn upsert_plan_rejects_incomplete_headings() {
-        let mode_root = test_root("upsert-incomplete").join("mode");
-        let plan_dir = test_root("upsert-incomplete").join("plan");
+    fn upsert_plan_accepts_freeform_content() {
+        let mode_root = test_root("upsert-freeform").join("mode");
+        let plan_dir = test_root("upsert-freeform").join("plan");
         let catalog = builtin_catalog();
 
         handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
@@ -419,8 +384,8 @@ mod tests {
         )
         .expect("should return result");
 
-        assert!(result.is_error);
-        assert!(result.content.contains("missing required headings"));
+        assert!(!result.is_error);
+        assert!(result.content.contains("created"));
     }
 
     #[test]
@@ -431,7 +396,7 @@ mod tests {
 
         handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
 
-        let plan = crate::prompts::plan_template().replace("<title>", "full test");
+        let plan = "# Plan: full test\n\n## Goal\n\nDo something.\n";
         handle_upsert_plan(json!({ "content": plan }), &mode_root, &plan_dir).unwrap();
 
         let exit =

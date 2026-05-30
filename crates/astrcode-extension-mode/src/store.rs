@@ -87,18 +87,6 @@ pub fn save_plan(plan_dir: &Path, content: &str) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Validate that plan content contains all required headings.
-pub fn validate_plan_headings(content: &str) -> Vec<String> {
-    crate::catalog::PLAN_REQUIRED_HEADINGS
-        .iter()
-        .filter(|heading| {
-            let pattern = format!("## {}", heading);
-            !content.contains(&pattern)
-        })
-        .map(|s| (*s).to_string())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,22 +118,6 @@ mod tests {
         save_mode_state(&root, &state).unwrap();
         let loaded = load_mode_state(&root).unwrap();
         assert_eq!(loaded, state);
-    }
-
-    #[test]
-    fn validate_plan_headings_detects_missing() {
-        let plan = "# Plan: test\n\n## Goal\n\n## Scope\n";
-        let missing = validate_plan_headings(plan);
-        assert!(missing.contains(&"Context".to_string()));
-        assert!(missing.contains(&"Verification".to_string()));
-        assert!(!missing.contains(&"Goal".to_string()));
-    }
-
-    #[test]
-    fn validate_plan_headings_accepts_complete_plan() {
-        let plan = crate::prompts::plan_template().replace("<title>", "test");
-        let missing = validate_plan_headings(&plan);
-        assert!(missing.is_empty());
     }
 
     #[test]

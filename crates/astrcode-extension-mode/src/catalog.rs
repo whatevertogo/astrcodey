@@ -32,16 +32,6 @@ impl std::fmt::Display for ModeId {
     }
 }
 
-/// Required headings for the plan artifact.
-pub const PLAN_REQUIRED_HEADINGS: &[&str] = &[
-    "Context",
-    "Goal",
-    "Scope",
-    "Implementation Steps",
-    "Verification",
-    "Dependencies and Risks",
-];
-
 /// Tools blocked in plan mode.
 const PLAN_RESTRICTED_TOOLS: &[&str] = &[];
 
