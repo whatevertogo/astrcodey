@@ -2,18 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, tool::FileObservationStore,
-    types::SessionId,
 };
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
 
 use crate::{
-    background::BackgroundTaskManager,
-    child_turn::{ChildTurnGuard, ChildTurnManager},
-    compact_circuit_breaker::CompactCircuitBreaker,
-    tool_exec::InMemoryFileObservationStore,
+    compact_circuit_breaker::CompactCircuitBreaker, tool_exec::InMemoryFileObservationStore,
 };
 
 /// 当前 session 使用的模型绑定；一次替换同时切换 provider 与模型标识。
@@ -25,12 +20,12 @@ pub struct SessionModelBinding {
 }
 
 impl SessionModelBinding {
-    pub fn llm(&self) -> &Arc<dyn LlmProvider> {
-        &self.llm
+    pub fn llm(&self) -> &dyn LlmProvider {
+        self.llm.as_ref()
     }
 
-    pub fn small_llm(&self) -> &Arc<dyn LlmProvider> {
-        &self.small_llm
+    pub fn small_llm(&self) -> &dyn LlmProvider {
+        self.small_llm.as_ref()
     }
 
     pub fn model_id(&self) -> &str {
@@ -42,7 +37,6 @@ impl SessionModelBinding {
 struct ToolResources {
     file_observation_store: Arc<dyn FileObservationStore>,
     registry: Mutex<Arc<ToolRegistry>>,
-    background_tasks: Arc<Mutex<BackgroundTaskManager>>,
 }
 
 /// 参与每次 turn 装配的可变配置与其派生缓存。
@@ -57,24 +51,6 @@ struct TurnConfiguration {
     /// 缓存的稳定前缀文本及其指纹（Identity → ProjectRules）。
     /// 首次构建后跨 turn 复用，compact 后清空触发全量重建。
     cached_stable_prefix: Mutex<Option<(String, String)>>,
-}
-
-/// 派生子 agent turn 的所有权与完成通知通道。
-struct ChildTurns {
-    manager: ChildTurnManager,
-    completed_tx: mpsc::UnboundedSender<SessionId>,
-    completed_rx: Mutex<mpsc::UnboundedReceiver<SessionId>>,
-}
-
-impl ChildTurns {
-    fn new() -> Self {
-        let (completed_tx, completed_rx) = mpsc::unbounded_channel();
-        Self {
-            manager: ChildTurnManager::new(),
-            completed_tx,
-            completed_rx: Mutex::new(completed_rx),
-        }
-    }
 }
 
 /// 单个 session 在当前进程内持有的瞬态状态。
@@ -99,7 +75,6 @@ pub struct SessionRuntimeState {
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_out: Arc<EventFanout<Event>>,
-    children: ChildTurns,
 }
 
 impl SessionRuntimeState {
@@ -118,7 +93,6 @@ impl SessionRuntimeState {
             tools: ToolResources {
                 file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
                 registry: Mutex::new(Arc::new(ToolRegistry::new())),
-                background_tasks: Arc::new(Mutex::new(BackgroundTaskManager::new())),
             },
             configuration: TurnConfiguration {
                 extra_system_prompt: Mutex::new(None),
@@ -130,7 +104,6 @@ impl SessionRuntimeState {
                 Duration::from_secs(60),
             )),
             event_out,
-            children: ChildTurns::new(),
         }
     }
 
@@ -171,32 +144,32 @@ impl SessionRuntimeState {
         Arc::clone(&self.tools.file_observation_store)
     }
 
-    pub fn tool_registry(&self) -> Arc<ToolRegistry> {
+    pub fn loaded_tool_registry(&self) -> Arc<ToolRegistry> {
         Arc::clone(&lock_parking(&self.tools.registry))
     }
 
-    pub fn set_tool_registry(&self, registry: Arc<ToolRegistry>) {
+    pub fn reset_tool_registry(&self) {
+        self.install_tool_registry(Arc::new(ToolRegistry::new()));
+    }
+
+    pub(crate) fn install_tool_registry(&self, registry: Arc<ToolRegistry>) {
         *lock_parking(&self.tools.registry) = registry;
     }
 
-    pub fn background_tasks(&self) -> Arc<Mutex<BackgroundTaskManager>> {
-        Arc::clone(&self.tools.background_tasks)
-    }
-
-    pub fn extra_system_prompt(&self) -> Option<String> {
-        lock_parking(&self.configuration.extra_system_prompt).clone()
-    }
-
-    pub fn set_extra_system_prompt(&self, prompt: Option<String>) {
-        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
-    }
-
-    pub fn tool_policy(&self) -> Option<ChildToolPolicy> {
+    pub fn child_tool_policy(&self) -> Option<ChildToolPolicy> {
         lock_parking(&self.configuration.tool_policy).clone()
     }
 
-    pub fn set_tool_policy(&self, policy: Option<ChildToolPolicy>) {
+    pub(crate) fn apply_child_tool_policy(&self, policy: Option<ChildToolPolicy>) {
         *lock_parking(&self.configuration.tool_policy) = policy;
+    }
+
+    pub fn prompt_extra(&self) -> Option<String> {
+        lock_parking(&self.configuration.extra_system_prompt).clone()
+    }
+
+    pub fn update_prompt_extra(&self, prompt: Option<String>) {
+        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
     }
 
     pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
@@ -207,11 +180,11 @@ impl SessionRuntimeState {
         lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
     }
 
-    pub fn cached_stable_prefix(&self) -> Option<(String, String)> {
+    pub fn stable_prefix_cache(&self) -> Option<(String, String)> {
         lock_parking(&self.configuration.cached_stable_prefix).clone()
     }
 
-    pub fn set_cached_stable_prefix(&self, text: String, fingerprint: String) {
+    pub(crate) fn store_stable_prefix_cache(&self, text: String, fingerprint: String) {
         *lock_parking(&self.configuration.cached_stable_prefix) = Some((text, fingerprint));
     }
 
@@ -229,45 +202,6 @@ impl SessionRuntimeState {
     pub(crate) fn fanout(&self, event: Event) {
         self.event_out.send(event);
     }
-
-    // ── 子 agent 管理 ──────────────────────────────────────────
-
-    pub fn child_turn_manager(&self) -> &ChildTurnManager {
-        &self.children.manager
-    }
-
-    pub fn completed_tx(&self) -> mpsc::UnboundedSender<SessionId> {
-        self.children.completed_tx.clone()
-    }
-
-    /// 消费完成信号通道并收集已完成的子 turn guard。非阻塞。
-    /// 消费子 turn 完成通知 channel 中积压的 signal，再收集已完成的 guard。
-    /// signal 本身不含 payload，仅作唤醒；真正状态在 `ChildTurnManager` 内。
-    pub fn drain_completed(&self) -> Vec<Arc<ChildTurnGuard>> {
-        let mut rx = self.children.completed_rx.lock();
-        while rx.try_recv().is_ok() {}
-        self.children.manager.collect_completed()
-    }
-
-    /// 主清理路径：同步 abort 所有子 turn 并等完成。
-    /// 调用方需在持有 `SessionManager` 时级联递归孙子。
-    pub fn abort_all_direct(&self) -> Vec<Arc<ChildTurnGuard>> {
-        self.children.manager.abort_all_direct()
-    }
-}
-
-// ── 兜底清理 ───────────────────────────────────────────────────
-
-impl Drop for SessionRuntimeState {
-    fn drop(&mut self) {
-        let guards = self.children.manager.abort_all_direct();
-        if !guards.is_empty() {
-            tracing::warn!(
-                count = guards.len(),
-                "SessionRuntimeState dropped without prior cleanup; child turns force-aborted"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -281,6 +215,7 @@ mod tests {
         llm::{LlmError, LlmEvent, LlmMessage, ModelLimits},
         tool::ToolDefinition,
     };
+    use tokio::sync::mpsc;
 
     use super::*;
 

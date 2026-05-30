@@ -75,11 +75,11 @@ impl CommandHandler {
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
                 let _ = self.scheduler.abort(&session_id).await;
-                self.scheduler.cleanup(&session_id).await;
+                self.scheduler.abort_and_cleanup(&session_id).await;
                 match self.runtime.session_manager().delete(&session_id).await {
                     Ok(()) => {
-                        if self.active_session_id.as_ref() == Some(&session_id) {
-                            self.active_session_id = None;
+                        if self.focused_session_id.as_ref() == Some(&session_id) {
+                            self.focused_session_id = None;
                         }
                     },
                     Err(e) => self.send_error(40401, &format!("Session not found: {e}")),

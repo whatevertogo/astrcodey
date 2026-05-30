@@ -10,8 +10,10 @@ mod exec;
 mod transport;
 mod tui;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
+use astrcode_protocol::framing::PROTOCOL_VERSION;
+use astrcode_server::bootstrap::ServerRuntime;
 use clap::{Parser, Subcommand};
 
 /// CLI 顶层参数结构。
@@ -35,7 +37,7 @@ enum Commands {
         #[arg(long)]
         jsonl: bool,
         /// 超时时间（秒）
-        #[arg(long, default_value = "300")]
+        #[arg(long, default_value = "600")]
         timeout: u64,
     },
     /// 启动 HTTP/SSE 后端服务器
@@ -57,7 +59,7 @@ enum Commands {
         output: Option<std::path::PathBuf>,
         /// 输出格式
         #[arg(long, default_value = "json")]
-        format: String,
+        format: EvalOutputFormat,
         /// 最大并发 case 数
         #[arg(long, default_value = "4")]
         concurrency: usize,
@@ -82,8 +84,26 @@ enum Commands {
 }
 
 /// 程序入口：解析命令行参数并分发到对应子命令处理函数。
+async fn bootstrap_runtime() -> Arc<ServerRuntime> {
+    match astrcode_server::bootstrap::bootstrap().await {
+        Ok(rt) => Arc::new(rt),
+        Err(e) => {
+            tracing::error!("Bootstrap failed: {e}");
+            std::process::exit(1);
+        },
+    }
+}
+
+#[cfg(feature = "dev-mode")]
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum EvalOutputFormat {
+    Json,
+    Markdown,
+    Md,
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // TUI 模式禁用 stderr 日志，避免破坏终端 UI
@@ -99,6 +119,7 @@ async fn main() {
         None | Some(Commands::Tui) => {
             if let Err(e) = tui::run().await {
                 eprintln!("TUI error: {}", e);
+                return ExitCode::from(1);
             }
         },
         Some(Commands::Exec {
@@ -107,39 +128,27 @@ async fn main() {
             timeout,
         }) => {
             if let Err(e) = exec::run(&prompt, jsonl, timeout).await {
-                eprintln!("Exec error: {}", e);
-                std::process::exit(1);
+                eprintln!("Exec error: {e}");
+                return ExitCode::from(1);
             }
         },
         Some(Commands::Server { addr }) => {
-            let runtime = match astrcode_server::bootstrap::bootstrap().await {
-                Ok(rt) => Arc::new(rt),
-                Err(e) => {
-                    tracing::error!("Bootstrap failed: {e}");
-                    std::process::exit(1);
-                },
-            };
+            let runtime = bootstrap_runtime().await;
             if let Err(e) = astrcode_server::http::run_http_server(runtime, addr).await {
                 tracing::error!("Server failed: {e}");
-                std::process::exit(1);
+                return ExitCode::from(1);
             }
         },
         Some(Commands::Acp) => {
-            let runtime = match astrcode_server::bootstrap::bootstrap().await {
-                Ok(rt) => Arc::new(rt),
-                Err(e) => {
-                    tracing::error!("Bootstrap failed: {e}");
-                    std::process::exit(1);
-                },
-            };
+            let runtime = bootstrap_runtime().await;
             if let Err(e) = astrcode_server::acp::run_acp_server(runtime).await {
                 tracing::error!("ACP server failed: {e}");
-                std::process::exit(1);
+                return ExitCode::from(1);
             }
         },
         Some(Commands::Version) => {
             println!("astrcode v{}", env!("CARGO_PKG_VERSION"));
-            println!("protocol version: 1");
+            println!("protocol version: {PROTOCOL_VERSION}");
         },
         #[cfg(feature = "dev-mode")]
         Some(Commands::Eval {
@@ -164,27 +173,29 @@ async fn main() {
             };
             match astrcode_eval::run_eval(config).await {
                 Ok(report) => {
-                    let text = match format.as_str() {
-                        "markdown" | "md" => report.to_markdown(),
-                        _ => report.to_json(),
+                    let text = match format {
+                        EvalOutputFormat::Markdown | EvalOutputFormat::Md => report.to_markdown(),
+                        EvalOutputFormat::Json => report.to_json(),
                     };
                     if let Some(path) = output {
                         if let Err(e) = std::fs::write(&path, &text) {
                             eprintln!("Failed to write report: {e}");
-                            std::process::exit(1);
+                            return ExitCode::from(1);
                         }
                     } else {
                         println!("{text}");
                     }
                     if !report.all_passed() {
-                        std::process::exit(1);
+                        return ExitCode::from(1);
                     }
                 },
                 Err(e) => {
                     eprintln!("Eval error: {e}");
-                    std::process::exit(1);
+                    return ExitCode::from(1);
                 },
             }
         },
     }
+
+    ExitCode::SUCCESS
 }

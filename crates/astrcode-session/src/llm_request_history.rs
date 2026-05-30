@@ -2,11 +2,9 @@
 
 use astrcode_context::prompt_engine::system_messages_from_prompt;
 use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
     storage::SessionReadModel,
 };
-
-use crate::llm_stream::provider_visible_messages;
 
 /// assembler / should_auto_compact 用的「可见历史」（无 system 行）。
 pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<LlmMessage> {
@@ -63,14 +61,17 @@ mod tests {
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::system("stale system in store"),
             updated_seq: 2,
+            source: None,
         });
         model.context_messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("ctx"),
             updated_seq: 3,
+            source: None,
         });
         model
     }
@@ -125,10 +126,12 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 1,
+            source: None,
         });
         model.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hi"),
             updated_seq: 2,
+            source: None,
         });
         assert_eq!(committed_tool_result_content_len(&model), 6);
     }

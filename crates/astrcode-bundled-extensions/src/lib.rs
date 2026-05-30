@@ -68,6 +68,10 @@ pub fn bundled_extensions(
     if is_enabled(extension_states, "astrcode.memory") {
         extensions.push(astrcode_extension_memory::extension());
     }
+    #[cfg(feature = "channels")]
+    if is_enabled(extension_states, "astrcode-channels") {
+        extensions.push(astrcode_extension_channels::extension());
+    }
 
     extensions
 }
@@ -86,6 +90,8 @@ pub fn bundled_extension_ids() -> Vec<&'static str> {
         "astrcode-mode",
         #[cfg(feature = "memory")]
         "astrcode.memory",
+        #[cfg(feature = "channels")]
+        "astrcode-channels",
     ]
 }
 

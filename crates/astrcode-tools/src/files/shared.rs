@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
-    hash::Hasher,
-    io::Read as IoRead,
+    fs::File,
+    io::{BufRead, BufReader, Read as IoRead},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -12,9 +12,23 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 pub(super) const DEFAULT_MAX_CHARS: usize = 20_000;
 pub(super) const MAX_INLINE_IMAGE_BASE64_BYTES: u64 = 1024 * 1024;
+/// 未指定行分页时允许全量读入的最大字节数，超出需使用 offset/limit。
+pub(super) const MAX_UNPAGINATED_READ_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 在 Tokio worker 上运行阻塞 I/O，避免拖慢运行时。
+pub(crate) async fn run_blocking<F, T>(f: F) -> Result<T, ToolError>
+where
+    F: FnOnce() -> Result<T, ToolError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|join_error| ToolError::Execution(format!("blocking task failed: {join_error}")))?
+}
 
 const IMAGE_TYPES: &[(&str, &str)] = &[
     ("png", "image/png"),
@@ -40,6 +54,7 @@ pub(super) struct FileCollectOptions {
     pub(super) respect_gitignore: bool,
     pub(super) skip_vcs_dirs: bool,
     pub(super) skip_build_output: bool,
+    pub(super) include_dirs: bool,
 }
 
 const VCS_DIR_NAMES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
@@ -67,7 +82,7 @@ pub(super) fn collect_candidate_files(
     root: &Path,
     pattern: Option<&str>,
     options: FileCollectOptions,
-) -> std::io::Result<Vec<(String, std::time::SystemTime)>> {
+) -> std::io::Result<Vec<(String, std::time::SystemTime, bool)>> {
     let globset = pattern.map(build_globset).transpose()?;
     let mut builder = WalkBuilder::new(root);
     builder
@@ -92,7 +107,7 @@ pub(super) fn collect_candidate_files(
         let path = entry.path();
         if !entry
             .file_type()
-            .is_some_and(|file_type| file_type.is_file())
+            .is_some_and(|ft| ft.is_file() || (options.include_dirs && ft.is_dir()))
         {
             continue;
         }
@@ -107,11 +122,12 @@ pub(super) fn collect_candidate_files(
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .unwrap_or(std::time::UNIX_EPOCH);
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
         let display_path = path
             .strip_prefix(working_dir)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| path.display().to_string());
-        files.push((display_path, modified));
+        files.push((display_path, modified, is_dir));
     }
     Ok(files)
 }
@@ -142,11 +158,12 @@ pub(super) fn collect_grep_files(
             respect_gitignore: true,
             skip_vcs_dirs: true,
             skip_build_output: true,
+            include_dirs: false,
         },
     )?;
     Ok(candidates
         .into_iter()
-        .map(|(path, _)| resolve_path(working_dir, Path::new(&path)))
+        .map(|(path, _, _)| resolve_path(working_dir, Path::new(&path)))
         .filter(|path| matches_file_type_filter(path, file_type))
         .collect())
 }
@@ -219,8 +236,8 @@ pub(super) fn image_media_type(path: &Path) -> Option<&'static str> {
         .find_map(|(candidate, media_type)| (*candidate == ext).then_some(*media_type))
 }
 
-pub(super) fn read_image_file(
-    ctx: &ToolExecutionContext,
+pub(super) fn read_image_file_result(
+    call_id: String,
     started_at: Instant,
     path: &Path,
     media_type: &str,
@@ -243,8 +260,8 @@ pub(super) fn read_image_file(
             "maxBase64Bytes".into(),
             serde_json::json!(MAX_INLINE_IMAGE_BASE64_BYTES),
         );
-        return Ok(error_result(
-            ctx,
+        return Ok(error_result_with_call_id(
+            call_id,
             started_at,
             format!(
                 "image payload would expand to about {estimated_base64_bytes} bytes after base64 \
@@ -261,7 +278,7 @@ pub(super) fn read_image_file(
     })
     .to_string();
     Ok(ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content,
         is_error: false,
         error: None,
@@ -272,46 +289,71 @@ pub(super) fn read_image_file(
 
 /// Resolve `raw` relative to `working_dir` and verify it stays within the sandbox.
 ///
-/// Returns the resolved absolute path on success, or a `ToolResult` error for
-/// path-traversal violations. Callers typically match on the result:
-///
-/// ```ignore
-/// let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
-/// let Ok(path) = path else { return Ok(path.unwrap_err()) };
-/// ```
-pub(super) fn resolve_sandboxed_path(
-    working_dir: &Path,
-    raw: &Path,
-    ctx: &ToolExecutionContext,
-    started_at: Instant,
-) -> Result<PathBuf, ToolResult> {
+/// On failure the returned `PathBuf` is the escaped absolute path (for metadata).
+pub(super) fn resolve_sandboxed_path(working_dir: &Path, raw: &Path) -> Result<PathBuf, PathBuf> {
     let path = resolve_path(working_dir, raw);
-    if !is_path_within(&path, working_dir) {
-        return Err(error_result(
-            ctx,
-            started_at,
-            format!("path escapes working directory: {}", path.display()),
-            BTreeMap::from([
-                ("path".into(), serde_json::json!(path.display().to_string())),
-                ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-            ]),
-        ));
+    if is_path_within(&path, working_dir) {
+        Ok(path)
+    } else {
+        Err(path)
     }
-    Ok(path)
+}
+
+pub(super) fn sandbox_escape_result(
+    call_id: String,
+    started_at: Instant,
+    escaped: &Path,
+) -> ToolResult {
+    ToolResult {
+        call_id,
+        content: format!("path escapes working directory: {}", escaped.display()),
+        is_error: true,
+        error: Some(format!(
+            "path escapes working directory: {}",
+            escaped.display()
+        )),
+        metadata: BTreeMap::from([
+            (
+                "path".into(),
+                serde_json::json!(escaped.display().to_string()),
+            ),
+            ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
+        ]),
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }
+}
+
+/// 按行分页读取文本，避免大文件全量读入内存。
+pub(super) fn read_lines_segment(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> std::io::Result<(Vec<String>, usize)> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut collected = Vec::new();
+    let mut total_lines = 0usize;
+    for line in reader.lines() {
+        let line = line?;
+        if total_lines >= offset && collected.len() < limit {
+            collected.push(line);
+        }
+        total_lines += 1;
+    }
+    Ok((collected, total_lines))
 }
 
 pub(crate) fn tool_call_id(ctx: &ToolExecutionContext) -> String {
     ctx.tool_call_id.clone().unwrap_or_default()
 }
 
-pub(super) fn error_result(
-    ctx: &ToolExecutionContext,
+pub(super) fn error_result_with_call_id(
+    call_id: String,
     started_at: Instant,
     error: String,
     metadata: BTreeMap<String, Value>,
 ) -> ToolResult {
     ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content: error.clone(),
         is_error: true,
         error: Some(error),
@@ -385,9 +427,9 @@ pub(super) fn find_unique_occurrence(
 }
 
 /// 构造"文件未找到"的工具返回结果。
-pub(super) fn not_found(ctx: &ToolExecutionContext, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn not_found_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content: format!("Not found: {}", p.display()),
         is_error: false,
         error: None,
@@ -400,9 +442,9 @@ pub(super) fn not_found(ctx: &ToolExecutionContext, started_at: Instant, p: &Pat
 }
 
 /// 构造"路径是目录"的工具返回结果。
-pub(super) fn directory(ctx: &ToolExecutionContext, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn directory_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content: format!("Is a directory: {} — use find or shell ls", p.display()),
         is_error: false,
         error: None,
@@ -415,9 +457,9 @@ pub(super) fn directory(ctx: &ToolExecutionContext, started_at: Instant, p: &Pat
 }
 
 /// 构造"二进制文件"的工具返回结果。
-pub(super) fn binary(ctx: &ToolExecutionContext, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn binary_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content: format!("Binary file: {}", p.display()),
         is_error: false,
         error: None,
@@ -461,21 +503,21 @@ pub(super) fn capture_file_observation(path: &Path) -> std::io::Result<FileObser
         .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64);
 
     let mut file = std::fs::File::open(path)?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = Sha256::new();
     let mut buffer = [0u8; FILE_OBSERVATION_HASH_BUFFER_BYTES];
     loop {
         let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
-        hasher.write(&buffer[..bytes_read]);
+        hasher.update(&buffer[..bytes_read]);
     }
 
     Ok(FileObservation {
         path: path.to_string_lossy().to_string(),
         bytes: metadata.len(),
         modified_unix_nanos,
-        content_fingerprint: format!("{:016x}", hasher.finish()),
+        content_fingerprint: format!("{:x}", hasher.finalize()),
     })
 }
 
@@ -488,27 +530,25 @@ fn observation_matches(previous: &FileObservation, current: &FileObservation) ->
 }
 
 /// 记录文件观察快照到 store。
-pub(super) fn remember_file_observation(
-    ctx: &ToolExecutionContext,
+pub(super) fn remember_file_observation_with_store(
+    store: Option<&std::sync::Arc<dyn FileObservationStore>>,
     path: &Path,
 ) -> std::io::Result<FileObservation> {
     let observation = capture_file_observation(path)?;
-    if let Some(store) = &ctx.capabilities.file_observation_store {
+    if let Some(store) = store {
         store.remember(observation.clone());
     }
     Ok(observation)
 }
 
 /// 检查文件是否在上次观察后被外部修改。
-///
-/// 如果存在之前的观察记录且当前文件与记录不一致，返回错误提示。
-/// 如果没有之前的观察记录，返回 `Ok(None)` 允许编辑继续。
-pub(super) fn stale_file_guard_result(
-    ctx: &ToolExecutionContext,
+pub(super) fn stale_file_guard_with_store(
+    store: Option<&std::sync::Arc<dyn FileObservationStore>>,
+    call_id: String,
     path: &Path,
     started_at: Instant,
 ) -> Result<Option<ToolResult>, ToolError> {
-    let Some(store) = &ctx.capabilities.file_observation_store else {
+    let Some(store) = store else {
         return Ok(None);
     };
     let Some(previous) = store.load(&path.to_string_lossy()) else {
@@ -521,7 +561,7 @@ pub(super) fn stale_file_guard_result(
     }
 
     Ok(Some(ToolResult {
-        call_id: tool_call_id(ctx),
+        call_id,
         content: format!(
             "File changed on disk after the last read in this session. Call read on '{}' first, \
              then retry edit.",
@@ -547,7 +587,7 @@ pub(super) fn stale_file_guard_result(
 /// 返回 `(diff_text, insertions, deletions)`。diff_text 使用 unified format，
 /// 限制最大行数避免 metadata 膨胀。
 pub(super) fn compute_unified_diff(
-    _path: &str,
+    path: &str,
     old: &str,
     new: &str,
     max_diff_lines: usize,
@@ -563,7 +603,7 @@ pub(super) fn compute_unified_diff(
     let unified = diff
         .unified_diff()
         .context_radius(3)
-        .header("a", "b")
+        .header(path, path)
         .to_string();
 
     for (line_count, line) in unified.lines().enumerate() {

@@ -99,7 +99,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         caps.small_llm(),
         "mock-model".into(),
     ));
-    runtime_a.set_extra_system_prompt(Some("child agent body".into()));
+    runtime_a.update_prompt_extra(Some("child agent body".into()));
     let session_a = Session::create_with_id(
         Arc::clone(&store),
         sid.clone(),
@@ -134,7 +134,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         caps.small_llm(),
         "mock-model".into(),
     ));
-    assert!(runtime_b.extra_system_prompt().is_none());
+    assert!(runtime_b.prompt_extra().is_none());
     let session_b = Session::open(
         Arc::clone(&store),
         sid.clone(),
@@ -164,7 +164,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         "extra_system_prompt must survive refresh_prompt(None) on a reopened session",
     );
     assert_eq!(
-        runtime_b.extra_system_prompt().as_deref(),
+        runtime_b.prompt_extra().as_deref(),
         Some("child agent body"),
         "runtime_b should be hydrated from projection",
     );

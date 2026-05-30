@@ -41,7 +41,7 @@ fn result_body(tool_name: &str, result: &ToolResult) -> String {
     }
     match tool_name {
         "read" => format!("⎿ read {} line(s)", content.lines().count().max(1)),
-        "find" => prefixed_lines("matched files", content, 8),
+        "glob" => prefixed_lines("matched files", content, 8),
         "grep" => prefixed_lines("matches", content, 10),
         "write" | "edit" | "patch" => prefixed_lines("result", content, 12),
         _ => prefixed_lines("output", content, 16),

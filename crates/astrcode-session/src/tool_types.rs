@@ -2,11 +2,11 @@
 //!
 //! 包含工具调用从 LLM 流式响应中积累、预处理、到最终执行各阶段的类型。
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolResult};
 
-use super::turn_publish::TurnPublisher;
+use super::turn_publish::TurnEvents;
 use crate::turn_stages::TurnState;
 
 /// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
@@ -32,14 +32,14 @@ pub struct ExecuteToolCalls<'a> {
     pub prepared: &'a [PreparedToolCall],
     pub tools: &'a [ToolDefinition],
     pub state: &'a mut TurnState,
-    pub publisher: std::sync::Arc<TurnPublisher>,
+    pub publisher: std::sync::Arc<TurnEvents>,
 }
 
 pub struct CommitToolResults<'a> {
     pub prepared: &'a [PreparedToolCall],
-    pub results: BTreeMap<usize, ToolResult>,
+    pub results: HashMap<usize, ToolResult>,
     pub state: &'a mut TurnState,
-    pub publisher: std::sync::Arc<TurnPublisher>,
+    pub publisher: std::sync::Arc<TurnEvents>,
 }
 
 pub struct PendingCommittedToolResult {
@@ -47,7 +47,7 @@ pub struct PendingCommittedToolResult {
     pub tool_name: String,
     pub result: ToolResult,
     pub arguments: String,
-    pub arguments_json: Option<serde_json::Value>,
+    pub arguments_json: serde_json::Value,
 }
 
 pub enum ToolExecutionStep {

@@ -4,10 +4,10 @@
 
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     storage::{
-        AgentSessionLinkView, AgentSessionStatus, BackgroundToolCallView, CompactBoundaryView,
-        SequencedLlmMessage, SessionReadModel,
+        AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, SequencedLlmMessage,
+        SessionReadModel,
     },
     types::SessionId,
 };
@@ -60,7 +60,6 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.extra_system_prompt = None;
             model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
-            model.background_tool_calls.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
             model.extension_events = Default::default();
@@ -89,34 +88,32 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             child_session_id,
             final_session_id,
             summary,
-        }
-        | EventPayload::AgentSessionFailed {
-            child_session_id,
-            final_session_id,
-            error: summary,
         } => {
             if let Some(link) = model
                 .agent_sessions
                 .iter_mut()
                 .find(|l| l.child_session_id == *child_session_id)
             {
-                link.status = match &event.payload {
-                    EventPayload::AgentSessionCompleted { .. } => AgentSessionStatus::Completed,
-                    EventPayload::AgentSessionFailed { .. } => AgentSessionStatus::Failed,
-                    _ => unreachable!(),
-                };
+                link.status = AgentSessionStatus::Completed;
                 link.final_session_id = Some(final_session_id.clone());
-                match &event.payload {
-                    EventPayload::AgentSessionCompleted { .. } => {
-                        link.summary = Some(summary.clone());
-                        link.error = None;
-                    },
-                    EventPayload::AgentSessionFailed { .. } => {
-                        link.error = Some(summary.clone());
-                        link.summary = None;
-                    },
-                    _ => unreachable!(),
-                }
+                link.summary = Some(summary.clone());
+                link.error = None;
+            }
+        },
+        EventPayload::AgentSessionFailed {
+            child_session_id,
+            final_session_id,
+            error,
+        } => {
+            if let Some(link) = model
+                .agent_sessions
+                .iter_mut()
+                .find(|l| l.child_session_id == *child_session_id)
+            {
+                link.status = AgentSessionStatus::Failed;
+                link.final_session_id = Some(final_session_id.clone());
+                link.error = Some(error.clone());
+                link.summary = None;
             }
         },
         EventPayload::AgentSessionRecycled { child_session_id } => {
@@ -139,12 +136,20 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 model.messages.push(SequencedLlmMessage {
                     message: LlmMessage::user(text),
                     updated_seq: event_seq,
+                    source: None,
                 });
             }
         },
         EventPayload::TurnCompleted { .. } => {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
+        },
+        EventPayload::TurnAbortedContext => {
+            model.messages.push(SequencedLlmMessage {
+                message: turn_aborted_context_message(),
+                updated_seq: event_seq,
+                source: Some(TURN_ABORTED_SOURCE.into()),
+            });
         },
         EventPayload::AssistantMessageStarted { .. } => {
             model.phase = Phase::Streaming;
@@ -159,6 +164,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.messages.push(SequencedLlmMessage {
                 message: msg,
                 updated_seq: event_seq,
+                source: None,
             });
             model.phase = Phase::Thinking;
         },
@@ -189,6 +195,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                             reasoning_content: None,
                         },
                         updated_seq: event_seq,
+                        source: None,
                     });
                 }
             } else {
@@ -200,6 +207,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                         reasoning_content: None,
                     },
                     updated_seq: event_seq,
+                    source: None,
                 });
             }
             model.phase = Phase::CallingTool;
@@ -211,23 +219,8 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             ..
         } => {
             model.pending_tool_calls.remove(call_id);
-            if let Some(task_id) = result
-                .metadata
-                .get("task_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                model.background_tool_calls.insert(
-                    call_id.clone(),
-                    BackgroundToolCallView {
-                        task_id: task_id.into(),
-                        completed: !result
-                            .metadata
-                            .get("backgrounded")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
-                    },
-                );
-            }
+
+            // 始终 push（不再 update-in-place）
             model.messages.push(SequencedLlmMessage {
                 message: LlmMessage {
                     role: LlmRole::Tool,
@@ -240,6 +233,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     reasoning_content: None,
                 },
                 updated_seq: event_seq,
+                source: None,
             });
             model.phase = if model.pending_tool_calls.is_empty() {
                 Phase::Thinking
@@ -292,6 +286,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .map(|message| SequencedLlmMessage {
                     message,
                     updated_seq: event_seq,
+                    source: None,
                 })
                 .collect();
             let mut messages: Vec<SequencedLlmMessage> = retained_messages
@@ -300,6 +295,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .map(|message| SequencedLlmMessage {
                     message,
                     updated_seq: event_seq,
+                    source: None,
                 })
                 .collect();
             messages.extend(tail_messages);
@@ -319,6 +315,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .map(|message| SequencedLlmMessage {
                     message,
                     updated_seq: event_seq,
+                    source: None,
                 })
                 .collect();
             model.messages = retained_messages
@@ -327,6 +324,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .map(|message| SequencedLlmMessage {
                     message,
                     updated_seq: event_seq,
+                    source: None,
                 })
                 .collect();
             model.phase = Phase::Idle;
@@ -381,10 +379,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolOutputDelta { .. }
         | EventPayload::AgentRunStarted
-        | EventPayload::AgentRunCompleted { .. }
-        | EventPayload::ToolCallBackgrounded { .. }
-        | EventPayload::BackgroundTaskOutput { .. }
-        | EventPayload::BackgroundTaskCompleted { .. } => {},
+        | EventPayload::AgentRunCompleted { .. } => {},
     }
 }
 
@@ -393,7 +388,7 @@ mod tests {
     use astrcode_core::{
         event::{Event, EventPayload},
         extension::CompactStrategy,
-        llm::LlmMessage,
+        llm::{LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         types::{SessionId, new_message_id},
     };
 
@@ -578,6 +573,51 @@ mod tests {
         assert_eq!(
             link.status,
             astrcode_core::storage::AgentSessionStatus::Completed
+        );
+    }
+
+    #[test]
+    fn turn_aborted_context_is_provider_visible_but_source_marked() {
+        let session_id = SessionId::from("session-turn-aborted-context");
+        let events = vec![
+            event(
+                1,
+                &session_id,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "run a long command".into(),
+                },
+            ),
+            event(2, &session_id, EventPayload::TurnAbortedContext),
+            event(
+                3,
+                &session_id,
+                EventPayload::TurnCompleted {
+                    finish_reason: "aborted".into(),
+                },
+            ),
+        ];
+
+        let model = replay(session_id, &events);
+
+        let marker = model
+            .messages
+            .iter()
+            .find(|message| message.source.as_deref() == Some(TURN_ABORTED_SOURCE))
+            .expect("turn-aborted context should be projected");
+        assert_eq!(marker.message.role, LlmRole::User);
+        assert!(
+            marker
+                .message
+                .joined_display_text("")
+                .contains("<turn_aborted>")
+        );
+        assert!(
+            model
+                .provider_messages()
+                .iter()
+                .any(|message| message.joined_display_text("").contains("<turn_aborted>")),
+            "provider history should include the marker"
         );
     }
 }

@@ -104,7 +104,7 @@ fn tool_descriptions() -> Vec<ToolDefinition> {
             working_dir: working_dir.clone(),
         }
         .definition(),
-        FindFilesTool {
+        GlobTool {
             working_dir: working_dir.clone(),
         }
         .definition(),
@@ -115,10 +115,10 @@ fn tool_descriptions() -> Vec<ToolDefinition> {
 #[test]
 fn file_tool_descriptions_separate_search_read_and_write_roles() {
     let definitions = tool_descriptions();
-    let find_files = definitions
+    let glob_tool = definitions
         .iter()
-        .find(|definition| definition.name == "find")
-        .expect("find definition should exist");
+        .find(|definition| definition.name == "glob")
+        .expect("glob definition should exist");
     let grep = definitions
         .iter()
         .find(|definition| definition.name == "grep")
@@ -136,16 +136,29 @@ fn file_tool_descriptions_separate_search_read_and_write_roles() {
         .find(|definition| definition.name == "edit")
         .expect("edit definition should exist");
 
-    assert!(find_files.description.contains("glob pattern"));
-    assert!(grep.description.contains("regex or literal"));
-    assert!(grep.description.contains("files_with_matches"));
-    assert!(read_file.description.contains("Reads a file"));
+    assert!(glob_tool.description.contains("glob pattern"));
+    assert!(glob_tool.description.contains("When NOT to use"));
+    assert!(glob_tool.description.contains("Tips"));
+    assert!(grep.description.contains("When NOT to use"));
+    assert!(grep.description.contains("Tips"));
+    assert!(grep.description.contains("`glob`"));
+    assert!(
+        grep.parameters["properties"]["outputMode"]["description"]
+            .as_str()
+            .expect("outputMode description")
+            .contains("files_with_matches")
+    );
+    assert!(read_file.description.contains("Read a file"));
+    assert!(read_file.description.contains("When NOT to use"));
+    assert!(read_file.description.contains("Tips"));
     assert!(
         write_file
             .description
-            .contains("Creates or completely overwrites")
+            .contains("Create or completely overwrite")
     );
-    assert!(edit_file.description.contains("string replacements"));
+    assert!(edit_file.description.contains("string replacement"));
+    assert!(edit_file.description.contains("When NOT to use"));
+    assert!(edit_file.description.contains("Tips"));
 }
 
 #[tokio::test]
@@ -360,7 +373,7 @@ async fn edit_file_multi_edit_does_not_write_after_late_failure() {
 }
 
 #[tokio::test]
-async fn find_files_respects_gitignore_hidden_and_brace_glob() {
+async fn glob_respects_gitignore_hidden_and_brace_glob() {
     let temp = unique_temp_dir("find-files-filters");
     std::fs::write(temp.path().join(".gitignore"), "ignored/\n").expect("seed gitignore");
     std::fs::write(temp.path().join("visible.json"), "{}").expect("seed visible");
@@ -368,7 +381,7 @@ async fn find_files_respects_gitignore_hidden_and_brace_glob() {
     std::fs::write(temp.path().join(".hidden.json"), "{}").expect("seed hidden");
     std::fs::create_dir_all(temp.path().join("ignored")).expect("create ignored");
     std::fs::write(temp.path().join("ignored").join("skip.json"), "{}").expect("seed ignored");
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
@@ -391,12 +404,12 @@ async fn find_files_respects_gitignore_hidden_and_brace_glob() {
 }
 
 #[tokio::test]
-async fn find_files_reports_truncation_and_blocks_root_escape() {
+async fn glob_reports_truncation() {
     let temp = unique_temp_dir("find-files-truncated");
     for name in ["a.rs", "b.rs", "c.rs"] {
         std::fs::write(temp.path().join(name), "").expect("seed file");
     }
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
@@ -418,12 +431,35 @@ async fn find_files_reports_truncation_and_blocks_root_escape() {
 }
 
 #[tokio::test]
-async fn find_files_default_limit_keeps_path_lists_compact() {
+async fn glob_blocks_root_escape() {
+    let temp = unique_temp_dir("find-files-escape");
+    std::fs::write(temp.path().join("local.txt"), "").expect("seed file");
+    let tool = GlobTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({ "pattern": "*.txt", "root": "../" }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("glob should execute");
+
+    assert!(result.is_error, "{result:?}");
+    assert_eq!(
+        result.metadata["pathEscapesWorkingDir"],
+        serde_json::json!(true)
+    );
+}
+
+#[tokio::test]
+async fn glob_default_limit_keeps_path_lists_compact() {
     let temp = unique_temp_dir("find-files-default-limit");
     for index in 0..101 {
         std::fs::write(temp.path().join(format!("{index:03}.rs")), "").expect("seed file");
     }
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
@@ -440,12 +476,12 @@ async fn find_files_default_limit_keeps_path_lists_compact() {
 }
 
 #[tokio::test]
-async fn find_files_supports_offset_pagination() {
+async fn glob_supports_offset_pagination() {
     let temp = unique_temp_dir("find-files-offset");
     for name in ["a.rs", "b.rs", "c.rs"] {
         std::fs::write(temp.path().join(name), "").expect("seed file");
     }
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
@@ -608,7 +644,7 @@ async fn find_skips_build_output_dirs_by_default() {
         "",
     )
     .expect("seed nm");
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
@@ -631,7 +667,7 @@ async fn find_allows_build_dir_when_root_is_inside() {
     std::fs::write(target_dir.join("app.exe"), "binary").expect("seed target");
     std::fs::create_dir_all(target_dir.join("deps")).expect("create deps");
     std::fs::write(target_dir.join("deps").join("lib.rlib"), "").expect("seed deps");
-    let tool = FindFilesTool {
+    let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 

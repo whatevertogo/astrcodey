@@ -5,11 +5,24 @@
 
 use std::io::Write;
 
-use astrcode_client::client::AstrcodeClient;
+use astrcode_client::{client::AstrcodeClient, error::ClientError};
 use astrcode_core::event::EventPayload;
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use thiserror::Error;
 
 use crate::transport::InProcessTransport;
+
+#[derive(Debug, Error)]
+pub enum ExecError {
+    #[error(transparent)]
+    Client(#[from] ClientError),
+    #[error("exec timed out after {0}s")]
+    Timeout(u64),
+    #[error("write stdout: {0}")]
+    WriteStdout(#[from] std::io::Error),
+    #[error("serialize jsonl: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationAction {
@@ -18,26 +31,19 @@ enum NotificationAction {
 }
 
 /// 执行单次提示并等待响应完成。
-pub async fn run(prompt: &str, jsonl: bool, timeout_secs: u64) -> Result<(), String> {
+pub async fn run(prompt: &str, jsonl: bool, timeout_secs: u64) -> Result<(), ExecError> {
     let client = AstrcodeClient::new(InProcessTransport::start());
 
-    let _sid = client
-        .create_session(".")
-        .await
-        .map_err(|e| format!("Cannot create session: {e}"))?;
+    let _sid = client.create_session(".").await?;
 
-    let mut stream = client
-        .subscribe_events()
-        .await
-        .map_err(|e| format!("Cannot subscribe: {e}"))?;
+    let mut stream = client.subscribe_events().await?;
 
     client
         .send_command(&ClientCommand::SubmitPrompt {
             text: prompt.into(),
             attachments: vec![],
         })
-        .await
-        .map_err(|e| format!("Cannot submit: {e}"))?;
+        .await?;
 
     let deadline = (timeout_secs > 0)
         .then(|| tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs));
@@ -46,7 +52,7 @@ pub async fn run(prompt: &str, jsonl: bool, timeout_secs: u64) -> Result<(), Str
         let recv_result = if let Some(deadline) = deadline {
             tokio::time::timeout_at(deadline, stream.recv())
                 .await
-                .map_err(|_| format!("exec timed out after {timeout_secs}s"))?
+                .map_err(|_| ExecError::Timeout(timeout_secs))?
         } else {
             stream.recv().await
         };
@@ -72,7 +78,7 @@ fn render_notification(
     jsonl: bool,
     out: &mut impl Write,
     err: &mut impl Write,
-) -> Result<NotificationAction, String> {
+) -> Result<NotificationAction, ExecError> {
     if jsonl {
         write_jsonl(notification, out)?;
         return Ok(notification_action(notification));
@@ -81,30 +87,31 @@ fn render_notification(
     match notification {
         ClientNotification::Event(core_event) => match &core_event.payload {
             EventPayload::AssistantTextDelta { delta, .. } => {
-                write!(out, "{delta}").map_err(|e| format!("write stdout: {e}"))?;
+                write!(out, "{delta}")?;
                 Ok(NotificationAction::Continue)
             },
             EventPayload::TurnCompleted { .. } => {
-                writeln!(out).map_err(|e| format!("write stdout: {e}"))?;
+                writeln!(out)?;
                 Ok(NotificationAction::Finish)
             },
             EventPayload::ErrorOccurred { message, .. } => {
-                writeln!(err, "Error: {message}").map_err(|e| format!("write stderr: {e}"))?;
+                writeln!(err, "Error: {message}")?;
                 Ok(NotificationAction::Finish)
             },
             _ => Ok(NotificationAction::Continue),
         },
         ClientNotification::Error { message, .. } => {
-            writeln!(err, "Error: {message}").map_err(|e| format!("write stderr: {e}"))?;
+            writeln!(err, "Error: {message}")?;
             Ok(NotificationAction::Finish)
         },
         _ => Ok(NotificationAction::Continue),
     }
 }
 
-fn write_jsonl(notification: &ClientNotification, out: &mut impl Write) -> Result<(), String> {
-    serde_json::to_writer(&mut *out, notification).map_err(|e| format!("serialize jsonl: {e}"))?;
-    writeln!(out).map_err(|e| format!("write stdout: {e}"))
+fn write_jsonl(notification: &ClientNotification, out: &mut impl Write) -> Result<(), ExecError> {
+    serde_json::to_writer(&mut *out, notification)?;
+    writeln!(out)?;
+    Ok(())
 }
 
 fn notification_action(notification: &ClientNotification) -> NotificationAction {

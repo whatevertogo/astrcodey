@@ -70,7 +70,6 @@ pub(in crate::http) fn event_to_replay_deltas(
                 arguments: format_args_inline(tool_name, arguments),
                 text: String::new(),
                 status: ConversationBlockStatusDto::Streaming,
-                task_id: None,
                 metadata: None,
                 arguments_json: Some(arguments.clone()),
             },

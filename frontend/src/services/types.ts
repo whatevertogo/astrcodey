@@ -8,7 +8,7 @@ export type Phase =
   | 'compacting'
   | 'error'
 export type ToolOutputStream = 'stdout' | 'stderr'
-export type BlockStatus = 'streaming' | 'complete' | 'error' | 'backgrounded'
+export type BlockStatus = 'streaming' | 'complete' | 'error'
 
 // ── Request/Response ──
 
@@ -123,7 +123,12 @@ export interface ConversationControlState {
 }
 
 export type ConversationBlock =
-  | { kind: 'user'; id: string; text: string }
+  | {
+      kind: 'user'
+      id: string
+      text: string
+      source?: string
+    }
   | {
       kind: 'assistant'
       id: string
@@ -139,7 +144,6 @@ export type ConversationBlock =
       argumentsJson?: Record<string, unknown>
       text: string
       status: BlockStatus
-      taskId?: string
       metadata?: Record<string, unknown>
     }
   | { kind: 'error'; id: string; message: string }
@@ -197,7 +201,6 @@ export type ConversationDelta =
       arguments: string
       argumentsJson?: Record<string, unknown>
     }
-  | { kind: 'toolCallBackgrounded'; callId: string; taskId: string }
   | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
   | { kind: 'agentSessionRemoved'; childSessionId: string }
   | { kind: 'statusItemUpdate'; id: string; text: string }

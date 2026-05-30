@@ -217,16 +217,14 @@ fn skill_tool_metadata()
     let mut map = std::collections::HashMap::new();
     map.insert(
         SKILL_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Call `Skill` with the exact skill name from [Skills] before continuing when a task \
-             matches one of the listed skills.",
-        )
-        .caveat("Users may also refer to skills as slash commands, e.g. `/commit`.")
-        .caveat(
-            "If the response says the skill was not found, the available skill names are listed \
-             with it. Pick from that list — do not retry with a guessed name.",
-        )
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Discovery),
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
+            .caveat("Users may also refer to skills as slash commands, e.g. `/commit`.")
+            .caveat(
+                "If the skill was not found, pick from the listed [Skills] names — do not retry \
+                 with a guessed name.",
+            )
+            .example("Task matches `/commit` in [Skills] → Skill(\"commit\"), not ad-hoc prose.")
+            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Discovery),
     );
     map
 }
@@ -304,9 +302,11 @@ fn skill_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SKILL_TOOL_NAME.into(),
         description: "Load a named skill's instructions into the conversation. The skill's rules \
-                      will govern your subsequent behavior until the skill completes.\nCall this \
-                      when the current task matches a skill listed in [Skills], or when the user \
-                      invokes it via slash command (e.g. `/commit`)."
+                      govern your subsequent behavior until the skill completes.\n\nWhen NOT to \
+                      use:\n- No [Skills] entry matches the task\n- Simple one-shot work with no \
+                      skill-specific workflow\n\nTips:\n- Task matches a [Skills] description or \
+                      when_to_use\n- User invokes a slash command (e.g. `/commit`)\n\nUse the \
+                      exact skill name from [Skills]. Optional `args` are forwarded to the skill."
             .into(),
         parameters: json!({
             "type": "object",

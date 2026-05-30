@@ -4,7 +4,7 @@ pub(crate) fn tool_display_name(tool_name: &str) -> &str {
         "read" => "Read",
         "write" => "Write",
         "edit" => "Edit",
-        "find" => "Find",
+        "glob" => "Glob",
         "grep" => "Search",
         "patch" => "Patch",
         "agent" => "Task",

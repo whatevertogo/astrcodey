@@ -4,8 +4,9 @@ use astrcode_core::tool::*;
 use serde::Deserialize;
 
 use super::shared::{
-    clean_quotes, compute_unified_diff, find_unique_occurrence, remember_file_observation,
-    resolve_sandboxed_path, stale_file_guard_result, tool_call_id,
+    clean_quotes, compute_unified_diff, find_unique_occurrence,
+    remember_file_observation_with_store, resolve_sandboxed_path, run_blocking,
+    sandbox_escape_result, stale_file_guard_with_store, tool_call_id,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
 
@@ -71,50 +72,22 @@ impl Tool for EditFileTool {
         let started_at = Instant::now();
         let args: EditFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
-        let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
-        let Ok(path) = path else {
-            return Ok(path.unwrap_err());
-        };
-
-        // 检查文件是否在上次观察后被外部修改
-        if let Some(stale_result) = stale_file_guard_result(ctx, &path, started_at)? {
-            return Ok(stale_result);
-        }
-
+        let path_raw = args.path.clone();
         let operations = normalize_edit_operations(args)?;
-
-        let original = std::fs::read_to_string(&path)
-            .map_err(|e| ToolError::Execution(format!("read: {e}")))?;
-        let (updated, replacements) = apply_edit_operations(&original, &path, &operations)?;
-        std::fs::write(&path, &updated).map_err(|e| ToolError::Execution(format!("write: {e}")))?;
-
-        // 编辑成功后刷新观察快照，允许同一 session 在未发生外部改动时继续连续 edit
-        let _ = remember_file_observation(ctx, &path);
-
-        let metadata = BTreeMap::from([
-            ("path".into(), serde_json::json!(path.display().to_string())),
-            ("operationCount".into(), serde_json::json!(operations.len())),
-            ("replacements".into(), serde_json::json!(replacements)),
-            ("oldBytes".into(), serde_json::json!(original.len())),
-            ("newBytes".into(), serde_json::json!(updated.len())),
-        ]);
-        let mut metadata = metadata;
-        // 注入 unified diff 供 TUI/前端结构化渲染。
-        let display_path = path.display().to_string();
-        let (diff_text, ins, del) = compute_unified_diff(&display_path, &original, &updated, 80);
-        if !diff_text.is_empty() {
-            metadata.insert("diff".into(), serde_json::json!(diff_text));
-            metadata.insert("insertions".into(), serde_json::json!(ins));
-            metadata.insert("deletions".into(), serde_json::json!(del));
-        }
-        Ok(ToolResult {
-            call_id: tool_call_id(ctx),
-            content: format!("Edited {}", path.display()),
-            is_error: false,
-            error: None,
-            metadata,
-            duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        let call_id = tool_call_id(ctx);
+        let file_observation_store = ctx.capabilities.file_observation_store.clone();
+        let working_dir = self.working_dir.clone();
+        run_blocking(move || {
+            execute_edit_sync(
+                working_dir,
+                path_raw,
+                operations,
+                call_id,
+                file_observation_store,
+                started_at,
+            )
         })
+        .await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -122,16 +95,72 @@ impl Tool for EditFileTool {
     }
 }
 
+fn execute_edit_sync(
+    working_dir: PathBuf,
+    path_raw: PathBuf,
+    operations: Vec<EditOperation>,
+    call_id: String,
+    file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
+    started_at: Instant,
+) -> Result<ToolResult, ToolError> {
+    let path = match resolve_sandboxed_path(&working_dir, &path_raw) {
+        Ok(path) => path,
+        Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
+    };
+
+    if let Some(stale_result) = stale_file_guard_with_store(
+        file_observation_store.as_ref(),
+        call_id.clone(),
+        &path,
+        started_at,
+    )? {
+        return Ok(stale_result);
+    }
+
+    let original =
+        std::fs::read_to_string(&path).map_err(|e| ToolError::Execution(format!("read: {e}")))?;
+    let (updated, replacements) = apply_edit_operations(&original, &path, &operations)?;
+    std::fs::write(&path, &updated).map_err(|e| ToolError::Execution(format!("write: {e}")))?;
+
+    let _ = remember_file_observation_with_store(file_observation_store.as_ref(), &path);
+
+    let metadata = BTreeMap::from([
+        ("path".into(), serde_json::json!(path.display().to_string())),
+        ("operationCount".into(), serde_json::json!(operations.len())),
+        ("replacements".into(), serde_json::json!(replacements)),
+        ("oldBytes".into(), serde_json::json!(original.len())),
+        ("newBytes".into(), serde_json::json!(updated.len())),
+    ]);
+    let mut metadata = metadata;
+    let display_path = path.display().to_string();
+    let (diff_text, ins, del) = compute_unified_diff(&display_path, &original, &updated, 80);
+    if !diff_text.is_empty() {
+        metadata.insert("diff".into(), serde_json::json!(diff_text));
+        metadata.insert("insertions".into(), serde_json::json!(ins));
+        metadata.insert("deletions".into(), serde_json::json!(del));
+    }
+    Ok(ToolResult {
+        call_id,
+        content: format!("Edited {}", path.display()),
+        is_error: false,
+        error: None,
+        metadata,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    })
+}
+
 fn edit_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "edit".into(),
         description: concat!(
-            "Exact string replacements in an existing file. MUST `read` first.\n",
-            "- Preserve exact indentation from read output. Never include line numbers.\n",
-            "- `oldStr` must be unique. Use `replaceAll` for non-unique matches.\n",
-            "- Use `edits` for multiple atomic replacements. Use `patch` for multi-file changes.\n",
-            "- File modified externally since last read? Re-read and retry.",
+            "Exact string replacement in an existing file.\n\n",
+            "When NOT to use:\n",
+            "- New files → `write`\n",
+            "- Multi-file changes → `patch`\n",
+            "- Large rewrites of an existing file\n\n",
+            "Tips:\n",
+            "- Single-file, small, precise edits after `read`",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -144,11 +173,11 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "oldStr": {
                     "type": "string",
-                    "description": "Exact text to replace, copied verbatim from the read output."
+                    "description": "Exact text to replace, copied verbatim from read output (no line numbers). Must be unique unless replaceAll."
                 },
                 "newStr": {
                     "type": "string",
-                    "description": "Replacement text."
+                    "description": "Replacement text. Preserve indentation from read output."
                 },
                 "replaceAll": {
                     "type": "boolean",
@@ -156,7 +185,7 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Atomic ordered replacements. Do not combine with top-level oldStr/newStr.",
+                    "description": "Multiple atomic replacements in order. Re-read if the file changed externally since last read.",
                     "items": {
                         "type": "object",
                         "properties": {

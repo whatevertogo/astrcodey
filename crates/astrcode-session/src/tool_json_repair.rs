@@ -3,6 +3,8 @@
 //! 某些 LLM 提供者可能生成格式不正确的 JSON。
 //! 本模块提供解析和修复常见问题的工具函数。
 
+use std::borrow::Cow;
+
 /// 解析并尝试修复 JSON 参数。
 ///
 /// 某些 LLM 提供者（如 glm-5.1）可能生成格式不正确的 JSON。
@@ -42,8 +44,8 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
     // 某些 LLM（如 glm-5.1）会在 JSON 字符串内直接输出换行、制表符等，
     // 这不符合 JSON 规范（控制字符必须转义）。
     let escaped = escape_control_chars_in_json_strings(trimmed);
-    if escaped != trimmed {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&escaped) {
+    if escaped.as_ref() != trimmed {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(escaped.as_ref()) {
             tracing::debug!(
                 tool = %tool_name,
                 "Successfully repaired JSON by escaping control characters in strings"
@@ -53,8 +55,8 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
     }
 
     // 尝试修复策略 3：转义控制字符 + 关闭截断的字符串并补全缺失的闭合括号
-    let repaired = close_truncated_json(&escaped);
-    if repaired != escaped {
+    let repaired = close_truncated_json(escaped.as_ref());
+    if repaired != escaped.as_ref() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
             tracing::debug!(
                 tool = %tool_name,
@@ -90,7 +92,7 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
 /// 扫描输入，在 JSON 字符串值（双引号内）遇到未转义的控制字符时，
 /// 将其替换为对应的 JSON 转义序列（`\n`、`\r`、`\t`、`\uXXXX`）。
 /// 不在字符串内的内容（键名、括号、数字等）保持不变。
-fn escape_control_chars_in_json_strings(s: &str) -> String {
+fn escape_control_chars_in_json_strings(s: &str) -> Cow<'_, str> {
     let mut result = String::with_capacity(s.len());
     let mut in_string = false;
     let mut escape_next = false;
@@ -149,9 +151,9 @@ fn escape_control_chars_in_json_strings(s: &str) -> String {
 
     // 快速路径：没有控制字符需要转义，直接返回原字符串
     if !has_changes {
-        return s.to_string();
+        return Cow::Borrowed(s);
     }
-    result
+    Cow::Owned(result)
 }
 
 /// 关闭截断的 JSON：补上未闭合的字符串引号和缺失的括号。

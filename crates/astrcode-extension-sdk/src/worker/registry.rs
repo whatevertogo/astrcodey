@@ -67,7 +67,11 @@ impl HandlerRegistry {
         self.catalog.extension_events.push(event);
     }
 
-    pub(crate) fn register_tool(&mut self, def: crate::tool::ToolDefinition, handler: ToolHandlerFn) {
+    pub(crate) fn register_tool(
+        &mut self,
+        def: crate::tool::ToolDefinition,
+        handler: ToolHandlerFn,
+    ) {
         let name = def.name.clone();
         if self.tools.contains_key(&name) {
             panic!("duplicate tool registration: {name}");

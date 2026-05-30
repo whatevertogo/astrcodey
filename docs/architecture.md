@@ -18,7 +18,7 @@ Rust 实现的 AI coding agent，~79k 行（Rust ~72.2k + TypeScript ~6.8k），
 
 - `Session` 是系统唯一的持久事实来源，同时持有进程内瞬态资源
 - 持久层：`EventStore` 负责 JSONL 事件日志，`SessionReadModel` 是投影结果
-- 瞬态层：`SessionRuntimeState` 持有工具表快照、后台任务管理器、file observation store 和 session 级 broadcast channel
+- 瞬态层：`SessionRuntimeState` 持有工具表快照、file observation store 和 session 级 broadcast channel
 - 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `runtime_states` HashMap 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
 - 不需要"保存 session"——事件已经写回了
 
@@ -84,22 +84,23 @@ session-A (root)
 
 ### 下一 turn 输入队列（唯一）
 
-所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::notify_turn` → `pending_queues`。
-`TurnCompleted` 后由 `on_turn_completed` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
+所有「当前 turn 运行中，稍后处理」的输入走 `TurnScheduler::deliver_input(..., QueueIfRunningElseStart)` → `pending_queues`。
+Turn 结束后由 `finish_execution` **FIFO 每次弹出一条** 并 `submit`，与 HTTP 连发 prompt 行为一致。
 
 ### 启动顺序
 
 ```
-bootstrap_with → TurnScheduler + TurnRegistry
-              → ServerEventBus::new(fanout, scheduler)
-              → SessionManager::bind_event_bus
+bootstrap_with → ChildSessionCoordinator + TurnScheduler + TurnRegistry
+              → ServerEventBus::new(fanout)
+              → SessionEventReactor::new(scheduler)
+              → SessionManager::bind_event_bus + bind_event_reactor
               → CommandHandle::spawn
 ```
 
 ### 命令路径
 
 - **写**：`ClientCommand` / HTTP POST → `CommandHandle` → `CommandHandler`（Actor 串行）
-- **Turn**：`start_turn` / `notify_turn` → `TurnScheduler::submit`
+- **Turn**：`start_turn` → `TurnScheduler::submit`；连发 prompt → `deliver_input(QueueIfRunningElseStart)`
 - **读（HTTP）**：`ServerRuntime::session_manager()` / `event_store()` → projection DTO
 
 ---
@@ -180,8 +181,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
-- 每个工具声明 `ExecutionMode`：read-only 工具（find/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential
-- task 工具管理后台任务（list/cancel），shell 工具支持 `BackgroundPolicy::AutoAfter` 自动后台化
+- 每个工具声明 `ExecutionMode`：read-only 工具（glob/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential
 
 ### 工具管线
 

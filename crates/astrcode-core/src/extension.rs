@@ -22,7 +22,7 @@ use crate::{
     config::ModelSelection,
     llm::LlmProvider,
     storage::{EventReader, EventStore},
-    tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
+    tool::{SessionOperations, ToolDefinition, ToolPromptMetadata, ToolResult},
 };
 
 // ─── Extension Trait ─────────────────────────────────────────────────────
@@ -357,6 +357,11 @@ pub struct ExtensionHostServices {
     pub main_llm: Option<Arc<dyn LlmProvider>>,
     /// 小模型 provider（`activeSmallModel`；未配置时与主模型相同）。
     pub small_llm: Option<Arc<dyn LlmProvider>>,
+    /// 会话原子操作能力。
+    ///
+    /// 只注入给声明了 [`ExtensionCapability::SessionControl`] 的 trusted bundled
+    /// extension。磁盘 IPC 扩展仍通过 HostRouter 的能力门控访问子集。
+    pub session_ops: Option<Arc<dyn SessionOperations>>,
 }
 
 impl ExtensionHostServices {
@@ -370,7 +375,13 @@ impl ExtensionHostServices {
             session_read: Some(event_store),
             main_llm,
             small_llm,
+            session_ops: None,
         }
+    }
+
+    pub fn with_session_ops(mut self, session_ops: Arc<dyn SessionOperations>) -> Self {
+        self.session_ops = Some(session_ops);
+        self
     }
 }
 

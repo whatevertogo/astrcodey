@@ -302,8 +302,9 @@ async fn persist_compact_result_accepts_new_tail_events() {
         .latest_cursor()
         .await
         .unwrap()
-        .and_then(|c| c.parse::<u64>().ok())
-        .unwrap_or(0);
+        .expect("session should have cursor after seeding")
+        .parse::<u64>()
+        .expect("cursor should be u64 event seq");
 
     session
         .emit_durable(
@@ -488,8 +489,8 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
 
     let state = session.read_model().await.unwrap();
     let caps = test_caps(race_llm.clone(), context);
-    let extension_runner = Arc::clone(caps.extension_runner());
-    let context_assembler = Arc::clone(caps.context_assembler());
+    let extension_runner = caps.extension_runner_arc();
+    let context_assembler = caps.context_assembler_arc();
     let llm = caps.llm();
     let tools = session
         .refresh_tools(&state.working_dir)

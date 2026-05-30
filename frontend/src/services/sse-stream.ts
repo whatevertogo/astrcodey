@@ -1,5 +1,4 @@
 import { authHeaders, getBaseUrl } from './api'
-import { isTauriEnvironment } from '../lib/tauri'
 import { tryDecodeConversationStreamEnvelope } from './protocol'
 import type { ConversationStreamEnvelope } from './types'
 
@@ -9,12 +8,9 @@ function isAbortError(err: unknown): boolean {
   return err instanceof DOMException && err.name === 'AbortError'
 }
 
-async function resolveFetch(): Promise<typeof window.fetch> {
-  if (isTauriEnvironment()) {
-    const { fetch } = await import('@tauri-apps/plugin-http')
-    return fetch as unknown as typeof window.fetch
-  }
-  return window.fetch
+/** SSE 必须用 WebView 原生 fetch；Tauri plugin-http 会缓冲响应体直到连接结束。 */
+function streamFetch(): typeof window.fetch {
+  return window.fetch.bind(window)
 }
 
 export async function consumeSseStream(
@@ -27,12 +23,12 @@ export async function consumeSseStream(
   const url = `${getBaseUrl()}/api/sessions/${encodeURIComponent(sessionId)}/stream${params}`
   console.debug('[sse] connecting', { url, cursor })
 
-  const fetchFn = await resolveFetch()
   let response: Response
   try {
-    response = await fetchFn(url, {
+    response = await streamFetch()(url, {
       headers: {
         Accept: 'text/event-stream',
+        'Cache-Control': 'no-cache',
         ...authHeaders(),
       },
       signal,

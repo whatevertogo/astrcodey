@@ -50,16 +50,27 @@ impl RetryPolicy {
         attempt <= self.max_transport_retries
     }
 
-    /// 根据尝试次数计算指数退避延迟，并加入 ±25% 抖动。
+    /// 根据尝试次数计算指数退避延迟，并加入 ±25% 随机抖动。
     ///
     /// 加入抖动是为了在多个客户端同时重试时避免惊群效应。
     pub fn delay(&self, attempt: u32) -> Duration {
-        let base = self.base_delay_ms * 2u64.pow(attempt - 1);
-        // 简单的确定性抖动：使用尝试次数作为伪随机种子
+        let base = self.base_delay_ms * 2u64.pow(attempt.saturating_sub(1));
         let jitter = base / 4;
-        let offset = (attempt as u64 * 17 + base % 31) % (jitter * 2 + 1);
+        let span = jitter.saturating_mul(2);
+        let offset = random_jitter(span);
         Duration::from_millis(base.saturating_sub(jitter) + offset)
     }
+}
+
+fn random_jitter(span: u64) -> u64 {
+    if span == 0 {
+        return 0;
+    }
+    let mut bytes = [0_u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        return span / 2;
+    }
+    u64::from_le_bytes(bytes) % (span + 1)
 }
 
 #[cfg(test)]

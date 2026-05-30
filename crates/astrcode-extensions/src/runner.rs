@@ -493,7 +493,8 @@ impl ExtensionRunner {
             });
         let needs_host_services = capabilities.contains(&ExtensionCapability::SessionHistory)
             || capabilities.contains(&ExtensionCapability::MainModel)
-            || capabilities.contains(&ExtensionCapability::SmallModel);
+            || capabilities.contains(&ExtensionCapability::SmallModel)
+            || capabilities.contains(&ExtensionCapability::SessionControl);
         let host_services = needs_host_services
             .then(|| {
                 self.host_services.read().as_ref().map(|services| {
@@ -509,6 +510,10 @@ impl ExtensionRunner {
                         small_llm: capabilities
                             .contains(&ExtensionCapability::SmallModel)
                             .then(|| services.small_llm.clone())
+                            .flatten(),
+                        session_ops: capabilities
+                            .contains(&ExtensionCapability::SessionControl)
+                            .then(|| services.session_ops.clone())
                             .flatten(),
                     })
                 })

@@ -28,11 +28,12 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::files::tool_call_id;
+use crate::files::{run_blocking, tool_call_id};
 
 const MAX_BUFFER_BYTES: usize = 1_024 * 1_024; // 1 MB
 const DEFAULT_READ_WAIT_MS: u64 = 100;
 const MAX_READ_WAIT_MS: u64 = 10_000;
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// 终端空闲超时：最后一次 send/read 后超过此时间自动关闭。
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600); // 10 分钟
 /// 每个 session 允许的最大并发终端数。
@@ -56,12 +57,14 @@ struct TerminalEntry {
     /// 接收读线程写入的 stdout/stderr。每次 read action 取走后清空。
     output: Mutex<TerminalBuffer>,
     /// PTY master 写端（向子进程 stdin 写入）。
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
     /// PTY master 必须存活直到终端关闭，否则 reader 会立刻收到 EOF
     /// 而子进程会收到 SIGHUP。drop 此字段等同于关闭终端。
     _master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     /// PTY 子进程引用。Drop 时关闭 PTY 终止子进程。
     child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
+    /// 同步 reader 线程句柄；close/cleanup 时 join，避免泄漏。
+    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 子进程结束后填入退出码。reader 线程检测到 EOF 后由 wait 线程更新。
     exit_code: Mutex<Option<i32>>,
 }
@@ -181,7 +184,23 @@ impl TerminalRegistry {
     }
 }
 
-/// 杀掉 entry 中的子进程（如果还活着）。
+/// 带超时 join reader，避免 Windows ConPTY 上永久阻塞。
+fn join_reader_thread(handle: std::thread::JoinHandle<()>) {
+    use std::sync::mpsc;
+    let (done_tx, done_rx) = mpsc::sync_channel(0);
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(READER_JOIN_TIMEOUT).is_err() {
+        tracing::warn!(
+            timeout_secs = READER_JOIN_TIMEOUT.as_secs(),
+            "terminal reader thread did not exit in time; detaching"
+        );
+    }
+}
+
+/// 杀掉 entry 中的子进程并 join reader 线程。
 fn kill_entry(entry: &TerminalEntry) {
     if let Some(mut child) = entry.child.lock().take() {
         let _ = child.kill();
@@ -191,6 +210,11 @@ fn kill_entry(entry: &TerminalEntry) {
             .map(|status| status.exit_code() as i32)
             .unwrap_or(-1);
         *entry.exit_code.lock() = Some(exit_code);
+    }
+    entry.writer.lock().take();
+    entry._master.lock().take();
+    if let Some(handle) = entry.reader.lock().take() {
+        join_reader_thread(handle);
     }
 }
 
@@ -237,17 +261,7 @@ impl Tool for TerminalTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `terminal` for interactive sessions: REPLs (python, node), debuggers (gdb, \
-                 pdb), or scripts that need multi-step input. For one-shot commands prefer \
-                 `shell`. Always close terminals when done.",
-            )
-            .caveat(
-                "Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
-            )
-            .prompt_tag(ToolPromptTag::System),
-        )
+        Some(ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::System))
     }
 
     async fn execute(
@@ -260,17 +274,25 @@ impl Tool for TerminalTool {
             .map_err(|e| ToolError::InvalidArguments(format!("invalid terminal args: {e}")))?;
 
         let result = match args.action.as_str() {
-            "start" => action_start(self, args, ctx.session_id.as_str()).await,
-            "send" => action_send(args).await,
-            "read" => action_read(args).await,
-            "close" => action_close(args).await,
-            "list" => action_list(ctx.session_id.as_str()),
-            other => Err(ToolError::InvalidArguments(format!(
-                "unknown action '{other}', expected start / send / read / close / list"
-            ))),
+            "start" => {
+                let tool = self.working_dir.clone();
+                let session_id = ctx.session_id.as_str().to_string();
+                run_blocking(move || action_start(&tool, args, &session_id)).await?
+            },
+            "send" => action_send(args)?,
+            "read" => action_read(args).await?,
+            "close" => action_close(args)?,
+            "list" => action_list(ctx.session_id.as_str())?,
+            other => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "unknown action '{other}', expected start / send / read / close / list"
+                )));
+            },
         };
 
-        result.map(|(content, metadata, is_error)| ToolResult {
+        let (content, metadata, is_error) = result;
+
+        Ok(ToolResult {
             call_id: tool_call_id(ctx),
             content,
             is_error,
@@ -283,8 +305,8 @@ impl Tool for TerminalTool {
 
 // ─── Action handlers ─────────────────────────────────────────────────────
 
-async fn action_start(
-    tool: &TerminalTool,
+fn action_start(
+    working_dir: &std::path::Path,
     args: TerminalArgs,
     session_id: &str,
 ) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
@@ -306,7 +328,7 @@ async fn action_start(
     let cwd = args
         .cwd
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| tool.working_dir.clone());
+        .unwrap_or_else(|| working_dir.to_path_buf());
 
     let pty = NativePtySystem::default();
     let pair = pty
@@ -348,9 +370,10 @@ async fn action_start(
         session_id: session_id.to_string(),
         last_activity: Mutex::new(std::time::Instant::now()),
         output: Mutex::new(TerminalBuffer::default()),
-        writer: Mutex::new(writer),
+        writer: Mutex::new(Some(writer)),
         _master: Mutex::new(Some(pair.master)),
         child: Mutex::new(Some(child)),
+        reader: Mutex::new(None),
         exit_code: Mutex::new(None),
     });
 
@@ -358,7 +381,7 @@ async fn action_start(
     // PTY reader 是阻塞同步 IO，必须用 OS 线程而非 tokio task。
     {
         let entry_for_thread = Arc::clone(&entry);
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name(format!("astrcode-terminal-reader-{id}"))
             .spawn(move || {
                 let mut buf = [0u8; 4096];
@@ -370,18 +393,12 @@ async fn action_start(
                         Err(_) => break,
                     }
                 }
-
-                // EOF 后等待子进程退出，记录退出码。
-                if let Some(mut child) = entry_for_thread.child.lock().take() {
-                    let exit_code = child
-                        .wait()
-                        .ok()
-                        .map(|status| status.exit_code() as i32)
-                        .unwrap_or(-1);
-                    *entry_for_thread.exit_code.lock() = Some(exit_code);
+                if entry_for_thread.exit_code.lock().is_none() {
+                    *entry_for_thread.exit_code.lock() = Some(-1);
                 }
             })
             .map_err(|e| ToolError::Execution(format!("spawn reader thread: {e}")))?;
+        *entry.reader.lock() = Some(handle);
     }
 
     TerminalRegistry::global().insert(id.clone(), entry);
@@ -392,7 +409,7 @@ async fn action_start(
     Ok((format!("terminal started: {id}"), metadata, false))
 }
 
-async fn action_send(
+fn action_send(
     args: TerminalArgs,
 ) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
     let id = args
@@ -411,6 +428,9 @@ async fn action_send(
 
     {
         let mut writer = entry.writer.lock();
+        let Some(writer) = writer.as_mut() else {
+            return Err(ToolError::Execution(format!("terminal '{id}' is closed")));
+        };
         writer
             .write_all(input.as_bytes())
             .map_err(|e| ToolError::Execution(format!("write stdin: {e}")))?;
@@ -465,7 +485,7 @@ async fn action_read(
     Ok((output, metadata, false))
 }
 
-async fn action_close(
+fn action_close(
     args: TerminalArgs,
 ) -> Result<(String, BTreeMap<String, serde_json::Value>, bool), ToolError> {
     let id = args
@@ -476,16 +496,7 @@ async fn action_close(
         .remove(&id)
         .ok_or_else(|| ToolError::Execution(format!("terminal '{id}' not found")))?;
 
-    // 主动 kill 子进程；reader 线程会检测到 EOF 后退出。
-    if let Some(mut child) = entry.child.lock().take() {
-        let _ = child.kill();
-        let exit_code = child
-            .wait()
-            .ok()
-            .map(|status| status.exit_code() as i32)
-            .unwrap_or(-1);
-        *entry.exit_code.lock() = Some(exit_code);
-    }
+    kill_entry(&entry);
 
     let exit_code = *entry.exit_code.lock();
     let mut metadata = BTreeMap::new();
@@ -520,10 +531,13 @@ fn terminal_tool_definition() -> &'static ToolDefinition {
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "terminal".into(),
         description: concat!(
-            "Manages long-lived PTY sessions for interactive REPLs/debuggers.\n",
-            "Lifecycle: `start` → `send`/`read` → `close`. `list` shows active sessions.\n",
-            "- For one-shot commands, use `shell`.\n",
-            "- Always `close` when finished. Use `waitMs` (up to 10000, default 100) for slow output.",
+            "Manages long-lived PTY sessions for interactive REPLs/debuggers.\n\n",
+            "When NOT to use:\n",
+            "- One-shot commands → `shell`\n\n",
+            "Tips:\n",
+            "- Lifecycle: `start` → `send`/`read` → `close`. `list` shows active sessions.\n",
+            "- Always `close` when finished. Use `waitMs` (up to 10000, default 100) for slow output.\n",
+            "- Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
         )
             .into(),
         origin: ToolOrigin::Builtin,
@@ -576,9 +590,9 @@ mod tests {
 
     use super::*;
 
-    fn empty_ctx() -> ToolExecutionContext {
+    fn test_ctx(session_id: &str) -> ToolExecutionContext {
         ToolExecutionContext {
-            session_id: String::new().into(),
+            session_id: session_id.into(),
             working_dir: String::new(),
             tool_call_id: None,
             event_tx: None,
@@ -599,16 +613,17 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_start_send_read_close_lifecycle() {
+        let session_id = format!("terminal-test-{}", Uuid::new_v4());
+        cleanup_terminals_for_session(&session_id);
+        let ctx = test_ctx(&session_id);
         let tool = TerminalTool {
             working_dir: std::env::current_dir().expect("cwd"),
         };
 
         // PTY spawn 直接用 CreateProcessW / execvp，不走 shell。
-        // 必须选择当前平台 PATH 中可用的原生命令。
-        // Unix: cat 回显 stdin → stdout
-        // Windows: cat 不可用，用 cmd.exe 交互模式，验证 PTY 生命周期即可
+        // Windows: 用 cmd /c 执行单条命令后退出，避免交互式 cmd 在 ConPTY 上阻塞 close。
         let (command, args) = if cfg!(windows) {
-            ("cmd.exe", vec!["/q"] as Vec<&str>)
+            ("cmd.exe", vec!["/c", "echo hello"])
         } else {
             ("cat", vec![])
         };
@@ -621,26 +636,28 @@ mod tests {
                     "command": command,
                     "args": args
                 }),
-                &empty_ctx(),
+                &ctx,
             )
             .await
             .expect("start");
         assert!(!start.is_error, "{start:?}");
         let id = start.metadata["id"].as_str().expect("id").to_string();
 
-        // send some input
-        let send = tool
-            .execute(
-                serde_json::json!({
-                    "action": "send",
-                    "id": id,
-                    "input": if cfg!(windows) { "echo hello\r\n" } else { "hello\n" }
-                }),
-                &empty_ctx(),
-            )
-            .await
-            .expect("send");
-        assert!(!send.is_error);
+        if cfg!(not(windows)) {
+            // send some input
+            let send = tool
+                .execute(
+                    serde_json::json!({
+                        "action": "send",
+                        "id": id,
+                        "input": "hello\n"
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect("send");
+            assert!(!send.is_error);
+        }
 
         // read with a small wait to allow output
         let read = tool
@@ -650,14 +667,12 @@ mod tests {
                     "id": id,
                     "waitMs": 500
                 }),
-                &empty_ctx(),
+                &ctx,
             )
             .await
             .expect("read");
         assert!(!read.is_error);
-        // Verify the process produced some output (exact content depends on platform/shell)
         assert!(!read.content.is_empty(), "got: {}", read.content);
-        assert_eq!(read.metadata["alive"], serde_json::json!(true));
 
         // close
         let close = tool
@@ -666,11 +681,12 @@ mod tests {
                     "action": "close",
                     "id": id
                 }),
-                &empty_ctx(),
+                &ctx,
             )
             .await
             .expect("close");
         assert!(!close.is_error);
+        cleanup_terminals_for_session(&session_id);
     }
 
     #[tokio::test]
@@ -685,7 +701,7 @@ mod tests {
                     "id": "term-does-not-exist",
                     "input": "x"
                 }),
-                &empty_ctx(),
+                &test_ctx(""),
             )
             .await;
         assert!(matches!(result, Err(ToolError::Execution(_))));

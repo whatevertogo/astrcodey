@@ -27,7 +27,7 @@ impl SseLineReader {
         let mut lines = Vec::new();
         while let Some(pos) = self.buffer.find('\n') {
             let line = self.buffer[..pos].trim_end_matches('\r').to_string();
-            self.buffer = self.buffer[pos + 1..].to_string();
+            self.buffer.drain(..=pos);
             lines.push(line);
         }
         lines
@@ -97,9 +97,7 @@ impl Utf8StreamDecoder {
                 Err(error) => {
                     let valid_up_to = error.valid_up_to();
                     if valid_up_to > 0 {
-                        let valid_prefix = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("valid_up_to should always point to a valid utf-8 prefix");
-                        decoded.push_str(valid_prefix);
+                        decoded.push_str(valid_utf8_prefix(&self.pending[..valid_up_to]));
                     }
 
                     if let Some(invalid_len) = error.error_len() {
@@ -146,9 +144,7 @@ impl Utf8StreamDecoder {
                 Err(error) => {
                     let valid_up_to = error.valid_up_to();
                     if valid_up_to > 0 {
-                        let valid_prefix = std::str::from_utf8(&self.pending[..valid_up_to])
-                            .expect("valid_up_to should always point to a valid utf-8 prefix");
-                        decoded.push_str(valid_prefix);
+                        decoded.push_str(valid_utf8_prefix(&self.pending[..valid_up_to]));
                     }
 
                     let Some(invalid_len) = error.error_len() else {
@@ -186,6 +182,11 @@ impl Default for Utf8StreamDecoder {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+fn valid_utf8_prefix(bytes: &[u8]) -> &str {
+    // SAFETY: slice comes from `Utf8Error::valid_up_to()`, which guarantees valid UTF-8.
+    unsafe { std::str::from_utf8_unchecked(bytes) }
+}
 
 /// 格式化 UTF-8 字节片段用于日志输出。
 fn debug_utf8_bytes(bytes: &[u8], valid_up_to: usize, invalid_len: Option<usize>) -> String {

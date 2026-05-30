@@ -27,6 +27,17 @@ const AGENT_NOTE_MAX_CHARS: usize = 20_000;
 const TOOL_NOTE_MAX_CHARS: usize = 16_000;
 const TOKEN_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
 
+struct PostCompactCollectInput {
+    source_messages: Vec<LlmMessage>,
+    retained_messages: Vec<LlmMessage>,
+    working_dir: String,
+    session_id: String,
+    system_prompt: Option<String>,
+    tools: Vec<ToolDefinition>,
+    settings: ContextSettings,
+    session_store_dir: Option<PathBuf>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn enrich_post_compact_context(
     compaction: &mut CompactResult,
@@ -38,28 +49,28 @@ pub async fn enrich_post_compact_context(
     settings: &ContextSettings,
     session_store_dir: Option<PathBuf>,
 ) {
-    let source_messages = source_messages.to_vec();
-    let retained_messages = compaction.retained_messages.clone();
-    let working_dir = working_dir.to_string();
-    let system_prompt = system_prompt.map(str::to_string);
-    let tools = tools.to_vec();
-    let session_id_for_closure = session_id.to_string();
-    let settings = settings.clone();
-    let session_store_dir_clone = session_store_dir.clone();
-    let result = tokio::task::spawn_blocking({
-        let settings = settings.clone();
-        move || {
-            collect_post_compact_context(
-                &source_messages,
-                &retained_messages,
-                &working_dir,
-                &session_id_for_closure,
-                system_prompt.as_deref(),
-                &tools,
-                &settings,
-                session_store_dir_clone,
-            )
-        }
+    let input = PostCompactCollectInput {
+        source_messages: source_messages.to_vec(),
+        retained_messages: compaction.retained_messages.clone(),
+        working_dir: working_dir.to_string(),
+        session_id: session_id.to_string(),
+        system_prompt: system_prompt.map(str::to_string),
+        tools: tools.to_vec(),
+        settings: settings.clone(),
+        session_store_dir,
+    };
+    let settings = input.settings.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        collect_post_compact_context(
+            &input.source_messages,
+            &input.retained_messages,
+            &input.working_dir,
+            &input.session_id,
+            input.system_prompt.as_deref(),
+            &input.tools,
+            &input.settings,
+            input.session_store_dir,
+        )
     })
     .await;
     let (files, notes) = match result {

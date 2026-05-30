@@ -68,6 +68,7 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
         },
         ClientNotification::ExtensionRegistryChanged => {
             app.extension_commands.clear();
+            app.extension_command_names.clear();
             app.keybindings.clear();
             app.status_items.clear();
             app.needs_extension_refresh = true;
@@ -138,7 +139,7 @@ fn apply_event(app: &mut App, event: &Event) {
             // Optimistically pushed on Enter; skip.
         },
         EventPayload::AssistantMessageStarted { message_id } => {
-            let width = 120; // TODO: get from terminal width
+            let width = app.content_width;
             app.stream_states
                 .insert(message_id.to_string(), StreamController::new(Some(width)));
             // 不立刻写 StreamHeader，延迟到第一个 AssistantTextDelta 时再写，
@@ -452,16 +453,6 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             app.child_session_map.remove(child_session_id.as_str());
         },
-        EventPayload::ToolCallBackgrounded {
-            tool_name, task_id, ..
-        } => {
-            app.status_text = format!("{} → background ({})", tool_name, task_id);
-        },
-        EventPayload::BackgroundTaskCompleted {
-            task_id, tool_name, ..
-        } => {
-            app.status_text = format!("{} background done ({})", tool_name, task_id);
-        },
         EventPayload::Custom { name, data } => {
             // 将自定义事件作为带 custom_type 的消息推入 scrollback。
             // 如果 MessageRendererRegistry 中有匹配的渲染器，渲染时会分发给它；
@@ -544,7 +535,7 @@ fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult)
             }
         },
         "write" | "edit" | "patch" => "done".into(),
-        "find" => {
+        "glob" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
             format!("{count} file(s)")
         },
@@ -664,6 +655,11 @@ fn apply_extension_command_list(
             needs_argument: info.needs_argument,
         })
         .collect();
+    app.extension_command_names = app
+        .extension_commands
+        .iter()
+        .map(|cmd| cmd.name.clone())
+        .collect();
     // 注册插件快捷键
     app.keybindings = keybindings
         .iter()
@@ -710,7 +706,7 @@ fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> 
             let path = arguments.and_then(|a| a["path"].as_str()).unwrap_or("...");
             format!("{action} {path}")
         },
-        "find" => {
+        "glob" => {
             let pattern = arguments
                 .and_then(|a| a["pattern"].as_str())
                 .unwrap_or("...");
@@ -750,7 +746,7 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
         },
         "read" => format!("● Read {} line(s)", content.lines().count().max(1)),
         "write" | "edit" | "patch" => "● Done".into(),
-        "find" => {
+        "glob" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
             format!("● Found {count} file(s)")
         },

@@ -28,9 +28,11 @@ const MAX_LIST_ENTRIES: usize = 50;
 pub(crate) fn memory_save_definition() -> ToolDefinition {
     ToolDefinition {
         name: MEMORY_SAVE_TOOL.to_string(),
-        description: "Save a piece of information to long-term memory. Use this to remember user \
-                      preferences, project decisions, coding patterns, or any fact worth \
-                      recalling in future sessions."
+        description: "Save information to long-term memory for future sessions.\n\nWhen NOT to \
+                      use:\n- Secrets, tokens, credentials, or one-off debug output\n- Facts \
+                      already in AGENTS.md or easy to re-read from the repo next turn\n\nTips:\n- \
+                      Stable user preferences, project decisions, or recurring patterns worth \
+                      recalling later."
             .to_string(),
         parameters: json!({
             "type": "object",
@@ -48,7 +50,11 @@ pub(crate) fn memory_save_definition() -> ToolDefinition {
 pub(crate) fn memory_delete_definition() -> ToolDefinition {
     ToolDefinition {
         name: MEMORY_DELETE_TOOL.to_string(),
-        description: "Delete entries from long-term memory by content match.".to_string(),
+        description: "Delete entries from long-term memory by content match.\n\nWhen NOT to \
+                      use:\n- Clearing session-local context (use normal conversation \
+                      flow)\n\nTips:\n- User asks to forget specific stored facts\n- Correcting \
+                      outdated memory entries"
+            .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {

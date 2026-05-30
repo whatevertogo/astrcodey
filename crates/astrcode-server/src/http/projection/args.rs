@@ -48,7 +48,7 @@ fn tool_argument_summary(tool_name: &str, args: &serde_json::Value) -> Option<St
         },
         "shell" => string_arg(args, "command").map(|command| format!("$ {command}")),
         "read" | "write" | "edit" => string_arg(args, "path").map(str::to_string),
-        "find" => string_arg(args, "pattern").map(|pattern| format!("pattern: {pattern}")),
+        "glob" => string_arg(args, "pattern").map(|pattern| format!("pattern: {pattern}")),
         "grep" => {
             let pattern = string_arg(args, "pattern").or_else(|| string_arg(args, "query"));
             let path = string_arg(args, "path").or_else(|| string_arg(args, "glob"));

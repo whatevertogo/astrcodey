@@ -30,8 +30,6 @@ function statusLabel(status: string): string {
       return '完成'
     case 'error':
       return '失败'
-    case 'backgrounded':
-      return '后台运行中'
     default:
       return '运行中'
   }
@@ -449,7 +447,6 @@ function ShellToolDetails({ block }: { block: ToolCall }) {
   const stdoutBytes = numberValue(meta, 'stdoutBytes')
   const stderrBytes = numberValue(meta, 'stderrBytes')
   const stdin = stringValue(args, 'stdin')
-  const runInBackground = boolValue(args, 'runInBackground')
   const output =
     block.text || (block.status === 'streaming' ? 'Waiting for output...' : '')
 
@@ -487,10 +484,6 @@ function ShellToolDetails({ block }: { block: ToolCall }) {
             ]
               .filter(Boolean)
               .join(' / ')}
-          />
-          <MetaRow
-            label="mode"
-            value={runInBackground ? 'background' : undefined}
           />
           <MetaRow label="intent" value={intent} />
           <MetaRow

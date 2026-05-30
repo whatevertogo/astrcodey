@@ -32,10 +32,10 @@ pub mod storage {
 
 pub mod tool {
     pub use astrcode_core::tool::{
-        CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY, ExecutionMode, SessionApiError,
-        SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool,
-        ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
-        ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
+        CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY, ExecutionMode,
+        SessionApiError, SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest,
+        SubmitTurnResult, Tool, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     };
 }
 
@@ -90,8 +90,8 @@ pub mod worker_prelude {
             effects::{CallContinuation, HandlerResult},
         },
         worker::{
-            HostApi, HostClient, Worker, WorkerCallContext, command_handler,
-            handler_err, hook_handler, hook_handler_args, inject_host_api, parse_hook_input,
+            HostApi, HostClient, Worker, WorkerCallContext, command_handler, handler_err,
+            hook_handler, hook_handler_args, inject_host_api, parse_hook_input,
             parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
         },
     };

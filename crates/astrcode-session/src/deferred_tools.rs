@@ -106,6 +106,79 @@ pub fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
     tools.iter().any(|tool| tool.name == name)
 }
 
+/// 常见误用工具名 → 本环境实际工具名。
+pub(crate) fn suggest_tool_alias(requested: &str) -> Option<&'static str> {
+    if requested.eq_ignore_ascii_case("find")
+        || requested.eq_ignore_ascii_case("glob_file_search")
+        || requested.eq_ignore_ascii_case("list_files")
+    {
+        Some("glob")
+    } else if requested.eq_ignore_ascii_case("read_file")
+        || requested.eq_ignore_ascii_case("readfile")
+    {
+        Some("read")
+    } else if requested.eq_ignore_ascii_case("write_file")
+        || requested.eq_ignore_ascii_case("writefile")
+    {
+        Some("write")
+    } else {
+        None
+    }
+}
+
+fn visible_tool_names_hint(visible_tools: &[ToolDefinition]) -> String {
+    if visible_tools.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = visible_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    if names.len() <= 12 {
+        format!(" Available tools: {}.", names.join(", "))
+    } else {
+        format!(
+            " Available tools include: {} ({} total).",
+            names[..10].join(", "),
+            names.len()
+        )
+    }
+}
+
+/// 工具不在当前 turn 可见列表中时的 LLM 可见指引。
+pub(crate) fn unavailable_tool_guidance(
+    requested: &str,
+    visible_tools: &[ToolDefinition],
+    registered_tools: &[ToolDefinition],
+) -> String {
+    let registered = registered_tools.iter().any(|tool| tool.name == requested);
+    let visible = tool_is_visible(visible_tools, requested);
+
+    if registered && !visible {
+        return format!(
+            "Tool `{requested}` is registered but not loaded for this turn yet. For external MCP \
+             tools, call `tool_search_tool` with a keyword from the tool name, then call the \
+             matching `mcp__...` tool using the returned schema."
+        );
+    }
+
+    if let Some(alias) = suggest_tool_alias(requested) {
+        return format!(
+            "Tool `{requested}` does not exist in this session. Use `{alias}` instead and read \
+             its schema from the provider tool list."
+        );
+    }
+
+    let mut message = format!("Tool `{requested}` is not available in this session.");
+    if requested.eq_ignore_ascii_case("find") {
+        message
+            .push_str(" The file-path tool was renamed to `glob`; call `glob` with a `pattern`.");
+    }
+    message.push_str(&visible_tool_names_hint(visible_tools));
+    message.push_str(" Use exact tool names from the provider tool list.");
+    message
+}
+
 fn is_deferred_tool(tool: &ToolSnapshot) -> bool {
     tool.prompt_metadata
         .as_ref()
@@ -259,5 +332,43 @@ mod tests {
         let tools = vec![def("read"), def("write")];
         assert!(tool_is_visible(&tools, "read"));
         assert!(!tool_is_visible(&tools, "shell"));
+    }
+
+    #[test]
+    fn suggest_tool_alias_maps_common_mistakes() {
+        assert_eq!(suggest_tool_alias("find"), Some("glob"));
+        assert_eq!(suggest_tool_alias("list_files"), Some("glob"));
+        assert_eq!(suggest_tool_alias("read_file"), Some("read"));
+        assert_eq!(suggest_tool_alias("shell"), None);
+    }
+
+    #[test]
+    fn unavailable_tool_guidance_suggests_glob_for_legacy_find() {
+        let visible = vec![def("glob"), def("grep"), def("read")];
+        let registered = visible.clone();
+        let msg = unavailable_tool_guidance("find", &visible, &registered);
+        assert!(msg.contains("glob"));
+        assert!(!msg.contains("tool_search_tool"));
+    }
+
+    #[test]
+    fn unavailable_tool_guidance_defers_mcp_tools_to_search() {
+        let visible = vec![def("read"), def("tool_search_tool")];
+        let registered = vec![
+            def("read"),
+            def("tool_search_tool"),
+            def("mcp__demo__search"),
+        ];
+        let msg = unavailable_tool_guidance("mcp__demo__search", &visible, &registered);
+        assert!(msg.contains("tool_search_tool"));
+        assert!(msg.contains("not loaded for this turn"));
+    }
+
+    #[test]
+    fn unavailable_tool_guidance_lists_visible_tools_for_unknown_names() {
+        let visible = vec![def("glob"), def("grep")];
+        let msg = unavailable_tool_guidance("missing_tool", &visible, &visible);
+        assert!(msg.contains("Available tools"));
+        assert!(msg.contains("glob"));
     }
 }

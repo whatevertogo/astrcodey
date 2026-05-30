@@ -84,13 +84,11 @@ function mergeBlock(
   if (current.kind === 'toolCall' && incoming.kind === 'toolCall') {
     return {
       ...incoming,
-      name: incoming.name ?? current.name,
+      name: incoming.name.trim() ? incoming.name : current.name,
       arguments: incoming.arguments.trim()
         ? incoming.arguments
         : current.arguments,
-      text: incoming.text ?? current.text,
-      // taskId 不随 FinalizeBlock 返回，保留当前值
-      taskId: incoming.taskId ?? current.taskId,
+      text: incoming.text.trim() ? incoming.text : current.text,
       metadata: incoming.metadata ?? current.metadata,
       // argumentsJson 不随 FinalizeBlock 返回，保留当前值
       argumentsJson: incoming.argumentsJson ?? current.argumentsJson,
@@ -253,6 +251,33 @@ function coalesceDeltas(deltas: ConversationDelta[]): CoalescedDelta[] {
   return result
 }
 
+/** ToolOutput 可能早于 ToolCallStarted 到达；缺失块时先占位，避免 delta 被丢弃。 */
+function findOrCreateToolCallIdx(
+  blocks: ConversationBlock[],
+  mutations: Map<number, ConversationBlock>,
+  callId: string
+): number {
+  const inBlocks = blocks.findIndex(
+    (b) => b.kind === 'toolCall' && b.id === callId
+  )
+  if (inBlocks !== -1) return inBlocks
+  for (const [idx, block] of mutations) {
+    if (block.kind === 'toolCall' && block.id === callId) {
+      return idx
+    }
+  }
+  const newIdx = blocks.length
+  mutations.set(newIdx, {
+    kind: 'toolCall',
+    id: callId,
+    name: '',
+    arguments: '',
+    text: '',
+    status: 'streaming',
+  })
+  return newIdx
+}
+
 /** Apply all coalesced deltas to blocks in a single array pass. */
 function applyCoalescedDeltas(
   blocks: ConversationBlock[],
@@ -326,15 +351,12 @@ function applyCoalescedDeltas(
         break
       }
       case 'toolOutput': {
-        const idx = blocks.findIndex(
-          (b) => b.kind === 'toolCall' && b.id === c.callId
-        )
-        if (idx === -1) break
-        const block = mutations.get(idx) ?? blocks[idx]
-        if (block.kind !== 'toolCall') break
         const output = c.parts
           .map((p) => (p.stream === 'stderr' ? '\n[stderr] ' : '\n') + p.delta)
           .join('')
+        const idx = findOrCreateToolCallIdx(blocks, mutations, c.callId)
+        const block = mutations.get(idx) ?? blocks[idx]
+        if (block.kind !== 'toolCall') break
         mutations.set(idx, { ...block, text: block.text + output })
         needsNewBlocks = true
         break
@@ -732,15 +754,30 @@ export const useAppStore = create<ConversationState>((set, get) => ({
 
       case 'toolOutput': {
         set((current) => {
+          const prefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n'
+          const chunk = prefix + delta.delta
           const idx = current.blocks.findIndex(
             (b) => b.kind === 'toolCall' && b.id === delta.callId
           )
-          if (idx === -1) return {}
+          if (idx === -1) {
+            return {
+              blocks: [
+                ...current.blocks,
+                {
+                  kind: 'toolCall',
+                  id: delta.callId,
+                  name: '',
+                  arguments: '',
+                  text: chunk,
+                  status: 'streaming',
+                },
+              ],
+            }
+          }
           const block = current.blocks[idx]
           if (block.kind !== 'toolCall') return {}
-          const prefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n'
           const next = [...current.blocks]
-          next[idx] = { ...block, text: block.text + prefix + delta.delta }
+          next[idx] = { ...block, text: block.text + chunk }
           return { blocks: next }
         })
         break
@@ -763,26 +800,6 @@ export const useAppStore = create<ConversationState>((set, get) => ({
         } else {
           void get().switchSession(delta.newSessionId)
         }
-        break
-      }
-
-      case 'toolCallBackgrounded': {
-        set((current) => {
-          const idx = current.blocks.findIndex(
-            (b) => b.kind === 'toolCall' && b.id === delta.callId
-          )
-          if (idx === -1) return {}
-          const block = current.blocks[idx]
-          if (block.kind !== 'toolCall') return {}
-          const next = [...current.blocks]
-          next[idx] = {
-            ...block,
-            text: `Task moved to background (task: ${delta.taskId}). Result will arrive when done.`,
-            status: 'backgrounded',
-            taskId: delta.taskId,
-          }
-          return { blocks: next }
-        })
         break
       }
 

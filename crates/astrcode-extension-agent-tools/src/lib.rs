@@ -16,7 +16,10 @@ use astrcode_extension_sdk::{
         PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{CreateSessionRequest, ExecutionMode, SubmitTurnRequest, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        CreateSessionRequest, ExecutionMode, SubmitTurnRequest, ToolDefinition, ToolOrigin,
+        ToolResult, tool_metadata,
+    },
 };
 use astrcode_support::text::compact_inline;
 use serde::Deserialize;
@@ -101,13 +104,13 @@ impl AgentShared {
 // 定义 → 参数 → 构建逻辑 → 渲染 → Handler，自上而下阅读即可理解完整流程。
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Delegate a multi-step task to a specialized subagent. See [Agents] for available \
-     types.\nWhen NOT to use:\n- Reading 1-3 known files → `read`\n- Searching for a symbol → \
-     `grep`/`find`\n- Anything achievable in 2-6 direct tool calls → do it yourself\nOne or \
-     multiple agents — match the task scope:\n- Single agent: focused task in one area (find how \
-     X is implemented, review a PR)\n- Multiple agents in parallel: broad task spanning \
-     independent areas (explore impl + tests, review while executing, investigate different \
-     modules)\nSet `waitForResult=false` to background an agent and continue working.";
+    "Launch a specialized subagent. Types: [Agents].\n\nWhen NOT to use:\n- Simple tasks you can \
+     finish quickly in the current mode\n- Known file path → `read`\n- Known symbol, class, or \
+     pattern → `grep`/`glob`\n- Needle queries or anything doable in a few direct tool \
+     calls\n\nTips:\n- Often useful for multi-step work that fits an [Agents] type (explore / \
+     reviewer / execute)\n- Parallel or serial calls are your choice; split prompts by concern \
+     when running several\n- Give each subagent a self-contained prompt (goal, scope, expected \
+     output)\n- `waitForResult=false` runs in background and notifies when done";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
@@ -372,30 +375,15 @@ fn agent_tool_metadata()
     let mut map = std::collections::HashMap::new();
     map.insert(
         "agent".to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Delegate to a subagent when the task needs multi-step exploration, isolated context, \
-             or parallel execution. For directed searches (a known symbol or pattern) use \
-             `find`/`grep` directly. Prefer `subagentType=explore` for broad exploration that \
-             would take more than 3 manual queries.\nAgent count — match the scope:\n- Single \
-             agent for a focused task: investigate one area, review specific files, trace a \
-             single call chain.\n- Multiple agents in parallel for broad tasks: each agent gets a \
-             distinct concern.\nSplit examples: implementation + tests, different modules, data \
-             flow + config.\nWhen using multiple agents, make all independent `agent` calls in \
-             the same tool block.\nWriting a good `prompt`:\n- Brief a smart colleague who just \
-             walked in: give context up front.\n- State whether the agent should write code, \
-             explore, or only research.\n- Include relevant file paths, line numbers, and \
-             specific patterns.\n- If depending on a previous agent's output, summarize that \
-             output rather than expecting the subagent to read the whole conversation.",
-        )
-        .caveat(
-            "Don't duplicate work the subagent is doing — if you delegate, stop running the same \
-             searches yourself.",
-        )
-        .caveat(
-            "If the response says the requested `subagentType` was not found, the available \
-             agents are listed below it. Pick from that list and retry; do not invent agent names.",
-        )
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
+            .example("Needle query (\"where is X defined?\") → `grep`/`glob`, not `agent`.")
+            .example(
+                "Multi-area exploration → `subagentType=explore`; parallel or serial as you see \
+                 fit.",
+            )
+            .caveat("Don't duplicate work you delegate — stop the same searches yourself.")
+            .caveat("Unknown `subagentType` → pick from [Agents]; do not invent agent names.")
+            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
     );
     map
 }
@@ -486,6 +474,9 @@ mod tests {
             .as_object()
             .expect("tool schema properties");
 
+        assert!(definition.description.contains("When NOT to use"));
+        assert!(definition.description.contains("Tips"));
+        assert!(!definition.description.contains("When to use"));
         assert!(properties.contains_key("waitForResult"));
         assert_eq!(
             properties["waitForResult"]["default"],

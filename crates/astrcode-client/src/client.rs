@@ -35,7 +35,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
 
     /// 发送命令并循环等待匹配的响应通知。
     ///
-    /// 跳过无关的广播事件（如后台任务完成、异步 Agent 事件等），
+    /// 跳过无关的广播事件（如异步 Agent 子会话事件等），
     /// 直到收到 predicate 匹配的通知或事件流断开。
     async fn wait_for<F>(
         &self,

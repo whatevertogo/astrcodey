@@ -21,7 +21,6 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
-fs2 = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]

@@ -175,6 +175,23 @@ Extensions can be enabled or disabled via `~/.astrcode/config.json`. By default,
 ```
 
 To enable the memory extension, add `"astrcode.memory": true` to `extensionStates`.
+Telegram channels are configured under `extensions.astrcode-channels.telegram`; keep
+`allowedChatIds` populated unless you explicitly set `allowAllChats` to `true`.
+
+```json
+{
+  "extensions": {
+    "astrcode-channels": {
+      "telegram": {
+        "enabled": true,
+        "botTokenEnv": "TELEGRAM_BOT_TOKEN",
+        "allowedChatIds": ["123456789"],
+        "workingDir": "D:/astrcode"
+      }
+    }
+  }
+}
+```
 
 ### Built-in Extensions
 
@@ -188,6 +205,7 @@ First-party extensions are wired through [`astrcode-bundled-extensions`](crates/
 | **Todo Tool** | `astrcode-extension-todo-tool` | Progress tracking todo list tool |
 | **Agent Tools** | `astrcode-extension-agent-tools` | Sub-agent delegation, agent discovery |
 | **Memory** | `astrcode-extension-memory` | Project-scoped markdown memory storage (disabled by default) |
+| **Channels** | `astrcode-extension-channels` | Telegram channel bridge for using AstrCode from an external chat |
 
 ## Quick Start
 
@@ -331,7 +349,7 @@ The Cargo workspace under [`crates/`](crates/) contains **22 crates**, plus [`sr
 | Crate | Lines | Description |
 |---|---|---|
 | [`astrcode-ai`](crates/astrcode-ai) | 3.8k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
-| [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, find, grep, shell, terminal, task |
+| [`astrcode-tools`](crates/astrcode-tools) | 5.5k | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, task |
 | [`astrcode-storage`](crates/astrcode-storage) | 4.3k | JSONL event log, snapshots, config persistence, file locking |
 | [`astrcode-context`](crates/astrcode-context) | 4.0k | Token estimation, context window budgeting, auto-compact, prompt engine |
 | [`astrcode-session`](crates/astrcode-session) | 8.9k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
@@ -424,7 +442,7 @@ Tools run in parallel batches (up to 5 concurrent). The pipeline:
 2. **Execute** — parallel batch via `JoinSet`, sequential tools flush the batch first
 3. **Commit** — dispatch `PostToolUse` / `PostToolUseFailure` hooks, persist large results, enforce message budget, emit events
 
-Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (find/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
+Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (glob/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
 
 ### Extension System
 

@@ -7,14 +7,16 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::resolve_path;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
 use serde::Deserialize;
 
-use super::shared::{collect_grep_files, tool_call_id, trunc};
+use super::shared::{
+    collect_grep_files, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
+    trunc,
+};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
@@ -127,97 +129,9 @@ impl Tool for GrepTool {
         let started_at = Instant::now();
         let args: GrepArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
-        let mut matcher_builder = RegexMatcherBuilder::new();
-        matcher_builder
-            .case_insensitive(args.case_insensitive)
-            .multi_line(args.multiline)
-            .dot_matches_new_line(args.multiline);
-        let matcher = if args.literal {
-            matcher_builder.build(&regex::escape(&args.pattern))
-        } else {
-            matcher_builder.build(&args.pattern)
-        }
-        .map_err(|e| {
-            let hint = if args.literal {
-                String::new()
-            } else {
-                "; if you meant exact text, set literal to true".into()
-            };
-            ToolError::Execution(format!("regex: {e}{hint}"))
-        })?;
-        let root = match args.path {
-            Some(ref raw) => resolve_path(&self.working_dir, raw),
-            None => self.working_dir.clone(),
-        };
-        let max_matches = args.max_matches.unwrap_or(250);
-        let offset = args.offset.unwrap_or(0);
-        let files = collect_grep_files(
-            &self.working_dir,
-            &root,
-            args.glob.as_deref(),
-            args.file_type.as_deref(),
-            args.recursive.unwrap_or_else(|| root.is_dir()),
-        )
-        .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
-        let mut state = GrepState {
-            seen: 0,
-            max_matches,
-            offset,
-            output_mode: args.output_mode,
-            matches: Vec::new(),
-            counts: BTreeMap::new(),
-            files: Vec::new(),
-            skipped_files: 0,
-            has_more: false,
-        };
-        let options = GrepOptions {
-            before_context: args.before_context.unwrap_or(0),
-            after_context: args.after_context.unwrap_or(0),
-            multiline: args.multiline,
-        };
-        run_grep(&files, &matcher, &options, &mut state)
-            .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
-        let matches = render_grep_output(args.output_mode, &state);
-        let mut meta = BTreeMap::new();
-        meta.insert("pattern".into(), serde_json::json!(args.pattern));
-        meta.insert("literal".into(), serde_json::json!(args.literal));
-        meta.insert("multiline".into(), serde_json::json!(args.multiline));
-        meta.insert("returned".into(), serde_json::json!(matches.len()));
-        meta.insert("offset".into(), serde_json::json!(offset));
-        meta.insert("maxMatches".into(), serde_json::json!(max_matches));
-        meta.insert("hasMore".into(), serde_json::json!(state.has_more));
-        meta.insert(
-            "skippedFiles".into(),
-            serde_json::json!(state.skipped_files),
-        );
-        meta.insert("truncated".into(), serde_json::json!(state.has_more));
-        meta.insert(
-            "outputMode".into(),
-            serde_json::json!(args.output_mode.as_str()),
-        );
-        if state.has_more {
-            meta.insert(
-                "nextOffset".into(),
-                serde_json::json!(offset.saturating_add(matches.len())),
-            );
-        }
-        let content = if matches.is_empty() {
-            format!(
-                "No matches found for pattern {:?} in {}",
-                args.pattern,
-                root.display()
-            )
-        } else {
-            matches.join("\n")
-        };
-        Ok(ToolResult {
-            call_id: tool_call_id(ctx),
-            content,
-            is_error: false,
-            error: None,
-            metadata: meta,
-            duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        })
+        let call_id = tool_call_id(ctx);
+        let working_dir = self.working_dir.clone();
+        run_blocking(move || execute_grep_sync(working_dir, args, call_id, started_at)).await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -225,17 +139,120 @@ impl Tool for GrepTool {
     }
 }
 
+fn execute_grep_sync(
+    working_dir: PathBuf,
+    args: GrepArgs,
+    call_id: String,
+    started_at: Instant,
+) -> Result<ToolResult, ToolError> {
+    let mut matcher_builder = RegexMatcherBuilder::new();
+    matcher_builder
+        .case_insensitive(args.case_insensitive)
+        .multi_line(args.multiline)
+        .dot_matches_new_line(args.multiline);
+    let matcher = if args.literal {
+        matcher_builder.build(&regex::escape(&args.pattern))
+    } else {
+        matcher_builder.build(&args.pattern)
+    }
+    .map_err(|e| {
+        let hint = if args.literal {
+            String::new()
+        } else {
+            "; if you meant exact text, set literal to true".into()
+        };
+        ToolError::Execution(format!("regex: {e}{hint}"))
+    })?;
+    let root = match args.path {
+        Some(ref raw) => match resolve_sandboxed_path(&working_dir, raw) {
+            Ok(path) => path,
+            Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
+        },
+        None => working_dir.clone(),
+    };
+    let max_matches = args.max_matches.unwrap_or(250);
+    let offset = args.offset.unwrap_or(0);
+    let files = collect_grep_files(
+        &working_dir,
+        &root,
+        args.glob.as_deref(),
+        args.file_type.as_deref(),
+        args.recursive.unwrap_or_else(|| root.is_dir()),
+    )
+    .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
+    let mut state = GrepState {
+        seen: 0,
+        max_matches,
+        offset,
+        output_mode: args.output_mode,
+        matches: Vec::new(),
+        counts: BTreeMap::new(),
+        files: Vec::new(),
+        skipped_files: 0,
+        has_more: false,
+    };
+    let options = GrepOptions {
+        before_context: args.before_context.unwrap_or(0),
+        after_context: args.after_context.unwrap_or(0),
+        multiline: args.multiline,
+    };
+    run_grep(&files, &matcher, &options, &mut state)
+        .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
+    let matches = render_grep_output(args.output_mode, &state);
+    let mut meta = BTreeMap::new();
+    meta.insert("pattern".into(), serde_json::json!(args.pattern.clone()));
+    meta.insert("literal".into(), serde_json::json!(args.literal));
+    meta.insert("multiline".into(), serde_json::json!(args.multiline));
+    meta.insert("returned".into(), serde_json::json!(matches.len()));
+    meta.insert("offset".into(), serde_json::json!(offset));
+    meta.insert("maxMatches".into(), serde_json::json!(max_matches));
+    meta.insert("hasMore".into(), serde_json::json!(state.has_more));
+    meta.insert(
+        "skippedFiles".into(),
+        serde_json::json!(state.skipped_files),
+    );
+    meta.insert("truncated".into(), serde_json::json!(state.has_more));
+    meta.insert(
+        "outputMode".into(),
+        serde_json::json!(args.output_mode.as_str()),
+    );
+    if state.has_more {
+        meta.insert(
+            "nextOffset".into(),
+            serde_json::json!(offset.saturating_add(matches.len())),
+        );
+    }
+    let content = if matches.is_empty() {
+        format!(
+            "No matches found for pattern {:?} in {}",
+            args.pattern,
+            root.display()
+        )
+    } else {
+        matches.join("\n")
+    };
+    Ok(ToolResult {
+        call_id,
+        content,
+        is_error: false,
+        error: None,
+        metadata: meta,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    })
+}
+
 fn grep_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "grep".into(),
         description: concat!(
-            "Searches file contents by regex or literal text.\n",
-            "- Full regex syntax. Set `literal=true` for exact text with special characters.\n",
-            "- Filter by `glob` or `fileType`. Output modes: `content`, `files_with_matches` \
-             (default), `count`.\n",
-            "- Set `multiline=true` for cross-line patterns.\n",
-            "- For file names, use `find`.",
+            "Search file contents by regex or literal text.\n\n",
+            "When NOT to use:\n",
+            "- Finding paths → `glob`\n",
+            "- Known file path → `read`\n\n",
+            "Tips:\n",
+            "- Symbols, strings, classes, or regex patterns across files\n",
+            "- Multiple searches may run together when helpful",
         ).into(),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
@@ -244,7 +261,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern (or literal text when literal=true)."
+                    "description": "Regex pattern, or literal text when literal=true (e.g. class Foo, exact strings with special chars)."
                 },
                 "literal": {
                     "type": "boolean",
@@ -278,7 +295,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Path filter, e.g. '*.rs'."
+                    "description": "Path filter within search scope (e.g. '*.md'), not the `glob` tool."
                 },
                 "fileType": {
                     "type": "string",
@@ -297,7 +314,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
                 "outputMode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
-                    "description": "Default files_with_matches."
+                    "description": "content | files_with_matches (default) | count."
                 }
             },
             "required": ["pattern"],

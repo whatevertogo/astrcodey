@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs, future,
     path::{Path, PathBuf},
     sync::{
@@ -19,7 +18,7 @@ use astrcode_core::{
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
-    tool::{ToolDefinition, ToolResult},
+    tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -747,11 +746,20 @@ fn test_runtime_with_settings(
         Arc::clone(&capabilities),
         vec![],
     ));
+    let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+        Arc::clone(&session_manager),
+    ));
+    let scheduler = Arc::new(crate::turn_scheduler::TurnScheduler::new(
+        Arc::clone(&session_manager),
+        Arc::new(crate::turn_registry::TurnRegistry::new()),
+        child_sessions,
+    ));
     Arc::new(ServerRuntime {
         event_store,
         config_manager: config,
         context_assembler,
         session_manager,
+        scheduler,
         extension_runner,
         capabilities,
         startup_working_dir: std::env::temp_dir(),
@@ -768,9 +776,14 @@ fn test_runtime() -> Arc<ServerRuntime> {
 }
 
 fn test_scheduler(runtime: &Arc<ServerRuntime>) -> Arc<crate::turn_scheduler::TurnScheduler> {
+    let session_manager = runtime.session_manager().clone();
+    let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+        Arc::clone(&session_manager),
+    ));
     Arc::new(crate::turn_scheduler::TurnScheduler::new(
-        runtime.session_manager().clone(),
+        session_manager,
         Arc::new(crate::turn_registry::TurnRegistry::new()),
+        child_sessions,
     ))
 }
 
@@ -809,11 +822,8 @@ async fn recv_event(event_rx: &mut mpsc::Receiver<ClientNotification>) -> Client
 fn test_event_bus(
     runtime: &Arc<crate::bootstrap::ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
-    scheduler: Arc<crate::turn_scheduler::TurnScheduler>,
 ) -> Arc<crate::server_event_bus::ServerEventBus> {
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(
-        event_tx, scheduler,
-    ));
+    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(event_tx));
     runtime
         .session_manager()
         .bind_event_bus(Arc::clone(&event_bus));
@@ -828,7 +838,7 @@ fn spawn_test_actor(
     CommandHandler::spawn_actor(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx, scheduler),
+        test_event_bus(&runtime, event_tx),
     )
 }
 
@@ -948,6 +958,19 @@ async fn collect_turn_ids_until_completed(
             _ => {},
         }
     }
+}
+
+async fn wait_until_no_active_turn(
+    scheduler: &crate::turn_scheduler::TurnScheduler,
+    session_id: &SessionId,
+) {
+    for _ in 0..50 {
+        if !scheduler.registry().has_active(session_id) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("turn registry entry was not cleaned up");
 }
 
 #[test]
@@ -1326,7 +1349,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx, scheduler),
+        test_event_bus(&runtime, event_tx),
         actor_tx,
     );
 
@@ -1353,10 +1376,16 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             )
         })
     }));
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(|message| { message.joined_display_text("").contains("<turn_aborted>") })
+    );
 }
 
 #[tokio::test]
-async fn repair_stale_background_tasks_even_when_phase_is_idle() {
+async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
     let runtime = test_runtime();
     let sid = new_session_id();
     runtime
@@ -1368,36 +1397,11 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
         .event_store()
         .append_event(Event::new(
             sid.clone(),
-            Some("turn-1".into()),
+            Some("aborted-turn".into()),
             EventPayload::ToolCallRequested {
-                call_id: "call-bg".into(),
+                call_id: "call-abort".into(),
                 tool_name: "shell".into(),
-                arguments: serde_json::json!({ "command": "long-running" }),
-            },
-        ))
-        .await
-        .unwrap();
-    let mut metadata = BTreeMap::new();
-    metadata.insert("task_id".into(), serde_json::json!("task-bg"));
-    metadata.insert("backgrounded".into(), serde_json::json!(true));
-    runtime
-        .event_store()
-        .append_event(Event::new(
-            sid.clone(),
-            Some("turn-1".into()),
-            EventPayload::ToolCallCompleted {
-                call_id: "call-bg".into(),
-                tool_name: "shell".into(),
-                result: ToolResult {
-                    call_id: "call-bg".into(),
-                    content: "Task moved to background (task: task-bg).".into(),
-                    is_error: false,
-                    error: None,
-                    metadata,
-                    duration_ms: None,
-                },
-                arguments: "long-running".into(),
-                arguments_json: Some(serde_json::json!({ "command": "long-running" })),
+                arguments: serde_json::json!({ "command": "sleep" }),
             },
         ))
         .await
@@ -1406,9 +1410,9 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
         .event_store()
         .append_event(Event::new(
             sid.clone(),
-            Some("turn-1".into()),
+            Some("aborted-turn".into()),
             EventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
+                finish_reason: "aborted".into(),
             },
         ))
         .await
@@ -1420,13 +1424,7 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
         .await
         .unwrap();
     assert_eq!(stale_state.phase, Phase::Idle);
-    assert!(
-        !stale_state
-            .background_tool_calls
-            .get(&ToolCallId::from("call-bg"))
-            .unwrap()
-            .completed
-    );
+    assert!(stale_state.pending_tool_calls.is_empty());
 
     let event_tx = Arc::new(EventFanout::new(1024));
     let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
@@ -1434,7 +1432,7 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx, scheduler),
+        test_event_bus(&runtime, event_tx),
         actor_tx,
     );
 
@@ -1445,13 +1443,6 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(
-        state
-            .background_tool_calls
-            .get(&ToolCallId::from("call-bg"))
-            .unwrap()
-            .completed
-    );
     assert!(state.messages.iter().any(|message| {
         message.message.content.iter().any(|content| {
             matches!(
@@ -1460,12 +1451,18 @@ async fn repair_stale_background_tasks_even_when_phase_is_idle() {
                     tool_call_id,
                     content,
                     is_error
-                } if tool_call_id == "call-bg"
+                } if tool_call_id == "call-abort"
                     && *is_error
-                    && content.contains("Background task interrupted")
+                    && content.contains("interrupted before completion")
             )
         })
     }));
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(|message| { message.joined_display_text("").contains("<turn_aborted>") })
+    );
 }
 
 #[tokio::test]
@@ -1505,7 +1502,7 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx, scheduler),
+        test_event_bus(&runtime, event_tx),
         actor_tx,
     );
 
@@ -1562,6 +1559,38 @@ async fn submit_prompt_queues_second_running_turn_for_next_turn() {
     );
 
     handler.abort_session(sid).await.unwrap();
+}
+
+#[tokio::test]
+async fn queue_input_started_from_idle_is_cleaned_up() {
+    let runtime = test_runtime_with_llm(Arc::new(MockLlm));
+    let scheduler = test_scheduler(&runtime);
+    let created = runtime.session_manager().create(".").await.unwrap();
+    let sid = created.session.id().clone();
+
+    let outcome = scheduler
+        .deliver_input(
+            sid.clone(),
+            "queued-after-race".into(),
+            crate::turn_scheduler::InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        crate::turn_scheduler::DeliveryOutcome::Started { .. }
+    ));
+    wait_until_no_active_turn(&scheduler, &sid).await;
+    assert_eq!(
+        runtime
+            .event_store()
+            .session_read_model(&sid)
+            .await
+            .unwrap()
+            .phase,
+        Phase::Idle
+    );
 }
 
 #[tokio::test]
@@ -1843,7 +1872,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
         .send(CommandMessage::AgentTurnCleanup {
             session_id: sid,
             turn_id,
-            completion: TurnCompletion::Aborted,
+            completion: TurnCompletion::Dropped,
         })
         .await
         .unwrap();

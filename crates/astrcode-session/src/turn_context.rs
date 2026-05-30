@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 // ─── Turn event channel ──────────────────────────────────────────────────
 
 /// Turn 内 live 事件发送端；新代码优先
-/// [`TurnPublisher::live`](crate::turn_publish::TurnPublisher::live)。
+/// [`TurnEvents::live`](crate::turn_publish::TurnEvents::live)。
 pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
 
 pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {
@@ -36,19 +36,13 @@ pub(crate) async fn on_step_end_best_effort(
     }
 }
 
-/// Emit `TurnEnd` before returning an error, preventing extensions from
-/// seeing an unfinished turn.
-pub(crate) async fn end_turn_with_error_typed<T, E>(
-    extension_runner: &ExtensionRunner,
-    shared: &SharedTurnContext,
-    error: E,
-) -> Result<T, TurnError>
+/// Turn 循环内的 typed early-return；`TurnEnd` 由
+/// [`TurnLoop::finalize_turn_on_error`](crate::turn_runner::TurnLoop::finalize_turn_on_error)
+/// 统一补发。
+pub(crate) fn end_turn_with_error_typed<T, E>(error: E) -> Result<T, TurnError>
 where
     E: Into<TurnError>,
 {
-    let _ = extension_runner
-        .emit_lifecycle(ExtensionEvent::TurnEnd, shared.lifecycle_ctx())
-        .await;
     Err(error.into())
 }
 
@@ -64,7 +58,7 @@ pub(crate) struct SharedTurnContext {
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
-    /// 当前 turn 的扩展事件通道（`ExtensionEventBridge` 在 `process_prompt` 期间注入）。
+    /// 当前 turn 的扩展事件通道（`ExtensionEvents` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_tx: Option<TurnEventTx>,
 }
 
@@ -138,32 +132,18 @@ pub enum TurnError {
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
     Extension(#[from] astrcode_core::extension::ExtensionError),
+    #[error("{0}")]
+    Session(#[from] crate::session::SessionError),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
-    #[error("session read failed: {0}")]
-    SessionReadFailed(String),
     #[error("LLM stream ended unexpectedly")]
     StreamEndedUnexpectedly,
+    #[error("turn aborted")]
+    Aborted,
     #[error("provider blocked request: {reason}")]
     ProviderBlocked { reason: String },
-    #[error("persist tool result failed: {0}")]
-    PersistToolResultFailed(String),
     #[error("tool task join failed: {0}")]
-    ToolTaskJoinFailed(String),
-    #[error("{0}")]
-    Internal(String),
-    #[error("durable event emit failed: {0}")]
-    DurableEmitFailed(String),
-}
-
-/// 是否应在 turn 失败时补发 `TurnEnd`（已由 `end_turn_with_error_typed` 处理的路径除外）。
-pub(crate) fn turn_error_emits_turn_end(error: &TurnError) -> bool {
-    !matches!(
-        error,
-        TurnError::ProviderBlocked { .. }
-            | TurnError::CompactExhausted
-            | TurnError::Llm(_)
-            | TurnError::Extension(_)
-            | TurnError::Tool(_)
-    )
+    TaskJoin(#[from] tokio::task::JoinError),
+    #[error("turn model cache not populated")]
+    ModelCacheEmpty,
 }

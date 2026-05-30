@@ -91,9 +91,6 @@ pub struct Message {
 pub enum ScrollbackEntry {
     Message(Message),
     StreamHeader,
-    StreamText {
-        role: MessageRole,
-        text: String,
-    },
+    StreamText { role: MessageRole, text: String },
     BlankLine,
 }

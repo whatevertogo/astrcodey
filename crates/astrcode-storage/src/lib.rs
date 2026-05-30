@@ -6,8 +6,9 @@ pub mod config_store;
 pub mod event_log;
 #[cfg(feature = "testing")]
 pub mod in_memory;
+#[cfg(test)]
 pub mod lock;
 pub mod projection;
 pub mod session_repo;
 pub mod snapshot;
-mod tool_artifacts;
+pub mod tool_artifacts;

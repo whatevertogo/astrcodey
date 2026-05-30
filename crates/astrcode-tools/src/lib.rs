@@ -5,5 +5,4 @@
 pub mod files;
 pub mod registry;
 pub mod shell_tool;
-pub mod task_tool;
 pub mod terminal_tool;

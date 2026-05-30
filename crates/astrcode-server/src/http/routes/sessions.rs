@@ -299,10 +299,7 @@ fn conversation_to_dto(
     if let Some(boundary) = latest_compact_boundary(&session.compact_boundaries) {
         blocks.push(compact_summary_block(boundary));
     }
-    blocks.extend(messages_to_blocks(
-        &session.messages,
-        &session.background_tool_calls,
-    ));
+    blocks.extend(messages_to_blocks(&session.messages));
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
@@ -344,10 +341,7 @@ fn session_title(working_dir: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{
-        llm::{LlmContent, LlmMessage, LlmRole},
-        storage::BackgroundToolCallView,
-    };
+    use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
     use astrcode_protocol::http::ConversationBlockStatusDto;
 
     use super::*;
@@ -362,6 +356,7 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("hello"),
                 updated_seq: 1,
+                source: None,
             });
 
         let dto = conversation_to_dto(session, None);
@@ -388,12 +383,14 @@ mod tests {
                     reasoning_content: None,
                 },
                 updated_seq: 1,
+                source: None,
             });
         session
             .messages
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
                 updated_seq: 2,
+                source: None,
             });
 
         let dto = conversation_to_dto(session, None);
@@ -431,12 +428,14 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("recent user"),
                 updated_seq: 1,
+                source: None,
             });
         session
             .messages
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::assistant("recent assistant"),
                 updated_seq: 2,
+                source: None,
             });
         // compact boundary 元数据
         session.compact_boundaries.push(CompactBoundaryView {
@@ -481,6 +480,7 @@ mod tests {
             .push(astrcode_core::storage::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
+                source: None,
             });
         session.compact_boundaries.push(CompactBoundaryView {
             trigger: "auto_threshold".into(),
@@ -514,56 +514,5 @@ mod tests {
             other => panic!("expected CompactSummary, got {other:?}"),
         }
         assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
-    }
-
-    #[test]
-    fn conversation_snapshot_restores_background_task_state() {
-        let mut session = SessionReadModel::empty("session-1".into());
-        session.working_dir = "D:/work/project".into();
-        session
-            .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
-                message: LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: vec![LlmContent::ToolCall {
-                        call_id: "tool-1".into(),
-                        name: "shell".into(),
-                        arguments: serde_json::json!({ "command": "npm run dev" }),
-                    }],
-                    name: None,
-                    reasoning_content: None,
-                },
-                updated_seq: 1,
-            });
-        session
-            .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
-                message: LlmMessage::tool(
-                    "shell",
-                    "tool-1",
-                    "Task moved to background (task: bg-1).",
-                    false,
-                ),
-                updated_seq: 2,
-            });
-        session.background_tool_calls.insert(
-            "tool-1".into(),
-            BackgroundToolCallView {
-                task_id: "bg-1".into(),
-                completed: false,
-            },
-        );
-
-        let dto = conversation_to_dto(session, None);
-
-        match &dto.blocks[0] {
-            ConversationBlockDto::ToolCall {
-                status, task_id, ..
-            } => {
-                assert!(matches!(status, ConversationBlockStatusDto::Backgrounded));
-                assert_eq!(task_id.as_deref(), Some("bg-1"));
-            },
-            other => panic!("unexpected block: {other:?}"),
-        }
     }
 }

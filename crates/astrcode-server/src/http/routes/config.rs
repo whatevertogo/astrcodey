@@ -85,6 +85,7 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
             format!("Reloaded config is invalid: {error}"),
         );
     }
+    state.runtime.sync_session_model_bindings();
     // 通知扩展配置已变更（针对已运行扩展的配置热更新）
     let config_errors = state
         .runtime
@@ -149,6 +150,8 @@ pub(in crate::http) async fn update_active_selection(
         .apply_raw_config_and_rebuild(candidate)
     {
         tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
+    } else {
+        state.runtime.sync_session_model_bindings();
     }
 
     // 通知扩展配置已变更（如果有扩展配置变化）

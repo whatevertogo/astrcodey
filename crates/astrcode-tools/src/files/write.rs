@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock, time::Instant};
 use astrcode_core::tool::*;
 use serde::Deserialize;
 
-use super::shared::{compute_unified_diff, resolve_sandboxed_path, tool_call_id};
+use super::shared::{
+    compute_unified_diff, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
+};
 // ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
@@ -29,6 +31,7 @@ struct WriteFileArgs {
 
 #[async_trait::async_trait]
 impl Tool for WriteFileTool {
+    /// 返回 write 工具的定义，包含参数 schema。
     fn definition(&self) -> ToolDefinition {
         write_file_tool_definition().clone()
     }
@@ -48,59 +51,9 @@ impl Tool for WriteFileTool {
         let started_at = Instant::now();
         let args: WriteFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid write args: {e}")))?;
-        let path = resolve_sandboxed_path(&self.working_dir, &args.path, ctx, started_at);
-        let Ok(path) = path else {
-            return Ok(path.unwrap_err());
-        };
-        if args.create_dirs {
-            let Some(parent) = path.parent() else {
-                return Err(ToolError::Execution("path has no parent directory".into()));
-            };
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ToolError::Execution(format!("mkdir: {e}")))?;
-        }
-
-        let old = std::fs::read_to_string(&path).ok();
-        std::fs::write(&path, &args.content)
-            .map_err(|e| ToolError::Execution(format!("write: {e}")))?;
-
-        let old_bytes = old.as_ref().map(|old| old.len());
-        let msg = if let Some(old_bytes) = old_bytes {
-            format!(
-                "Updated {} ({}→{} bytes)",
-                path.display(),
-                old_bytes,
-                args.content.len()
-            )
-        } else {
-            format!("Created {} ({} bytes)", path.display(), args.content.len())
-        };
-        let mut metadata = BTreeMap::new();
-        metadata.insert("path".into(), serde_json::json!(path.display().to_string()));
-        metadata.insert("newBytes".into(), serde_json::json!(args.content.len()));
-        metadata.insert("created".into(), serde_json::json!(old_bytes.is_none()));
-        if let Some(old_bytes) = old_bytes {
-            metadata.insert("oldBytes".into(), serde_json::json!(old_bytes));
-        }
-        // 注入 unified diff 供 TUI/前端结构化渲染。
-        if let Some(ref old_text) = old {
-            let display_path = path.display().to_string();
-            let (diff_text, ins, del) =
-                compute_unified_diff(&display_path, old_text, &args.content, 80);
-            if !diff_text.is_empty() {
-                metadata.insert("diff".into(), serde_json::json!(diff_text));
-                metadata.insert("insertions".into(), serde_json::json!(ins));
-                metadata.insert("deletions".into(), serde_json::json!(del));
-            }
-        }
-        Ok(ToolResult {
-            call_id: tool_call_id(ctx),
-            content: msg,
-            is_error: false,
-            error: None,
-            metadata,
-            duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        })
+        let call_id = tool_call_id(ctx);
+        let working_dir = self.working_dir.clone();
+        run_blocking(move || execute_write_sync(working_dir, args, call_id, started_at)).await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -108,15 +61,77 @@ impl Tool for WriteFileTool {
     }
 }
 
+fn execute_write_sync(
+    working_dir: PathBuf,
+    args: WriteFileArgs,
+    call_id: String,
+    started_at: Instant,
+) -> Result<ToolResult, ToolError> {
+    let path = match resolve_sandboxed_path(&working_dir, &args.path) {
+        Ok(path) => path,
+        Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
+    };
+    if args.create_dirs {
+        let Some(parent) = path.parent() else {
+            return Err(ToolError::Execution("path has no parent directory".into()));
+        };
+        std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution(format!("mkdir: {e}")))?;
+    }
+
+    let old = std::fs::read_to_string(&path).ok();
+    std::fs::write(&path, &args.content)
+        .map_err(|e| ToolError::Execution(format!("write: {e}")))?;
+
+    let old_bytes = old.as_ref().map(|old| old.len());
+    let msg = if let Some(old_bytes) = old_bytes {
+        format!(
+            "Updated {} ({}→{} bytes)",
+            path.display(),
+            old_bytes,
+            args.content.len()
+        )
+    } else {
+        format!("Created {} ({} bytes)", path.display(), args.content.len())
+    };
+    let mut metadata = BTreeMap::new();
+    metadata.insert("path".into(), serde_json::json!(path.display().to_string()));
+    metadata.insert("newBytes".into(), serde_json::json!(args.content.len()));
+    metadata.insert("created".into(), serde_json::json!(old_bytes.is_none()));
+    if let Some(old_bytes) = old_bytes {
+        metadata.insert("oldBytes".into(), serde_json::json!(old_bytes));
+    }
+    // 注入 unified diff 供 TUI/前端结构化渲染。
+    if let Some(ref old_text) = old {
+        let display_path = path.display().to_string();
+        let (diff_text, ins, del) =
+            compute_unified_diff(&display_path, old_text, &args.content, 80);
+        if !diff_text.is_empty() {
+            metadata.insert("diff".into(), serde_json::json!(diff_text));
+            metadata.insert("insertions".into(), serde_json::json!(ins));
+            metadata.insert("deletions".into(), serde_json::json!(del));
+        }
+    }
+    Ok(ToolResult {
+        call_id,
+        content: msg,
+        is_error: false,
+        error: None,
+        metadata,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    })
+}
+
 fn write_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "write".into(),
         description: concat!(
-            "Creates or completely overwrites a file.\n",
-            "- MUST `read` existing files first. Prefer `edit` for modifications.\n",
-            "- Set `createDirs` to create missing parent directories.\n",
-            "- NEVER create *.md/README unless explicitly requested.",
+            "Create or completely overwrite a file.\n\n",
+            "When NOT to use:\n",
+            "- Incremental edits to an existing file → `edit`\n\n",
+            "Tips:\n",
+            "- New files\n",
+            "- Full-file rewrite after `read`",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -130,11 +145,11 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Complete UTF-8 content. Replaces the whole file."
+                    "description": "Complete UTF-8 content. Replaces the whole file. MUST read existing files first. Do not create *.md/README unless requested."
                 },
                 "createDirs": {
                     "type": "boolean",
-                    "description": "Create missing parent dirs."
+                    "description": "Create missing parent directories."
                 }
             },
             "required": ["path", "content"],

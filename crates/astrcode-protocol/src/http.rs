@@ -228,6 +228,8 @@ pub enum ConversationBlockDto {
     User {
         id: String,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     Assistant {
         id: String,
@@ -244,9 +246,6 @@ pub enum ConversationBlockDto {
         /// 工具执行结果（展开后显示）。
         text: String,
         status: ConversationBlockStatusDto,
-        /// 后台任务 ID（仅后台化任务携带，用于前端面板追踪）。
-        #[serde(skip_serializing_if = "Option::is_none")]
-        task_id: Option<String>,
         /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
@@ -278,7 +277,6 @@ pub enum ConversationBlockDto {
 #[serde(rename_all = "camelCase")]
 pub enum ConversationBlockStatusDto {
     Streaming,
-    Backgrounded,
     Complete,
     Error,
 }
@@ -337,11 +335,6 @@ pub enum ConversationDeltaDto {
     ThinkingDelta {
         block_id: String,
         delta: String,
-    },
-    /// 工具调用被移入后台执行。
-    ToolCallBackgrounded {
-        call_id: String,
-        task_id: String,
     },
     /// Agent 子会话状态变更（新增 / 完成 / 失败）。
     AgentSessionUpdated {

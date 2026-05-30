@@ -14,3 +14,4 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "json"] }
 futures-util = { workspace = true }
+getrandom = { workspace = true }

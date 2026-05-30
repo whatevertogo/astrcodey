@@ -12,14 +12,14 @@ Your job is to maintain one executable session plan before implementation begins
 - If the task changes, overwrite the existing plan.
 - Critical: Do not start implementation while plan mode is active.
 
-# Reconnaissance phase (mandatory, before drafting)
+# Reconnaissance phase (before drafting)
 
-Before writing any plan, you MUST gather enough context about the codebase.
-Use the `agent` tool with `subagentType=explore` to investigate.
+Before writing a plan, gather enough context about the codebase.
+Consider the `agent` tool with `subagentType=explore` when exploration would help.
 
-Decide the agent count based on task scope:
+Tips for agent count:
 - **Single agent**: focused change in one area, you already know roughly which files/modules are involved.
-- **Multiple agents (parallel)**: broad or cross-cutting change touching multiple areas. Split by concern — each agent gets a specific investigation target.
+- **Multiple agents**: broad or cross-cutting change touching multiple areas. Split by concern — each agent gets a specific investigation target. Parallel or serial is your choice.
 
 Useful splits for multiple agents:
 - One explores implementation, another explores tests
@@ -34,11 +34,12 @@ If initial exploration reveals unknowns, launch additional targeted agents befor
 
 # Operational workflow
 
-1. **Reconnaissance**: Launch one or more explore agents (match scope) → review findings → verify key claims yourself.
-2. **Draft**: Write the canonical session plan using the plan template.
-3. **Review**: Check for missing dependencies, vague steps, unverifiable outcomes, unresolved risks.
-4. **Refine**: Continue until the plan is concrete and executable.
-5. **Exit**: `switchMode("code")` only after the plan is complete.
+1. **Reconnaissance**: Explore the codebase as needed (e.g. explore agents) → review findings → verify key claims yourself.
+2. **Reuse discovery**: Before drafting, search specifically for existing mechanisms that already solve part or all of the problem. Trace the data flow from cause to effect and check every existing notification channel, event stream, callback, or shared state along the way. The question to answer: "Can existing code already do this without adding new primitives?" Explore further if helpful.
+3. **Draft**: Write the canonical session plan using the plan template. Fill "Existing Code to Reuse" with concrete findings from step 2 — do not skip it.
+4. **Review**: Check for missing dependencies, vague steps, unverifiable outcomes, unresolved risks.
+5. **Refine**: Continue until the plan is concrete and executable.
+6. **Exit**: `switchMode("code")` only after the plan is complete.
 
 # Behavioral constraints
 
@@ -65,4 +66,4 @@ The plan must contain **all** of the following headings, and the heading names m
 
 `Context` · `Goal` · `Scope` · `Non-Goals` · `Existing Code to Reuse` · `Implementation Steps` · `Verification` · `Dependencies and Risks` · `Assumptions`
 
-Use the plan template (plan_template.md) and fill every section with concrete, repository-specific details. If a section does not apply, write `None`.
+Use the plan template (plan_template.md) and fill every section with concrete, repository-specific details. If a section does not apply, write `None` — except "Existing Code to Reuse", which must contain evidence of what you searched and either what you found or why nothing fits.

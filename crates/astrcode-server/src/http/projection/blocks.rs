@@ -1,12 +1,11 @@
 //! 把 LLM message 历史与 EventPayload 投影成 ConversationBlockDto。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    llm::{LlmContent, LlmMessage, LlmRole},
-    storage::{BackgroundToolCallView, CompactBoundaryView, SequencedLlmMessage},
-    types::ToolCallId,
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
+    storage::{CompactBoundaryView, SequencedLlmMessage},
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
 
@@ -43,6 +42,7 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
         EventPayload::UserMessage { message_id, text } => Some(ConversationBlockDto::User {
             id: message_id.to_string(),
             text: text.clone(),
+            source: None,
         }),
         EventPayload::AssistantMessageCompleted {
             message_id,
@@ -79,11 +79,6 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
                 } else {
                     ConversationBlockStatusDto::Complete
                 },
-                task_id: result
-                    .metadata
-                    .get("task_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
                 metadata,
                 arguments_json: arguments_json.clone(),
             })
@@ -117,18 +112,22 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
 
 pub(in crate::http) fn messages_to_blocks(
     messages: &[SequencedLlmMessage],
-    background_tool_calls: &HashMap<ToolCallId, BackgroundToolCallView>,
 ) -> Vec<ConversationBlockDto> {
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 
-    for (index, message) in messages.iter().enumerate() {
-        let message = &message.message;
+    for (index, seq_msg) in messages.iter().enumerate() {
+        let message = &seq_msg.message;
+        let source = &seq_msg.source;
+        if source.as_deref() == Some(TURN_ABORTED_SOURCE) {
+            continue;
+        }
         let id = format!("snapshot-message-{index}");
         match message.role {
             LlmRole::User => blocks.push(ConversationBlockDto::User {
                 id,
                 text: visible_message_text(message),
+                source: source.clone(),
             }),
             LlmRole::Assistant => {
                 let text = visible_message_text(message);
@@ -156,20 +155,15 @@ pub(in crate::http) fn messages_to_blocks(
                         arguments: format_args_inline(name, arguments),
                         text: String::new(),
                         status: ConversationBlockStatusDto::Streaming,
-                        task_id: None,
                         metadata: None,
                         arguments_json: Some(arguments.clone()),
                     });
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }
             },
-            LlmRole::Tool => push_tool_result_block(
-                &mut blocks,
-                &tool_block_indices,
-                background_tool_calls,
-                message,
-                id,
-            ),
+            LlmRole::Tool => {
+                push_tool_result_block(&mut blocks, &tool_block_indices, message, id);
+            },
             LlmRole::System => blocks.push(ConversationBlockDto::SystemNote {
                 id,
                 text: visible_message_text(message),
@@ -183,7 +177,6 @@ pub(in crate::http) fn messages_to_blocks(
 fn push_tool_result_block(
     blocks: &mut Vec<ConversationBlockDto>,
     tool_block_indices: &BTreeMap<String, usize>,
-    background_tool_calls: &HashMap<ToolCallId, BackgroundToolCallView>,
     message: &LlmMessage,
     fallback_id: String,
 ) {
@@ -199,11 +192,7 @@ fn push_tool_result_block(
         else {
             continue;
         };
-        let background_call_id = ToolCallId::from(tool_call_id.as_str());
-        let background_task = background_tool_calls.get(&background_call_id);
-        let status = if background_task.is_some_and(|task| !task.completed) {
-            ConversationBlockStatusDto::Backgrounded
-        } else if *is_error {
+        let status = if *is_error {
             ConversationBlockStatusDto::Error
         } else {
             ConversationBlockStatusDto::Complete
@@ -212,13 +201,11 @@ fn push_tool_result_block(
             if let Some(ConversationBlockDto::ToolCall {
                 text,
                 status: block_status,
-                task_id,
                 ..
             }) = blocks.get_mut(*block_index)
             {
                 *text = content.clone();
                 *block_status = status;
-                *task_id = background_task.map(|task| task.task_id.to_string());
                 pushed_result = true;
                 continue;
             }
@@ -229,7 +216,6 @@ fn push_tool_result_block(
             arguments: String::new(),
             text: content.clone(),
             status,
-            task_id: background_task.map(|task| task.task_id.to_string()),
             metadata: None,
             arguments_json: None,
         });
@@ -243,7 +229,6 @@ fn push_tool_result_block(
             arguments: String::new(),
             text: visible_message_text(message),
             status: ConversationBlockStatusDto::Complete,
-            task_id: None,
             metadata: None,
             arguments_json: None,
         });
@@ -260,4 +245,38 @@ fn visible_message_text(message: &LlmMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{
+        llm::{LlmMessage, TURN_ABORTED_SOURCE, turn_aborted_context_message},
+        storage::SequencedLlmMessage,
+    };
+
+    use super::*;
+
+    #[test]
+    fn messages_to_blocks_hides_turn_aborted_context() {
+        let messages = vec![
+            SequencedLlmMessage {
+                message: LlmMessage::user("visible"),
+                updated_seq: 1,
+                source: None,
+            },
+            SequencedLlmMessage {
+                message: turn_aborted_context_message(),
+                updated_seq: 2,
+                source: Some(TURN_ABORTED_SOURCE.into()),
+            },
+        ];
+
+        let blocks = messages_to_blocks(&messages);
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &blocks[0],
+            ConversationBlockDto::User { text, .. } if text == "visible"
+        ));
+    }
 }

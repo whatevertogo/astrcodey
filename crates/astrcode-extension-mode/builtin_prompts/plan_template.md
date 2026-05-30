@@ -18,7 +18,7 @@
 
 - <What is explicitly excluded to prevent scope creep>
 
-## Existing Code to Reuse (optional)
+## Existing Code to Reuse
 
 - <Reusable functions, modules, or patterns>
 

@@ -5,8 +5,10 @@ use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
-    DEFAULT_MAX_CHARS, binary, directory, error_result, image_media_type, is_binary, not_found,
-    read_image_file, remember_file_observation, slice_chars, tool_call_id,
+    DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, directory_result,
+    error_result_with_call_id, image_media_type, is_binary, not_found_result,
+    read_image_file_result, read_lines_segment, remember_file_observation_with_store, run_blocking,
+    slice_chars, tool_call_id,
 };
 
 const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
@@ -16,7 +18,7 @@ const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
 ///
 /// 支持行偏移/限制和字符级别的截断，适用于大文件的分页读取。
 pub struct ReadFileTool {
-    /// 工具的工作目录，用于解析相对路径和做路径遍历防护
+    /// 工具的工作目录，用于解析相对路径
     pub working_dir: PathBuf,
 }
 
@@ -39,7 +41,6 @@ struct ReadFileArgs {
     #[serde(default)]
     limit: Option<usize>,
 }
-
 
 #[async_trait::async_trait]
 impl Tool for ReadFileTool {
@@ -68,84 +69,22 @@ impl Tool for ReadFileTool {
             {
                 return Ok(result);
             }
-            return Ok(not_found(ctx, started_at, &path));
-        }
-        if path.is_dir() {
-            return Ok(directory(ctx, started_at, &path));
-        }
-        if let Some(media_type) = image_media_type(&path) {
-            return read_image_file(ctx, started_at, &path, media_type);
-        }
-        if is_binary(&path) {
-            return Ok(binary(ctx, started_at, &path));
+            return Ok(not_found_result(tool_call_id(ctx), started_at, &path));
         }
 
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| ToolError::Execution(format!("read: {e}")))?;
-        let offset = args.offset.unwrap_or(0);
-        let limit = args.limit.unwrap_or(usize::MAX);
-        let char_offset = args.char_offset.unwrap_or(0);
-        let max_chars = args.max_chars.unwrap_or(DEFAULT_MAX_CHARS);
-
-        let total_lines = content.lines().count();
-        let lines: Vec<String> = content
-            .lines()
-            .skip(offset)
-            .take(limit)
-            .enumerate()
-            .map(|(i, l)| format!("{:>6}\t{}", i + offset + 1, l))
-            .collect();
-        let rendered = lines.join("\n");
-        let rendered = slice_chars(&rendered, char_offset, max_chars);
-        let line_truncated = offset.saturating_add(lines.len()) < total_lines;
-
-        // 记录文件观察快照，供后续 edit 工具做 stale file 检测
-        let _ = remember_file_observation(ctx, &path);
-
-        let mut meta = BTreeMap::new();
-        meta.insert("path".into(), serde_json::json!(path.display().to_string()));
-        meta.insert("totalLines".into(), serde_json::json!(total_lines));
-        meta.insert("shownLines".into(), serde_json::json!(lines.len()));
-        meta.insert("offset".into(), serde_json::json!(offset));
-        if args.limit.is_some() {
-            meta.insert("limit".into(), serde_json::json!(limit));
-        }
-        meta.insert("charOffset".into(), serde_json::json!(char_offset));
-        meta.insert("maxChars".into(), serde_json::json!(max_chars));
-        meta.insert(
-            "returnedChars".into(),
-            serde_json::json!(rendered.returned_chars),
-        );
-        meta.insert(
-            "nextCharOffset".into(),
-            serde_json::json!(rendered.next_char_offset),
-        );
-        meta.insert(
-            "hasMore".into(),
-            serde_json::json!(rendered.has_more || line_truncated),
-        );
-        meta.insert(
-            "truncated".into(),
-            serde_json::json!(rendered.has_more || line_truncated),
-        );
-        // 明确标记截断来源，方便客户端决定用 nextOffset 还是 nextCharOffset 续读
-        meta.insert("lineTruncated".into(), serde_json::json!(line_truncated));
-        meta.insert("charTruncated".into(), serde_json::json!(rendered.has_more));
-        if line_truncated {
-            meta.insert(
-                "nextOffset".into(),
-                serde_json::json!(offset.saturating_add(lines.len())),
-            );
-        }
-
-        Ok(ToolResult {
-            call_id: tool_call_id(ctx),
-            content: rendered.text,
-            is_error: false,
-            error: None,
-            metadata: meta,
-            duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        let call_id = tool_call_id(ctx);
+        let file_observation_store = ctx.capabilities.file_observation_store.clone();
+        let working_dir = self.working_dir.clone();
+        run_blocking(move || {
+            read_existing_file_sync(
+                working_dir,
+                args,
+                call_id,
+                file_observation_store,
+                started_at,
+            )
         })
+        .await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -153,17 +92,137 @@ impl Tool for ReadFileTool {
     }
 }
 
+fn read_existing_file_sync(
+    working_dir: PathBuf,
+    args: ReadFileArgs,
+    call_id: String,
+    file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
+    started_at: Instant,
+) -> Result<ToolResult, ToolError> {
+    let path = resolve_path(&working_dir, &args.path);
+    if path.is_dir() {
+        return Ok(directory_result(call_id.clone(), started_at, &path));
+    }
+    if let Some(media_type) = image_media_type(&path) {
+        return read_image_file_result(call_id, started_at, &path, media_type);
+    }
+    if is_binary(&path) {
+        return Ok(binary_result(call_id.clone(), started_at, &path));
+    }
+
+    let offset = args.offset.unwrap_or(0);
+    let limit = args.limit.unwrap_or(usize::MAX);
+    let char_offset = args.char_offset.unwrap_or(0);
+    let max_chars = args.max_chars.unwrap_or(DEFAULT_MAX_CHARS);
+    let use_line_pagination = args.offset.is_some() || args.limit.is_some();
+
+    let file_len = std::fs::metadata(&path)
+        .map_err(|e| ToolError::Execution(format!("stat: {e}")))?
+        .len();
+    if !use_line_pagination && file_len > MAX_UNPAGINATED_READ_BYTES {
+        return Ok(error_result_with_call_id(
+            call_id.clone(),
+            started_at,
+            format!(
+                "file is {file_len} bytes; use offset/limit to paginate reads over \
+                 {MAX_UNPAGINATED_READ_BYTES} bytes"
+            ),
+            BTreeMap::from([
+                ("path".into(), serde_json::json!(path.display().to_string())),
+                ("bytes".into(), serde_json::json!(file_len)),
+                (
+                    "maxUnpaginatedBytes".into(),
+                    serde_json::json!(MAX_UNPAGINATED_READ_BYTES),
+                ),
+            ]),
+        ));
+    }
+
+    let (raw_lines, total_lines) = if use_line_pagination {
+        read_lines_segment(&path, offset, limit)
+            .map_err(|e| ToolError::Execution(format!("read: {e}")))?
+    } else {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| ToolError::Execution(format!("read: {e}")))?;
+        let total_lines = content.lines().count();
+        let lines: Vec<String> = content
+            .lines()
+            .skip(offset)
+            .take(limit)
+            .map(str::to_string)
+            .collect();
+        (lines, total_lines)
+    };
+
+    let lines: Vec<String> = raw_lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:>6}\t{}", i + offset + 1, l))
+        .collect();
+    let rendered = lines.join("\n");
+    let rendered = slice_chars(&rendered, char_offset, max_chars);
+    let line_truncated = offset.saturating_add(lines.len()) < total_lines;
+
+    let _ = remember_file_observation_with_store(file_observation_store.as_ref(), &path);
+
+    let mut meta = BTreeMap::new();
+    meta.insert("path".into(), serde_json::json!(path.display().to_string()));
+    meta.insert("totalLines".into(), serde_json::json!(total_lines));
+    meta.insert("shownLines".into(), serde_json::json!(lines.len()));
+    meta.insert("offset".into(), serde_json::json!(offset));
+    if args.limit.is_some() {
+        meta.insert("limit".into(), serde_json::json!(limit));
+    }
+    meta.insert("charOffset".into(), serde_json::json!(char_offset));
+    meta.insert("maxChars".into(), serde_json::json!(max_chars));
+    meta.insert(
+        "returnedChars".into(),
+        serde_json::json!(rendered.returned_chars),
+    );
+    meta.insert(
+        "nextCharOffset".into(),
+        serde_json::json!(rendered.next_char_offset),
+    );
+    meta.insert(
+        "hasMore".into(),
+        serde_json::json!(rendered.has_more || line_truncated),
+    );
+    meta.insert(
+        "truncated".into(),
+        serde_json::json!(rendered.has_more || line_truncated),
+    );
+    meta.insert("lineTruncated".into(), serde_json::json!(line_truncated));
+    meta.insert("charTruncated".into(), serde_json::json!(rendered.has_more));
+    if line_truncated {
+        meta.insert(
+            "nextOffset".into(),
+            serde_json::json!(offset.saturating_add(lines.len())),
+        );
+    }
+
+    Ok(ToolResult {
+        call_id,
+        content: rendered.text,
+        is_error: false,
+        error: None,
+        metadata: meta,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    })
+}
+
 fn read_file_tool_definition() -> &'static ToolDefinition {
     static DEFINITION: OnceLock<ToolDefinition> = OnceLock::new();
     DEFINITION.get_or_init(|| ToolDefinition {
         name: "read".into(),
         description: concat!(
-            "Reads a file with line numbers. You MUST read before editing.\n",
-            "- Copy text from after the line-number prefix; never include line numbers in \
-             `oldStr`/`newStr`.\n",
-            "- Large files: use `offset`+`limit` or `charOffset`+`maxChars` for pagination.\n",
-            "- Supports text, code, JSON, Markdown, and auto-detects binary/images.\n",
-            "- To list directories, use `find`.",
+            "Read a file with line numbers. MUST `read` before `edit`.\n\n",
+            "When NOT to use:\n",
+            "- Listing paths → `glob`\n",
+            "- Repo-wide content search → `grep` first\n\n",
+            "Tips:\n",
+            "- Known file path (or persisted tool-result path)\n",
+            "- Multiple files may be read together when helpful\n\n",
+            "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),
         origin: ToolOrigin::Builtin,
@@ -173,22 +232,22 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path, or a persisted tool-result path from a prior result."
+                    "description": "File path, or a persisted tool-result path from a prior result. Supports text, code, images, and binary detection."
                 },
                 "maxChars": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Default 20000 (60000 for persisted results)."
+                    "description": "Default 20000 (60000 for persisted results). Use with charOffset to paginate large files."
                 },
                 "charOffset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Continue a truncated read."
+                    "description": "Continue a truncated read (character offset)."
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Start line (0-based)."
+                    "description": "Start line (0-based). Use with limit for line pagination."
                 },
                 "limit": {
                     "type": "integer",
@@ -224,8 +283,8 @@ async fn read_persisted_tool_result_path(
         Ok(slice) => slice,
         Err(StorageError::InvalidId(_) | StorageError::Unsupported(_)) => return Ok(None),
         Err(StorageError::NotFound(_)) => {
-            return Ok(Some(error_result(
-                ctx,
+            return Ok(Some(error_result_with_call_id(
+                tool_call_id(ctx),
                 started_at,
                 format!("tool result path not found: {path}"),
                 BTreeMap::from([

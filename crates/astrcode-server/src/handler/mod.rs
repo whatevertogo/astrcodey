@@ -3,8 +3,8 @@
 //! 传输层无关：同时被 stdio 二进制和进程内 CLI 使用。
 //! 负责将 `ClientCommand` 路由到对应的服务方法，并通过广播通道发送通知。
 //!
-//! 连发 prompt 的「下一 turn」排队统一由 [`TurnScheduler::notify_turn`]
-//! 处理，本模块不再维护独立队列。
+//! 连发 prompt 的「下一 turn」排队统一由
+//! [`TurnScheduler::deliver_input`]（`QueueIfRunningElseStart`） 处理，本模块不再维护独立队列。
 
 use std::sync::Arc;
 
@@ -85,12 +85,10 @@ pub enum HandlerError {
 pub(crate) use turn::TurnCompletion;
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
-///
-/// 维护当前活跃会话和活跃回合的状态，确保同一时间只有一个回合在运行。
 pub(crate) struct CommandHandler {
     runtime: Arc<ServerRuntime>,
-    /// 当前活跃的会话 ID
-    active_session_id: Option<SessionId>,
+    /// Handler 最近 focus 的 session（最近一次 create/fork），非「当前有 turn 在跑」。
+    focused_session_id: Option<SessionId>,
     /// 统一的 turn 生命周期服务
     scheduler: Arc<TurnScheduler>,
     /// 事件总线，用于发送客户端通知
@@ -127,7 +125,7 @@ impl CommandHandler {
             .map_err(HandlerError::SessionManager)?;
 
         let new_sid = forked.session.id().clone();
-        self.active_session_id = Some(new_sid.clone());
+        self.focused_session_id = Some(new_sid.clone());
 
         // 初始化 runtime（工具表在新 session 上需要重建）
         let working_dir = self
@@ -200,22 +198,11 @@ impl CommandHandler {
 
     // ─── 模型选择 ───────────────────────────────────────────────────────
 
-    /// 全局配置已更新，同步活跃 session 的 provider 和 model_id。
+    /// 全局配置已更新，同步所有已打开 session 的 provider 和 model_id。
     async fn sync_active_session_provider(&self) -> Result<(), HandlerError> {
-        if let Some(ref sid) = self.active_session_id {
-            let session = self
-                .runtime
-                .session_manager()
-                .open(sid.clone())
-                .await
-                .map_err(HandlerError::SessionManager)?;
-            let caps = session.caps();
-            session.runtime().replace_model_binding(
-                caps.llm(),
-                caps.small_llm(),
-                caps.read_effective().llm.model_id.clone(),
-            );
-        }
+        self.runtime
+            .session_manager()
+            .sync_all_model_bindings_from_config();
         Ok(())
     }
 

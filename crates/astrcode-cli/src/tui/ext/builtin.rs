@@ -9,6 +9,7 @@ use astrcode_core::{
     render::{RenderKeyValue, RenderSpec, RenderTone},
     tool::ToolResult,
 };
+
 use super::{
     fallback::DefaultToolRenderer,
     tool::{ToolRenderCtx, ToolRenderer, ToolRendererRegistry},
@@ -310,7 +311,7 @@ pub struct FindRenderer;
 
 impl ToolRenderer for FindRenderer {
     fn tool_name(&self) -> &str {
-        "find"
+        "glob"
     }
 
     fn render_result(&self, result: &ToolResult, _ctx: &ToolRenderCtx<'_>) -> Option<RenderSpec> {

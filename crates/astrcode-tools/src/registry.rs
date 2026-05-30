@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use astrcode_core::{
     extension::ChildToolPolicy,
     tool::{
-        BackgroundPolicy, ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolPromptMetadata, ToolResult,
+        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolPromptMetadata,
+        ToolResult,
     },
 };
 
@@ -20,9 +20,9 @@ struct RegisteredTool {
 
 /// Registry of available tools (built-in + extension-registered).
 ///
-/// 用 `BTreeMap` 同时承载 O(log n) 命名查找、按名稱有序遍历，以及单一事实
+/// 用 `BTreeMap` 同时承载 O(log n) 命名查找、按名称有序遍历，以及单一事实
 /// 来源——避免之前 `HashMap` + sorted `Vec` 双结构在 `register` 时做 O(n)
-/// sorted insert。`list_definitions()` 走迭代，仍按名稱有序输出。
+/// sorted insert。`list_definitions()` 走迭代，仍按名称有序输出。
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
@@ -105,14 +105,6 @@ impl ToolRegistry {
         self.tools.get(name).map(|entry| entry.definition.clone())
     }
 
-    /// 按名称查询工具的后台化策略，未找到返回 `Never`。
-    pub fn background_policy(&self, name: &str) -> BackgroundPolicy {
-        self.tools
-            .get(name)
-            .map(|entry| entry.tool.background_policy())
-            .unwrap_or(BackgroundPolicy::Never)
-    }
-
     /// Drain all registered tools into a Vec (consumes the registry).
     pub fn into_tools(self) -> Vec<std::sync::Arc<dyn Tool>> {
         self.tools.into_values().map(|entry| entry.tool).collect()
@@ -154,10 +146,10 @@ impl ToolRegistry {
                 let allow: std::collections::HashSet<&str> =
                     tools.iter().map(String::as_str).collect();
                 let to_remove: Vec<String> = self
-                    .list_definitions()
-                    .into_iter()
-                    .map(|definition| definition.name)
+                    .tools
+                    .keys()
                     .filter(|name| !allow.contains(name.as_str()))
+                    .cloned()
                     .collect();
                 for name in to_remove {
                     self.unregister(&name);
@@ -182,7 +174,7 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
         Arc::new(super::files::ApplyPatchTool {
             working_dir: working_dir.clone(),
         }) as Arc<dyn Tool>,
-        Arc::new(super::files::FindFilesTool {
+        Arc::new(super::files::GlobTool {
             working_dir: working_dir.clone(),
         }) as Arc<dyn Tool>,
         Arc::new(super::files::GrepTool {
@@ -193,7 +185,6 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
             timeout_secs,
         }) as Arc<dyn Tool>,
         Arc::new(super::terminal_tool::TerminalTool { working_dir }) as Arc<dyn Tool>,
-        Arc::new(super::task_tool::TaskTool) as Arc<dyn Tool>,
     ]
 }
 
@@ -247,7 +238,7 @@ mod tests {
             registry.register(tool);
         }
 
-        for name in ["find", "grep", "read"] {
+        for name in ["glob", "grep", "read"] {
             let definition = registry.find_definition(name).unwrap();
             assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
         }

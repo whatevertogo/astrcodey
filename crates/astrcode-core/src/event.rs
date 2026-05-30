@@ -125,7 +125,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话成功完成。
     ///
-    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
     ///
     /// **双 `SessionId` 说明（勿删其一）**：`child_session_id` 锚定
     /// `AgentSessionSpawned`；`final_session_id` 为结果所在 leaf。当前 compact 为
@@ -142,7 +142,7 @@ pub enum EventPayload {
 
     /// 子 Agent 会话失败。
     ///
-    /// 由 `ChildTurnGuard` / server 在子 turn 结束后追加到父会话。
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
     /// 双 `SessionId` 语义同 [`AgentSessionCompleted`]。
     AgentSessionFailed {
         /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。
@@ -170,6 +170,11 @@ pub enum EventPayload {
         /// 完成原因（如 "stop"、"tool_use" 等）。
         finish_reason: String,
     },
+
+    /// 上一轮被用户中断的模型上下文。
+    ///
+    /// Projection 会将其追加为 provider 可见、普通 transcript 隐藏的 User 消息。
+    TurnAbortedContext,
 
     /// 用户发送的消息。
     UserMessage {
@@ -380,47 +385,6 @@ pub enum EventPayload {
         data: serde_json::Value,
     },
 
-    /// 工具调用已转入后台执行。
-    ///
-    /// 当工具执行超过其声明的后台化阈值时，agent loop 自动将调用
-    /// 从同步等待转为后台运行，并返回占位结果给 LLM 继续推理。
-    ToolCallBackgrounded {
-        /// 工具调用唯一标识。
-        call_id: ToolCallId,
-        /// 工具名称。
-        tool_name: String,
-        /// 后台任务 ID，用于后续查询和取消。
-        task_id: crate::types::BackgroundTaskId,
-        /// 后台化原因（如 "auto_threshold"）。
-        reason: String,
-    },
-
-    /// 后台任务的输出增量（stdout/stderr 流）。
-    ///
-    /// 这是 live 事件，不持久化到事件日志。
-    BackgroundTaskOutput {
-        /// 后台任务 ID。
-        task_id: crate::types::BackgroundTaskId,
-        /// 原始工具调用 ID，用于客户端将输出关联到对应的 tool-call block。
-        call_id: ToolCallId,
-        /// 输出流类型。
-        stream: ToolOutputStream,
-        /// 本次增量输出文本。
-        delta: String,
-    },
-
-    /// 后台任务已完成。
-    BackgroundTaskCompleted {
-        /// 后台任务 ID。
-        task_id: crate::types::BackgroundTaskId,
-        /// 原始工具调用 ID。
-        call_id: ToolCallId,
-        /// 工具名称。
-        tool_name: String,
-        /// 工具执行的最终结果。
-        result: ToolResult,
-    },
-
     /// 插件命名空间事件。
     ///
     /// 由 [`crate::extension::ExtensionEventSink`] 发出，`extension_id` 由 runtime
@@ -441,8 +405,8 @@ pub enum EventPayload {
 impl EventPayload {
     /// 判断该事件是否应持久化到会话的 JSONL 事件日志中。
     ///
-    /// 增量类事件（如文本增量、参数增量、输出增量）和临时控制事件
-    /// 不需要持久化，因为它们可以从持久化事件中重建。
+    /// 采用「默认持久化」策略：仅排除 live/增量类事件；新增 [`EventPayload`] 变体若未加入
+    /// 排除列表会自动持久化（更安全，但新增 live-only 变体时须记得更新此列表）。
     pub fn is_durable(&self) -> bool {
         !matches!(
             self,
@@ -453,9 +417,6 @@ impl EventPayload {
                 | Self::ToolOutputDelta { .. }
                 | Self::AgentRunStarted
                 | Self::AgentRunCompleted { .. }
-                | Self::ToolCallBackgrounded { .. }
-                | Self::BackgroundTaskOutput { .. }
-                | Self::BackgroundTaskCompleted { .. }
                 | Self::CompactionStarted
                 | Self::CompactionCompleted { .. }
                 | Self::CompactionSkipped { .. }
@@ -639,33 +600,6 @@ mod tests {
             "ToolCallStarted is live UI state only"
         );
         assert!(
-            !EventPayload::ToolCallBackgrounded {
-                call_id: "c1".into(),
-                tool_name: "shell".into(),
-                task_id: "t1".into(),
-                reason: "auto_threshold".into(),
-            }
-            .is_durable(),
-            "ToolCallBackgrounded is live UI state only"
-        );
-        assert!(
-            !EventPayload::BackgroundTaskCompleted {
-                task_id: "t1".into(),
-                call_id: "c1".into(),
-                tool_name: "shell".into(),
-                result: ToolResult {
-                    call_id: "c1".into(),
-                    content: "ok".into(),
-                    is_error: false,
-                    error: None,
-                    metadata: BTreeMap::new(),
-                    duration_ms: Some(10),
-                },
-            }
-            .is_durable(),
-            "BackgroundTaskCompleted is live UI state only"
-        );
-        assert!(
             EventPayload::CompactBoundaryCreated {
                 trigger: "manual_command".into(),
                 pre_tokens: 10,
@@ -692,6 +626,10 @@ mod tests {
             }
             .is_durable(),
             "SessionContinuedFromCompaction is the durable child-session projection fact"
+        );
+        assert!(
+            EventPayload::TurnAbortedContext.is_durable(),
+            "TurnAbortedContext must be durably visible to the next provider request"
         );
     }
 

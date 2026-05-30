@@ -175,7 +175,7 @@ async fn handle_prompt(
                         tracing::warn!(error, "ACP prompt turn failed");
                         Ok(StopReason::Cancelled)
                     },
-                    Ok(TurnCompletion::Aborted) => Ok(StopReason::Cancelled),
+                    Ok(TurnCompletion::Dropped) => Ok(StopReason::Cancelled),
                     Err(_) => Ok(StopReason::EndTurn),
                 };
             },

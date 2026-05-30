@@ -1,6 +1,7 @@
 //! InMemoryEventStore — 纯内存事件存储和投影，仅用于测试。
 //!
-//! 注: 仅用于测试
+//! 通过 crate feature `testing` 暴露给跨 crate 集成测试；本 crate 内单元测试也可启用该 feature。
+//! 不要用 `#[cfg(test)]` 单独 gating：否则 `astrcode-server` 等集成测试无法链接此模块。
 
 use std::collections::HashMap;
 
@@ -206,12 +207,18 @@ impl EventStore for InMemoryEventStore {
     async fn checkpoint(
         &self,
         session_id: &SessionId,
-        _cursor: &Cursor,
+        cursor: &Cursor,
     ) -> Result<(), StorageError> {
-        // In-memory storage does not persist checkpoint state. We still read
-        // the session model to validate the session exists and to keep the
-        // semantics of checkpoint as a no-op that can fail for invalid sessions.
-        self.session_read_model(session_id).await?;
+        let map = self.sessions.lock().await;
+        let session = map
+            .get(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let latest_cursor = session.projection.cursor();
+        if cursor != &latest_cursor {
+            return Err(StorageError::InvalidId(format!(
+                "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
+            )));
+        }
         Ok(())
     }
 
@@ -285,9 +292,43 @@ fn format_memory_tool_result_path(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::types::SessionId;
+    use astrcode_core::{event::Event, types::SessionId};
 
     use super::*;
+
+    #[tokio::test]
+    async fn checkpoint_rejects_stale_cursor_like_filesystem_store() {
+        use astrcode_core::event::EventPayload;
+
+        let store = InMemoryEventStore::new();
+        let session_id = SessionId::from("session-test");
+        store
+            .create_session(&session_id, ".", "mock", None, None, None)
+            .await
+            .unwrap();
+        store
+            .append_event(Event::new(
+                session_id.clone(),
+                None,
+                EventPayload::UserMessage {
+                    message_id: "m1".into(),
+                    text: "hello".into(),
+                },
+            ))
+            .await
+            .unwrap();
+
+        let error = store
+            .checkpoint(&session_id, &"0".into())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StorageError::InvalidId(message)
+                if message.contains("checkpoint cursor 0 does not match latest cursor 1")
+        ));
+    }
 
     #[tokio::test]
     async fn replay_from_rejects_invalid_cursor_like_filesystem_store() {

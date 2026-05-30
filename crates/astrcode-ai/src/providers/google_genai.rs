@@ -3,11 +3,13 @@
 //! Implements [`LlmProvider`] for Google's generativelanguage API with SSE
 //! streaming, function calling, and thinking support.
 
+use std::sync::Mutex;
+
 use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{build_client, stream_with_retry},
+    common::{StreamEventSink, build_client, send_event, stream_with_retry},
     retry::RetryPolicy,
     serialization::ContentMapper,
 };
@@ -25,9 +27,9 @@ impl GeminiProvider {
         model_id: String,
         max_tokens: Option<u32>,
         context_limit: Option<usize>,
-    ) -> Self {
-        let client = build_client(&config);
-        Self {
+    ) -> Result<Self, LlmError> {
+        let client = build_client(&config)?;
+        Ok(Self {
             config,
             model_id,
             model_limits_val: ModelLimits {
@@ -35,19 +37,16 @@ impl GeminiProvider {
                 max_output_tokens: max_tokens.unwrap_or(8192) as usize,
             },
             client,
-        }
+        })
     }
 
     fn endpoint(&self) -> String {
         let base = self.config.base_url.trim_end_matches('/');
         let model = &self.model_id;
         if base.contains("generateContent") || base.contains("streamGenerateContent") {
-            return format!("{base}&key={}", self.config.api_key);
+            return base.to_string();
         }
-        format!(
-            "{base}/models/{model}:streamGenerateContent?alt=sse&key={}",
-            self.config.api_key
-        )
+        format!("{base}/models/{model}:streamGenerateContent?alt=sse")
     }
 
     fn build_request_body(
@@ -120,12 +119,13 @@ impl LlmProvider for GeminiProvider {
         let body = self.build_request_body(&messages, &tools);
 
         let endpoint = self.endpoint();
-        let headers: Vec<(String, String)> = self
+        let mut headers: Vec<(String, String)> = self
             .config
             .extra_headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        headers.push(("x-goog-api-key".into(), self.config.api_key.clone()));
         let client = self.client.clone();
         let retry = RetryPolicy {
             max_retries: self.config.max_retries,
@@ -134,6 +134,7 @@ impl LlmProvider for GeminiProvider {
         };
 
         tokio::spawn(async move {
+            let sink = Mutex::new(StreamEventSink::new());
             let result = stream_with_retry(
                 client,
                 endpoint,
@@ -143,15 +144,27 @@ impl LlmProvider for GeminiProvider {
                 tx.clone(),
                 |data, tx| {
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        process_gemini_chunk(&event, tx);
+                        let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+                        process_gemini_chunk(&event, tx, &mut sink)
+                    } else {
+                        true
                     }
                 },
             )
             .await;
-            if let Err(e) = result {
-                let _ = tx.send(LlmEvent::Error {
-                    message: e.to_string(),
-                });
+            if result.is_ok() {
+                let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+                if !sink.done_sent() {
+                    sink.ensure_done(&tx);
+                }
+            }
+            if let Err(error) = result {
+                send_event(
+                    &tx,
+                    LlmEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
             }
         });
 
@@ -163,9 +176,13 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
-fn process_gemini_chunk(event: &serde_json::Value, tx: &mpsc::UnboundedSender<LlmEvent>) {
+fn process_gemini_chunk(
+    event: &serde_json::Value,
+    tx: &mpsc::UnboundedSender<LlmEvent>,
+    sink: &mut StreamEventSink,
+) -> bool {
     let Some(candidates) = event.get("candidates").and_then(|v| v.as_array()) else {
-        return;
+        return true;
     };
 
     for candidate in candidates {
@@ -178,42 +195,50 @@ fn process_gemini_chunk(event: &serde_json::Value, tx: &mpsc::UnboundedSender<Ll
 
         for part in parts {
             if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                if part
+                let event = if part
                     .get("thought")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false)
                 {
-                    let _ = tx.send(LlmEvent::ThinkingDelta {
+                    LlmEvent::ThinkingDelta {
                         delta: text.to_string(),
-                    });
+                    }
                 } else {
-                    let _ = tx.send(LlmEvent::ContentDelta {
+                    LlmEvent::ContentDelta {
                         delta: text.to_string(),
-                    });
+                    }
+                };
+                if !send_event(tx, event) {
+                    return false;
                 }
             }
 
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-                let call_id = fc.get("id").and_then(|v| v.as_str()).unwrap_or(name);
+                let call_id = sink.tool_call_id(fc.get("id").and_then(|v| v.as_str()));
                 let args = fc.get("args").cloned().unwrap_or(serde_json::json!({}));
                 let arguments_str = serde_json::to_string(&args).unwrap_or_default();
-                let _ = tx.send(LlmEvent::ToolCallStart {
-                    call_id: call_id.to_string(),
-                    name: name.to_string(),
-                    arguments: arguments_str,
-                });
+                if !send_event(
+                    tx,
+                    LlmEvent::ToolCallStart {
+                        call_id,
+                        name: name.to_string(),
+                        arguments: arguments_str,
+                    },
+                ) {
+                    return false;
+                }
             }
         }
 
         if let Some(finish) = candidate.get("finishReason").and_then(|v| v.as_str()) {
-            if !finish.is_empty() {
-                let _ = tx.send(LlmEvent::Done {
-                    finish_reason: finish.to_string(),
-                });
+            if !finish.is_empty() && !sink.emit_done(tx, finish) {
+                return false;
             }
         }
     }
+
+    true
 }
 
 // ─── Message conversion ──────────────────────────────────────────────────
@@ -359,7 +384,8 @@ mod tests {
             "gemini-test".into(),
             Some(1024),
             Some(8192),
-        );
+        )
+        .unwrap();
         let body = provider.build_request_body(
             &[
                 LlmMessage::system("static instructions"),
@@ -386,10 +412,53 @@ mod tests {
             "gemini-2.5-pro".into(),
             None,
             None,
-        );
+        )
+        .unwrap();
         let endpoint = provider.endpoint();
         assert!(endpoint.contains("gemini-2.5-pro"));
         assert!(endpoint.contains("streamGenerateContent"));
-        assert!(endpoint.contains("test-key"));
+        assert!(!endpoint.contains("test-key"));
+    }
+
+    #[test]
+    fn gemini_done_event_is_emitted_once() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sink = StreamEventSink::new();
+        let event = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "hi"}]},
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(process_gemini_chunk(&event, &tx, &mut sink));
+        assert!(process_gemini_chunk(&event, &tx, &mut sink));
+        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| matches!(event, LlmEvent::Done { .. }))
+            .count();
+        assert_eq!(done_count, 1);
+        assert!(sink.done_sent());
+    }
+
+    #[test]
+    fn gemini_fallback_call_ids_are_unique_without_provider_id() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sink = StreamEventSink::new();
+        let event = serde_json::json!({
+            "candidates": [{
+                "content": {"parts": [
+                    {"functionCall": {"name": "read", "args": {}}},
+                    {"functionCall": {"name": "read", "args": {}}}
+                ]}
+            }]
+        });
+        assert!(process_gemini_chunk(&event, &tx, &mut sink));
+
+        let call_ids: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                LlmEvent::ToolCallStart { call_id, .. } => Some(call_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(call_ids, vec!["call_1", "call_2"]);
     }
 }

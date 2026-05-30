@@ -6,18 +6,23 @@ use astrcode_core::types::*;
 use tokio::sync::mpsc;
 
 use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_schedule_error_for_client};
-use crate::turn_scheduler::{TurnScheduleError, TurnScheduler};
+use crate::turn_scheduler::{CompletionParams, StartedExecution, TurnScheduleError, TurnScheduler};
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
 pub enum TurnCompletion {
-    Completed { finish_reason: String },
-    Failed { error: String },
-    Aborted,
+    Completed {
+        finish_reason: String,
+    },
+    Failed {
+        error: String,
+    },
+    /// completion 通道关闭或 task 异常，未拿到 turn 结果。
+    Dropped,
 }
 
 impl CommandHandler {
-    /// 启动新 Turn：委托给 scheduler.submit()，spawn completion watcher。
+    /// 启动新 Turn：经 scheduler 统一启动并 spawn completion watcher。
     pub(in crate::handler) async fn start_turn_for_session(
         &self,
         sid: SessionId,
@@ -25,9 +30,9 @@ impl CommandHandler {
         completion_tx: Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
     ) -> Result<TurnId, HandlerError> {
         tracing::info!(session_id = %sid, text_len = user_text.len(), "start_turn");
-        let (turn_id, handle) = self
+        let crate::turn_scheduler::StartedExecution { turn_id, handle } = self
             .scheduler
-            .submit(sid.clone(), user_text)
+            .start_with_completion(sid.clone(), user_text)
             .await
             .map_err(|e| {
                 let (code, err) = turn_schedule_error_for_client(e);
@@ -56,7 +61,6 @@ impl CommandHandler {
         Ok(turn_id)
     }
 
-    /// 中止指定会话的活跃 Turn。
     pub(in crate::handler) async fn abort_session(
         &self,
         session_id: &SessionId,
@@ -71,16 +75,14 @@ impl CommandHandler {
         }
     }
 
-    /// 中止当前活跃会话的 Turn。
     pub(in crate::handler) async fn abort_active_turn(&self) -> Result<(), HandlerError> {
-        let Some(sid) = self.active_session_id.as_ref() else {
+        let Some(sid) = self.focused_session_id.as_ref() else {
             self.send_error(40400, "No active turn");
             return Ok(());
         };
         self.abort_session(sid).await
     }
 
-    /// 修复遗留状态。
     pub(in crate::handler) async fn repair_stale_session(
         &self,
         session_id: &SessionId,
@@ -91,7 +93,6 @@ impl CommandHandler {
             .map_err(HandlerError::from)
     }
 
-    /// 提交提示词并返回完成通知接收器。
     pub(in crate::handler) async fn submit_input_with_completion(
         &self,
         sid: SessionId,
@@ -103,10 +104,7 @@ impl CommandHandler {
     }
 }
 
-/// Completion watcher：等待 TurnHandle 完成，通知 actor 清理。
-///
-/// Turn 的终态事件（TurnCompleted / AgentRunCompleted）由 `Session::submit` 内部发射。
-/// 这里只负责 registry 清理、sync durable events、通知 actor 触发 queued input dispatch。
+/// Completion watcher：等待 TurnHandle 完成，交给 scheduler 统一收尾。
 async fn run_completion_watcher(
     mut handle: astrcode_session::turn_handle::TurnHandle,
     scheduler: Arc<TurnScheduler>,
@@ -118,67 +116,72 @@ async fn run_completion_watcher(
     loop {
         let completion = match handle.wait().await {
             Some(result) => match result.output {
-                Ok(output) => {
-                    scheduler.sync_durable_events(&sid).await;
-                    TurnCompletion::Completed {
-                        finish_reason: output.finish_reason,
-                    }
+                Ok(output) => TurnCompletion::Completed {
+                    finish_reason: output.finish_reason,
                 },
-                Err(error) => {
-                    scheduler.sync_durable_events(&sid).await;
-                    TurnCompletion::Failed {
-                        error: error.to_string(),
-                    }
+                Err(error) => TurnCompletion::Failed {
+                    error: error.to_string(),
                 },
             },
-            None => TurnCompletion::Aborted,
+            None => TurnCompletion::Dropped,
         };
 
-        scheduler.registry().remove_if_matches(&sid, &turn_id);
-        scheduler.on_turn_completed(&sid).await;
-
-        if let Some((next_turn_id, next_handle)) = scheduler.start_next_queued_turn(&sid).await {
-            if let Some(tx) = completion_tx.take() {
-                let _ = tx.send(completion.clone());
-            }
-            if actor_tx
-                .send(CommandMessage::AgentTurnCleanup {
-                    session_id: sid.clone(),
-                    turn_id: turn_id.clone(),
-                    completion: completion.clone(),
-                })
-                .await
-                .is_err()
-            {
-                tracing::warn!(
-                    session_id = %sid,
-                    turn_id = %turn_id,
-                    "command actor queue closed; skipping turn cleanup message"
-                );
-                break;
-            }
-            turn_id = next_turn_id;
-            handle = next_handle;
-            continue;
-        }
-
-        if let Some(tx) = completion_tx.take() {
-            let _ = tx.send(completion.clone());
-        }
-        if actor_tx
-            .send(CommandMessage::AgentTurnCleanup {
-                session_id: sid,
+        let next = scheduler
+            .finish_and_maybe_start_next(CompletionParams {
+                session_id: sid.clone(),
                 turn_id: turn_id.clone(),
-                completion,
             })
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                turn_id = %turn_id,
-                "command actor queue closed; skipping turn cleanup message"
-            );
+            .await;
+
+        let actor_ok = send_turn_completion(
+            &mut completion_tx,
+            &actor_tx,
+            sid.clone(),
+            turn_id.clone(),
+            completion,
+        )
+        .await;
+        if !actor_ok {
+            break;
         }
-        break;
+
+        let Some(StartedExecution {
+            turn_id: next_turn_id,
+            handle: next_handle,
+        }) = next
+        else {
+            break;
+        };
+        turn_id = next_turn_id;
+        handle = next_handle;
     }
+}
+
+/// 向 completion oneshot 与 actor 发送本轮结果；actor 通道关闭时返回 false。
+async fn send_turn_completion(
+    completion_tx: &mut Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
+    actor_tx: &mpsc::Sender<CommandMessage>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    completion: TurnCompletion,
+) -> bool {
+    if let Some(tx) = completion_tx.take() {
+        let _ = tx.send(completion.clone());
+    }
+    if actor_tx
+        .send(CommandMessage::AgentTurnCleanup {
+            session_id,
+            turn_id: turn_id.clone(),
+            completion,
+        })
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            turn_id = %turn_id,
+            "command actor queue closed; skipping turn cleanup message"
+        );
+        return false;
+    }
+    true
 }

@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::ConfigStore, extension::ExtensionHostServices, lifecycle::SessionResourceCleanup,
-    storage::EventStore,
+    storage::EventStore, tool::SessionOperations,
 };
 use astrcode_extensions::{
     build_host_router,
@@ -24,7 +24,11 @@ mod server_system;
 pub use server_system::{ServerSystem, spawn_server_system};
 
 pub use crate::config_manager::ConfigManager;
-use crate::session_manager::SessionManager;
+use crate::{
+    child_session::ChildSessionCoordinator, session_manager::SessionManager,
+    session_operations::ServerSessionOperations, turn_registry::TurnRegistry,
+    turn_scheduler::TurnScheduler,
+};
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
 
@@ -37,6 +41,7 @@ pub struct ServerRuntime {
     pub(crate) config_manager: Arc<ConfigManager>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) session_manager: Arc<SessionManager>,
+    pub(crate) scheduler: Arc<TurnScheduler>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
     pub(crate) capabilities: Arc<SessionRuntimeServices>,
     pub(crate) startup_working_dir: PathBuf,
@@ -60,6 +65,10 @@ impl ServerRuntime {
         &self.session_manager
     }
 
+    pub fn scheduler(&self) -> &Arc<TurnScheduler> {
+        &self.scheduler
+    }
+
     pub fn extension_runner(&self) -> &Arc<ExtensionRunner> {
         &self.extension_runner
     }
@@ -74,6 +83,11 @@ impl ServerRuntime {
 
     pub fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown_token
+    }
+
+    /// 配置热更新后同步所有 session runtime 的 LLM binding。
+    pub fn sync_session_model_bindings(&self) {
+        self.session_manager.sync_all_model_bindings_from_config();
     }
 }
 
@@ -106,8 +120,8 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 /// 4. 初始化存储后端
 /// 5. 创建空的扩展运行器
 /// 6. 组装 ConfigManager（内部构建 providers）
-/// 7. 加载扩展（从 capabilities 获取 small_llm）
-/// 8. 绑定扩展创建子会话的宿主能力
+/// 7. 创建 turn scheduler 与 session ops
+/// 8. 加载扩展（从 capabilities 获取 LLM 与 session ops）
 /// 9. 返回共享运行时容器
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
     // 1. 读取配置并解析成 EffectiveConfig。
@@ -142,14 +156,11 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
         Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new())
     } else {
-        Arc::new(
-            astrcode_storage::session_repo::FileSystemSessionRepository::for_project_path(&cwd),
-        )
+        Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new())
     };
     #[cfg(not(feature = "testing"))]
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(
-        astrcode_storage::session_repo::FileSystemSessionRepository::for_project_path(&cwd),
-    );
+    let store: Arc<dyn astrcode_core::storage::EventStore> =
+        Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new());
     let event_store = store;
 
     // 5. 创建空的扩展运行器。
@@ -168,7 +179,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         effective,
         Arc::clone(&extension_runner),
         Arc::clone(&context_assembler),
-    );
+    )?;
     let config_manager = Arc::new(config_manager);
 
     let session_manager = Arc::new(SessionManager::new(
@@ -178,15 +189,35 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         vec![Arc::new(TerminalCleanup)],
     ));
 
+    let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
+    let scheduler = Arc::new(TurnScheduler::new(
+        Arc::clone(&session_manager),
+        Arc::new(TurnRegistry::new()),
+        Arc::clone(&child_sessions),
+    ));
+    child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
+    let session_ops: Arc<dyn SessionOperations> = Arc::new(ServerSessionOperations {
+        session_manager: Arc::clone(&session_manager),
+        scheduler: Arc::clone(&scheduler),
+        child_sessions,
+    });
+    extension_runner.bind_session_ops(Arc::clone(&session_ops));
+    session_manager.add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
+        scheduler: Arc::clone(&scheduler),
+    }));
+
     // 7. 加载扩展。
     //
-    // HostServices 从 capabilities 获取 small_llm，为 trusted bundled extension
-    // 提供运行时依赖（EventStore、small_llm）。不传给磁盘 IPC 扩展。
-    let host_services = Arc::new(ExtensionHostServices::new(
-        Arc::clone(&event_store),
-        Some(capabilities.llm()),
-        Some(capabilities.small_llm()),
-    ));
+    // HostServices 从 capabilities 获取 LLM，并携带 session ops 给声明了
+    // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。
+    let host_services = Arc::new(
+        ExtensionHostServices::new(
+            Arc::clone(&event_store),
+            Some(capabilities.llm()),
+            Some(capabilities.small_llm()),
+        )
+        .with_session_ops(session_ops),
+    );
     extension_runner.bind_host_services(Arc::clone(&host_services));
     let load_errors =
         load_extensions_into_runner(&extension_runner, &capabilities, &host_services, &cwd).await;
@@ -194,14 +225,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!("Extension load error: {err}");
     }
 
-    // 8. 子会话操作能力绑定移至 spawn_server_system（需要 scheduler）。
-
     // 9. 返回运行时容器。
     Ok(ServerRuntime {
         event_store,
         config_manager,
         context_assembler,
         session_manager,
+        scheduler,
         extension_runner,
         capabilities,
         startup_working_dir: cwd,
@@ -214,16 +244,20 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 pub enum BootstrapError {
     #[error("Config: {0}")]
     Config(#[from] astrcode_core::config::ConfigStoreError),
+    #[error("LLM provider: {0}")]
+    Llm(#[from] astrcode_core::llm::LlmError),
 }
 
 #[cfg(feature = "testing")]
 impl ServerRuntime {
     /// 集成测试用：从已组装的部件构造运行时（避免测试直接访问私有字段）。
+    #[allow(clippy::too_many_arguments)] // 字段与 `ServerRuntime` 一一对应，拆 struct 无收益
     pub fn assemble_for_test(
         event_store: Arc<dyn EventStore>,
         config_manager: Arc<ConfigManager>,
         context_assembler: Arc<LlmContextAssembler>,
         session_manager: Arc<SessionManager>,
+        scheduler: Arc<TurnScheduler>,
         extension_runner: Arc<ExtensionRunner>,
         capabilities: Arc<SessionRuntimeServices>,
         startup_working_dir: PathBuf,
@@ -233,6 +267,7 @@ impl ServerRuntime {
             config_manager,
             context_assembler,
             session_manager,
+            scheduler,
             extension_runner,
             capabilities,
             startup_working_dir,
@@ -252,11 +287,15 @@ impl ServerRuntime {
     /// 按当前配置重载扩展集合，并让已打开 session 的工具快照在下一次 turn 重建。
     pub async fn reload_extensions(&self) -> Vec<String> {
         let caps = self.capabilities();
-        let host_services = Arc::new(ExtensionHostServices::new(
+        let mut host_services = ExtensionHostServices::new(
             Arc::clone(self.event_store()),
             Some(caps.llm()),
             Some(caps.small_llm()),
-        ));
+        );
+        if let Some(session_ops) = caps.session_ops() {
+            host_services = host_services.with_session_ops(session_ops);
+        }
+        let host_services = Arc::new(host_services);
         self.extension_runner()
             .bind_host_services(Arc::clone(&host_services));
         let load_errors = load_extensions_into_runner(
@@ -315,5 +354,21 @@ struct TerminalCleanup;
 impl SessionResourceCleanup for TerminalCleanup {
     fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
         astrcode_tools::terminal_tool::cleanup_terminals_for_session(session_id.as_str());
+    }
+}
+
+/// session 销毁/回收时清理 turn scheduler 中的待处理输入和活跃记录。
+struct TurnSchedulerCleanup {
+    scheduler: Arc<TurnScheduler>,
+}
+
+impl SessionResourceCleanup for TurnSchedulerCleanup {
+    fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
+        let scheduler = Arc::clone(&self.scheduler);
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+            scheduler.abort_and_cleanup(&sid).await;
+            tracing::debug!(session_id = %sid, "turn scheduler cleanup finished");
+        });
     }
 }

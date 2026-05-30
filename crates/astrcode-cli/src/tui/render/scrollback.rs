@@ -167,7 +167,7 @@ pub fn scrollback_entry_to_lines(
 ) -> Vec<Line<'static>> {
     match entry {
         ScrollbackEntry::Message(msg) => render_message(msg, width, theme, message_renderers),
-        ScrollbackEntry::StreamHeader { .. } => vec![Line::from("")],
+        ScrollbackEntry::StreamHeader => vec![Line::from("")],
         ScrollbackEntry::StreamText { role, text } => {
             stream_text_to_lines(role, text, width, theme)
         },

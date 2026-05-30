@@ -67,6 +67,7 @@ pub(in crate::http) async fn set_enabled(
     {
         return bad_request_response("invalid_extension_state", error);
     }
+    state.runtime.sync_session_model_bindings();
 
     // 通知扩展配置已变更
     let config_errors = state

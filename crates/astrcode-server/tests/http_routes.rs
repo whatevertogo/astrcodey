@@ -17,7 +17,13 @@ use astrcode_protocol::{
         PromptSubmitResponse, SlashCommandListResponseDto,
     },
 };
-use astrcode_server::{bootstrap::ServerRuntime, http::router};
+use astrcode_server::{
+    bootstrap::ServerRuntime,
+    http::router,
+    test_support::{
+        ChildSessionCoordinator, ConfigManager, SessionManager, TurnRegistry, TurnScheduler,
+    },
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use astrcode_support::event_fanout::EventFanout;
 use axum::{
@@ -877,24 +883,32 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         Arc::clone(&context_assembler),
         effective,
     ));
-    let config = Arc::new(astrcode_server::bootstrap::ConfigManager::new(
+    let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-config.json"),
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&capabilities),
     ));
-    let session_manager = Arc::new(astrcode_server::session_manager::SessionManager::new(
+    let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
         Arc::clone(&capabilities),
         vec![],
     ));
+    let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
+    let scheduler = Arc::new(TurnScheduler::new(
+        Arc::clone(&session_manager),
+        Arc::new(TurnRegistry::new()),
+        Arc::clone(&child_sessions),
+    ));
+    child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
     Arc::new(ServerRuntime::assemble_for_test(
         event_store,
         config,
         context_assembler,
         session_manager,
+        scheduler,
         extension_runner,
         capabilities,
         std::env::temp_dir(),

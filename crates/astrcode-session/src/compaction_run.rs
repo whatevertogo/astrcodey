@@ -69,11 +69,7 @@ pub async fn compact_idle_session(
         message_count: provider_messages.len(),
     };
     let custom_instructions = collect_compact_instructions(extension_runner, hook_ctx).await?;
-    let base_event_seq = session
-        .latest_cursor()
-        .await?
-        .and_then(|c| c.parse::<u64>().ok())
-        .unwrap_or(0);
+    let base_event_seq = crate::session::parse_base_event_seq(session.latest_cursor().await?)?;
     let render_options = CompactSummaryRenderOptions {
         transcript_path: params.transcript_path,
         custom_instructions: custom_instructions.clone(),

@@ -103,11 +103,6 @@ id_newtype! {
     pub struct ToolCallId;
 }
 
-id_newtype! {
-    /// 后台任务的唯一标识符。
-    pub struct BackgroundTaskId;
-}
-
 /// 会话事件日志中的位置游标。
 /// 对客户端不透明；服务器用于分页和恢复。
 pub type Cursor = String;
@@ -168,11 +163,6 @@ pub fn new_turn_id() -> TurnId {
 /// 生成新的唯一消息 ID（基于 UUID v4）。
 pub fn new_message_id() -> MessageId {
     MessageId::new(uuid::Uuid::new_v4().to_string())
-}
-
-/// 生成新的唯一后台任务 ID（基于 UUID v4）。
-pub fn new_background_task_id() -> BackgroundTaskId {
-    BackgroundTaskId::new(uuid::Uuid::new_v4().to_string())
 }
 
 /// 从工作目录路径派生可读的稳定项目标识符。

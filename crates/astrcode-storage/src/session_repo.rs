@@ -68,7 +68,11 @@ struct SessionMeta {
     snapshot_mgr: SnapshotManager,
     /// 当前会话所在目录。
     dir: PathBuf,
-    /// 从事件日志同步维护的内部读模型。
+    /// 从事件日志同步维护的内部读模型（本进程内由 `append_event` 增量更新）。
+    ///
+    /// TODO(multi-process): 多 server 进程共享同一 session 目录时，另一进程写入 JSONL 后
+    /// 本实例缓存不会自动失效。刷新策略待定：比较日志 `mtime` 或尾部 `seq` 与
+    /// `projection.latest_seq`，落后则 `replay_after` 并写回此字段（见 `get_or_open_meta`）。
     projection: RwLock<SessionReadModel>,
 }
 
@@ -84,11 +88,6 @@ impl FileSystemSessionRepository {
     /// 会话按 `working_dir` 动态分发到对应的项目目录，不再绑定启动时的 cwd。
     pub fn new() -> Self {
         Self::with_projects_base(hostpaths::projects_dir())
-    }
-
-    /// 根据真实项目路径创建仓库（与 `new` 相同，保留语义入口）。
-    pub fn for_project_path(_: &Path) -> Self {
-        Self::new()
     }
 
     fn with_projects_base(projects_base: PathBuf) -> Self {
@@ -152,14 +151,11 @@ impl FileSystemSessionRepository {
     }
 
     /// 递归搜索 `base` 下所有 session 目录的 `subagents/{extension}/` 子树。
-    fn search_subagents_tree<'a>(
-        &'a self,
-        base: &'a Path,
-        id: &'a SessionId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + 'a>> {
-        Box::pin(async move {
-            let Ok(mut entries) = tokio::fs::read_dir(base).await else {
-                return None;
+    async fn search_subagents_tree(&self, base: &Path, id: &SessionId) -> Option<PathBuf> {
+        let mut stack = vec![base.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+                continue;
             };
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let subagents = entry.path().join("subagents");
@@ -185,13 +181,11 @@ impl FileSystemSessionRepository {
                     {
                         return Some(candidate);
                     }
-                    if let Some(found) = self.search_subagents_tree(&extension_dir, id).await {
-                        return Some(found);
-                    }
+                    stack.push(extension_dir);
                 }
             }
-            None
-        })
+        }
+        None
     }
 
     /// 获取指定会话的目录路径。
@@ -215,6 +209,10 @@ impl FileSystemSessionRepository {
     /// 如果会话已在内存中则直接返回缓存；否则从磁盘打开事件日志，
     /// 恢复其内存中的 seq 计数器，并加入缓存。
     /// 使用双重检查锁定模式避免重复打开。
+    ///
+    /// TODO(multi-process): 缓存命中时也应检测外部写入（日志 `mtime` / 尾部 `seq` vs
+    /// `projection.latest_seq`），必要时增量重放并更新 `SessionMeta::projection`，避免
+    /// `session_read_model` 等读路径返回过期状态。
     async fn get_or_open_meta(
         &self,
         session_id: &SessionId,
@@ -223,6 +221,7 @@ impl FileSystemSessionRepository {
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
         if let Some(meta) = self.sessions.read().await.get(session_id).cloned() {
+            // TODO(multi-process): call refresh_projection_if_stale(&meta) here
             return Ok(meta);
         }
 
@@ -287,10 +286,11 @@ async fn restore_from_snapshot(
         ));
     };
 
-    let event_count = log.count().await?;
-    if latest_seq >= event_count as u64 {
+    // `count()` returns the next seq to assign (= number of persisted events).
+    let next_seq = log.count().await? as u64;
+    if latest_seq >= next_seq {
         return Err(StorageError::InvalidId(format!(
-            "snapshot latest_seq {latest_seq} is outside event log with {event_count} events"
+            "snapshot latest_seq {latest_seq} is outside event log (next_seq={next_seq})"
         )));
     }
 
@@ -315,6 +315,7 @@ impl EventReader for FileSystemSessionRepository {
         session_id: &SessionId,
     ) -> Result<SessionReadModel, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        // TODO(multi-process): stale check belongs in get_or_open_meta; keep read path thin
         let model = meta.projection.read().await.clone();
         Ok(model)
     }
@@ -381,7 +382,7 @@ impl EventReader for FileSystemSessionRepository {
             .map(|(id, _)| id.clone())
             .collect();
         for base_path in self.session_roots().await {
-            self.collect_session_ids_recursive(&base_path, &mut ids)
+            self.collect_session_ids_from_dir(&base_path, &mut ids)
                 .await;
         }
         ids.sort();
@@ -679,7 +680,7 @@ impl EventStore for FileSystemSessionRepository {
 
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        meta.log.force_sync()
+        meta.log.force_sync_async().await
     }
 }
 
@@ -705,14 +706,15 @@ impl FileSystemSessionRepository {
     }
 
     /// 搜索 sessions_root 下所有 session 的 subagents/.recycled/{extension}/{id}。
-    fn search_recycled_in_root<'a>(
-        &'a self,
-        sessions_root: &'a Path,
-        id: &'a SessionId,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PathBuf>> + Send + 'a>> {
-        Box::pin(async move {
-            let Ok(mut entries) = tokio::fs::read_dir(sessions_root).await else {
-                return None;
+    async fn search_recycled_in_root(
+        &self,
+        sessions_root: &Path,
+        id: &SessionId,
+    ) -> Option<PathBuf> {
+        let mut stack = vec![sessions_root.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+                continue;
             };
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
@@ -727,8 +729,8 @@ impl FileSystemSessionRepository {
                 {
                     continue;
                 }
-                // Check subagents/.recycled/{extension}/{id}
-                let recycled_dir = entry.path().join("subagents").join(".recycled");
+                let session_dir = entry.path();
+                let recycled_dir = session_dir.join("subagents").join(".recycled");
                 if tokio::fs::metadata(&recycled_dir)
                     .await
                     .is_ok_and(|m| m.is_dir())
@@ -745,8 +747,7 @@ impl FileSystemSessionRepository {
                         }
                     }
                 }
-                // Recurse into subagents/{extension}/ for nested sessions
-                let subagents = entry.path().join("subagents");
+                let subagents = session_dir.join("subagents");
                 if tokio::fs::metadata(&subagents)
                     .await
                     .is_ok_and(|m| m.is_dir())
@@ -760,18 +761,13 @@ impl FileSystemSessionRepository {
                             continue;
                         }
                         if extension_entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                            if let Some(found) = self
-                                .search_recycled_in_root(&extension_entry.path(), id)
-                                .await
-                            {
-                                return Some(found);
-                            }
+                            stack.push(extension_entry.path());
                         }
                     }
                 }
             }
-            None
-        })
+        }
+        None
     }
 
     /// 仅扫描磁盘上的会话目录名，不打开任何文件。
@@ -785,43 +781,40 @@ impl FileSystemSessionRepository {
             .map(|(id, _)| id.clone())
             .collect();
         for base_path in self.session_roots().await {
-            self.collect_session_ids_recursive(&base_path, &mut ids)
+            self.collect_session_ids_from_dir(&base_path, &mut ids)
                 .await;
         }
         ids.sort();
         Ok(ids)
     }
 
-    /// 递归收集 base 目录下所有 session ID，包含 subagents/ 子树。
-    fn collect_session_ids_recursive<'a>(
-        &'a self,
-        base: &'a Path,
-        ids: &'a mut Vec<SessionId>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let Ok(mut entries) = tokio::fs::read_dir(base).await else {
-                return;
-            };
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
-                    continue;
-                }
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str == "subagents"
-                    || name_str == "snapshots"
-                    || name_str == "compact-snapshots"
-                    || name_str == "tool-results"
-                    || name_str == ".recycled"
-                {
-                    continue;
-                }
-                let id = SessionId::from(name_str.to_string());
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
+    /// 收集 `base` 下一层会话目录名（不含 `subagents/` 等元数据目录）。
+    ///
+    /// 子 agent 会话存放在 `subagents/<id>/`，由 `find_session_dir` 按需解析，
+    /// 不出现在 `list_sessions` 结果中。
+    async fn collect_session_ids_from_dir(&self, base: &Path, ids: &mut Vec<SessionId>) {
+        let Ok(mut entries) = tokio::fs::read_dir(base).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if !entry.file_type().await.is_ok_and(|t| t.is_dir()) {
+                continue;
             }
-        })
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == "subagents"
+                || name_str == "snapshots"
+                || name_str == "compact-snapshots"
+                || name_str == "tool-results"
+                || name_str == ".recycled"
+            {
+                continue;
+            }
+            let id = SessionId::from(name_str.to_string());
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
     }
 
     /// 从事件日志的首行和末行事件构造轻量级 SessionSummary。

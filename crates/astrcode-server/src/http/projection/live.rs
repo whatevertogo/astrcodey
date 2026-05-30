@@ -40,7 +40,6 @@ pub(in crate::http) fn event_to_deltas(
                     arguments: String::new(),
                     text: String::new(),
                     status: ConversationBlockStatusDto::Streaming,
-                    task_id: None,
                     metadata: None,
                     arguments_json: None,
                 },
@@ -50,18 +49,6 @@ pub(in crate::http) fn event_to_deltas(
             call_id,
             stream,
             delta,
-        } => vec![ConversationDeltaDto::ToolOutput {
-            call_id: call_id.to_string(),
-            stream: *stream,
-            delta: delta.clone(),
-        }],
-
-        // BackgroundTaskOutput — same as ToolOutputDelta but from a backgrounded task
-        EventPayload::BackgroundTaskOutput {
-            call_id,
-            stream,
-            delta,
-            ..
         } => vec![ConversationDeltaDto::ToolOutput {
             call_id: call_id.to_string(),
             stream: *stream,
@@ -120,24 +107,10 @@ pub(in crate::http) fn event_to_deltas(
         // Phase transitions
         EventPayload::TurnStarted
         | EventPayload::AgentRunStarted
-        | EventPayload::CompactionStarted
-        | EventPayload::BackgroundTaskCompleted { .. } => {
+        | EventPayload::CompactionStarted => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_phase(projected_phase(&event.payload), has_messages),
             }]
-        },
-        EventPayload::ToolCallBackgrounded {
-            call_id, task_id, ..
-        } => {
-            vec![
-                ConversationDeltaDto::UpdateControlState {
-                    control: control_from_phase(projected_phase(&event.payload), has_messages),
-                },
-                ConversationDeltaDto::ToolCallBackgrounded {
-                    call_id: call_id.to_string(),
-                    task_id: task_id.to_string(),
-                },
-            ]
         },
         EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
@@ -220,6 +193,7 @@ pub(in crate::http) fn event_to_deltas(
 
         // Events the client doesn't need as visible deltas
         EventPayload::SystemPromptConfigured { .. }
+        | EventPayload::TurnAbortedContext
         | EventPayload::SessionContinuedFromCompaction { .. }
         | EventPayload::SessionForked { .. }
         | EventPayload::ToolCallArgumentsDelta { .. } => vec![],
@@ -239,8 +213,7 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolCallRequested { .. }
         | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::ToolCallCompleted { .. }
-        | EventPayload::ToolCallBackgrounded { .. } => Phase::CallingTool,
+        | EventPayload::ToolCallCompleted { .. } => Phase::CallingTool,
         EventPayload::CompactionStarted => Phase::Compacting,
         EventPayload::ErrorOccurred { .. } => Phase::Error,
         _ => Phase::Idle,
