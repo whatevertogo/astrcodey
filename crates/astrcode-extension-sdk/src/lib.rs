@@ -68,9 +68,9 @@ pub mod prelude {
         builder::{continue_after_stop_handler_fn, handler_fn, tool},
         extension::{
             CommandContext, CommandHandler, CompactContext, CompactContributions, CompactEvent,
-            CompactHandler, CompactResult, Extension, ExtensionCapability, ExtensionCommandResult,
+            CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+            ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
             ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionManifest,
-            ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
             HookMode, HookResult, LifecycleContext, LifecycleHandler, PostToolUseContext,
             PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
             PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,

@@ -55,7 +55,9 @@ where
 // ─── continue_after_stop_handler_fn ──────────────────────────────────────
 
 /// Wraps an async closure into `Arc<dyn ContinueAfterStopHandler>`.
-pub fn continue_after_stop_handler_fn<F, Fut>(f: F) -> Arc<dyn crate::extension::ContinueAfterStopHandler>
+pub fn continue_after_stop_handler_fn<F, Fut>(
+    f: F,
+) -> Arc<dyn crate::extension::ContinueAfterStopHandler>
 where
     F: Fn(ContinueAfterStopContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<ContinueAfterStopResult, ExtensionError>> + Send + 'static,
@@ -141,12 +143,13 @@ impl ToolDefinitionBuilder {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::config::ModelSelection;
-    use astrcode_core::types::SessionId;
+    use astrcode_core::{config::ModelSelection, types::SessionId};
 
     use super::*;
-    use crate::extension::{ContinueAfterStopContext, ContinueAfterStopResult};
-    use crate::tool::ToolCapabilities;
+    use crate::{
+        extension::{ContinueAfterStopContext, ContinueAfterStopResult},
+        tool::ToolCapabilities,
+    };
 
     #[test]
     fn tool_builder_sets_defaults() {
