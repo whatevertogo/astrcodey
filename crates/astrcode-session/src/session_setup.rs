@@ -175,6 +175,7 @@ pub async fn build_system_prompt_snapshot(
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
+        gh_cli_available: astrcode_support::shell::is_gh_cli_available(),
         identity: prompt_files.identity,
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,

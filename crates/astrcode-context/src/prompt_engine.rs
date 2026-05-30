@@ -168,6 +168,12 @@ fn compute_fingerprint(input: &SystemPromptInput) -> String {
     key.push('\0');
     key.push_str(&input.shell);
     key.push('\0');
+    key.push_str(if input.gh_cli_available {
+        "gh:yes"
+    } else {
+        "gh:no"
+    });
+    key.push('\0');
     if let Some(ref id) = input.identity {
         key.push_str(id);
     }
@@ -315,6 +321,12 @@ pub fn compute_stable_fingerprint(input: &SystemPromptInput) -> String {
     key.push('\0');
     key.push_str(&input.shell);
     key.push('\0');
+    key.push_str(if input.gh_cli_available {
+        "gh:yes"
+    } else {
+        "gh:no"
+    });
+    key.push('\0');
     if let Some(ref id) = input.identity {
         key.push_str(id);
     }
@@ -434,13 +446,17 @@ fn identity_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
 }
 
 fn environment_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+    let mut body = format!(
+        "Working directory: {}\nOS: {}\nShell: {}",
+        input.working_dir, input.os, input.shell
+    );
+    if input.gh_cli_available {
+        body.push_str("\nGitHub CLI (gh): available");
+    }
     vec![PromptSection::new(
         PromptSectionOrder::Environment,
         "Environment",
-        format!(
-            "Working directory: {}\nOS: {}\nShell: {}",
-            input.working_dir, input.os, input.shell
-        ),
+        body,
     )]
 }
 
@@ -1012,6 +1028,7 @@ mod tests {
             working_dir: env!("CARGO_MANIFEST_DIR").to_string(),
             os: "windows".into(),
             shell: "powershell".into(),
+            gh_cli_available: false,
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1056,6 +1073,7 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
+            gh_cli_available: false,
             identity: Some("custom identity".into()),
             user_rules: Some("test rules".into()),
             project_rules: Some("project rules content".into()),
@@ -1106,6 +1124,7 @@ mod tests {
         assert!(prompt.contains("[Task Guidelines]\n"));
         assert!(prompt.contains("[Communication]\n"));
         assert!(prompt.contains("[Environment]\n  Working directory: /test"));
+        assert!(!prompt.contains("GitHub CLI (gh): available"));
         assert!(prompt.contains("[User Rules]\n  test rules"));
         assert!(prompt.contains("[Project Rules]\n  project rules content"));
         assert!(prompt.contains("[Tool Summary]"));
@@ -1152,6 +1171,7 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
+            gh_cli_available: false,
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1182,6 +1202,7 @@ mod tests {
             working_dir: "/test".into(),
             os: "linux".into(),
             shell: "bash".into(),
+            gh_cli_available: false,
             identity: None,
             user_rules: None,
             project_rules: None,
@@ -1212,11 +1233,25 @@ mod tests {
     }
 
     #[test]
+    fn environment_reports_gh_cli_availability() {
+        let mut available = input();
+        available.gh_cli_available = true;
+        let prompt = build_system_prompt(&available);
+        assert!(prompt.contains("GitHub CLI (gh): available"));
+
+        let mut unavailable = input();
+        unavailable.gh_cli_available = false;
+        let prompt = build_system_prompt(&unavailable);
+        assert!(!prompt.contains("GitHub CLI (gh): available"));
+    }
+
+    #[test]
     fn environment_changes_keep_identity_prefix_stable() {
         let base = SystemPromptInput {
             working_dir: "/one".into(),
             os: "linux".into(),
             shell: "bash".into(),
+            gh_cli_available: false,
             identity: Some("stable identity".into()),
             user_rules: Some("stable user rules".into()),
             project_rules: Some("stable project rules".into()),

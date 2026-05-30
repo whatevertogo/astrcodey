@@ -98,6 +98,7 @@ impl Session {
             working_dir: working_dir.to_string(),
             os: std::env::consts::OS.into(),
             shell: super::Session::resolve_shell_name(),
+            gh_cli_available: astrcode_support::shell::is_gh_cli_available(),
             identity: prompt_files.identity,
             user_rules: prompt_files.user_rules,
             project_rules: prompt_files.project_rules,

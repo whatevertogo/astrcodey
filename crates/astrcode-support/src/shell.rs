@@ -119,6 +119,21 @@ fn detect_windows_shell() -> ShellInfo {
     }
 }
 
+static CACHED_GH_CLI: OnceLock<bool> = OnceLock::new();
+
+/// 检测 GitHub CLI (`gh`) 是否在 PATH 中可用。
+///
+/// 结果在同一进程内缓存，避免重复扫描 PATH。
+pub fn is_gh_cli_available() -> bool {
+    *CACHED_GH_CLI.get_or_init(|| {
+        if cfg!(windows) {
+            find_in_path("gh.exe").is_some() || find_in_path("gh").is_some()
+        } else {
+            find_in_path("gh").is_some()
+        }
+    })
+}
+
 /// 在 PATH 中查找可执行文件。
 fn find_in_path(name: &str) -> Option<String> {
     let path_var = env::var("PATH").ok()?;

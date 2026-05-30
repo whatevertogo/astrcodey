@@ -7,8 +7,8 @@ use serde::Deserialize;
 use super::shared::{
     DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, directory_result,
     error_result_with_call_id, image_media_type, is_binary, not_found_result,
-    read_image_file_result, read_lines_segment, remember_file_observation_with_store,
-    resolve_sandboxed_path, run_blocking, sandbox_escape_result, slice_chars, tool_call_id,
+    read_image_file_result, read_lines_segment, remember_file_observation_with_store, run_blocking,
+    slice_chars, tool_call_id,
 };
 
 const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
@@ -18,7 +18,7 @@ const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
 ///
 /// 支持行偏移/限制和字符级别的截断，适用于大文件的分页读取。
 pub struct ReadFileTool {
-    /// 工具的工作目录，用于解析相对路径和做路径遍历防护
+    /// 工具的工作目录，用于解析相对路径
     pub working_dir: PathBuf,
 }
 
@@ -99,10 +99,7 @@ fn read_existing_file_sync(
     file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
-    let path = match resolve_sandboxed_path(&working_dir, &args.path) {
-        Ok(path) => path,
-        Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
-    };
+    let path = resolve_path(&working_dir, &args.path);
     if path.is_dir() {
         return Ok(directory_result(call_id.clone(), started_at, &path));
     }
