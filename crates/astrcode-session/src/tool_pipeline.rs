@@ -174,8 +174,7 @@ impl ToolCalls {
                 PreToolUseResult::Allow => (args, PreparedToolOutcome::Ready),
             };
 
-            let same_step =
-                deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
+            let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
             outcome = match (outcome, same_step) {
                 (_, SameStepCheck::Duplicate) => PreparedToolOutcome::DuplicateSameStep,
                 (PreparedToolOutcome::Ready, SameStepCheck::Primary) => PreparedToolOutcome::Ready,

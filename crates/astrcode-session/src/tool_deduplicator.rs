@@ -65,7 +65,8 @@ impl ToolCallDeduplicator {
         self.call_key_by_call_id
             .insert(call_id.to_string(), key.clone());
 
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.same_step_in_flight.entry(key)
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.same_step_in_flight.entry(key)
         {
             let (result_tx, result_rx) = watch::channel(None);
             entry.insert(SameStepInFlight {
@@ -75,11 +76,7 @@ impl ToolCallDeduplicator {
             });
             SameStepCheck::Primary
         } else {
-            tracing::debug!(
-                call_id,
-                tool_name,
-                "same-step tool call deduplicated"
-            );
+            tracing::debug!(call_id, tool_name, "same-step tool call deduplicated");
             SameStepCheck::Duplicate
         }
     }
@@ -157,12 +154,12 @@ impl ToolCallDeduplicator {
         let (tool_name, args_json) = parse_call_key(key);
 
         let reminder = match count {
-            3 => "<system-reminder>You appear to be repeating the same tool call across \
-                 multiple steps. Consider trying a different approach.</system-reminder>"
+            3 => "<system-reminder>You appear to be repeating the same tool call across multiple \
+                  steps. Consider trying a different approach.</system-reminder>"
                 .to_string(),
             5 => format!(
-                "<system-reminder>Warning: you have called `{tool_name}` with identical \
-                 arguments {count} times in recent steps. Vary your strategy.</system-reminder>"
+                "<system-reminder>Warning: you have called `{tool_name}` with identical arguments \
+                 {count} times in recent steps. Vary your strategy.</system-reminder>"
             ),
             8 => format!(
                 "<system-reminder>Critical: `{tool_name}` has been invoked {count} consecutive \

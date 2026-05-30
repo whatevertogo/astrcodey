@@ -287,13 +287,8 @@ impl TurnLoop {
                             .await?;
                     }
 
-                    self.tools_stage(
-                        &extension_runner,
-                        &mut state,
-                        &tool_calls,
-                        publisher,
-                    )
-                    .await?;
+                    self.tools_stage(&extension_runner, &mut state, &tool_calls, publisher)
+                        .await?;
 
                     state.tool_deduplicator_mut().end_step();
                     on_step_end_best_effort(&extension_runner, &lifecycle_ctx).await;

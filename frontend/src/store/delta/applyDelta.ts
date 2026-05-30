@@ -1,10 +1,6 @@
 import type { ConversationDelta } from '../../services/types'
 import type { AppState } from '../types'
-import {
-  mergeAgentSession,
-  resolvePhase,
-  upsertBlock,
-} from './blockHelpers'
+import { mergeAgentSession, resolvePhase, upsertBlock } from './blockHelpers'
 
 export function applyDeltaToState(
   state: AppState,

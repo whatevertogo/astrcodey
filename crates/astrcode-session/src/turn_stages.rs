@@ -4,10 +4,12 @@ use std::collections::HashSet;
 
 use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata, ToolResult};
 
-use crate::deferred_tools::{
-    ToolSnapshot, activate_deferred_tools, clone_tools_by_index, provider_visible_tool_indexes,
+use crate::{
+    deferred_tools::{
+        ToolSnapshot, activate_deferred_tools, clone_tools_by_index, provider_visible_tool_indexes,
+    },
+    tool_deduplicator::ToolCallDeduplicator,
 };
-use crate::tool_deduplicator::ToolCallDeduplicator;
 
 /// 每轮 turn 内 `ContinueAfterStop` 可触发的额外 step 上限。
 pub(crate) const MAX_CONTINUE_AFTER_STOP_PER_TURN: u8 = 3;
