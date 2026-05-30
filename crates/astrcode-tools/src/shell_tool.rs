@@ -447,13 +447,13 @@ mod tests {
     use super::{ShellTool, command_args};
 
     fn empty_ctx() -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_id: String::new().into(),
-            working_dir: String::new(),
-            tool_call_id: None,
-            event_tx: None,
-            capabilities: ToolCapabilities::default(),
-        }
+        ToolExecutionContext::new(
+            String::new().into(),
+            String::new(),
+            None,
+            None,
+            ToolCapabilities::default(),
+        )
     }
 
     fn command_with_stderr() -> String {
@@ -527,11 +527,9 @@ mod tests {
             timeout_secs: 30,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let ctx = ToolExecutionContext {
-            tool_call_id: Some("shell-stream".into()),
-            event_tx: Some(tx),
-            ..empty_ctx()
-        };
+        let mut ctx = empty_ctx();
+        ctx.tool_call_id = Some("shell-stream".into());
+        ctx.event_tx = Some(tx);
 
         let result = tool
             .execute(

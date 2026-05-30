@@ -1228,23 +1228,23 @@ impl Tool for HandlerTool {
             .capabilities
             .contains(&ExtensionCapability::SessionState)
         {
-            ctx.capabilities.session_store_dir = None;
+            ctx.capabilities.paths.store_dir = None;
         }
         if !self
             .capabilities
             .contains(&ExtensionCapability::SessionControl)
         {
-            ctx.capabilities.session_ops = None;
+            ctx.capabilities.session.ops = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::MainModel) {
-            ctx.capabilities.main_model_id = None;
-            ctx.capabilities.llm_models.main = None;
+            ctx.capabilities.models.main = None;
+            ctx.capabilities.models.tiers.main = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::SmallModel) {
-            ctx.capabilities.small_model_id = None;
-            ctx.capabilities.llm_models.small = None;
+            ctx.capabilities.models.small = None;
+            ctx.capabilities.models.tiers.small = None;
         }
-        ctx.capabilities.extension_event_sink = if self
+        ctx.capabilities.host.extension_event_sink = if self
             .capabilities
             .contains(&ExtensionCapability::EmitEvents)
         {
@@ -1421,7 +1421,7 @@ mod tests {
             ctx: &ToolExecutionContext,
         ) -> Result<ToolResult, ExtensionError> {
             Ok(ToolResult::text(
-                ctx.capabilities.session_store_dir.is_some().to_string(),
+                ctx.capabilities.paths.store_dir.is_some().to_string(),
                 false,
                 Default::default(),
             ))
@@ -1470,7 +1470,7 @@ mod tests {
             ctx: &ToolExecutionContext,
         ) -> Result<ToolResult, ExtensionError> {
             Ok(ToolResult::text(
-                ctx.capabilities.small_model_id.is_some().to_string(),
+                ctx.capabilities.models.small.is_some().to_string(),
                 false,
                 Default::default(),
             ))
@@ -1673,16 +1673,19 @@ mod tests {
                 .into_iter()
                 .next()
                 .unwrap();
-            let ctx = ToolExecutionContext {
-                session_id: "session".into(),
-                working_dir: "D:/workspace".into(),
-                tool_call_id: None,
-                event_tx: None,
-                capabilities: ToolCapabilities {
-                    session_store_dir: Some("D:/session".into()),
+            let ctx = ToolExecutionContext::new(
+                "session".into(),
+                "D:/workspace",
+                None,
+                None,
+                ToolCapabilities {
+                    paths: astrcode_core::tool::ToolSessionPaths {
+                        store_dir: Some("D:/session".into()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-            };
+            );
 
             let result = tool.execute(json!({}), &ctx).await.unwrap();
             assert_eq!(result.content, expected);
@@ -1710,16 +1713,19 @@ mod tests {
                 .into_iter()
                 .next()
                 .unwrap();
-            let ctx = ToolExecutionContext {
-                session_id: "session".into(),
-                working_dir: "D:/workspace".into(),
-                tool_call_id: None,
-                event_tx: None,
-                capabilities: ToolCapabilities {
-                    small_model_id: Some("small-model".into()),
+            let ctx = ToolExecutionContext::new(
+                "session".into(),
+                "D:/workspace",
+                None,
+                None,
+                ToolCapabilities {
+                    models: astrcode_core::tool::ToolModelAccess {
+                        small: Some("small-model".into()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-            };
+            );
 
             let result = tool.execute(json!({}), &ctx).await.unwrap();
             assert_eq!(result.content, expected);

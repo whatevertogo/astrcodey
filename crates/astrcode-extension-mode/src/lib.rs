@@ -140,7 +140,7 @@ impl ToolHandler for ModeToolHandler {
         _working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
     ) -> Result<ToolResult, ExtensionError> {
-        let base = require_session_base(&ctx.capabilities.session_store_dir)?;
+        let base = require_session_base(&ctx.capabilities.paths.store_dir)?;
         let mode_root = store::mode_dir_from_base(&base);
         let plan_dir = store::plan_dir_from_base(&base);
 

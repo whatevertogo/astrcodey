@@ -75,7 +75,7 @@ impl Tool for EditFileTool {
         let path_raw = args.path.clone();
         let operations = normalize_edit_operations(args)?;
         let call_id = tool_call_id(ctx);
-        let file_observation_store = ctx.capabilities.file_observation_store.clone();
+        let file_observation_store = ctx.capabilities.files.observation_store.clone();
         let working_dir = self.working_dir.clone();
         run_blocking(move || {
             execute_edit_sync(

@@ -159,7 +159,7 @@ impl ToolHandler for MemoryDeleteHandler {
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
         if !removed.is_empty() {
-            if let Some(ref sink) = ctx.capabilities.extension_event_sink {
+            if let Some(ref sink) = ctx.capabilities.host.extension_event_sink {
                 let payload = json!({
                     "match": pattern_for_emit,
                     "deleted_count": removed.len(),

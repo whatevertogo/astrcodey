@@ -260,13 +260,13 @@ async fn duplicate_extension_tools_keep_first_registration() {
         tool_registry.register(tool);
     }
 
-    let ctx = astrcode_core::tool::ToolExecutionContext {
-        session_id: "test".into(),
-        working_dir: String::new(),
-        tool_call_id: None,
-        event_tx: None,
-        capabilities: Default::default(),
-    };
+    let ctx = astrcode_core::tool::ToolExecutionContext::new(
+        "test".into(),
+        String::new(),
+        None,
+        None,
+        Default::default(),
+    );
     let result = tool_registry
         .execute("sharedTool", serde_json::json!({}), &ctx)
         .await
@@ -298,13 +298,13 @@ async fn extension_tools_are_adapted_into_tool_registry() {
     let definitions = tool_registry.list_definitions();
     assert!(definitions.iter().any(|def| def.name == "extensionEcho"));
 
-    let ctx = astrcode_core::tool::ToolExecutionContext {
-        session_id: "test".into(),
-        working_dir: String::new(),
-        tool_call_id: None,
-        event_tx: None,
-        capabilities: Default::default(),
-    };
+    let ctx = astrcode_core::tool::ToolExecutionContext::new(
+        "test".into(),
+        String::new(),
+        None,
+        None,
+        Default::default(),
+    );
     let result = tool_registry
         .execute(
             "extensionEcho",

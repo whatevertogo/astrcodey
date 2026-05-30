@@ -729,7 +729,7 @@ mod tests {
         assert!(value["tool_policy"].is_null());
         assert_eq!(value["tool_call_id"], "call-42");
 
-        let round_trip: EventPayload = serde_json::from_value(value.clone()).unwrap();
+        let round_trip: EventPayload = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, payload);
     }
 }

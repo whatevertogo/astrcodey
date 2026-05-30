@@ -73,7 +73,7 @@ impl Tool for ReadFileTool {
         }
 
         let call_id = tool_call_id(ctx);
-        let file_observation_store = ctx.capabilities.file_observation_store.clone();
+        let file_observation_store = ctx.capabilities.files.observation_store.clone();
         let working_dir = self.working_dir.clone();
         run_blocking(move || {
             read_existing_file_sync(
@@ -267,7 +267,7 @@ async fn read_persisted_tool_result_path(
     path: &std::path::Path,
     args: &ReadFileArgs,
 ) -> Result<Option<ToolResult>, ToolError> {
-    let Some(reader) = ctx.capabilities.tool_result_reader.as_ref() else {
+    let Some(reader) = ctx.capabilities.host.result_reader.as_ref() else {
         return Ok(None);
     };
     let char_offset = args.char_offset.unwrap_or(0);

@@ -301,8 +301,8 @@ impl ToolHandler for S5rToolHandler {
         let invoke_ctx = InvokeContext {
             extension_id: self.extension_id.clone(),
             session_id: Some(ctx.session_id.to_string()),
-            session_store_dir: ctx.capabilities.session_store_dir.clone(),
-            session_ops: ctx.capabilities.session_ops.clone(),
+            session_store_dir: ctx.capabilities.paths.store_dir.clone(),
+            session_ops: ctx.capabilities.session.ops.clone(),
             event_tx: ctx.event_tx.clone(),
             working_dir: Some(working_dir.to_string()),
             cancel_token: None,

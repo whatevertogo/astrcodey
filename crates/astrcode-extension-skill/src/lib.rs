@@ -842,13 +842,13 @@ mod tests {
 
 
     fn tool_ctx(working_dir: &Path) -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_id: "session".into(),
-            working_dir: working_dir.to_string_lossy().into_owned(),
-            tool_call_id: None,
-            event_tx: None,
-            capabilities: ToolCapabilities::default(),
-        }
+        ToolExecutionContext::new(
+            "session".into(),
+            working_dir.to_string_lossy().into_owned(),
+            None,
+            None,
+            ToolCapabilities::default(),
+        )
     }
 
     #[tokio::test]

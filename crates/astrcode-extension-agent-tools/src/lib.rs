@@ -239,7 +239,7 @@ impl ToolHandler for AgentToolHandler {
 
         // 获取 session_ops
         let session_ops =
-            ctx.capabilities.session_ops.as_ref().ok_or_else(|| {
+            ctx.capabilities.session.ops.as_ref().ok_or_else(|| {
                 ExtensionError::Internal("session operations not available".into())
             })?;
 
@@ -396,10 +396,11 @@ fn agent_tool_metadata()
 fn resolve_child_small_model(
     caps: &astrcode_extension_sdk::tool::ToolCapabilities,
 ) -> Result<String, ExtensionError> {
-    caps.llm_models
+    caps.models
+        .tiers
         .small
         .clone()
-        .or_else(|| caps.small_model_id.clone())
+        .or_else(|| caps.models.small.clone())
         .ok_or_else(|| {
             ExtensionError::Internal(
                 "子 Agent 需要已配置的小模型（activeSmallProfile + \
@@ -509,7 +510,10 @@ mod tests {
     #[test]
     fn resolve_child_small_model_always_uses_configured_small_llm() {
         let caps = astrcode_extension_sdk::tool::ToolCapabilities {
-            small_model_id: Some("haiku".into()),
+            models: astrcode_extension_sdk::tool::ToolModelAccess {
+                small: Some("haiku".into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_eq!(resolve_child_small_model(&caps).unwrap(), "haiku");

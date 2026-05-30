@@ -205,18 +205,32 @@ pub async fn execute_tool_call(
 use crate::turn_publish::spawn_event_bridge;
 
 fn tool_capabilities_from_runtime(runtime: &ToolCallRuntimeContext) -> ToolCapabilities {
+    use astrcode_core::tool::{
+        ToolFileServices, ToolHostServices, ToolModelAccess, ToolSessionControl, ToolSessionPaths,
+    };
+
     let capabilities = &runtime.turn.capabilities;
     ToolCapabilities {
-        model_id: Some(runtime.turn.shared.model_id.clone()),
-        main_model_id: capabilities.main_model_id.clone(),
-        small_model_id: capabilities.small_model_id.clone(),
-        llm_models: capabilities.llm_models.clone(),
-        session_store_dir: capabilities.session_store_dir.clone(),
-        available_tools: Some(runtime.tools.clone()),
-        tool_result_reader: runtime.tool_result_reader.clone(),
-        file_observation_store: capabilities.file_observation_store.clone(),
-        session_ops: capabilities.session_ops.clone(),
-        extension_event_sink: None,
+        models: ToolModelAccess {
+            model_id: Some(runtime.turn.shared.model_id.clone()),
+            main: capabilities.main_model_id.clone(),
+            small: capabilities.small_model_id.clone(),
+            tiers: capabilities.llm_models.clone(),
+        },
+        paths: ToolSessionPaths {
+            store_dir: capabilities.session_store_dir.clone(),
+        },
+        session: ToolSessionControl {
+            ops: capabilities.session_ops.clone(),
+        },
+        files: ToolFileServices {
+            observation_store: capabilities.file_observation_store.clone(),
+        },
+        host: ToolHostServices {
+            result_reader: runtime.tool_result_reader.clone(),
+            available_tools: Some(runtime.tools.clone()),
+            extension_event_sink: None,
+        },
     }
 }
 
@@ -234,13 +248,13 @@ async fn execute_tool_call_blocking(
     let tool_event_tx = tool_event_bridge
         .as_ref()
         .map(|(tool_tx, _)| tool_tx.clone());
-    let tool_ctx = ToolExecutionContext {
-        session_id: runtime.turn.shared.session_id.clone(),
-        working_dir: runtime.turn.shared.working_dir.clone(),
-        tool_call_id: Some(call.call_id.clone()),
-        event_tx: tool_event_tx,
+    let tool_ctx = ToolExecutionContext::new(
+        runtime.turn.shared.session_id.clone(),
+        runtime.turn.shared.working_dir.clone(),
+        Some(call.call_id.clone()),
+        tool_event_tx,
         capabilities,
-    };
+    );
 
     let result = match tokio::select! {
         _ = runtime.cancellation_token.cancelled() => {

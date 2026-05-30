@@ -142,13 +142,13 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
 }
 
 fn tool_ctx(working_dir: &str) -> ToolExecutionContext {
-    ToolExecutionContext {
-        session_id: "e2e-session".into(),
-        working_dir: working_dir.into(),
-        tool_call_id: None,
-        event_tx: None,
-        capabilities: Default::default(),
-    }
+    ToolExecutionContext::new(
+        "e2e-session".into(),
+        working_dir,
+        None,
+        None,
+        Default::default(),
+    )
 }
 
 fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUseContext {
@@ -428,13 +428,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
     let result = tool
         .execute(
             serde_json::json!({}),
-            &ToolExecutionContext {
-                session_id: "e2e-session".into(),
-                working_dir: "/tmp".into(),
-                tool_call_id: None,
-                event_tx: None,
-                capabilities: Default::default(),
-            },
+            &tool_ctx("/tmp"),
         )
         .await
         .unwrap();

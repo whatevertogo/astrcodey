@@ -251,7 +251,7 @@ mod tests {
         assert_eq!(serde_json::to_string(&session_id).unwrap(), "\"session-1\"");
         assert_eq!(session_id.to_string(), "session-1");
         assert_eq!(session_id.as_str(), "session-1");
-        assert_eq!(session_id.clone().into_string(), "session-1");
+        assert_eq!(session_id.into_string(), "session-1");
     }
 
     #[test]

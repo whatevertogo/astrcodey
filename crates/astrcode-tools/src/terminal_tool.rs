@@ -591,13 +591,13 @@ mod tests {
     use super::*;
 
     fn test_ctx(session_id: &str) -> ToolExecutionContext {
-        ToolExecutionContext {
-            session_id: session_id.into(),
-            working_dir: String::new(),
-            tool_call_id: None,
-            event_tx: None,
-            capabilities: ToolCapabilities::default(),
-        }
+        ToolExecutionContext::new(
+            session_id.into(),
+            String::new(),
+            None,
+            None,
+            ToolCapabilities::default(),
+        )
     }
 
     #[tokio::test]

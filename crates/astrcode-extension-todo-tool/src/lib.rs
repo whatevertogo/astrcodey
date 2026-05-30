@@ -88,7 +88,8 @@ impl ToolHandler for TodoWriteToolHandler {
         }
         let root = ctx
             .capabilities
-            .session_store_dir
+            .paths
+            .store_dir
             .as_deref()
             .map(todo_dir_from_base)
             .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;

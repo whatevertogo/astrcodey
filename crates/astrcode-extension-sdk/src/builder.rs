@@ -135,13 +135,13 @@ mod tests {
                 Default::default(),
             ))
         });
-        let ctx = ToolExecutionContext {
-            session_id: SessionId::new("test"),
-            working_dir: String::new(),
-            tool_call_id: None,
-            event_tx: None,
-            capabilities: ToolCapabilities::default(),
-        };
+        let ctx = ToolExecutionContext::new(
+            SessionId::new("test"),
+            String::new(),
+            None,
+            None,
+            ToolCapabilities::default(),
+        );
         let result = handler
             .execute("test", serde_json::json!({}), "", &ctx)
             .await

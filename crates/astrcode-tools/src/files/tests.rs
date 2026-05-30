@@ -13,20 +13,19 @@ use serde_json::Value;
 use super::{shared::MAX_INLINE_IMAGE_BASE64_BYTES, *};
 
 fn empty_ctx() -> ToolExecutionContext {
-    ToolExecutionContext {
-        session_id: String::new().into(),
-        working_dir: String::new(),
-        tool_call_id: None,
-        event_tx: None,
-        capabilities: ToolCapabilities::default(),
-    }
+    ToolExecutionContext::new(
+        String::new().into(),
+        String::new(),
+        None,
+        None,
+        ToolCapabilities::default(),
+    )
 }
 
 fn ctx_with_call_id(call_id: &str) -> ToolExecutionContext {
-    ToolExecutionContext {
-        tool_call_id: Some(call_id.into()),
-        ..empty_ctx()
-    }
+    let mut ctx = empty_ctx();
+    ctx.tool_call_id = Some(call_id.into());
+    ctx
 }
 
 struct FixedToolResultReader {
@@ -205,17 +204,12 @@ async fn read_file_reads_persisted_tool_result_path() {
     let tool = ReadFileTool {
         working_dir: PathBuf::from("."),
     };
-    let ctx = ToolExecutionContext {
-        session_id: "session-1".into(),
-        tool_call_id: Some("read-result".into()),
-        capabilities: ToolCapabilities {
-            tool_result_reader: Some(Arc::new(FixedToolResultReader {
-                path: artifact_path.clone(),
-            })),
-            ..ToolCapabilities::default()
-        },
-        ..empty_ctx()
-    };
+    let mut ctx = empty_ctx();
+    ctx.session_id = "session-1".into();
+    ctx.tool_call_id = Some("read-result".into());
+    ctx.capabilities.host.result_reader = Some(Arc::new(FixedToolResultReader {
+        path: artifact_path.clone(),
+    }));
 
     let result = tool
         .execute(

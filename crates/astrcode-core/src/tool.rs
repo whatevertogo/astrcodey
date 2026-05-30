@@ -228,7 +228,7 @@ pub struct FileObservation {
 
 /// 文件观察快照的进程内存储。
 ///
-/// 由 agent loop 创建并以 `Arc` 共享注入到 `ToolCapabilities`。
+/// 由 agent loop 创建并以 `Arc` 共享注入到 [`ToolFileServices::observation_store`]。
 /// `read` 和 `edit` 工具通过它协作实现 read-before-edit 守卫。
 pub trait FileObservationStore: Send + Sync {
     /// 记录一次文件观察。
@@ -241,7 +241,7 @@ pub trait FileObservationStore: Send + Sync {
 
 /// 会话原子操作 trait。
 ///
-/// 由 server 层实现，通过 `ToolCapabilities.session_ops` 暴露给工具/插件。
+/// 由 server 层实现，通过 [`ToolSessionControl::ops`] 暴露给工具/插件。
 /// 插件在 `ToolHandler::execute` 中通过此接口自主编排子会话生命周期。
 #[async_trait::async_trait]
 pub trait SessionOperations: Send + Sync {
@@ -428,7 +428,7 @@ impl SessionApiError {
 /// 按档位暴露的 LLM model id（与 effective config 对齐）。
 ///
 /// 后续可增加 `middle` 等字段；子 agent / 插件应显式选择档位，避免硬编码字段名。
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct LlmModelIds {
     /// 父 session 主模型（`activeModel`）。
     pub main: Option<String>,
@@ -436,55 +436,122 @@ pub struct LlmModelIds {
     pub small: Option<String>,
 }
 
-/// 工具调用时按需注入的会话能力。
-///
-/// 大多数工具不需要这些能力；`Default::default()` 产生全部为 `None` 的空集。
-/// 生产环境由 agent loop 在构建 `ToolExecutionContext` 时按需填充。
+/// 模型档位访问（须在扩展 manifest 声明对应能力后才有值）。
 #[derive(Clone, Default)]
-pub struct ToolCapabilities {
-    /// 当前 session 主模型 id（与 [`LlmModelIds::main`] 相同；保留供既有调用方）。
+pub struct ToolModelAccess {
+    /// 与 [`Self::main`] 相同；保留供既有调用方。
     pub model_id: Option<String>,
-    /// 主模型 id；须在扩展 manifest 声明 `main_model` 能力后可用。
-    pub main_model_id: Option<String>,
-    /// 小模型 id；须在扩展 manifest 声明 `small_model` 能力后可用。
-    pub small_model_id: Option<String>,
+    /// 主模型 id（`main_model` 能力）。
+    pub main: Option<String>,
+    /// 小模型 id（`small_model` 能力）。
+    pub small: Option<String>,
     /// 分档模型 id 快照（未声明对应能力时，各档可能为 `None`）。
-    pub llm_models: LlmModelIds,
+    pub tiers: LlmModelIds,
+}
+
+/// 会话存储路径（`session_state` 能力）。
+#[derive(Clone, Debug, Default)]
+pub struct ToolSessionPaths {
     /// 当前 session 在存储层中的真实目录路径。
     ///
     /// 子 session 的真实目录可能在 `subagents/{extension}/` 下，
     /// 无法从 session_id + working_dir 推断。工具需要写附属数据时
     /// 应使用此路径，而非自行拼接。
-    pub session_store_dir: Option<std::path::PathBuf>,
+    pub store_dir: Option<std::path::PathBuf>,
+}
+
+/// 会话编排能力（`session_control` 能力）。
+#[derive(Clone, Default)]
+pub struct ToolSessionControl {
+    pub ops: Option<Arc<dyn SessionOperations>>,
+}
+
+/// 文件 read/edit 协作服务。
+#[derive(Clone, Default)]
+pub struct ToolFileServices {
+    /// `read` 与 `edit` 共享的观察存储（由 agent loop 注入）。
+    pub observation_store: Option<Arc<dyn FileObservationStore>>,
+}
+
+/// 宿主侧服务：artifact 读取、FFI 工具目录、扩展事件。
+#[derive(Clone, Default)]
+pub struct ToolHostServices {
+    /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
+    pub result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
     pub available_tools: Option<Vec<ToolDefinition>>,
-    /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
-    pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
-    /// 当前 session 的文件观察存储（`read` 和 `edit` 工具协作使用）。
-    pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
-    /// 会话原子操作能力（仅子 agent 工具需要）。
-    pub session_ops: Option<Arc<dyn SessionOperations>>,
-    /// 插件事件发射器（仅插件注册的工具会有值）。
+    /// 插件事件发射器（仅声明 `emit_events` 的扩展工具会有值）。
     pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
 }
 
-/// 每次工具调用时传递的上下文。
+/// 工具调用时按需注入的能力集合。
 ///
-/// 由 Agent 在每次工具调用开始时创建。核心字段是每次调用都不同的
-/// 会话标识和工具调用元数据；`capabilities` 携带特定工具才需要的
-/// 可选能力，默认为空。
+/// 按职责拆分为子结构，工具只依赖自己需要的那一组。`Default::default()`
+/// 产生全部为 `None` 的空集；生产环境由 agent loop 在构建
+/// [`ToolExecutionContext`] 时按需填充。
+#[derive(Clone, Default)]
+pub struct ToolCapabilities {
+    pub models: ToolModelAccess,
+    pub paths: ToolSessionPaths,
+    pub session: ToolSessionControl,
+    pub files: ToolFileServices,
+    pub host: ToolHostServices,
+}
+
+/// 每次工具调用的强制上下文（会话标识与 I/O 通道）。
 #[derive(Clone)]
-pub struct ToolExecutionContext {
-    /// 当前会话 ID。
+pub struct ToolCallScope {
     pub session_id: SessionId,
-    /// 工作目录路径。
     pub working_dir: String,
     /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
     pub tool_call_id: Option<String>,
     /// 当前回合事件发送器，用于工具发出非持久化进度事件。
     pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
-    /// 按需注入的会话能力。
+}
+
+/// 每次工具调用时传递的上下文。
+///
+/// 由 Agent 在每次工具调用开始时创建。[`ToolCallScope`] 为每次调用
+/// 都不同的会话标识与通道；[`ToolCapabilities`] 为特定工具才需要的
+/// 可选能力，默认为空。
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    pub scope: ToolCallScope,
     pub capabilities: ToolCapabilities,
+}
+
+impl ToolExecutionContext {
+    pub fn new(
+        session_id: SessionId,
+        working_dir: impl Into<String>,
+        tool_call_id: Option<String>,
+        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        capabilities: ToolCapabilities,
+    ) -> Self {
+        Self {
+            scope: ToolCallScope {
+                session_id,
+                working_dir: working_dir.into(),
+                tool_call_id,
+                event_tx,
+            },
+            capabilities,
+        }
+    }
+}
+
+impl std::ops::Deref for ToolExecutionContext {
+    type Target = ToolCallScope;
+
+    fn deref(&self) -> &Self::Target {
+        &self.scope
+    }
+}
+
+impl std::ops::DerefMut for ToolExecutionContext {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.scope
+    }
 }
 
 /// Build a metadata map from key-value pairs.
@@ -517,13 +584,21 @@ impl ToolResult {
     }
 }
 
-impl std::fmt::Debug for ToolExecutionContext {
+impl std::fmt::Debug for ToolCallScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolExecutionContext")
+        f.debug_struct("ToolCallScope")
             .field("session_id", &self.session_id)
             .field("working_dir", &self.working_dir)
             .field("tool_call_id", &self.tool_call_id)
             .field("event_tx", &self.event_tx.as_ref().map(|_| "<event_tx>"))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ToolExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolExecutionContext")
+            .field("scope", &self.scope)
             .field("capabilities", &self.capabilities)
             .finish()
     }
@@ -532,22 +607,65 @@ impl std::fmt::Debug for ToolExecutionContext {
 impl std::fmt::Debug for ToolCapabilities {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolCapabilities")
+            .field("models", &self.models)
+            .field("paths", &self.paths)
+            .field("session", &self.session)
+            .field("files", &self.files)
+            .field("host", &self.host)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ToolSessionControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolSessionControl")
+            .field("ops", &self.ops.as_ref().map(|_| "<session_ops>"))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ToolFileServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolFileServices")
+            .field(
+                "observation_store",
+                &self.observation_store.as_ref().map(|_| "<store>"),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ToolModelAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolModelAccess")
             .field("model_id", &self.model_id)
-            .field("main_model_id", &self.main_model_id)
-            .field("small_model_id", &self.small_model_id)
+            .field("main", &self.main)
+            .field("small", &self.small)
+            .field("tiers", &self.tiers)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ToolHostServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolHostServices")
             .field(
                 "available_tools",
                 &self.available_tools.as_ref().map(|t| t.len()),
             )
             .field(
-                "tool_result_reader",
-                &self.tool_result_reader.as_ref().map(|_| "<reader>"),
+                "result_reader",
+                &self.result_reader.as_ref().map(|_| "<reader>"),
             )
             .finish()
     }
 }
 
 /// `Tool` trait——所有工具（内置和扩展注册）都必须实现此接口。
+///
+/// 使用 `async_trait` 是因为注册表以 [`Arc<dyn Tool>`] 做类型擦除；
+/// 稳定版 Rust 的 trait 内 `async fn` 尚不支持 `dyn` 兼容（需消除
+/// `dyn Tool` 后才能迁移到原生 async fn in trait）。
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// 返回工具的定义，用于 LLM 函数调用。

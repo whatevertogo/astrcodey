@@ -34,8 +34,10 @@ pub mod tool {
     pub use astrcode_core::tool::{
         CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY, ExecutionMode,
         SessionApiError, SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest,
-        SubmitTurnResult, Tool, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
+        SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities, ToolDefinition, ToolError,
+        ToolExecutionContext, ToolFileServices, ToolHostServices, ToolModelAccess,
+        ToolSessionControl, ToolSessionPaths, ToolOrigin, ToolPromptMetadata, ToolPromptTag,
+        ToolResult, tool_metadata,
     };
 }
 
@@ -76,7 +78,10 @@ pub mod prelude {
         },
         manifest::validate_manifest,
         s5r::effects::HandlerResult,
-        tool::{ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolResult},
+        tool::{
+            ExecutionMode, ToolCallScope, ToolCapabilities, ToolDefinition, ToolExecutionContext,
+            ToolResult,
+        },
         worker::{HostClient, Worker, WorkerCallContext, tool_text},
     };
 }
