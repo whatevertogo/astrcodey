@@ -976,21 +976,41 @@ pub struct PromptFiles {
 
 /// 异步加载系统提示词文件（identity、user rules、project rules）。
 pub async fn load_system_prompt_files(working_dir: &str) -> PromptFiles {
-    let working_dir = PathBuf::from(working_dir);
-    let fallback_dir = working_dir.clone();
-    tokio::task::spawn_blocking(move || read_system_prompt_files(&working_dir))
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "prompt file preload task failed; reading inline");
-            read_system_prompt_files(&fallback_dir)
-        })
+    load_system_prompt_files_with_scope(working_dir, true).await
 }
 
-fn read_system_prompt_files(working_dir: &Path) -> PromptFiles {
+/// 按会话类型加载系统提示词文件。
+///
+/// 子 agent 使用专用 body，不应继承 AGENTS.md（项目级与用户级）。
+pub async fn load_system_prompt_files_with_scope(
+    working_dir: &str,
+    include_agents_rules: bool,
+) -> PromptFiles {
+    let working_dir = PathBuf::from(working_dir);
+    let fallback_dir = working_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        read_system_prompt_files(&working_dir, include_agents_rules)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "prompt file preload task failed; reading inline");
+        read_system_prompt_files(&fallback_dir, include_agents_rules)
+    })
+}
+
+fn read_system_prompt_files(working_dir: &Path, include_agents_rules: bool) -> PromptFiles {
     PromptFiles {
         identity: load_identity_md(&user_identity_md_path()),
-        user_rules: load_user_rules(&user_agents_md_path()),
-        project_rules: load_project_rules(working_dir),
+        user_rules: if include_agents_rules {
+            load_user_rules(&user_agents_md_path())
+        } else {
+            None
+        },
+        project_rules: if include_agents_rules {
+            load_project_rules(working_dir)
+        } else {
+            None
+        },
     }
 }
 
@@ -1269,5 +1289,22 @@ mod tests {
         let env = first.find("[Environment]").unwrap();
 
         assert_eq!(&first[..env], &second[..env]);
+    }
+
+    #[test]
+    fn subagent_prompt_file_load_omits_agents_md_rules() {
+        let working_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let with_rules = read_system_prompt_files(working_dir, true);
+        let without_rules = read_system_prompt_files(working_dir, false);
+
+        if with_rules.project_rules.is_some() || with_rules.user_rules.is_some() {
+            assert!(
+                without_rules.project_rules.is_none() && without_rules.user_rules.is_none(),
+                "subagent scope must not load AGENTS.md rules"
+            );
+        }
     }
 }

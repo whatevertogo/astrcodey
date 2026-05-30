@@ -136,7 +136,9 @@ impl SharedStreamSink {
     pub fn wrap<F>(
         &self,
         handler: F,
-    ) -> impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool + Send + Sync
+    ) -> impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
+    + Send
+    + Sync
     + 'static
     where
         F: Fn(

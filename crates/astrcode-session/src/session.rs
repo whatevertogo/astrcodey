@@ -395,8 +395,17 @@ impl Session {
         let resolved_extra = self
             .resolve_extra_system_prompt(extra_system_prompt, cached_state)
             .await?;
+        let is_subagent = match cached_state {
+            Some(state) => state.parent_session_id.is_some(),
+            None => self.read_model().await?.parent_session_id.is_some(),
+        };
         let (text, fingerprint) = self
-            .build_cached_system_prompt(working_dir, model_id, resolved_extra.as_deref())
+            .build_cached_system_prompt(
+                working_dir,
+                model_id,
+                resolved_extra.as_deref(),
+                is_subagent,
+            )
             .await?;
 
         if stored_fingerprint == Some(fingerprint.as_str()) {
@@ -435,9 +444,13 @@ impl Session {
         working_dir: &str,
         model_id: &str,
         resolved_extra: Option<&str>,
+        is_subagent: bool,
     ) -> Result<(String, String), SessionError> {
-        let prompt_files =
-            astrcode_context::prompt_engine::load_system_prompt_files(working_dir).await;
+        let prompt_files = astrcode_context::prompt_engine::load_system_prompt_files_with_scope(
+            working_dir,
+            !is_subagent,
+        )
+        .await;
         let tools_with_meta = self
             .runtime
             .loaded_tool_registry()
