@@ -573,11 +573,12 @@ impl ToolResult {
         is_error: bool,
         metadata: BTreeMap<String, serde_json::Value>,
     ) -> Self {
+        let error = is_error.then(|| content.clone());
         Self {
             call_id: String::new(),
-            content: content.clone(),
+            content,
             is_error,
-            error: is_error.then_some(content),
+            error,
             metadata,
             duration_ms: None,
         }

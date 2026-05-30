@@ -101,13 +101,13 @@ fn read_existing_file_sync(
 ) -> Result<ToolResult, ToolError> {
     let path = resolve_path(&working_dir, &args.path);
     if path.is_dir() {
-        return Ok(directory_result(call_id.clone(), started_at, &path));
+        return Ok(directory_result(call_id, started_at, &path));
     }
     if let Some(media_type) = image_media_type(&path) {
         return read_image_file_result(call_id, started_at, &path, media_type);
     }
     if is_binary(&path) {
-        return Ok(binary_result(call_id.clone(), started_at, &path));
+        return Ok(binary_result(call_id, started_at, &path));
     }
 
     let offset = args.offset.unwrap_or(0);
@@ -121,7 +121,7 @@ fn read_existing_file_sync(
         .len();
     if !use_line_pagination && file_len > MAX_UNPAGINATED_READ_BYTES {
         return Ok(error_result_with_call_id(
-            call_id.clone(),
+            call_id,
             started_at,
             format!(
                 "file is {file_len} bytes; use offset/limit to paginate reads over \

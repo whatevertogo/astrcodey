@@ -560,16 +560,13 @@ fn call_result(server: &str, tool: &str, result: crate::protocol::CallToolResult
     if let Some(meta) = result.meta {
         metadata.insert("mcpMeta".into(), meta);
     }
-    text_result(
-        content.clone(),
-        result.is_error,
-        result.is_error.then_some(content),
-        metadata,
-    )
+    let error = result.is_error.then(|| content.clone());
+    text_result(content, result.is_error, error, metadata)
 }
 
 fn error_result(content: String, metadata: BTreeMap<String, Value>) -> ToolResult {
-    text_result(content.clone(), true, Some(content), metadata)
+    let error = Some(content.clone());
+    text_result(content, true, error, metadata)
 }
 
 fn text_result(

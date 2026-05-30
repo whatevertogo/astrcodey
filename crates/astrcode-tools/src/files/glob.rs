@@ -144,7 +144,7 @@ fn execute_glob_sync(
         meta.insert("nextOffset".into(), serde_json::json!(next_offset));
     }
     meta.insert("root".into(), serde_json::json!(root.display().to_string()));
-    meta.insert("pattern".into(), serde_json::json!(args.pattern.clone()));
+    meta.insert("pattern".into(), serde_json::json!(args.pattern));
     meta.insert("files".into(), serde_json::json!(files));
     let content = if paths.is_empty() {
         format!(

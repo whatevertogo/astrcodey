@@ -120,7 +120,7 @@ impl ToolCalls {
                 );
                 let blocked_result = ToolResult {
                     call_id: tc.call_id.clone(),
-                    content: guidance.clone(),
+                    content: guidance,
                     is_error: true,
                     error: Some(format!("tool '{}' is not available", tc.name)),
                     metadata: Default::default(),
@@ -436,10 +436,9 @@ impl ToolCalls {
 
                 match self.extension_runner.emit_post_tool_use(post_ctx).await? {
                     PostToolUseResult::ModifyResult { content } => {
+                        let error = result.is_error.then(|| content.clone());
                         result.content = content;
-                        if result.is_error {
-                            result.error = Some(result.content.clone());
-                        }
+                        result.error = error;
                     },
                     PostToolUseResult::Block { reason } => {
                         result.content = format!("Tool result blocked by hook: {reason}");

@@ -163,11 +163,12 @@ fn error_tool_result(
         metadata.insert("timeoutMs".into(), serde_json::json!(ms));
     }
 
+    let error = Some(llm_visible.clone());
     ToolResult {
         call_id,
-        content: llm_visible.clone(),
+        content: llm_visible,
         is_error: true,
-        error: Some(llm_visible),
+        error,
         metadata,
         duration_ms: Some(duration.as_millis() as u64),
     }
@@ -204,15 +205,19 @@ pub async fn execute_tool_call(
 
 use crate::turn_publish::spawn_event_bridge;
 
-fn tool_capabilities_from_runtime(runtime: &ToolCallRuntimeContext) -> ToolCapabilities {
+fn tool_capabilities_from_runtime(
+    turn: &TurnToolContext,
+    tools: Vec<astrcode_core::tool::ToolDefinition>,
+    tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
+) -> ToolCapabilities {
     use astrcode_core::tool::{
         ToolFileServices, ToolHostServices, ToolModelAccess, ToolSessionControl, ToolSessionPaths,
     };
 
-    let capabilities = &runtime.turn.capabilities;
+    let capabilities = &turn.capabilities;
     ToolCapabilities {
         models: ToolModelAccess {
-            model_id: Some(runtime.turn.shared.model_id.clone()),
+            model_id: Some(turn.shared.model_id.clone()),
             main: capabilities.main_model_id.clone(),
             small: capabilities.small_model_id.clone(),
             tiers: capabilities.llm_models.clone(),
@@ -227,8 +232,8 @@ fn tool_capabilities_from_runtime(runtime: &ToolCallRuntimeContext) -> ToolCapab
             observation_store: capabilities.file_observation_store.clone(),
         },
         host: ToolHostServices {
-            result_reader: runtime.tool_result_reader.clone(),
-            available_tools: Some(runtime.tools.clone()),
+            result_reader: tool_result_reader,
+            available_tools: Some(tools),
             extension_event_sink: None,
         },
     }
@@ -242,32 +247,38 @@ async fn execute_tool_call_blocking(
 ) -> (usize, ToolResult) {
     let started_at = Instant::now();
     let tool_name = call.name;
-    let call_id = call.call_id.clone();
-    let capabilities = tool_capabilities_from_runtime(&runtime);
-    let tool_event_bridge = Some(spawn_event_bridge(runtime.publisher));
+    let ToolCallRuntimeContext {
+        turn,
+        tools,
+        tool_result_reader,
+        publisher,
+        cancellation_token,
+    } = runtime;
+    let capabilities = tool_capabilities_from_runtime(&turn, tools, tool_result_reader);
+    let tool_event_bridge = Some(spawn_event_bridge(publisher));
     let tool_event_tx = tool_event_bridge
         .as_ref()
         .map(|(tool_tx, _)| tool_tx.clone());
     let tool_ctx = ToolExecutionContext::new(
-        runtime.turn.shared.session_id.clone(),
-        runtime.turn.shared.working_dir.clone(),
+        turn.shared.session_id.clone(),
+        turn.shared.working_dir.clone(),
         Some(call.call_id.clone()),
         tool_event_tx,
         capabilities,
     );
 
     let result = match tokio::select! {
-        _ = runtime.cancellation_token.cancelled() => {
+        _ = cancellation_token.cancelled() => {
             Err(ToolError::Execution("tool execution interrupted before completion".into()))
         },
         result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => result,
     } {
         Ok(mut result) => {
-            result.call_id = call.call_id.clone();
+            result.call_id = call.call_id;
             result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
             result
         },
-        Err(e) => error_tool_result(call.call_id.clone(), &tool_name, e, started_at.elapsed()),
+        Err(e) => error_tool_result(call.call_id, &tool_name, e, started_at.elapsed()),
     };
     // Release the tool-side sender before awaiting the bridge; otherwise the
     // bridge keeps waiting for more tool progress events and this call hangs.
@@ -275,14 +286,14 @@ async fn execute_tool_call_blocking(
     if let Some((tool_tx, bridge)) = tool_event_bridge {
         drop(tool_tx);
         if let Err(e) = bridge.await {
-            tracing::error!(tool_name, call_id, panic = %e, "event bridge task panicked");
+            tracing::error!(tool_name, call_id = %result.call_id, panic = %e, "event bridge task panicked");
         }
     }
 
     if result.is_error {
         tracing::warn!(
             tool_name,
-            call_id,
+            call_id = %result.call_id,
             duration_ms = result.duration_ms.unwrap_or_default(),
             error = result.error.as_deref().unwrap_or("unknown error"),
             "tool execution completed with error"
@@ -290,7 +301,7 @@ async fn execute_tool_call_blocking(
     } else {
         tracing::debug!(
             tool_name,
-            call_id,
+            call_id = %result.call_id,
             duration_ms = result.duration_ms.unwrap_or_default(),
             "tool execution completed"
         );

@@ -404,7 +404,7 @@ fn action_start(
     TerminalRegistry::global().insert(id.clone(), entry);
 
     let mut metadata = BTreeMap::new();
-    metadata.insert("id".into(), serde_json::json!(id.clone()));
+    metadata.insert("id".into(), serde_json::json!(id));
     metadata.insert("command".into(), serde_json::json!(command));
     Ok((format!("terminal started: {id}"), metadata, false))
 }
@@ -515,7 +515,7 @@ fn action_list(
     let ids = registry.list_for_session(session_id);
     let mut metadata = BTreeMap::new();
     metadata.insert("count".into(), serde_json::json!(ids.len()));
-    metadata.insert("terminals".into(), serde_json::json!(ids.clone()));
+    metadata.insert("terminals".into(), serde_json::json!(ids));
     let content = if ids.is_empty() {
         "no active terminals".into()
     } else {

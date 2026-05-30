@@ -200,7 +200,7 @@ fn execute_grep_sync(
         .map_err(|e| ToolError::Execution(format!("grep: {e}")))?;
     let matches = render_grep_output(args.output_mode, &state);
     let mut meta = BTreeMap::new();
-    meta.insert("pattern".into(), serde_json::json!(args.pattern.clone()));
+    meta.insert("pattern".into(), serde_json::json!(args.pattern));
     meta.insert("literal".into(), serde_json::json!(args.literal));
     meta.insert("multiline".into(), serde_json::json!(args.multiline));
     meta.insert("returned".into(), serde_json::json!(matches.len()));

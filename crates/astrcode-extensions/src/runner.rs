@@ -821,13 +821,9 @@ impl ExtensionRunner {
                             return Ok(PostToolUseResult::Block { reason });
                         },
                         PostToolUseResult::ModifyResult { content } => {
-                            let is_error = ctx.tool_result.is_error;
-                            if is_error {
-                                ctx.tool_result.error = Some(content.clone());
-                                ctx.tool_result.content = content;
-                            } else {
-                                ctx.tool_result.content = content;
-                            }
+                            let error = ctx.tool_result.is_error.then(|| content.clone());
+                            ctx.tool_result.content = content;
+                            ctx.tool_result.error = error;
                             modified = true;
                         },
                         PostToolUseResult::Allow => {},
