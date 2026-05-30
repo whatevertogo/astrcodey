@@ -87,17 +87,18 @@ const COMMUNICATION: &str =
      brief.";
 
 const TOOL_GUIDANCE: &str =
-    "Prefer the narrowest tool. Read before you write; search before you ask.\nFile paths must \
+    "Prefer the narrowest tool. Read before you write; search before you ask.\nDefault \
+     exploration order: `grep`/`glob` → `read` → only then consider `agent`.\nFile paths must \
      stay inside the working directory.\nAvoid `shell` when a dedicated tool exists.\n\n## Tool \
      Selection\n- Read file → `read`\n- Search file contents → `grep` | Match file paths by glob \
      → `glob` (required `pattern`, e.g. `**/*.rs`)\n- Edit file → `edit` | New file → `write` | \
      Multi-file → `patch`\n- Commands → `shell` | Interactive → `terminal`\n- Progress → \
      `todoWrite` | Plan/Code mode → `switchMode` | Skill → `Skill`\n- External MCP only → \
-     `tool_search_tool`  | Delegate → `agent`\n\n## Delegation\nDo not use `agent` for narrow \
-     queries — handle them directly:\n- Known file path → `read`\n- Specific symbol, class, \
-     function, or string → `grep`/`glob`\n- Anything doable in a few direct tool calls → do it \
-     yourself\nUse `agent` only for genuinely multi-step work or parallel exploration across \
-     independent areas.";
+     `tool_search_tool` (not for builtin tools like `glob`) | Delegate → `agent`\n\n## \
+     Delegation\nDo not use `agent` for narrow queries — handle them directly:\n- Known file path \
+     → `read`\n- Specific symbol, class, function, or string → `grep`/`glob`\n- Anything doable \
+     in a few direct tool calls → do it yourself\nUse `agent` only for genuinely multi-step work \
+     or parallel exploration across independent areas.";
 
 const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
 const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";

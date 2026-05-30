@@ -385,21 +385,17 @@ fn mcp_tool_metadata()
 }
 
 fn tool_search_metadata() -> ToolPromptMetadata {
-    ToolPromptMetadata::new(
-        "Call `tool_search_tool` only when builtin tools are insufficient and you need an \
-         external MCP tool's schema.And you must use tool_search_tool before calling any \
-         `mcp__...` tool to get the correct schema, as argument names may vary between tools.",
-    )
-    .caveat(
-        "After `tool_search_tool` returns, call the concrete `mcp__...` tool directly with the \
-         shown schema. Do not call `tool_search_tool` again with the same query.",
-    )
-    .caveat(
-        "If the result reports zero matches, broaden the query or accept that no MCP tool fits — \
-         do not retry the same query.",
-    )
-    .prompt_tag(ToolPromptTag::Discovery)
-    .deferred_discovery_gate(MCP_DEFERRED_GROUP)
+    ToolPromptMetadata::new(String::new())
+        .caveat(
+            "After `tool_search_tool` returns, call the concrete `mcp__...` tool directly with \
+             the shown schema. Do not call `tool_search_tool` again with the same query.",
+        )
+        .caveat(
+            "If the result reports zero matches, broaden the query or accept that no MCP tool \
+             fits — do not retry the same query.",
+        )
+        .prompt_tag(ToolPromptTag::Discovery)
+        .deferred_discovery_gate(MCP_DEFERRED_GROUP)
 }
 
 fn mcp_concrete_tool_metadata() -> ToolPromptMetadata {
@@ -517,10 +513,15 @@ fn tool_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL_SEARCH_TOOL_NAME.into(),
         description: "Find an external MCP tool by name or keyword and return its input schema \
-                      (not execute it). Call this only when builtin tools \
-                      (`read`/`grep`/`glob`/`edit`/`patch`/`write`/`shell`) cannot accomplish the \
-                      task. After it returns, call the matching `mcp__...` tool directly using \
-                      the schema shown."
+                      (not execute it).\n\nWhen NOT to use:\n- Builtin tools suffice: \
+                      `read`/`grep`/`glob`/`edit`/`patch`/`write`/`shell`\n- Guessing `mcp__...` \
+                      argument names without a schema\n\nWhen to use:\n- Task needs an external \
+                      MCP capability\n- A visible `mcp__...` tool has unclear \
+                      parameters\n\nWorkflow:\n1. Call `tool_search_tool` with tool name or task \
+                      keywords (e.g. `\"webReader\"`, `\"github repo structure\"`; \
+                      `select:mcp__server__tool` for exact pick).\n2. Read the returned input \
+                      schema.\n3. Call the matching `mcp__...` tool directly — do not guess \
+                      argument names."
             .into(),
         parameters: json!({
             "type": "object",
@@ -546,12 +547,8 @@ fn tool_search_tool_definition() -> ToolDefinition {
 }
 
 fn mcp_discovery_instructions() -> &'static str {
-    "MCP discovery workflow:\n1. Check whether builtin tools already solve the task.\n2. If an \
-     external MCP tool is needed or a visible `mcp__...` tool has unclear parameters, call \
-     `tool_search_tool` first with part of the tool name or task purpose, for example `{ \
-     \"query\": \"webReader\" }` or `{ \"query\": \"github repo structure\" }`.\n3. Read the \
-     returned input schema before making the external tool call.\n4. Pick the matching concrete \
-     `mcp__...` tool and call it directly. Do not guess argument names when schema is available."
+    "MCP discovery workflow: covered by `tool_search_tool` — discover schema first, then call the \
+     concrete `mcp__...` tool with returned arguments (never guess names)."
 }
 
 fn call_result(server: &str, tool: &str, result: crate::protocol::CallToolResult) -> ToolResult {

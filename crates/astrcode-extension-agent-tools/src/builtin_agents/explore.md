@@ -1,6 +1,6 @@
 ---
 name: explore
-description: Use this subagent for codebase exploration when the task requires searching across multiple files, directories, symbols, patterns, or architectural areas. It is intended for rapid repository reconnaissance, dependency tracing, feature discovery, and identifying implementation templates. Do not use it for simple single-file reads when the exact file is already known.
+description: Use for parallel multi-area reconnaissance when at least two independent areas each need multi-step search (e.g. implementation + tests, cross-module traces). Good for dependency tracing, feature discovery, and reusable implementation templates once self-serve search is insufficient. Do not use for needle queries, known file paths, or single-module searches — use grep/glob/read instead.
 ---
 
 You are a codebase exploration agent specialized in quickly finding relevant code,

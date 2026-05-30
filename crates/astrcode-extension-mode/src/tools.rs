@@ -27,16 +27,16 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: ("Switch agent mode: \"code\" (default, full execution) or \"plan\" \
-                       (read-only planning).\nWhen to switch to plan mode (proactive, not only \
-                       when asked):\n- New feature or multi-file change (6+ files likely \
-                       affected)\n- Ambiguous scope: unclear which modules are involved or what \
-                       the right approach is\n- User says \"plan\", \"design\", \"how would you \
-                       approach\", \"think about\", or describes a task without saying \"just do \
-                       it\"\n- Risky changes: touching shared infrastructure, migrations, public \
-                       APIs\nWhen NOT to plan: single-file fixes, bug fixes with clear cause, \
-                       small config changes.\nSet `requireApproval: true` when the user \
-                       explicitly asked for a plan. Default: false (proceed directly after \
-                       planning).")
+                       (read-only planning).\n\nWhen NOT to switch to plan:\n- Single-file \
+                       fixes, bug fixes with clear cause, small config changes\n- Task scope and \
+                       target files are already clear\n\nWhen to switch to plan (proactive, not \
+                       only when asked):\n- New feature or multi-file change (6+ files likely \
+                       affected)\n- Ambiguous scope: unclear modules or approach\n- User says \
+                       \"plan\", \"design\", \"how would you approach\", \"think about\", or \
+                       describes work without \"just do it\"\n- Risky changes: shared \
+                       infrastructure, migrations, public APIs\n\nSet `requireApproval: true` \
+                       when the user explicitly asked for a plan. Default: false (proceed \
+                       directly after planning).")
             .into(),
         parameters: json!({
             "type": "object",
@@ -64,10 +64,11 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
 pub fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
-        description: "Create or update the session plan (plan mode only). Include all necessary \
-                      headings: Context, Goal, Scope, Implementation Steps, Verification, \
-                      Dependencies and Risks. Optional: Non-Goals, Existing Code to Reuse, \
-                      Assumptions."
+        description: "Create or update the session plan (plan mode only).\n\nRequired headings: \
+                      Context, Goal, Scope, Implementation Steps, Verification, Dependencies and \
+                      Risks.\nOptional: Non-Goals, Existing Code to Reuse, Assumptions.\n\nUse \
+                      `upsertSessionPlan` with full plan markdown; see plan template for section \
+                      contracts."
             .into(),
         parameters: json!({
             "type": "object",

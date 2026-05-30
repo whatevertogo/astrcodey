@@ -24,14 +24,14 @@ use serde_json::{Value, json};
 pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 
 const TODO_WRITE_DESCRIPTION: &str =
-    "\
-Update the session todo list to track multi-step task progress.\nWhen to use: 3+ distinct steps, \
-     multiple operations, or user gives a list of tasks.\nDo NOT use for simple Q&A or single \
-     straightforward tasks.\nRules:\n- Send the full list every time (not a patch). Keep exactly \
-     one `in_progress`.\n- Mark `in_progress` BEFORE starting work. Mark `completed` only when \
-     fully done (tests pass, implementation complete).\n- After receiving new instructions, \
-     immediately add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + \
-     `activeForm` (continuous: \"Fixing auth bug\").";
+    "Update the session todo list to track multi-step task progress.\n\nWhen NOT to use:\n- \
+     Simple Q&A or single straightforward task\n- One file, one edit, no progress tracking \
+     needed\n\nWhen to use:\n- 3+ distinct steps, multiple operations, or user gives a task \
+     list\n\nRules:\n- Send the full list every time (not a patch). Keep exactly one \
+     `in_progress`.\n- Mark `in_progress` BEFORE starting work. Mark `completed` only when fully \
+     done (tests pass, implementation complete).\n- After receiving new instructions, immediately \
+     add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + `activeForm` \
+     (continuous: \"Fixing auth bug\").";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
@@ -143,21 +143,14 @@ fn todo_write_metadata()
     let mut map = std::collections::HashMap::new();
     map.insert(
         TODO_WRITE_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Maintain the current progress snapshot for this branch of work. Use it when you want \
-             to keep track of multi-step progress that benefits from tracking.",
-        )
-        .caveat(
-            "Keep exactly one item in `in_progress` at a time. Mark an item `in_progress` before \
-             starting it, and mark it `completed` immediately after it is truly finished.",
-        )
-        .example(
-            "{ todos: [{ content: \"分析现有代码结构\", status: \"in_progress\", activeForm: \
-             \"正在分析现有代码结构\" }, { content: \"设计优化方案\", status: \"pending\", \
-             activeForm: \"准备设计优化方案\" }, { content: \"验证优化效果\", status: \
-             \"pending\", activeForm: \"准备验证优化效果\" }] }",
-        )
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
+            .example(
+                "{ todos: [{ content: \"分析现有代码结构\", status: \"in_progress\", activeForm: \
+                 \"正在分析现有代码结构\" }, { content: \"设计优化方案\", status: \"pending\", \
+                 activeForm: \"准备设计优化方案\" }, { content: \"验证优化效果\", status: \
+                 \"pending\", activeForm: \"准备验证优化效果\" }] }",
+            )
+            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map
 }

@@ -288,18 +288,13 @@ fn mode_tool_metadata()
     let mut map = std::collections::HashMap::new();
     map.insert(
         SWITCH_MODE_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(
-            "Use `switchMode` to enter plan mode for read-only exploration, or return to code \
-             mode for execution.",
-        )
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
+        ToolPromptMetadata::new(String::new())
+            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map.insert(
         UPSERT_PLAN_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(
-            "Only available in plan mode. The plan must contain all required headings.",
-        )
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
+        ToolPromptMetadata::new(String::new())
+            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
     map
 }

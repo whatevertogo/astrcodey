@@ -261,17 +261,7 @@ impl Tool for TerminalTool {
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
-        Some(
-            ToolPromptMetadata::new(
-                "Use `terminal` for interactive sessions: REPLs (python, node), debuggers (gdb, \
-                 pdb), or scripts that need multi-step input. For one-shot commands prefer \
-                 `shell`. Always close terminals when done.",
-            )
-            .caveat(
-                "Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
-            )
-            .prompt_tag(ToolPromptTag::System),
-        )
+        Some(ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::System))
     }
 
     async fn execute(
@@ -544,7 +534,8 @@ fn terminal_tool_definition() -> &'static ToolDefinition {
             "Manages long-lived PTY sessions for interactive REPLs/debuggers.\n",
             "Lifecycle: `start` → `send`/`read` → `close`. `list` shows active sessions.\n",
             "- For one-shot commands, use `shell`.\n",
-            "- Always `close` when finished. Use `waitMs` (up to 10000, default 100) for slow output.",
+            "- Always `close` when finished. Use `waitMs` (up to 10000, default 100) for slow output.\n",
+            "- Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
         )
             .into(),
         origin: ToolOrigin::Builtin,
