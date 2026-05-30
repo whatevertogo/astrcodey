@@ -4,11 +4,7 @@
 //! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/` （`project_ctx` /
 //!   `decision` / `general`、contexts/、pipeline 状态）
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrcode_support::hostpaths::{self, ensure_dir};
 use parking_lot::Mutex;
@@ -616,7 +612,8 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Ingest extracted memories: similar entries update index + MEMORY.md; `delete` removes matches.
+    /// Ingest extracted memories: similar entries update index + MEMORY.md; `delete` removes
+    /// matches.
     pub(crate) fn ingest_extracted_entries(
         &self,
         entries: &[MemoryEntry],
@@ -665,8 +662,7 @@ impl MemoryStore {
                     changed += 1;
                 },
                 UpsertResult::Updated {
-                    previous_content,
-                    ..
+                    previous_content, ..
                 } => {
                     let mut parsed = self.read_parsed()?;
                     parsed.replace_or_add_entry(category, &previous_content, &entry.content);
