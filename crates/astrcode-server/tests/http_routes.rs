@@ -1,13 +1,17 @@
-use std::{collections::BTreeMap, fs, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
 use astrcode_core::{
     config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     event::{Event, EventPayload},
+    extension::ChildToolPolicy,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::EventStore,
+    storage::{
+        EventReader, EventStore, SessionReadModel, SessionSummary, StorageError,
+        ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
+    },
     tool::{ToolDefinition, ToolResult},
-    types::{SessionId, new_message_id, new_session_id},
+    types::{Cursor, SessionId, new_message_id, new_session_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
@@ -139,7 +143,7 @@ impl LlmProvider for SummaryLlm {
 
 #[tokio::test]
 async fn http_routes_require_bearer_token() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
 
@@ -172,7 +176,7 @@ async fn http_routes_require_bearer_token() {
 
 #[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
-    let runtime = runtime(Arc::new(PendingLlm));
+    let runtime = runtime(Arc::new(PendingLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -218,7 +222,7 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 
 #[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
-    let runtime = runtime(Arc::new(PendingLlm));
+    let runtime = runtime(Arc::new(PendingLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -239,7 +243,7 @@ async fn inject_route_writes_mid_turn_user_message() {
 
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -251,7 +255,7 @@ async fn inject_route_without_active_turn_returns_client_error() {
 
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -306,7 +310,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 
 #[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -340,7 +344,7 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -380,7 +384,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 
 #[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -456,7 +460,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
 
 #[tokio::test]
 async fn stream_invalid_cursor_requests_rehydrate() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -479,7 +483,7 @@ async fn stream_invalid_cursor_requests_rehydrate() {
 
 #[tokio::test]
 async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
     let parent_id = create_session(app.clone(), &token).await;
@@ -549,7 +553,7 @@ async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
 
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -586,7 +590,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 
 #[tokio::test]
 async fn execute_extension_command_route_toggles_mode() {
-    let runtime = runtime(Arc::new(ImmediateLlm));
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -612,7 +616,7 @@ async fn execute_extension_command_route_toggles_mode() {
 
 #[tokio::test]
 async fn prompt_route_compact_returns_handled_and_streams_continuation() {
-    let runtime = runtime(Arc::new(SummaryLlm));
+    let runtime = runtime(Arc::new(SummaryLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -687,7 +691,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
 
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
-    let runtime = runtime(Arc::new(SummaryLlm));
+    let runtime = runtime(Arc::new(SummaryLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -892,7 +896,136 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
     }
 }
 
-fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+/// Thin wrapper around [`InMemoryEventStore`] that returns a temp directory
+/// for `session_store_dir`, enabling extensions (like mode) that need a real
+/// filesystem path for state persistence.
+struct TestEventStore {
+    inner: InMemoryEventStore,
+    temp_dir: PathBuf,
+}
+
+impl TestEventStore {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryEventStore::new(),
+            temp_dir: std::env::temp_dir(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventReader for TestEventStore {
+    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+        self.inner.replay_events(session_id).await
+    }
+
+    async fn session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReadModel, StorageError> {
+        self.inner.session_read_model(session_id).await
+    }
+
+    async fn session_system_prompt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<String>, StorageError> {
+        self.inner.session_system_prompt(session_id).await
+    }
+
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        self.inner.list_session_summaries().await
+    }
+
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        self.inner.latest_cursor(session_id).await
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, StorageError> {
+        self.inner.replay_from(session_id, cursor).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        self.inner.list_sessions().await
+    }
+
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, StorageError> {
+        self.inner
+            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .await
+    }
+
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        // Verify the session exists, then return a subdirectory in temp.
+        self.inner.session_read_model(session_id).await?;
+        Ok(Some(self.temp_dir.join(session_id.as_str())))
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for TestEventStore {
+    async fn create_session(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        model_id: &str,
+        parent_session_id: Option<&SessionId>,
+        tool_policy: Option<&ChildToolPolicy>,
+        source_extension: Option<&str>,
+    ) -> Result<Event, StorageError> {
+        self.inner
+            .create_session(
+                session_id,
+                working_dir,
+                model_id,
+                parent_session_id,
+                tool_policy,
+                source_extension,
+            )
+            .await
+    }
+
+    async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
+        self.inner.append_event(event).await
+    }
+
+    async fn checkpoint(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<(), StorageError> {
+        self.inner.checkpoint(session_id, cursor).await
+    }
+
+    async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        self.inner.delete_session(session_id).await
+    }
+
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        self.inner
+            .write_tool_result_artifact(session_id, artifact)
+            .await
+    }
+}
+
+async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -946,8 +1079,12 @@ fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
+    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn EventStore>;
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    extension_runner
+        .register(astrcode_extension_mode::extension())
+        .await
+        .unwrap();
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         llm_provider.clone(),

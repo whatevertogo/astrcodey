@@ -107,7 +107,9 @@ const AGENT_TOOL_DESCRIPTION: &str =
     "Launch a specialized subagent. Types: [Agents].\n\nWhen NOT to use:\n- Simple or needle \
      tasks; known path → `read`; symbol/pattern → `grep`/`glob`; few direct tool calls \
      enough\n\nTips:\n- One focused subtask per `agent` call; include all context in `prompt`\n- \
-     In `todoWrite`, note when a step will use parallel or serial `agent`";
+     In `todoWrite`, note when a step will use parallel or serial `agent`\n- `waitForResult: \
+     false`: completion injects `<background-agent-notification>` with output in `<output>`; \
+     continue from that content (do not re-run the task)";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
@@ -274,11 +276,10 @@ impl ToolHandler for AgentToolHandler {
                 .notify_parent_on_complete(if args.wait_for_result {
                     None
                 } else {
-                    Some(
-                        "[A background agent task has completed. Review the tool result above and \
-                         present the findings to the user.]"
-                            .into(),
-                    )
+                    Some(format!(
+                        "Background agent \"{}\" completed",
+                        args.description.trim()
+                    ))
                 })
                 .recycle_on_complete(!args.wait_for_result)
                 .tool_call_id(ctx.tool_call_id.clone()),
@@ -324,15 +325,17 @@ impl ToolHandler for AgentToolHandler {
                 task_id,
                 session_id,
             } => {
-                // 异步路径：后台完成后由 notify_parent_on_complete 通知父 agent。
-                // 回收留给后续调用或自动清理。
                 metadata.insert("backgrounded".into(), serde_json::json!(true));
                 metadata.insert("task_id".into(), serde_json::json!(task_id));
                 Ok(ToolResult {
                     call_id: String::new(),
                     content: format!(
-                        "异步 agent 已启动。完成后结果将在下一轮对话中可用。\nsession: \
-                         {session_id}"
+                        "task_id: {task_id}\nstatus: running\nchild_session_id: \
+                         {session_id}\nautomatic_notification: true\n\ndescription: \
+                         {}\n\nnext_step: Completion arrives automatically in a later turn as \
+                         `<background-agent-notification>` with `<output>` — do not poll or \
+                         re-run the task.",
+                        args.description.trim()
                     ),
                     is_error: false,
                     error: None,

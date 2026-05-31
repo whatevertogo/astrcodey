@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -18,12 +18,19 @@ use serde::Deserialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
+    sync::Notify,
 };
 
 use crate::{
-    background_shell::{BackgroundShellSpawnParams, spawn_background_shell, wait_background_shell},
+    background_shell::{
+        AdoptBackgroundShellParams, BackgroundShellSpawnParams, adopt_running_shell,
+        append_shell_output, spawn_background_shell, wait_background_shell,
+    },
     files::tool_call_id,
 };
+
+/// 前台命令超过此时间仍运行时，自动收编为后台 shell（参考 Claude Code assistant blocking budget）。
+const AUTO_BACKGROUND_AFTER_MS: u64 = 30_000;
 
 /// 每路 stdout/stderr 在内存中保留的上限；超出部分仍会从 pipe 读走以免子进程阻塞。
 pub(crate) const MAX_CAPTURE_BYTES_PER_STREAM: usize = 512 * 1024;
@@ -139,6 +146,17 @@ impl Tool for ShellTool {
                 "command cannot be empty".into(),
             ));
         }
+        return self.execute_foreground_shell(args, started_at, ctx).await;
+    }
+}
+
+impl ShellTool {
+    async fn execute_foreground_shell(
+        &self,
+        args: ShellArgs,
+        started_at: Instant,
+        ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
         let shell = resolve_shell();
         let command = preprocess_shell_command(&args.command, &shell);
         let command_args = command_args(&shell, &command);
@@ -148,30 +166,33 @@ impl Tool for ShellTool {
             .map(|cwd| resolve_path(&self.working_dir, cwd))
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs).min(600);
+        let can_auto_background =
+            is_auto_background_allowed(&command) && ctx.capabilities.session.ops.is_some();
 
-        let mut command = Command::new(&shell.path);
-        command
+        let mut command_builder = Command::new(&shell.path);
+        command_builder
             .args(&command_args)
             .current_dir(&cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        hide_command_window(&mut command);
-        setup_process_group(&mut command);
+        hide_command_window(&mut command_builder);
+        setup_process_group(&mut command_builder);
 
-        // stdin 处理：有数据则 pipe，否则 null
         if args.stdin.is_some() {
-            command.stdin(Stdio::piped());
+            command_builder.stdin(Stdio::piped());
         } else {
-            command.stdin(Stdio::null());
+            command_builder.stdin(Stdio::null());
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| ToolError::Execution(format!("spawn: {e}")))?;
+        let mut child = Some(
+            command_builder
+                .spawn()
+                .map_err(|e| ToolError::Execution(format!("spawn: {e}")))?,
+        );
 
-        // 写入 stdin 数据后关闭
         if let Some(input) = &args.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
+            if let Some(stdin) = child.as_mut().and_then(|c| c.stdin.take()) {
+                let mut stdin = stdin;
                 use tokio::io::AsyncWriteExt;
                 stdin
                     .write_all(input.as_bytes())
@@ -182,70 +203,131 @@ impl Tool for ShellTool {
         }
 
         let stdout = child
-            .stdout
-            .take()
+            .as_mut()
+            .and_then(|c| c.stdout.take())
             .ok_or_else(|| ToolError::Execution("failed to capture stdout".into()))?;
         let stderr = child
-            .stderr
-            .take()
+            .as_mut()
+            .and_then(|c| c.stderr.take())
             .ok_or_else(|| ToolError::Execution("failed to capture stderr".into()))?;
 
         let call_id = tool_call_id(ctx);
-        let out_h = tokio::spawn(capture_stream(stdout));
-        let err_h = tokio::spawn(capture_stream(stderr));
+        let transfer = BackgroundTransfer::new();
+        let mut out_h = Some(tokio::spawn(capture_stream_with_background_transfer(
+            stdout,
+            Arc::clone(&transfer),
+            false,
+        )));
+        let mut err_h = Some(tokio::spawn(capture_stream_with_background_transfer(
+            stderr,
+            Arc::clone(&transfer),
+            true,
+        )));
 
-        let (status, timed_out) =
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait())
-                .await
-            {
-                Ok(status) => (status, false),
-                Err(_) => {
-                    terminate_child_tree(&mut child).await;
-                    let status = child.wait().await;
-                    (status, true)
-                },
-            };
+        let auto_bg_timer =
+            tokio::time::sleep(std::time::Duration::from_millis(AUTO_BACKGROUND_AFTER_MS));
+        tokio::pin!(auto_bg_timer);
+        let timeout_timer = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+        tokio::pin!(timeout_timer);
 
-        let exit = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
-        let stdout_capture = out_h.await.unwrap_or_else(|_| CapturedOutput::default());
-        let stderr_capture = err_h.await.unwrap_or_else(|_| CapturedOutput::default());
+        let mut auto_bg_attempted = false;
+        let adopt_result = loop {
+            tokio::select! {
+                status = async {
+                    match child.as_mut() {
+                        Some(c) => c.wait().await,
+                        None => std::future::pending().await,
+                    }
+                }, if child.is_some() => {
+                    break ForegroundWaitOutcome::Completed(status);
+                }
+                _ = &mut auto_bg_timer, if can_auto_background && !auto_bg_attempted => {
+                    auto_bg_attempted = true;
+                    match self.try_adopt_foreground_shell(
+                        &args,
+                        &command,
+                        &shell,
+                        &cwd,
+                        timeout_secs,
+                        started_at,
+                        ctx,
+                        &transfer,
+                        &mut child,
+                        &mut out_h,
+                        &mut err_h,
+                        "auto_background",
+                    ).await {
+                        Ok(result) => return Ok(result),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "auto-background adopt failed; continuing foreground wait");
+                        }
+                    }
+                }
+                _ = &mut timeout_timer, if child.is_some() => {
+                    if can_auto_background {
+                        match self.try_adopt_foreground_shell(
+                            &args,
+                            &command,
+                            &shell,
+                            &cwd,
+                            timeout_secs,
+                            started_at,
+                            ctx,
+                            &transfer,
+                            &mut child,
+                            &mut out_h,
+                            &mut err_h,
+                            "timeout_background",
+                        ).await {
+                            Ok(result) => return Ok(result),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "timeout adopt failed; terminating shell");
+                            }
+                        }
+                    }
+                    if let Some(ref mut running) = child {
+                        terminate_child_tree(running).await;
+                    }
+                    break ForegroundWaitOutcome::TimedOut;
+                }
+            }
+        };
+
+        let (exit, timed_out) = match adopt_result {
+            ForegroundWaitOutcome::Completed(status) => {
+                (status.ok().and_then(|s| s.code()).unwrap_or(-1), false)
+            },
+            ForegroundWaitOutcome::TimedOut => {
+                if let Some(running) = child.as_mut() {
+                    let _ = running.wait().await;
+                }
+                (-1, true)
+            },
+        };
+        let stdout_capture = out_h
+            .take()
+            .unwrap_or_else(|| tokio::spawn(async { CapturedOutput::default() }))
+            .await
+            .unwrap_or_default();
+        let stderr_capture = err_h
+            .take()
+            .unwrap_or_else(|| tokio::spawn(async { CapturedOutput::default() }))
+            .await
+            .unwrap_or_default();
 
         let mut output = render_shell_output(&stdout_capture.text, &stderr_capture.text);
 
-        let mut meta = BTreeMap::new();
-        meta.insert("command".into(), serde_json::json!(args.command));
-        if let Some(intent) = args.intent.filter(|intent| !intent.trim().is_empty()) {
-            meta.insert("intent".into(), serde_json::json!(intent));
-        }
-        meta.insert("exitCode".into(), serde_json::json!(exit));
-        meta.insert("shell".into(), serde_json::json!(shell.name));
-        meta.insert("shellPath".into(), serde_json::json!(shell.path));
-        meta.insert("cwd".into(), serde_json::json!(cwd.display().to_string()));
-        meta.insert("streamed".into(), serde_json::json!(false));
-        meta.insert("timedOut".into(), serde_json::json!(timed_out));
-        meta.insert(
-            "stdoutBytes".into(),
-            serde_json::json!(stdout_capture.bytes_read),
+        let meta = foreground_shell_metadata(
+            &args.command,
+            args.intent.as_deref(),
+            &shell,
+            &cwd,
+            exit,
+            timed_out,
+            &stdout_capture,
+            &stderr_capture,
         );
-        meta.insert(
-            "stderrBytes".into(),
-            serde_json::json!(stderr_capture.bytes_read),
-        );
-        if stdout_capture.truncated {
-            meta.insert("stdoutTruncated".into(), serde_json::json!(true));
-        }
-        if stderr_capture.truncated {
-            meta.insert("stderrTruncated".into(), serde_json::json!(true));
-        }
-        if stdout_capture.truncated || stderr_capture.truncated {
-            meta.insert(
-                "captureNote".into(),
-                serde_json::json!(format!(
-                    "Output exceeded {MAX_CAPTURE_BYTES_PER_STREAM} bytes per stream; captured \
-                     prefix only. Re-run with narrower scope or redirect to a file and use `read`."
-                )),
-            );
-        }
+
         if output.is_empty() {
             output = "(no output)".into();
         }
@@ -253,7 +335,6 @@ impl Tool for ShellTool {
         let is_error = timed_out || exit != 0;
         let error = if timed_out {
             let timeout_msg = format!("shell command timed out after {timeout_secs}s");
-            // LLM 历史只携带 content；超时说明必须写入正文。
             if output == "(no output)" {
                 output = timeout_msg.clone();
             } else {
@@ -276,6 +357,127 @@ impl Tool for ShellTool {
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
         })
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_adopt_foreground_shell(
+        &self,
+        args: &ShellArgs,
+        command: &str,
+        shell: &ShellInfo,
+        cwd: &Path,
+        timeout_secs: u64,
+        started_at: Instant,
+        ctx: &ToolExecutionContext,
+        transfer: &BackgroundTransfer,
+        child: &mut Option<tokio::process::Child>,
+        out_h: &mut Option<tokio::task::JoinHandle<CapturedOutput>>,
+        err_h: &mut Option<tokio::task::JoinHandle<CapturedOutput>>,
+        reason: &str,
+    ) -> Result<ToolResult, ToolError> {
+        let shell_id = uuid::Uuid::new_v4().to_string();
+        let output_dir = resolve_background_output_dir(ctx, cwd)?;
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| ToolError::Execution(format!("create background-shells dir: {e}")))?;
+        let output_path = output_dir.join(format!("{shell_id}.txt"));
+        let description = args
+            .intent
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| truncate_command_for_description(command));
+
+        write_background_shell_header(&output_path, command, &description, cwd, shell, &shell_id)
+            .await?;
+
+        let remaining_timeout = timeout_secs
+            .saturating_sub(started_at.elapsed().as_secs())
+            .max(1);
+
+        let out_handle = out_h
+            .take()
+            .ok_or_else(|| ToolError::Execution("stdout capture task missing".into()))?;
+        let err_handle = err_h
+            .take()
+            .ok_or_else(|| ToolError::Execution("stderr capture task missing".into()))?;
+
+        let adopted = match adopt_running_shell(
+            AdoptBackgroundShellParams {
+                session_id: ctx.session_id.to_string(),
+                tool_call_id: ctx.tool_call_id.clone(),
+                command: command.to_string(),
+                intent: args.intent.clone(),
+                cwd: cwd.to_path_buf(),
+                shell: shell.clone(),
+                timeout_secs: remaining_timeout,
+                store_dir: ctx.capabilities.paths.store_dir.clone(),
+                session_ops: ctx.capabilities.session.ops.clone(),
+                shell_id: shell_id.clone(),
+                output_path: output_path.clone(),
+                description: description.clone(),
+                child: child
+                    .take()
+                    .ok_or_else(|| ToolError::Execution("child already taken".into()))?,
+            },
+            tokio::spawn(async move {
+                let _ = out_handle.await;
+            }),
+            tokio::spawn(async move {
+                let _ = err_handle.await;
+            }),
+        )
+        .await
+        {
+            Ok(adopted) => adopted,
+            Err(e) => {
+                return Err(e);
+            },
+        };
+
+        transfer.activate(output_path.clone());
+
+        let path = adopted.output_path.display().to_string();
+        let reason_note = match reason {
+            "auto_background" => format!(
+                "Command exceeded {AUTO_BACKGROUND_AFTER_MS}ms and was moved to the background."
+            ),
+            _ => format!(
+                "Command reached the {timeout_secs}s foreground timeout and was moved to the \
+                 background."
+            ),
+        };
+        let content = format!(
+            "{reason_note}\nBackground shell started (shell_id: {}).\nOutput file: {path}\nYou \
+             will be notified when the command completes. Do not poll; use `read` on this path \
+             only if you need partial output before completion.",
+            adopted.shell_id
+        );
+        let mut meta = BTreeMap::new();
+        meta.insert("backgrounded".into(), serde_json::json!(true));
+        meta.insert("autoBackgrounded".into(), serde_json::json!(true));
+        meta.insert("shellId".into(), serde_json::json!(adopted.shell_id));
+        meta.insert("outputPath".into(), serde_json::json!(path));
+        meta.insert("command".into(), serde_json::json!(args.command));
+        if let Some(intent) = args
+            .intent
+            .as_ref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            meta.insert("intent".into(), serde_json::json!(intent));
+        }
+        Ok(ToolResult {
+            call_id: tool_call_id(ctx),
+            content,
+            is_error: false,
+            error: None,
+            metadata: meta,
+            duration_ms: Some(started_at.elapsed().as_millis() as u64),
+        })
+    }
+}
+
+enum ForegroundWaitOutcome {
+    Completed(std::io::Result<std::process::ExitStatus>),
+    TimedOut,
 }
 
 impl ShellTool {
@@ -405,8 +607,12 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "- Long-running commands: `runInBackground` returns immediately; you are notified \
                  on completion (do not poll). Output is written under session \
                  background-shells/.\n",
+                "- Foreground commands still running after ~30s may be auto-moved to background \
+                 (same as `runInBackground`); you are notified on completion.\n",
                 "- Poll/wait on a background shell with `shellId` and optional `blockUntilMs` (0 \
                  = status only).\n",
+                "- When you receive a `<background-shell-notification>`, the command output is in \
+                 `<output>`; use Read on `<output-file>` only if truncated or you need more.\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
                 "- Set `cwd` instead of using `cd`. Use `stdin` to pipe data.\n",
                 "- Non-zero exit codes produce errors.\n",
@@ -592,8 +798,246 @@ struct CapturedOutput {
     truncated: bool,
 }
 
+/// 前台执行期间可切换为写 background-shell 输出文件。
+struct BackgroundTransfer {
+    path: Mutex<Option<PathBuf>>,
+    notify: Notify,
+}
+
+impl BackgroundTransfer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            path: Mutex::new(None),
+            notify: Notify::new(),
+        })
+    }
+
+    fn activate(&self, path: PathBuf) {
+        *self.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        self.notify.notify_waiters();
+    }
+}
+
+fn is_auto_background_allowed(command: &str) -> bool {
+    let first = command
+        .split(['|', '&', ';'])
+        .next()
+        .unwrap_or(command)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    !matches!(
+        first.as_str(),
+        "sleep" | "start-sleep" | "timeout" | "ping" | "await"
+    )
+}
+
+fn resolve_background_output_dir(
+    ctx: &ToolExecutionContext,
+    cwd: &Path,
+) -> Result<PathBuf, ToolError> {
+    if let Some(dir) = &ctx.capabilities.paths.store_dir {
+        return Ok(dir.join("background-shells"));
+    }
+    Ok(cwd.join(".astrcode").join("background-shells"))
+}
+
+fn truncate_command_for_description(command: &str) -> String {
+    const MAX: usize = 80;
+    let trimmed = command.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+    let mut out = String::new();
+    for ch in trimmed.chars().take(MAX.saturating_sub(1)) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+async fn write_background_shell_header(
+    path: &Path,
+    command: &str,
+    description: &str,
+    cwd: &Path,
+    shell: &ShellInfo,
+    shell_id: &str,
+) -> Result<(), ToolError> {
+    let header = format!(
+        "---\nshell_id: {shell_id}\ncommand: {}\ndescription: {}\ncwd: {}\nshell: {}\n---\n\n",
+        command.replace('\n', " "),
+        description.replace('\n', " "),
+        cwd.display(),
+        shell.name,
+    );
+    tokio::fs::write(path, header.as_bytes())
+        .await
+        .map_err(|e| ToolError::Execution(format!("write background shell header: {e}")))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn foreground_shell_metadata(
+    command: &str,
+    intent: Option<&str>,
+    shell: &ShellInfo,
+    cwd: &Path,
+    exit: i32,
+    timed_out: bool,
+    stdout_capture: &CapturedOutput,
+    stderr_capture: &CapturedOutput,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut meta = BTreeMap::new();
+    meta.insert("command".into(), serde_json::json!(command));
+    if let Some(intent) = intent.filter(|intent| !intent.trim().is_empty()) {
+        meta.insert("intent".into(), serde_json::json!(intent));
+    }
+    meta.insert("exitCode".into(), serde_json::json!(exit));
+    meta.insert("shell".into(), serde_json::json!(shell.name));
+    meta.insert("shellPath".into(), serde_json::json!(shell.path));
+    meta.insert("cwd".into(), serde_json::json!(cwd.display().to_string()));
+    meta.insert("streamed".into(), serde_json::json!(false));
+    meta.insert("timedOut".into(), serde_json::json!(timed_out));
+    meta.insert(
+        "stdoutBytes".into(),
+        serde_json::json!(stdout_capture.bytes_read),
+    );
+    meta.insert(
+        "stderrBytes".into(),
+        serde_json::json!(stderr_capture.bytes_read),
+    );
+    if stdout_capture.truncated {
+        meta.insert("stdoutTruncated".into(), serde_json::json!(true));
+    }
+    if stderr_capture.truncated {
+        meta.insert("stderrTruncated".into(), serde_json::json!(true));
+    }
+    if stdout_capture.truncated || stderr_capture.truncated {
+        meta.insert(
+            "captureNote".into(),
+            serde_json::json!(format!(
+                "Output exceeded {MAX_CAPTURE_BYTES_PER_STREAM} bytes per stream; captured prefix \
+                 only. Re-run with narrower scope or redirect to a file and use `read`."
+            )),
+        );
+    }
+    meta
+}
+
+async fn capture_stream_with_background_transfer(
+    mut stream: impl AsyncRead + Unpin + Send + 'static,
+    transfer: Arc<BackgroundTransfer>,
+    is_stderr: bool,
+) -> CapturedOutput {
+    let mut output = CapturedOutput::default();
+    let mut buf = [0u8; 8192];
+    let mut drain_buf = [0u8; 65536];
+    let mut file_path: Option<PathBuf> = None;
+    let mut file_kept = 0usize;
+    let mut file_truncated = false;
+    let mut draining = false;
+
+    loop {
+        if file_path.is_none() {
+            let activated_path = {
+                transfer
+                    .path
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            };
+            if let Some(path) = activated_path {
+                if is_stderr {
+                    let _ = append_shell_output(&path, b"\n--- STDERR ---\n").await;
+                }
+                if !output.text.is_empty() {
+                    let _ = append_shell_output(path.as_path(), output.text.as_bytes()).await;
+                    file_kept += output.text.len();
+                }
+                file_path = Some(path);
+            }
+        }
+
+        let read_future = stream.read(if draining {
+            &mut drain_buf[..]
+        } else {
+            &mut buf[..]
+        });
+
+        let n = if file_path.is_none() {
+            tokio::select! {
+                _ = transfer.notify.notified() => continue,
+                res = read_future => match res {
+                    Ok(n) => n,
+                    Err(_) => break,
+                },
+            }
+        } else {
+            match read_future.await {
+                Ok(n) => n,
+                Err(_) => break,
+            }
+        };
+
+        if n == 0 {
+            break;
+        }
+        output.bytes_read += n;
+
+        if let Some(ref path) = file_path {
+            if file_truncated {
+                continue;
+            }
+            let chunk = if draining { &drain_buf[..n] } else { &buf[..n] };
+            let take = if file_kept + n > MAX_CAPTURE_BYTES_PER_STREAM {
+                file_truncated = true;
+                MAX_CAPTURE_BYTES_PER_STREAM.saturating_sub(file_kept)
+            } else {
+                n
+            };
+            if take > 0 {
+                if append_shell_output(path.as_path(), &chunk[..take])
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                file_kept += take;
+            }
+            if file_truncated {
+                let note = format!(
+                    "\n[output truncated at {MAX_CAPTURE_BYTES_PER_STREAM} bytes per stream]\n"
+                );
+                let _ = append_shell_output(path.as_path(), note.as_bytes()).await;
+            }
+            continue;
+        }
+
+        if draining {
+            continue;
+        }
+        let kept = output.text.len();
+        let remaining = MAX_CAPTURE_BYTES_PER_STREAM.saturating_sub(kept);
+        if remaining == 0 {
+            output.truncated = true;
+            draining = true;
+            continue;
+        }
+        let take = n.min(remaining);
+        output.text.push_str(&String::from_utf8_lossy(&buf[..take]));
+        if take < n {
+            output.truncated = true;
+            draining = true;
+        }
+    }
+
+    output
+}
+
 /// 读取子进程输出直到 EOF；超出 [`MAX_CAPTURE_BYTES_PER_STREAM`] 后仍继续 drain pipe
-/// 以免子进程写端阻塞。
+/// 以免子进程写端阻塞。保留供单元测试与简单路径使用。
+#[allow(dead_code)]
 async fn capture_stream(mut stream: impl AsyncRead + Unpin) -> CapturedOutput {
     let mut output = CapturedOutput::default();
     let mut buf = [0u8; 8192];
@@ -892,6 +1336,13 @@ mod tests {
             exit_code, 0,
             "exit code should be non-zero, got {exit_code}"
         );
+    }
+
+    #[test]
+    fn auto_background_disallows_sleep_commands() {
+        assert!(!super::is_auto_background_allowed("sleep 60"));
+        assert!(!super::is_auto_background_allowed("Start-Sleep -Seconds 5"));
+        assert!(super::is_auto_background_allowed("cargo build --release"));
     }
 
     #[test]

@@ -264,6 +264,41 @@ async fn inject_message_during_active_turn_binds_turn_id() {
 }
 
 #[tokio::test]
+async fn inject_message_when_idle_starts_turn() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let session_id = new_session_id();
+    store
+        .create_session(&session_id, ".", "mock", None, None, None)
+        .await
+        .unwrap();
+
+    let ops = build_test_ops(Arc::clone(&store), "handled notification");
+
+    assert!(
+        !ops.scheduler.registry().has_active(&session_id),
+        "session should start idle"
+    );
+
+    ops.inject_message(
+        SessionAccess::same(session_id.as_str()),
+        "<background-shell-notification>done</background-shell-notification>".into(),
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..50 {
+        if ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        ops.scheduler.registry().has_active(&session_id),
+        "idle inject must start a turn (background shell completion path)"
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_sync_returns_llm_output() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
@@ -378,18 +413,20 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
         AgentSessionStatus::Completed
     );
 
-    // notify_parent_on_complete 消息应存在
+    // notify_parent_on_complete 消息应存在，且包含子 agent 输出
     let has_notify = parent_model.messages.iter().any(|m| {
         m.message.content.iter().any(|c| {
             matches!(
                 c,
-                astrcode_core::llm::LlmContent::Text { text } if text.contains("[done]")
+                astrcode_core::llm::LlmContent::Text { text }
+                    if text.contains("<background-agent-notification>")
+                        && text.contains("async result")
             )
         })
     });
     assert!(
         has_notify,
-        "notify_parent_on_complete message should be in parent session"
+        "notify_parent_on_complete should inject agent output in notification"
     );
 }
 

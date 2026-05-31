@@ -27,11 +27,14 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChildOutcome {
-    Completed { summary: String },
+    Completed { output: String },
     Failed { error: String },
     Aborted,
     TimedOut,
 }
+
+/// 完成通知内嵌的输出上限（字节）。
+const AGENT_NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildCleanup {
@@ -44,7 +47,9 @@ pub struct ChildSessionCompletionConfig {
     pub child_session_id: SessionId,
     pub parent_session_id: SessionId,
     pub cleanup: ChildCleanup,
+    /// 非 None 时在完成后向父 session 注入通知；字符串作 summary 提示（可为空）。
     pub notify_on_complete: Option<String>,
+    pub tool_call_id: Option<String>,
 }
 
 struct ChildSessionTracker {
@@ -275,6 +280,7 @@ impl ChildSessionCoordinator {
     }
 
     /// 后台 turn：注册 completion guard，并 drain 父 session 上已完成的 child。
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_turn_background(
         &self,
         scheduler: &TurnScheduler,
@@ -283,6 +289,7 @@ impl ChildSessionCoordinator {
         user_prompt: String,
         cleanup: ChildCleanup,
         notify_on_complete: Option<String>,
+        tool_call_id: Option<String>,
     ) -> Result<(TurnId, SessionId), SessionApiError> {
         self.prepare_turn_target(target_sid).await?;
         let started = scheduler
@@ -296,6 +303,7 @@ impl ChildSessionCoordinator {
             parent_session_id: caller_sid.clone(),
             cleanup,
             notify_on_complete,
+            tool_call_id,
         };
         self.register_completion_guard(started.handle, config);
         self.drain_completed(scheduler, caller_sid).await;
@@ -366,11 +374,12 @@ impl ChildSessionCoordinator {
             } else {
                 scheduler.registry().remove(guard.child_session_id());
             }
-            if let Some(notify_text) = guard.notify_text() {
+            if guard.notify_text().is_some() {
+                let message = build_background_agent_notification(&guard).await;
                 if let Err(e) = scheduler
                     .deliver_input(
                         guard.parent_session_id().clone(),
-                        notify_text.to_string(),
+                        message,
                         InputDelivery::InjectIfRunningElseStart,
                     )
                     .await
@@ -455,8 +464,8 @@ impl ChildSessionCoordinator {
         let parent_sid = guard.parent_session_id();
         let child_sid = guard.child_session_id();
         match guard.outcome().await {
-            ChildOutcome::Completed { summary } => {
-                self.record_completed(parent_sid, child_sid, &summary).await;
+            ChildOutcome::Completed { output } => {
+                self.record_completed(parent_sid, child_sid, &output).await;
             },
             ChildOutcome::Failed { error } => {
                 self.record_failed(parent_sid, child_sid, &error).await;
@@ -617,9 +626,7 @@ impl ChildSessionCompletionGuard {
             let result = handle.wait().await;
             let outcome = match result {
                 Some(r) => match r.output {
-                    Ok(out) => ChildOutcome::Completed {
-                        summary: one_line_summary(&out.text),
-                    },
+                    Ok(out) => ChildOutcome::Completed { output: out.text },
                     Err(TurnError::Aborted) => ChildOutcome::Aborted,
                     Err(e) => ChildOutcome::Failed {
                         error: e.to_string(),
@@ -677,6 +684,17 @@ impl ChildSessionCompletionGuard {
 
     pub fn notify_text(&self) -> Option<&str> {
         self.config.notify_on_complete.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.config.tool_call_id.as_deref()
+    }
+
+    pub fn summary_hint(&self) -> Option<&str> {
+        self.config
+            .notify_on_complete
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
     }
 }
 
@@ -748,6 +766,115 @@ fn one_line_summary(text: &str) -> String {
     astrcode_support::text::compact_inline(text, 159)
 }
 
+async fn build_background_agent_notification(guard: &ChildSessionCompletionGuard) -> String {
+    let child_id = guard.child_session_id().to_string();
+    let tool_call_id = guard.tool_call_id().map(str::to_string);
+    let summary_hint = guard.summary_hint().map(str::to_string);
+    match guard.outcome().await {
+        ChildOutcome::Completed { output } => {
+            let (body, truncated) = truncate_notification_output(&output);
+            format_background_agent_notification(
+                &child_id,
+                tool_call_id.as_deref(),
+                "completed",
+                None,
+                summary_hint.as_deref(),
+                &body,
+                truncated,
+            )
+        },
+        ChildOutcome::Failed { error } => format_background_agent_notification(
+            &child_id,
+            tool_call_id.as_deref(),
+            "failed",
+            Some(&error),
+            summary_hint.as_deref(),
+            "",
+            false,
+        ),
+        ChildOutcome::Aborted => format_background_agent_notification(
+            &child_id,
+            tool_call_id.as_deref(),
+            "aborted",
+            Some("aborted"),
+            summary_hint.as_deref(),
+            "",
+            false,
+        ),
+        ChildOutcome::TimedOut => format_background_agent_notification(
+            &child_id,
+            tool_call_id.as_deref(),
+            "timed_out",
+            Some("timed out"),
+            summary_hint.as_deref(),
+            "",
+            false,
+        ),
+    }
+}
+
+fn format_background_agent_notification(
+    child_session_id: &str,
+    tool_call_id: Option<&str>,
+    status: &str,
+    error: Option<&str>,
+    summary_hint: Option<&str>,
+    output_body: &str,
+    output_truncated: bool,
+) -> String {
+    let tool_call_line = tool_call_id
+        .map(|id| format!("\n<tool-call-id>{id}</tool-call-id>"))
+        .unwrap_or_default();
+    let error_line = error
+        .map(|e| format!("\n<error>{e}</error>"))
+        .unwrap_or_default();
+    let output_truncated_line = if output_truncated {
+        format!(
+            "\n<output-truncated>Showing last {AGENT_NOTIFICATION_OUTPUT_MAX_BYTES} bytes; child \
+             session transcript may contain more.</output-truncated>"
+        )
+    } else {
+        String::new()
+    };
+    let output_section = if output_body.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n<output>{cdata}</output>{output_truncated_line}",
+            cdata = wrap_agent_output_cdata(output_body),
+        )
+    };
+    let summary = summary_hint
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Background agent task {status}"));
+    format!(
+        "<background-agent-notification>\n<child-session-id>{child_session_id}</\
+         child-session-id>{tool_call_line}\n<status>{status}</status>{error_line}{output_section}\\
+         n<summary>{summary}</summary>\n</background-agent-notification>"
+    )
+}
+
+fn truncate_notification_output(text: &str) -> (String, bool) {
+    let bytes = text.as_bytes();
+    let truncated = bytes.len() > AGENT_NOTIFICATION_OUTPUT_MAX_BYTES;
+    let start = bytes
+        .len()
+        .saturating_sub(AGENT_NOTIFICATION_OUTPUT_MAX_BYTES);
+    (
+        String::from_utf8_lossy(&bytes[start..]).into_owned(),
+        truncated,
+    )
+}
+
+fn wrap_agent_output_cdata(text: &str) -> String {
+    if !text.contains("]]>") {
+        return format!("<![CDATA[\n{text}\n]]>");
+    }
+    let escaped = text.replace("]]>", "]]]]><![CDATA[>");
+    format!("<![CDATA[\n{escaped}\n]]>")
+}
+
 #[cfg(test)]
 mod tests {
     use astrcode_core::event::EventPayload;
@@ -760,7 +887,7 @@ mod tests {
         try_set_outcome(
             &tx,
             ChildOutcome::Completed {
-                summary: "first".into(),
+                output: "first".into(),
             },
         );
         try_set_outcome(
@@ -772,9 +899,27 @@ mod tests {
         assert_eq!(
             rx.borrow().clone(),
             Some(ChildOutcome::Completed {
-                summary: "first".into(),
+                output: "first".into(),
             })
         );
+    }
+
+    #[test]
+    fn format_background_agent_notification_includes_output() {
+        let msg = format_background_agent_notification(
+            "child-1",
+            Some("call-9"),
+            "completed",
+            None,
+            Some("explore task"),
+            "findings here",
+            false,
+        );
+        assert!(msg.contains("<child-session-id>child-1</child-session-id>"));
+        assert!(msg.contains("<tool-call-id>call-9</tool-call-id>"));
+        assert!(msg.contains("<status>completed</status>"));
+        assert!(msg.contains("findings here"));
+        assert!(msg.contains("<summary>explore task</summary>"));
     }
 
     #[test]

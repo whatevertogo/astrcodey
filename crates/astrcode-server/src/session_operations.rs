@@ -3,12 +3,11 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::EventPayload,
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
         SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
     },
-    types::{SessionId, new_message_id},
+    types::SessionId,
 };
 
 fn session_ids(access: SessionAccess<'_>) -> (SessionId, SessionId) {
@@ -74,34 +73,14 @@ impl SessionOperations for ServerSessionOperations {
             .verify_access(&caller_sid, &target_sid)
             .await?;
 
-        if self.scheduler.registry().has_active(&target_sid) {
-            self.scheduler
-                .deliver_input(
-                    target_sid.clone(),
-                    content,
-                    InputDelivery::InjectIfRunningElseStart,
-                )
-                .await
-                .map_err(SessionApiError::internal)?;
-        } else {
-            let session = self
-                .session_manager
-                .open(target_sid.clone())
-                .await
-                .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
-
-            let message_id = new_message_id();
-            session
-                .emit_durable(
-                    None,
-                    EventPayload::UserMessage {
-                        message_id,
-                        text: content,
-                    },
-                )
-                .await
-                .map_err(SessionApiError::internal)?;
-        }
+        self.scheduler
+            .deliver_input(
+                target_sid.clone(),
+                content,
+                InputDelivery::InjectIfRunningElseStart,
+            )
+            .await
+            .map_err(SessionApiError::internal)?;
 
         self.session_manager.sync_durable_events(&target_sid).await;
         Ok(())
@@ -143,6 +122,7 @@ impl SessionOperations for ServerSessionOperations {
                     request.user_prompt,
                     cleanup,
                     request.notify_parent_on_complete,
+                    request.tool_call_id.clone(),
                 )
                 .await?;
             Ok(SubmitTurnResult::Backgrounded {

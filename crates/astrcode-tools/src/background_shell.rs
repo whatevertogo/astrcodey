@@ -24,6 +24,9 @@ use crate::shell_tool::{
 
 const BACKGROUND_SHELLS_DIR: &str = "background-shells";
 
+/// 完成通知内嵌的输出上限（字节）；更大文件仍可通过 `<output-file>` 用 read 分页读取。
+const NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+
 /// session 销毁时终止该 session 下所有后台 shell。
 pub fn cleanup_background_shells_for_session(session_id: &str) {
     BackgroundShellRegistry::global().cleanup_session(session_id);
@@ -34,6 +37,34 @@ pub async fn spawn_background_shell(
     params: BackgroundShellSpawnParams,
 ) -> Result<SpawnedBackgroundShell, ToolError> {
     BackgroundShellRegistry::global().spawn(params).await
+}
+
+/// 将已在运行的前台 shell 收编为后台任务（进程与输出流保持不中断）。
+pub async fn adopt_running_shell(
+    params: AdoptBackgroundShellParams,
+    stdout_join: tokio::task::JoinHandle<()>,
+    stderr_join: tokio::task::JoinHandle<()>,
+) -> Result<SpawnedBackgroundShell, ToolError> {
+    BackgroundShellRegistry::global()
+        .adopt(params, stdout_join, stderr_join)
+        .await
+}
+
+/// 收编已在运行的前台 shell 时的参数（输出文件与 header 由调用方预先写好）。
+pub struct AdoptBackgroundShellParams {
+    pub session_id: String,
+    pub tool_call_id: Option<String>,
+    pub command: String,
+    pub intent: Option<String>,
+    pub cwd: PathBuf,
+    pub shell: ShellInfo,
+    pub timeout_secs: u64,
+    pub store_dir: Option<PathBuf>,
+    pub session_ops: Option<Arc<dyn SessionOperations>>,
+    pub shell_id: String,
+    pub output_path: PathBuf,
+    pub description: String,
+    pub child: Child,
 }
 
 /// 等待已有后台 shell 结束或超时（`block_until_ms`）；`0` 表示仅查询状态。
@@ -188,6 +219,42 @@ impl BackgroundShellRegistry {
         })
     }
 
+    async fn adopt(
+        &self,
+        params: AdoptBackgroundShellParams,
+        stdout_join: tokio::task::JoinHandle<()>,
+        stderr_join: tokio::task::JoinHandle<()>,
+    ) -> Result<SpawnedBackgroundShell, ToolError> {
+        let shell_id = params.shell_id;
+        let output_path = params.output_path.clone();
+        let record = Arc::new(BackgroundShellRecord {
+            session_id: params.session_id.clone(),
+            shell_id: shell_id.clone(),
+            output_path: output_path.clone(),
+            description: params.description.clone(),
+            tool_call_id: params.tool_call_id.clone(),
+            session_ops: params.session_ops.clone(),
+            status: Mutex::new(ShellRunStatus::Running),
+            exit_code: Mutex::new(None),
+            child: Mutex::new(Some(params.child)),
+            done: Notify::new(),
+        });
+        self.shells
+            .lock()
+            .insert(shell_id.clone(), Arc::clone(&record));
+
+        let wait_record = Arc::clone(&record);
+        let timeout_secs = params.timeout_secs;
+        tokio::spawn(async move {
+            run_adopted_background_shell(wait_record, stdout_join, stderr_join, timeout_secs).await;
+        });
+
+        Ok(SpawnedBackgroundShell {
+            shell_id,
+            output_path,
+        })
+    }
+
     fn get(&self, shell_id: &str) -> Option<Arc<BackgroundShellRecord>> {
         self.shells.lock().get(shell_id).cloned()
     }
@@ -266,6 +333,59 @@ async fn run_background_shell(
     notify_completion(&record, run_status, exit_code).await;
 }
 
+async fn run_adopted_background_shell(
+    record: Arc<BackgroundShellRecord>,
+    stdout_join: tokio::task::JoinHandle<()>,
+    stderr_join: tokio::task::JoinHandle<()>,
+    timeout_secs: u64,
+) {
+    let mut child = match record.child.lock().take() {
+        Some(c) => c,
+        None => return,
+    };
+
+    let (exit_code, run_status) = match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(Ok(status)) => {
+            let code = status.code().unwrap_or(-1);
+            let st = if code == 0 {
+                ShellRunStatus::Completed
+            } else {
+                ShellRunStatus::Failed
+            };
+            (Some(code), st)
+        },
+        Ok(Err(_)) => (None, ShellRunStatus::Failed),
+        Err(_) => {
+            terminate_child_tree(&mut child).await;
+            let _ = child.wait().await;
+            (None, ShellRunStatus::TimedOut)
+        },
+    };
+
+    let _ = stdout_join.await;
+    let _ = stderr_join.await;
+
+    *record.exit_code.lock() = exit_code;
+    *record.status.lock() = run_status;
+    record.done.notify_waiters();
+
+    let footer = format_footer(run_status, exit_code);
+    if let Err(e) = append_bytes(&record.output_path, footer.as_bytes()).await {
+        tracing::warn!(
+            shell_id = %record.shell_id,
+            error = %e,
+            "failed to append adopted background shell footer"
+        );
+    }
+
+    notify_completion(&record, run_status, exit_code).await;
+}
+
 async fn notify_completion(
     record: &BackgroundShellRecord,
     status: ShellRunStatus,
@@ -275,6 +395,44 @@ async fn notify_completion(
         return;
     };
     let access = SessionAccess::same(record.session_id.as_str());
+    let (output_body, output_truncated) = match read_notification_output(&record.output_path).await
+    {
+        Ok(v) => v,
+        Err(e) => (
+            format!("[failed to read background shell output: {e}]"),
+            false,
+        ),
+    };
+    let message = format_completion_notification(
+        &record.shell_id,
+        record.tool_call_id.as_deref(),
+        &record.output_path,
+        &record.description,
+        status,
+        exit_code,
+        &output_body,
+        output_truncated,
+    );
+    if let Err(e) = ops.inject_message(access, message).await {
+        tracing::warn!(
+            session_id = %record.session_id,
+            error = %e,
+            "failed to inject background shell completion notification"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_completion_notification(
+    shell_id: &str,
+    tool_call_id: Option<&str>,
+    output_path: &Path,
+    description: &str,
+    status: ShellRunStatus,
+    exit_code: Option<i32>,
+    output_body: &str,
+    output_truncated: bool,
+) -> String {
     let exit_note = match exit_code {
         Some(code) => format!(" (exit code {code})"),
         None if status == ShellRunStatus::TimedOut => " (timed out)".into(),
@@ -285,28 +443,59 @@ async fn notify_completion(
         ShellRunStatus::Failed => "failed",
         ShellRunStatus::TimedOut => "timed out",
         ShellRunStatus::Killed => "was stopped",
-        ShellRunStatus::Running => return,
+        ShellRunStatus::Running => "running",
     };
-    let path = record.output_path.display();
-    let tool_line = record
-        .tool_call_id
-        .as_ref()
-        .map(|id| format!("\nTool call id: {id}"))
+    let exit_code_line = match exit_code {
+        Some(code) => format!("\n<exit-code>{code}</exit-code>"),
+        None => String::new(),
+    };
+    let tool_call_line = tool_call_id
+        .map(|id| format!("\n<tool-call-id>{id}</tool-call-id>"))
         .unwrap_or_default();
-    let message = format!(
-        "[A background shell command has finished. Review the output file and continue the \
-         task.]\n\nBackground command \"{}\" {status_word}{exit_note}.\nOutput file: \
-         {path}{tool_line}\nUse `read` with this path (charOffset / maxChars) to paginate. Do not \
-         re-run the command for more output.",
-        record.description
-    );
-    if let Err(e) = ops.inject_message(access, message).await {
-        tracing::warn!(
-            session_id = %record.session_id,
-            error = %e,
-            "failed to inject background shell completion notification"
-        );
+    let output_truncated_line = if output_truncated {
+        format!(
+            "\n<output-truncated>Showing last {NOTIFICATION_OUTPUT_MAX_BYTES} bytes; use Read on \
+             output-file for full content.</output-truncated>"
+        )
+    } else {
+        String::new()
+    };
+    let output_section = if output_body.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n<output>{cdata}</output>{output_truncated_line}",
+            cdata = wrap_output_cdata(output_body),
+        )
+    };
+    format!(
+        "<background-shell-notification>\n<shell-id>{shell_id}</shell-id>{tool_call_line}\\
+         n<output-file>{path}</output-file>\n<status>{status_word}</\
+         status>{exit_code_line}{output_section}\n<summary>Background command \"{description}\" \
+         {status_word}{exit_note}</summary>\n</background-shell-notification>",
+        path = output_path.display(),
+    )
+}
+
+async fn read_notification_output(path: &Path) -> Result<(String, bool), ToolError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| ToolError::Execution(format!("read background shell output: {e}")))?;
+    let truncated = bytes.len() > NOTIFICATION_OUTPUT_MAX_BYTES;
+    let start = bytes.len().saturating_sub(NOTIFICATION_OUTPUT_MAX_BYTES);
+    Ok((
+        String::from_utf8_lossy(&bytes[start..]).into_owned(),
+        truncated,
+    ))
+}
+
+/// 将任意 shell 输出包进 CDATA，避免 `</output>` 或 `<` 破坏通知结构。
+fn wrap_output_cdata(text: &str) -> String {
+    if !text.contains("]]>") {
+        return format!("<![CDATA[\n{text}\n]]>");
     }
+    let escaped = text.replace("]]>", "]]]]><![CDATA[>");
+    format!("<![CDATA[\n{escaped}\n]]>")
 }
 
 fn kill_record(record: &BackgroundShellRecord) {
@@ -417,6 +606,10 @@ async fn stream_to_file(mut stream: impl AsyncRead + Unpin, path: PathBuf, is_st
     }
 }
 
+pub(crate) async fn append_shell_output(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    append_bytes(path, data).await
+}
+
 async fn append_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
@@ -517,6 +710,54 @@ mod tests {
         };
         let dir = resolve_output_dir(&params).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/.astrcode/background-shells"));
+    }
+
+    #[test]
+    fn format_completion_notification_includes_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("out.txt");
+        let msg = format_completion_notification(
+            "shell-abc",
+            Some("call-1"),
+            &path,
+            "demo",
+            ShellRunStatus::Completed,
+            Some(0),
+            "计数: 1\n完成！",
+            false,
+        );
+        assert!(msg.contains("<shell-id>shell-abc</shell-id>"));
+        assert!(msg.contains("<tool-call-id>call-1</tool-call-id>"));
+        assert!(msg.contains("<status>completed</status>"));
+        assert!(msg.contains("<exit-code>0</exit-code>"));
+        assert!(msg.contains("<output><![CDATA["));
+        assert!(msg.contains("计数: 1"));
+        assert!(msg.contains("完成！"));
+        assert!(!msg.contains("<output-truncated>"));
+    }
+
+    #[test]
+    fn format_completion_notification_marks_truncated_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("big.txt");
+        let msg = format_completion_notification(
+            "id",
+            None,
+            &path,
+            "long job",
+            ShellRunStatus::Completed,
+            Some(0),
+            "tail only",
+            true,
+        );
+        assert!(msg.contains("<output-truncated>"));
+        assert!(msg.contains("tail only"));
+    }
+
+    #[test]
+    fn wrap_output_cdata_escapes_embedded_cdata_end() {
+        let wrapped = wrap_output_cdata("a]]>b");
+        assert!(wrapped.contains("]]]]><![CDATA[>"));
     }
 
     #[test]

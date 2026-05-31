@@ -55,7 +55,7 @@ function RenderSpecViewerInner({ spec, className }: RenderSpecViewerProps) {
       return (
         <div
           className={cn(
-            'rounded-xl border border-border bg-surface-soft p-3',
+            'space-y-3 rounded-xl border border-border bg-surface-soft p-3',
             className
           )}
         >
@@ -73,11 +73,17 @@ function RenderSpecViewerInner({ spec, className }: RenderSpecViewerProps) {
     case 'list': {
       const items = spec.items ?? []
       const Tag = spec.ordered ? 'ol' : 'ul'
+      const allProgress =
+        items.length > 0 && items.every((item) => item.type === 'progress')
       return (
         <Tag
           className={cn(
-            'ml-4 space-y-1',
-            spec.ordered ? 'list-decimal' : 'list-disc',
+            'ml-4 space-y-2',
+            spec.ordered
+              ? 'list-decimal'
+              : allProgress
+                ? 'list-none'
+                : 'list-disc',
             className
           )}
         >
@@ -105,13 +111,15 @@ function RenderSpecViewerInner({ spec, className }: RenderSpecViewerProps) {
     case 'progress': {
       const pct = spec.value != null ? Math.round(spec.value * 100) : undefined
       return (
-        <div className={cn('space-y-1 text-[13px]', className)}>
-          <div className="flex items-center gap-2">
-            <span>{spec.label}</span>
+        <div className={cn('min-w-0 space-y-1 text-[13px]', className)}>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className="min-w-0 wrap-break-word">{spec.label}</span>
             {spec.status && (
-              <span className="text-text-muted">{spec.status}</span>
+              <span className="shrink-0 text-text-muted">{spec.status}</span>
             )}
-            {pct != null && <span className="text-text-muted">{pct}%</span>}
+            {pct != null && (
+              <span className="shrink-0 text-text-muted">{pct}%</span>
+            )}
           </div>
           {spec.value != null && (
             <div className="h-1.5 overflow-hidden rounded-full bg-surface-muted">

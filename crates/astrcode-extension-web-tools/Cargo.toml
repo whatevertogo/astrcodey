@@ -11,7 +11,7 @@ async-trait = { workspace = true }
 html2text = "0.12"
 parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
-scraper = "0.22"
+scraper = "0.27"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

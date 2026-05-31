@@ -19,7 +19,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "astrcode-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-sdk"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "astrcode-core",
  "async-trait",

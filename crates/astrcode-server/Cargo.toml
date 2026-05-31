@@ -62,6 +62,7 @@ required-features = ["testing"]
 http-body-util = { workspace = true }
 tower = { workspace = true }
 astrcode-extension-skill = { path = "../astrcode-extension-skill", default-features = false }
+astrcode-extension-mode = { path = "../astrcode-extension-mode" }
 # 测试时启用内存存储；Cargo 会把 testing feature 合并到正常依赖里，
 # 使 #[cfg(test)] 块和 tests/ 里的集成测试都能访问 in_memory 模块。
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }

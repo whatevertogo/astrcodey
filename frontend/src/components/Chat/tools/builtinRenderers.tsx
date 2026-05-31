@@ -18,6 +18,11 @@ import {
   TerminalToolDetails,
 } from './details'
 import { registerToolRenderer } from './registry'
+import {
+  todoWriteRenderSpec,
+  todoWriteSummaryLine,
+} from './todoWrite'
+import { RenderSpecViewer } from '../RenderSpecViewer'
 
 registerToolRenderer({
   id: 'builtin:read',
@@ -153,6 +158,19 @@ registerToolRenderer({
     )
   },
   render: ({ block }) => <PatchToolDetails block={block} />,
+})
+
+registerToolRenderer({
+  id: 'builtin:todoWrite',
+  priority: 100,
+  match: ({ block }) => block.name === 'todoWrite',
+  summary: ({ args, meta }) => todoWriteSummaryLine(args, meta) ?? '',
+  render: ({ block, args, meta }) => {
+    const spec = todoWriteRenderSpec(args, meta)
+    if (spec) return <RenderSpecViewer spec={spec} />
+    if (block.status === 'streaming') return null
+    return undefined
+  },
 })
 
 registerToolRenderer({

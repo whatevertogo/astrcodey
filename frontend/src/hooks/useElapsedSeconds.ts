@@ -6,10 +6,9 @@ export function useElapsedSeconds(active: boolean): number {
 
   useEffect(() => {
     if (!active) {
-      setElapsed(0)
       return
     }
-    setElapsed(0)
+
     const start = Date.now()
     const id = window.setInterval(() => {
       setElapsed(Math.floor((Date.now() - start) / 1000))
@@ -17,7 +16,7 @@ export function useElapsedSeconds(active: boolean): number {
     return () => window.clearInterval(id)
   }, [active])
 
-  return elapsed
+  return active ? elapsed : 0
 }
 
 export function runningElapsedLabel(
