@@ -60,6 +60,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.extra_system_prompt = None;
             model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
+            model.pending_tool_interactions.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
             model.extension_events = Default::default();
@@ -143,6 +144,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::TurnCompleted { .. } => {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
+            model.pending_tool_interactions.clear();
         },
         EventPayload::TurnAbortedContext => {
             model.messages.push(SequencedLlmMessage {
@@ -216,6 +218,20 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::CallingTool;
         },
         EventPayload::ToolApprovalResolved { .. } => {},
+        EventPayload::ToolCallInteractionPending {
+            call_id,
+            content,
+            metadata,
+        } => {
+            model.phase = Phase::CallingTool;
+            model.pending_tool_interactions.insert(
+                call_id.clone(),
+                astrcode_core::storage::PendingToolInteractionView {
+                    content: content.clone(),
+                    metadata: metadata.clone(),
+                },
+            );
+        },
         EventPayload::ToolCallCompleted {
             call_id,
             tool_name,
@@ -223,6 +239,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             ..
         } => {
             model.pending_tool_calls.remove(call_id);
+            model.pending_tool_interactions.remove(call_id);
 
             // 始终 push（不再 update-in-place）
             model.messages.push(SequencedLlmMessage {

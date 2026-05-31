@@ -4,6 +4,7 @@ import {
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
 import type { ConversationBlock } from '../../services/types'
+import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import {
   extractRenderSpec,
@@ -38,6 +39,7 @@ import {
   DefaultToolDetails,
   StatusIndicatorDot,
 } from './tools/shared'
+import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
 import { Icon } from '../ui/Icon'
 
 interface ToolCallBlockProps {
@@ -49,25 +51,47 @@ function ToolDetails({
   toolContext,
   approvalUi,
   renderer,
+  agentChildUi,
 }: {
   toolContext: ToolRendererContext
   approvalUi: ReactNode | null
   renderer?: ToolRenderer
+  agentChildUi?: ReactNode | null
 }) {
   if (toolContext.renderSpec) {
-    return <RenderSpecViewer spec={toolContext.renderSpec} />
+    return (
+      <div className="space-y-3">
+        <RenderSpecViewer spec={toolContext.renderSpec} />
+        {agentChildUi}
+      </div>
+    )
   }
   if (toolContext.agentSpec) {
-    return <RenderSpecViewer spec={toolContext.agentSpec} />
+    return (
+      <div className="space-y-3">
+        <RenderSpecViewer spec={toolContext.agentSpec} />
+        {agentChildUi}
+      </div>
+    )
   }
   if (approvalUi) return approvalUi
   const rendered = renderer?.render?.(toolContext)
-  if (rendered != null) return rendered
+  if (rendered != null) {
+    return (
+      <div className="space-y-3">
+        {rendered}
+        {agentChildUi}
+      </div>
+    )
+  }
+  if (agentChildUi) return agentChildUi
   return <DefaultToolDetails block={toolContext.block} />
 }
 
 function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
   const [isOpen, setIsOpen] = useState(false)
+  const agentSessions = useAppStore((s) => s.agentSessions)
+  const switchSession = useAppStore((s) => s.switchSession)
   const args = toolArgs(block)
   const meta = toolMeta(block)
 
@@ -115,15 +139,31 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
   const gateApproval = readGateApproval(block.metadata)
   const gatePending = gateApproval?.pending === true
   const questionnairePending = toolApprovalPending(toolUiCtx)
-  const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
+  const linkedAgent =
+    block.name === 'agent'
+      ? agentSessions.find((agent) => agent.toolCallId === block.id)
+      : undefined
+  const agentChildUi =
+    linkedAgent && block.status === 'streaming' ? (
+      <AgentChildSessionPanel
+        agent={linkedAgent}
+        onOpenChild={(childSessionId) => void switchSession(childSessionId)}
+      />
+    ) : null
+  const autoExpand =
+    toolApprovalShouldAutoExpand(toolUiCtx) || gatePending || !!agentChildUi
 
   const displayStatus = gatePending
     ? '待审批'
-    : toolApprovalPending(toolUiCtx)
+    : questionnairePending
       ? '待回答'
-      : streaming
-        ? runningElapsedLabel(elapsed, 'zh')
-        : statusLabel(block.status)
+      : linkedAgent && block.status === 'streaming'
+        ? linkedAgent.currentTool
+          ? `子Agent · ${linkedAgent.currentTool}`
+          : '子Agent运行中'
+        : streaming
+          ? runningElapsedLabel(elapsed, 'zh')
+          : statusLabel(block.status)
 
   return (
     <details
@@ -177,6 +217,7 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
                 toolContext={context}
                 approvalUi={approvalUi}
                 renderer={renderer}
+                agentChildUi={agentChildUi}
               />
             )}
           </div>

@@ -75,6 +75,24 @@ pub(in crate::http) fn event_to_replay_deltas(
             },
         }];
     }
+    if let EventPayload::ToolCallInteractionPending {
+        call_id,
+        content,
+        metadata,
+    } = &event.payload
+    {
+        let metadata = serde_json::to_value(metadata)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        return vec![ConversationDeltaDto::PatchToolCall {
+            block_id: call_id.to_string(),
+            text: content.clone(),
+            metadata: if metadata.as_object().is_some_and(|m| !m.is_empty()) {
+                Some(metadata)
+            } else {
+                None
+            },
+        }];
+    }
     if matches!(&event.payload, EventPayload::TurnCompleted { .. }) {
         return vec![ConversationDeltaDto::UpdateControlState {
             control: control_from_phase(Phase::Idle, has_messages),

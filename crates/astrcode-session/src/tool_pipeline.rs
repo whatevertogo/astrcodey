@@ -489,7 +489,11 @@ impl ToolCalls {
 
             if is_awaiting_user_input_content(&result.content) {
                 result = self
-                    .await_tool_ui_response(&input.prepared[position], result)
+                    .await_tool_ui_response(
+                        &input.prepared[position],
+                        result,
+                        Arc::clone(&input.publisher),
+                    )
                     .await?;
             }
 
@@ -513,7 +517,16 @@ impl ToolCalls {
         &self,
         call: &super::tool_types::PreparedToolCall,
         mut result: ToolResult,
+        publisher: Arc<TurnEvents>,
     ) -> Result<ToolResult, TurnError> {
+        publisher
+            .durable(EventPayload::ToolCallInteractionPending {
+                call_id: call.call_id.clone().into(),
+                content: result.content.clone(),
+                metadata: result.metadata.clone(),
+            })
+            .await?;
+
         let (tx, rx) = oneshot::channel();
         self.session
             .runtime()

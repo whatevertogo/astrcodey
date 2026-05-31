@@ -266,6 +266,13 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         blockId: requiredString(object, 'blockId'),
         metadata: optionalObject(object, 'metadata') ?? {},
       }
+    case 'patchToolCall':
+      return {
+        kind,
+        blockId: requiredString(object, 'blockId'),
+        text: requiredString(object, 'text'),
+        metadata: optionalObject(object, 'metadata'),
+      }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)
   }

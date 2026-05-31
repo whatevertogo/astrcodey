@@ -242,5 +242,29 @@ export function applyDeltaToState(
       })
       break
     }
+
+    case 'patchToolCall': {
+      const { blockId, text, metadata } = delta
+      set((current) => {
+        const idx = current.blocks.findIndex((b) => b.id === blockId)
+        if (idx === -1) return {}
+        const block = current.blocks[idx]
+        if (block.kind !== 'toolCall') return {}
+        const mergedMetadata = metadata
+          ? {
+              ...(block.metadata ?? {}),
+              ...metadata,
+            }
+          : block.metadata
+        const next = [...current.blocks]
+        next[idx] = {
+          ...block,
+          text,
+          ...(mergedMetadata ? { metadata: mergedMetadata } : {}),
+        }
+        return { blocks: next }
+      })
+      break
+    }
   }
 }

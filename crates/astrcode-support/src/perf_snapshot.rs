@@ -81,6 +81,7 @@ fn payload_type(payload: &EventPayload) -> &'static str {
         EventPayload::ToolApprovalRequested { .. } => "tool_approval_requested",
         EventPayload::ToolApprovalResolved { .. } => "tool_approval_resolved",
         EventPayload::ToolOutputDelta { .. } => "tool_output_delta",
+        EventPayload::ToolCallInteractionPending { .. } => "tool_call_interaction_pending",
         EventPayload::ToolCallCompleted { .. } => "tool_call_completed",
         EventPayload::CompactionStarted => "compaction_started",
         EventPayload::CompactionCompleted { .. } => "compaction_completed",

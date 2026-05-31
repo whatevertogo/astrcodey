@@ -210,6 +210,12 @@ export type ConversationDelta =
       blockId: string
       metadata: Record<string, unknown>
     }
+  | {
+      kind: 'patchToolCall'
+      blockId: string
+      text: string
+      metadata?: Record<string, unknown>
+    }
 
 // ── App State ──
 

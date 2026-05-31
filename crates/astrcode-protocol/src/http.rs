@@ -389,6 +389,13 @@ pub enum ConversationDeltaDto {
         block_id: String,
         metadata: serde_json::Value,
     },
+    /// 工具执行中进入交互等待态：同步更新 text 与 metadata（live-only）。
+    PatchToolCall {
+        block_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
 }
 
 /// HTTP 错误响应。

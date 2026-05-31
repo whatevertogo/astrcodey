@@ -282,6 +282,18 @@ pub enum EventPayload {
         detail: Option<String>,
     },
 
+    /// 工具调用进入等待用户交互阶段（durable；在 `ToolCallCompleted` 之前写入）。
+    ///
+    /// 用于 askUser 等 Approval UI：execute 已返回 `awaiting_user_input`，
+    /// turn 阻塞等待用户提交后才写入 `ToolCallCompleted`。
+    ToolCallInteractionPending {
+        call_id: ToolCallId,
+        /// 工具结果正文（如 `{"status":"awaiting_user_input",...}`）。
+        content: String,
+        /// 投影到前端 block.metadata（含 `toolUi` / `toolUiPhase` 等）。
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    },
+
     /// 工具调用已完成。
     ToolCallCompleted {
         /// 工具调用唯一标识。

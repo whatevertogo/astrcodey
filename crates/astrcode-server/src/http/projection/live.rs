@@ -180,6 +180,24 @@ pub(in crate::http) fn event_to_deltas(
             }]
         },
 
+        EventPayload::ToolCallInteractionPending {
+            call_id,
+            content,
+            metadata,
+        } => {
+            let metadata = serde_json::to_value(metadata)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            vec![ConversationDeltaDto::PatchToolCall {
+                block_id: call_id.to_string(),
+                text: content.clone(),
+                metadata: if metadata.as_object().is_some_and(|m| !m.is_empty()) {
+                    Some(metadata)
+                } else {
+                    None
+                },
+            }]
+        },
+
         EventPayload::AgentSessionSpawned {
             child_session_id,
             agent_name,
@@ -243,6 +261,7 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolCallRequested { .. }
         | EventPayload::ToolOutputDelta { .. }
+        | EventPayload::ToolCallInteractionPending { .. }
         | EventPayload::ToolCallCompleted { .. } => Phase::CallingTool,
         EventPayload::CompactionStarted => Phase::Compacting,
         EventPayload::ErrorOccurred { .. } => Phase::Error,
@@ -395,6 +414,46 @@ mod tests {
             ConversationDeltaDto::ThinkingDelta { block_id, delta } => {
                 assert_eq!(block_id, "assistant-1");
                 assert_eq!(delta, "reasoning");
+            },
+            other => panic!("unexpected delta: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_interaction_pending_patches_text_and_metadata() {
+        use astrcode_core::tool_ui::{TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY};
+        use std::collections::BTreeMap;
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            TOOL_UI_METADATA_KEY.into(),
+            serde_json::json!({
+                "approval": { "kind": "builtin", "variant": "questionnaire" }
+            }),
+        );
+        metadata.insert(TOOL_UI_PHASE_METADATA_KEY.into(), serde_json::json!("approval"));
+
+        let event = Event::new(
+            "session-1".into(),
+            None,
+            EventPayload::ToolCallInteractionPending {
+                call_id: "tool-ask".into(),
+                content: r#"{"status":"awaiting_user_input","questions":[]}"#.into(),
+                metadata,
+            },
+        );
+
+        let deltas = event_to_deltas(&event, true);
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            ConversationDeltaDto::PatchToolCall {
+                block_id,
+                text,
+                metadata,
+            } => {
+                assert_eq!(block_id, "tool-ask");
+                assert!(text.contains("awaiting_user_input"));
+                assert!(metadata.as_ref().is_some_and(|m| m.get("toolUi").is_some()));
             },
             other => panic!("unexpected delta: {other:?}"),
         }

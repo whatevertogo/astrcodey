@@ -423,6 +423,39 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     }
 }
 
+fn apply_pending_tool_interactions(
+    blocks: &mut [ConversationBlockDto],
+    pending: &std::collections::BTreeMap<
+        astrcode_core::types::ToolCallId,
+        astrcode_core::storage::PendingToolInteractionView,
+    >,
+) {
+    for block in blocks.iter_mut() {
+        let ConversationBlockDto::ToolCall {
+            id,
+            text,
+            metadata,
+            status,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let Some(interaction) = pending.get(&astrcode_core::types::ToolCallId::from(id.as_str())) else {
+            continue;
+        };
+        *text = interaction.content.clone();
+        *status = ConversationBlockStatusDto::Streaming;
+        let merged = serde_json::to_value(&interaction.metadata)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        *metadata = if merged.as_object().is_some_and(|m| !m.is_empty()) {
+            Some(merged)
+        } else {
+            None
+        };
+    }
+}
+
 fn conversation_to_dto(
     session: SessionReadModel,
     streaming: Option<&StreamingSnapshot>,
@@ -437,6 +470,7 @@ fn conversation_to_dto(
         blocks.push(compact_summary_block(boundary));
     }
     blocks.extend(messages_to_blocks(&session.messages));
+    apply_pending_tool_interactions(&mut blocks, &session.pending_tool_interactions);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），

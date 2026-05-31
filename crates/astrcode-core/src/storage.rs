@@ -8,7 +8,7 @@
 //! 通过 trait upcasting（Rust 1.86+），`Arc<dyn EventStore>` 可直接转换为
 //! `Arc<dyn EventReader>` 传递给只读消费者，不泄漏写入能力。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -440,6 +440,14 @@ pub struct UnansweredToolCall {
     pub tool_name: String,
 }
 
+/// 工具调用等待用户交互时的投影快照（如 askUser 问卷）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingToolInteractionView {
+    pub content: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -468,6 +476,9 @@ pub struct SessionReadModel {
     pub system_prompt_fingerprint: Option<String>,
     /// 尚未完成的工具调用。
     pub pending_tool_calls: HashSet<ToolCallId>,
+    /// 等待用户交互的工具调用（call_id → 交互态 text/metadata）。
+    #[serde(default)]
+    pub pending_tool_interactions: BTreeMap<ToolCallId, PendingToolInteractionView>,
     /// 创建时间（ISO 8601）。
     pub created_at: String,
     /// 更新时间（ISO 8601）。
@@ -510,6 +521,7 @@ impl SessionReadModel {
             extra_system_prompt: None,
             system_prompt_fingerprint: None,
             pending_tool_calls: HashSet::new(),
+            pending_tool_interactions: BTreeMap::new(),
             created_at: String::new(),
             updated_at: String::new(),
             parent_session_id: None,
