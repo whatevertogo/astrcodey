@@ -238,16 +238,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         command,
         argumentsText
       )
-      if (response.kind === 'handled') {
-        if (get().activeSessionId !== response.sessionId) {
-          return true
-        }
-        if (response.message.trim() && response.message !== 'command handled') {
-          set((current) => ({
-            blocks: [...current.blocks, commandNoteBlock(response.message)],
-          }))
-        }
+      if (
+        response.kind === 'handled' &&
+        get().activeSessionId !== response.sessionId
+      ) {
+        return true
       }
+      // Display 类扩展命令由 SSE ExtensionCommandResult → appendBlock 展示，勿重复写入。
       return true
     } catch (err) {
       console.error('executeExtensionCommand failed:', err)
@@ -352,9 +349,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
         } else if (
+          !slashCommand &&
           response.message.trim() &&
           response.message !== 'command handled'
         ) {
+          // 内置命令（compact/model 等）走 HTTP；扩展斜杠命令走 SSE，避免重复展示。
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
           }))
