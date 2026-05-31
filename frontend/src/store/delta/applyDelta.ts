@@ -125,11 +125,18 @@ export function applyDeltaToState(
 
     case 'toolOutput':
       set((current) => {
-        const prefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n'
-        const chunk = prefix + delta.delta
+        const rawPrefix = delta.stream === 'stderr' ? '\n[stderr] ' : '\n'
         const idx = current.blocks.findIndex(
           (b) => b.kind === 'toolCall' && b.id === delta.callId
         )
+        const existingText =
+          idx !== -1 && current.blocks[idx].kind === 'toolCall'
+            ? current.blocks[idx].text
+            : ''
+        const chunk =
+          rawPrefix.startsWith('\n') && !existingText
+            ? rawPrefix.slice(1) + delta.delta
+            : rawPrefix + delta.delta
         if (idx === -1) {
           return {
             blocks: [

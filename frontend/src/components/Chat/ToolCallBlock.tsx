@@ -1,4 +1,8 @@
 import { memo, useState, type ReactNode } from 'react'
+import {
+  useElapsedSeconds,
+  runningElapsedLabel,
+} from '../../hooks/useElapsedSeconds'
 import type { ConversationBlock } from '../../services/types'
 import { cn } from '../../lib/utils'
 import {
@@ -90,20 +94,32 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
   }
   const renderer = getToolRenderer(context)
 
+  const streaming = block.status === 'streaming'
+  const elapsed = useElapsedSeconds(streaming && !block.text)
+  const shellRunningSummary =
+    block.name === 'shell' && streaming && !block.text
+      ? runningElapsedLabel(elapsed, 'en')
+      : null
+
   const summaryLine = compactLine(
     extractRenderSummary(block.metadata) ||
       toolApprovalSummary(toolUiCtx) ||
       renderer?.summary?.(context) ||
       block.arguments ||
       block.text ||
-      (block.status === 'streaming' ? '等待输出...' : '(无输出)')
+      shellRunningSummary ||
+      (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
   )
 
   const gateApproval = readGateApproval(block.metadata)
   const gatePending = gateApproval?.pending === true
   const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
 
-  const displayStatus = gatePending ? '待审批' : statusLabel(block.status)
+  const displayStatus = gatePending
+    ? '待审批'
+    : streaming
+      ? runningElapsedLabel(elapsed, 'zh')
+      : statusLabel(block.status)
 
   return (
     <details

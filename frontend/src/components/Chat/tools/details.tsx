@@ -1,3 +1,7 @@
+import {
+  useElapsedSeconds,
+  runningElapsedLabel,
+} from '../../../hooks/useElapsedSeconds'
 import { cn } from '../../../lib/utils'
 import {
   arrayValue,
@@ -151,8 +155,15 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const stdoutBytes = numberValue(meta, 'stdoutBytes')
   const stderrBytes = numberValue(meta, 'stderrBytes')
   const stdin = stringValue(args, 'stdin')
+  const streaming = block.status === 'streaming'
+  const elapsed = useElapsedSeconds(streaming && !block.text)
   const output =
-    block.text || (block.status === 'streaming' ? 'Waiting for output...' : '')
+    block.text ||
+    (streaming
+      ? command
+        ? runningElapsedLabel(elapsed)
+        : 'Waiting for output...'
+      : '')
 
   return (
     <div className="min-w-0 divide-y divide-border/70">

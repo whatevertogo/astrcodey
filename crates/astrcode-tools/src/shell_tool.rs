@@ -13,6 +13,7 @@ use astrcode_support::{
     hostpaths::resolve_path,
     shell::{ShellFamily, ShellInfo, resolve_shell},
 };
+use regex::Regex;
 use serde::Deserialize;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -139,7 +140,8 @@ impl Tool for ShellTool {
             ));
         }
         let shell = resolve_shell();
-        let command_args = command_args(&shell, &args.command);
+        let command = preprocess_shell_command(&args.command, &shell);
+        let command_args = command_args(&shell, &command);
         let cwd = args
             .cwd
             .as_deref()
@@ -295,10 +297,11 @@ impl ShellTool {
             .map(|cwd| resolve_path(&self.working_dir, cwd))
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs).min(600);
+        let command = preprocess_shell_command(&args.command, &shell);
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
             session_id: ctx.session_id.to_string(),
             tool_call_id: ctx.tool_call_id.clone(),
-            command: args.command.clone(),
+            command,
             intent: args.intent.clone(),
             cwd,
             shell,
@@ -394,9 +397,14 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "- File search or reading files → `grep`/`glob`/`read`\n",
                 "- Interactive REPL or debugger sessions → `terminal`\n\n",
                 "Tips:\n",
-                "- One-shot commands with timeout up to 600s (default {timeout_secs}s)\n",
-                "- Long-running commands: set `runInBackground` to true; you will be notified on \
-                 completion (do not poll). Output is written under session background-shells/.\n",
+                "- Foreground commands expected to exceed ~30s (builds, large scans, sleeps, \
+                 network fetches) → set `runInBackground` to true; do not block the turn waiting \
+                 for output.\n",
+                "- One-shot foreground timeout up to 600s (default {timeout_secs}s); background \
+                 up to 600s.\n",
+                "- Long-running commands: `runInBackground` returns immediately; you are notified \
+                 on completion (do not poll). Output is written under session \
+                 background-shells/.\n",
                 "- Poll/wait on a background shell with `shellId` and optional `blockUntilMs` (0 \
                  = status only).\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
@@ -436,7 +444,7 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 },
                 "runInBackground": {
                     "type": "boolean",
-                    "description": "Run in background; returns shellId immediately. Completion is delivered via session notification."
+                    "description": "Run in background when the command may take more than ~30s (builds, scans, sleep). Returns shellId immediately; completion is delivered via session notification."
                 },
                 "shellId": {
                     "type": "string",
@@ -454,6 +462,20 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
     };
     definitions.insert(key, definition.clone());
     definition
+}
+
+/// Windows 上在 POSIX shell（Git Bash / MSYS）里，将 `>nul` / `2>nul` 改写为 `/dev/null`，
+/// 避免创建名为 `nul` 的 literal 文件（Windows 保留设备名）。
+pub(crate) fn preprocess_shell_command(command: &str, shell: &ShellInfo) -> String {
+    if !cfg!(windows) || shell.family != ShellFamily::Posix {
+        return command.to_string();
+    }
+    static NUL_REDIRECT: OnceLock<Regex> = OnceLock::new();
+    let re = NUL_REDIRECT.get_or_init(|| {
+        Regex::new(r"(\d?&?>+\s*)[Nn][Uu][Ll](\s|$|[|&;)\n\r])")
+            .expect("nul redirect regex must compile")
+    });
+    re.replace_all(command, "${1}/dev/null${2}").into_owned()
 }
 
 /// 根据 Shell 类型构建命令行参数。
@@ -630,7 +652,10 @@ mod tests {
     use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext};
     use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
 
-    use super::{MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, capture_stream, command_args};
+    use super::{
+        MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, capture_stream, command_args,
+        preprocess_shell_command,
+    };
 
     fn empty_ctx() -> ToolExecutionContext {
         ToolExecutionContext::new(
@@ -701,6 +726,41 @@ mod tests {
             path: "bash".into(),
         };
         assert_eq!(command_args(&posix, command), vec!["-lc", command]);
+    }
+
+    #[test]
+    fn preprocess_shell_command_rewrites_nul_redirect_on_windows_posix() {
+        let bash = ShellInfo {
+            family: ShellFamily::Posix,
+            name: "bash".into(),
+            path: "bash".into(),
+        };
+        if cfg!(windows) {
+            assert_eq!(
+                preprocess_shell_command("cmd 2>nul || echo ok", &bash),
+                "cmd 2>/dev/null || echo ok"
+            );
+            assert_eq!(
+                preprocess_shell_command("echo \">nul\"", &bash),
+                "echo \">nul\""
+            );
+        } else {
+            assert_eq!(
+                preprocess_shell_command("cmd 2>nul || echo ok", &bash),
+                "cmd 2>nul || echo ok"
+            );
+        }
+    }
+
+    #[test]
+    fn preprocess_shell_command_skips_powershell_on_windows() {
+        let powershell = ShellInfo {
+            family: ShellFamily::PowerShell,
+            name: "powershell".into(),
+            path: "powershell.exe".into(),
+        };
+        let command = "cmd 2>nul";
+        assert_eq!(preprocess_shell_command(command, &powershell), command);
     }
 
     #[tokio::test]

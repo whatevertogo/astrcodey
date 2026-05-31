@@ -194,7 +194,9 @@ export function applyCoalescedDeltas(
         const idx = findOrCreateToolCallIdx(blocks, mutations, c.callId)
         const block = mutations.get(idx) ?? blocks[idx]
         if (block.kind !== 'toolCall') break
-        mutations.set(idx, { ...block, text: block.text + output })
+        const prefix =
+          output.startsWith('\n') && !block.text ? output.slice(1) : output
+        mutations.set(idx, { ...block, text: block.text + prefix })
         needsNewBlocks = true
         break
       }
