@@ -2,6 +2,7 @@
 //!
 //! 提供路径解析、Shell 检测和工具结果持久化等与宿主操作系统相关的功能。
 //! 这些功能需要访问宿主 OS，但不属于核心逻辑层。
+pub mod channel_policy;
 pub mod event_fanout;
 pub mod frontmatter;
 pub mod hash;
@@ -10,3 +11,5 @@ pub mod perf_snapshot;
 pub mod shell;
 pub mod sync;
 pub mod text;
+
+pub use event_fanout::{EventFanout, EventFanoutStatsSnapshot};

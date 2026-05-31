@@ -186,7 +186,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
         Arc::clone(&capabilities),
-        vec![Arc::new(TerminalCleanup)],
+        vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
     ));
 
     let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
@@ -354,6 +354,17 @@ struct TerminalCleanup;
 impl SessionResourceCleanup for TerminalCleanup {
     fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
         astrcode_tools::terminal_tool::cleanup_terminals_for_session(session_id.as_str());
+    }
+}
+
+/// session 销毁/回收时终止后台 shell 子进程。
+struct BackgroundShellCleanup;
+
+impl SessionResourceCleanup for BackgroundShellCleanup {
+    fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
+        astrcode_tools::background_shell::cleanup_background_shells_for_session(
+            session_id.as_str(),
+        );
     }
 }
 

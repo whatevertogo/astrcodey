@@ -144,11 +144,10 @@ impl ToolHandler for MemorySaveHandler {
                     }
                 }
                 Ok(ok_text("Memory saved.".to_string()))
-            }
+            },
             AppendResult::SimilarExists(similar) => Ok(ok_text(format!(
-                "Similar memories already exist:\n{}\n\nPlease consolidate: \
-                 use memory_delete to remove the old entries, then memory_save the \
-                 consolidated version.",
+                "Similar memories already exist:\n{}\n\nPlease consolidate: use memory_delete to \
+                 remove the old entries, then memory_save the consolidated version.",
                 similar
                     .iter()
                     .map(|s| format!("- {s}"))

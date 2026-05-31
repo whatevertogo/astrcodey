@@ -212,7 +212,7 @@ impl SessionRuntimeState {
     }
 
     /// 订阅本 session 的事件流。
-    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Event> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
         self.event_out.subscribe()
     }
 

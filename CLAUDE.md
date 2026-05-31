@@ -27,7 +27,7 @@
 
 ## 验证
 
-优先最小相关检查：`cargo fmt --check` → `cargo test -p <crate> <test_name>` → `cargo clippy -p <crate> --all-targets -- -D warnings`。
+优先最小相关检查：`cargo fmt --check` → `cargo test -p <crate> <test_name>` → `cargo clippy -p <crate> --all-targets -- -D warnings`。然后再跑`cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --all-features`
 大范围改动：`cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --all-features`。
 
 ## 回复要求

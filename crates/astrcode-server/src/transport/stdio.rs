@@ -10,13 +10,14 @@ use astrcode_protocol::{
     },
     version::{InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo},
 };
+use astrcode_support::channel_policy::STDIO_MESSAGE_CAPACITY;
 use tokio::sync::mpsc;
 
 use super::{ServerTransport, TransportError};
 
 /// stdio transport: JSON-RPC 2.0 over stdin/stdout.
 pub struct StdioTransport {
-    rx: mpsc::UnboundedReceiver<StdioMessage>,
+    rx: mpsc::Receiver<StdioMessage>,
     initialize_request_id: Option<u64>,
 }
 
@@ -33,8 +34,8 @@ pub enum StdioMessage {
 
 impl StdioTransport {
     /// Create a channel pair: the sender for stdin reader, and the transport.
-    pub fn new_channel() -> (mpsc::UnboundedSender<StdioMessage>, Self) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn new_channel() -> (mpsc::Sender<StdioMessage>, Self) {
+        let (tx, rx) = mpsc::channel(STDIO_MESSAGE_CAPACITY);
         (
             tx,
             Self {
@@ -45,7 +46,7 @@ impl StdioTransport {
     }
 
     /// Spawn a background task that reads JSON-RPC lines from stdin.
-    pub fn spawn_stdin_reader(tx: mpsc::UnboundedSender<StdioMessage>) {
+    pub fn spawn_stdin_reader(tx: mpsc::Sender<StdioMessage>) {
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin);
@@ -74,7 +75,7 @@ impl StdioTransport {
                     });
                     if let Some(request) = request {
                         if tx
-                            .send(StdioMessage::Initialize {
+                            .blocking_send(StdioMessage::Initialize {
                                 id: message.id,
                                 request,
                             })
@@ -93,7 +94,7 @@ impl StdioTransport {
                 }
                 if let Ok(cmd) = command_from_jsonrpc_request(&message) {
                     if tx
-                        .send(StdioMessage::Command {
+                        .blocking_send(StdioMessage::Command {
                             id: message.id,
                             command: cmd,
                         })

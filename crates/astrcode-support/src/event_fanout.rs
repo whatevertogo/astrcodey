@@ -1,10 +1,9 @@
 //! 泛型 fan-out 广播器。
 //!
 //! ## 背压与慢消费者策略
-//! - 内部使用 bounded mpsc channel，默认容量 1024
-//! - `send()` 中如果某个订阅者的 channel 已满（`TrySendError::Full`）或已关闭， 则断开该订阅者（从
-//!   sender 列表中移除）
-//! - 慢消费者被断开后，SSE 客户端可凭 cursor 重新 replay 恢复
+//! - 内部使用 **unbounded** mpsc channel，避免 live delta 等高频事件填满 bounded buffer 后把 SSE
+//!   订阅者踢掉（live-only 事件无法 replay，丢订阅 = UI 假死）
+//! - `send()` 仅在接收端已关闭时移除对应订阅者
 //!
 //! ## 订阅者生命周期
 //! - 订阅者 drop 后在**下一次** `send()` 时自动清理
@@ -13,76 +12,111 @@
 //! ## 使用约束
 //! - 仅用于 in-process 事件分发（订阅者 ≤ 两位数）
 //! - 不用于远程/多进程场景
+//! - 内存由消费者速度约束；慢消费者会导致内存增长而非静默丢事件
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::sync::lock_parking;
 
-/// 默认 channel 容量。生产环境中 LLM streaming ~1-2 events/sec，
-/// 1024 条约缓冲 8-15 分钟，足够应对短暂拥塞。
-const DEFAULT_CAPACITY: usize = 1024;
+/// Fan-out 运行指标（进程内累计，供监控/调试）。
+#[derive(Default)]
+pub struct EventFanoutStats {
+    send_total: AtomicU64,
+    dropped_subscribers: AtomicU64,
+    dropped_subscribers_closed: AtomicU64,
+}
+
+/// [`EventFanoutStats`] 快照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventFanoutStatsSnapshot {
+    pub send_total: u64,
+    pub dropped_subscribers: u64,
+    /// unbounded 模式下恒为 0（保留字段便于监控面板兼容）。
+    pub dropped_subscribers_full: u64,
+    pub dropped_subscribers_closed: u64,
+    /// unbounded 模式下无队列深度；恒为 0。
+    pub max_queue_depth: usize,
+}
+
+impl EventFanoutStats {
+    pub fn snapshot(&self) -> EventFanoutStatsSnapshot {
+        EventFanoutStatsSnapshot {
+            send_total: self.send_total.load(Ordering::Relaxed),
+            dropped_subscribers: self.dropped_subscribers.load(Ordering::Relaxed),
+            dropped_subscribers_full: 0,
+            dropped_subscribers_closed: self.dropped_subscribers_closed.load(Ordering::Relaxed),
+            max_queue_depth: 0,
+        }
+    }
+}
 
 pub struct EventFanout<T: Clone> {
-    senders: Mutex<Vec<mpsc::Sender<T>>>,
-    capacity: usize,
+    senders: Mutex<Vec<mpsc::UnboundedSender<T>>>,
+    stats: EventFanoutStats,
 }
 
 impl<T: Clone> EventFanout<T> {
-    pub fn new(capacity: usize) -> Self {
+    /// `capacity` 保留以兼容既有调用点，当前实现使用 unbounded channel。
+    pub fn new(_capacity: usize) -> Self {
         Self {
             senders: Mutex::new(Vec::new()),
-            capacity,
+            stats: EventFanoutStats::default(),
         }
     }
 
-    /// 向所有订阅者广播。自动清理已关闭或过慢的接收端。
-    ///
-    /// `event` 会被 clone N-1 次（N = 订阅者数）。仅 in-process 场景使用。
-    ///
-    /// 慢消费者（channel 已满）会被断开并移除，统一以 debug 级别记录数量。
+    pub fn stats(&self) -> EventFanoutStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// 向所有订阅者广播。自动清理已关闭的接收端。
     pub fn send(&self, event: T) {
+        self.stats.send_total.fetch_add(1, Ordering::Relaxed);
         let mut senders = lock_parking(&self.senders);
         let before = senders.len();
         if before == 0 {
             return;
         }
-        // 单订阅者直接 move；多订阅者只额外 clone 一次作为后续广播副本。
         let backup = if before > 1 {
             Some(event.clone())
         } else {
             None
         };
         let mut owned = Some(event);
+        let mut dropped_closed = 0u64;
         senders.retain(|tx| {
             let payload = owned
                 .take()
                 .unwrap_or_else(|| backup.as_ref().expect("backup set when len > 1").clone());
-            match tx.try_send(payload) {
+            match tx.send(payload) {
                 Ok(()) => true,
-                Err(TrySendError::Full(e)) | Err(TrySendError::Closed(e)) => {
-                    owned = Some(e);
+                Err(err) => {
+                    owned = Some(err.0);
+                    dropped_closed += 1;
                     false
                 },
             }
         });
         let dropped = before - senders.len();
         if dropped > 0 {
-            tracing::warn!(
-                dropped,
-                "removed slow or closed event fanout subscribers (backpressure)"
-            );
+            self.stats
+                .dropped_subscribers
+                .fetch_add(dropped as u64, Ordering::Relaxed);
+            self.stats
+                .dropped_subscribers_closed
+                .fetch_add(dropped_closed, Ordering::Relaxed);
+            tracing::debug!(dropped, "removed closed event fanout subscribers");
         }
     }
 
-    /// 创建新订阅。
-    pub fn subscribe(&self) -> mpsc::Receiver<T> {
-        let (tx, rx) = mpsc::channel(self.capacity);
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<T> {
+        let (tx, rx) = mpsc::unbounded_channel();
         lock_parking(&self.senders).push(tx);
         rx
     }
 
-    /// 当前订阅者数量。**不精确**（TOCTOU），仅供调试/监控。
     pub fn subscriber_count(&self) -> usize {
         lock_parking(&self.senders).len()
     }
@@ -90,8 +124,23 @@ impl<T: Clone> EventFanout<T> {
 
 impl<T: Clone> Default for EventFanout<T> {
     fn default() -> Self {
-        Self::new(DEFAULT_CAPACITY)
+        Self::new(1024)
     }
 }
 
-use mpsc::error::TrySendError;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn slow_consumer_does_not_get_dropped_under_burst() {
+        let fanout = EventFanout::new(1024);
+        let mut rx = fanout.subscribe();
+        for i in 0..5000 {
+            fanout.send(i);
+        }
+        assert_eq!(fanout.subscriber_count(), 1);
+        assert_eq!(fanout.stats().dropped_subscribers, 0);
+        assert_eq!(rx.recv().await, Some(0));
+    }
+}

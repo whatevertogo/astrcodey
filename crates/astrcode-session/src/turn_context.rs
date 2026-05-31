@@ -13,8 +13,7 @@ use tokio::sync::mpsc;
 
 // ─── Turn event channel ──────────────────────────────────────────────────
 
-/// Turn 内 live 事件发送端；新代码优先
-/// [`TurnEvents::live`](crate::turn_publish::TurnEvents::live)。
+/// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
 pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
 
 pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {

@@ -23,15 +23,17 @@ impl ClientTransport for DisconnectTransport {
         Ok(())
     }
 
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
-        let (_, rx) = mpsc::channel::<ClientNotification>(16);
+    async fn subscribe(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+        let (_, rx) = mpsc::unbounded_channel::<ClientNotification>();
         Ok(rx)
     }
 }
 
 #[tokio::test]
 async fn conversation_stream_returns_disconnected_on_drop() {
-    let (_, rx) = mpsc::channel::<ClientNotification>(16);
+    let (_, rx) = mpsc::unbounded_channel::<ClientNotification>();
     let mut stream = ConversationStream::new(rx);
     let err = stream.recv().await.unwrap_err();
     assert!(matches!(err, StreamError::Disconnected));
@@ -39,10 +41,9 @@ async fn conversation_stream_returns_disconnected_on_drop() {
 
 #[tokio::test]
 async fn conversation_stream_drain_pending_returns_buffered() {
-    let (tx, rx) = mpsc::channel::<ClientNotification>(16);
+    let (tx, rx) = mpsc::unbounded_channel::<ClientNotification>();
     let mut stream = ConversationStream::new(rx);
     tx.send(ClientNotification::ExtensionRegistryChanged)
-        .await
         .unwrap();
     drop(tx);
     let items = stream.drain_pending();

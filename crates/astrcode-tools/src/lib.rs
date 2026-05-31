@@ -2,6 +2,7 @@
 //!
 //! File tools, shell execution, and tool registry.
 
+pub mod background_shell;
 pub mod files;
 pub mod registry;
 pub mod shell_tool;

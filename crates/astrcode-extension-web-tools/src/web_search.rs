@@ -16,7 +16,9 @@ const MIN_QUERY_LEN: usize = 2;
 const BRAVE_SEARCH_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 const SERPER_SEARCH_URL: &str = "https://google.serper.dev/search";
 const DUCKDUCKGO_HTML_URL: &str = "https://html.duckduckgo.com/html/";
-const HTML_SEARCH_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const HTML_SEARCH_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+                                      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 \
+                                      Safari/537.36";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -813,7 +813,9 @@ fn compacted_session_id(outcome: ManualCompactOutcome) -> SessionId {
     }
 }
 
-async fn recv_event(event_rx: &mut mpsc::Receiver<ClientNotification>) -> ClientNotification {
+async fn recv_event(
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
+) -> ClientNotification {
     tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
         .await
         .expect("event should arrive")
@@ -876,7 +878,9 @@ fn compact_summary_text(current_work: &str) -> String {
     )
 }
 
-async fn wait_for_turn_completed(event_rx: &mut mpsc::Receiver<ClientNotification>) -> String {
+async fn wait_for_turn_completed(
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
+) -> String {
     loop {
         let notification = recv_event(event_rx).await;
         let ClientNotification::Event(event) = notification else {
@@ -889,7 +893,7 @@ async fn wait_for_turn_completed(event_rx: &mut mpsc::Receiver<ClientNotificatio
 }
 
 async fn drain_until_compact_boundary(
-    event_rx: &mut mpsc::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
 ) -> SessionId {
     loop {
         let notification = recv_event(event_rx).await;
@@ -938,7 +942,7 @@ async fn append_user_assistant_pair(
 }
 
 async fn collect_turn_ids_until_completed(
-    event_rx: &mut mpsc::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
 ) -> (String, Vec<Option<TurnId>>) {
     let mut turn_ids = Vec::new();
     loop {

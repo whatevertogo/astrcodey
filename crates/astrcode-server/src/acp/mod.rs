@@ -186,7 +186,7 @@ async fn handle_prompt(
 /// Deterministic flush of queued events after completion signal.
 /// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
-    event_rx: &mut mpsc::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::UnboundedReceiver<ClientNotification>,
     accepted_sessions: &mut HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,

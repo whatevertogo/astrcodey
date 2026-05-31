@@ -120,7 +120,6 @@ pub(crate) fn spawn_event_bridge(
     });
     let handle = tokio::spawn(async move {
         while let Some(payload) = rx.recv().await {
-            // durable 写入（磁盘 I/O）不阻塞同 bridge 上的 live delta 转发，但保持顺序。
             if payload.is_durable() {
                 if durable_tx.send(payload).is_err() {
                     tracing::error!("event bridge durable worker unavailable");

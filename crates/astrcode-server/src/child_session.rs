@@ -16,6 +16,7 @@ use astrcode_session::{
     TurnError,
     turn_handle::{TurnHandle, TurnShutdownHandle},
 };
+use astrcode_support::channel_policy::CHILD_SESSION_COMPLETE_CAPACITY;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
@@ -83,13 +84,13 @@ impl ChildSessionTracker {
 pub struct ChildSessionCoordinator {
     session_manager: Arc<SessionManager>,
     by_parent: Mutex<HashMap<SessionId, ChildSessionTracker>>,
-    completed_tx: mpsc::UnboundedSender<SessionId>,
-    completed_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
+    completed_tx: mpsc::Sender<SessionId>,
+    completed_rx: Mutex<Option<mpsc::Receiver<SessionId>>>,
 }
 
 impl ChildSessionCoordinator {
     pub fn new(session_manager: Arc<SessionManager>) -> Self {
-        let (completed_tx, completed_rx) = mpsc::unbounded_channel();
+        let (completed_tx, completed_rx) = mpsc::channel(CHILD_SESSION_COMPLETE_CAPACITY);
         Self {
             session_manager,
             by_parent: Mutex::new(HashMap::new()),
@@ -605,7 +606,7 @@ impl ChildSessionCompletionGuard {
     pub fn spawn(
         handle: TurnHandle,
         config: ChildSessionCompletionConfig,
-        completed_tx: mpsc::UnboundedSender<SessionId>,
+        completed_tx: mpsc::Sender<SessionId>,
     ) -> Self {
         let (outcome_tx, outcome_rx) = watch::channel(None);
         let outcome_tx_for_task = outcome_tx.clone();
@@ -627,7 +628,7 @@ impl ChildSessionCompletionGuard {
                 None => ChildOutcome::Aborted,
             };
             try_set_outcome(&outcome_tx_for_task, outcome);
-            let _ = completed_tx.send(parent_sid);
+            let _ = completed_tx.send(parent_sid).await;
         });
 
         Self {

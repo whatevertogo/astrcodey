@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use astrcode_core::tool_access::{ResourceAccess, conflicts};
+use astrcode_support::channel_policy::TOOL_SCHEDULER_FINISH_CAPACITY;
 use tokio::sync::{mpsc, oneshot};
 
 type BoxStart = Box<dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
@@ -24,13 +25,13 @@ pub struct ToolScheduler {
     queued: Vec<QueuedTask>,
     max_concurrent: usize,
     next_id: u64,
-    finish_tx: mpsc::UnboundedSender<u64>,
-    finish_rx: mpsc::UnboundedReceiver<u64>,
+    finish_tx: mpsc::Sender<u64>,
+    finish_rx: mpsc::Receiver<u64>,
 }
 
 impl ToolScheduler {
     pub fn new(max_concurrent: usize) -> Self {
-        let (finish_tx, finish_rx) = mpsc::unbounded_channel();
+        let (finish_tx, finish_rx) = mpsc::channel(TOOL_SCHEDULER_FINISH_CAPACITY);
         Self {
             active: Vec::new(),
             queued: Vec::new(),
@@ -61,7 +62,7 @@ impl ToolScheduler {
             Box::pin(async move {
                 let result = execute().await;
                 let _ = result_tx.send(result);
-                let _ = finish_tx.send(task_id);
+                let _ = finish_tx.send(task_id).await;
             })
         });
 

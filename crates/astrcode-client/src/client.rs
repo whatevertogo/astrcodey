@@ -182,8 +182,10 @@ impl ClientTransport for MockTransport {
         Ok(())
     }
 
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
-        let (_, rx) = mpsc::channel::<ClientNotification>(1024);
+    async fn subscribe(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+        let (_, rx) = mpsc::unbounded_channel::<ClientNotification>();
         Ok(rx)
     }
 }
@@ -214,12 +216,14 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
-            let (tx, rx) = mpsc::channel::<ClientNotification>(1024);
+        async fn subscribe(
+            &self,
+        ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+            let (tx, rx) = mpsc::unbounded_channel::<ClientNotification>();
             let responses = std::mem::take(&mut *self.responses.lock().expect("responses lock"));
             tokio::spawn(async move {
                 for notification in responses {
-                    let _ = tx.send(notification).await;
+                    let _ = tx.send(notification);
                 }
                 // tx drops here, closing the channel after all responses are sent
             });

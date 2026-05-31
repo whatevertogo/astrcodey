@@ -8,7 +8,7 @@ use std::sync::Arc;
 use astrcode_client::transport::{ClientTransport, TransportError};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_server::bootstrap;
-use astrcode_support::event_fanout::EventFanout;
+use astrcode_support::{channel_policy::CLIENT_COMMAND_CAPACITY, event_fanout::EventFanout};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ enum BootstrapState {
 /// 事件通过 `event_tx`（EventFanout 通道）广播给所有订阅者。
 pub struct InProcessTransport {
     /// 命令发送端，将 ClientCommand 发送到服务器处理循环
-    cmd_tx: mpsc::UnboundedSender<ClientCommand>,
+    cmd_tx: mpsc::Sender<ClientCommand>,
     /// 事件 fan-out 发送端，服务器处理完命令后通过此通道广播通知
     event_tx: Arc<EventFanout<ClientNotification>>,
     ready_rx: watch::Receiver<BootstrapState>,
@@ -33,7 +33,7 @@ pub struct InProcessTransport {
 impl InProcessTransport {
     /// 启动后台服务器任务并返回已连接的传输实例。
     pub fn start() -> Self {
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ClientCommand>();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ClientCommand>(CLIENT_COMMAND_CAPACITY);
         let event_tx = Arc::new(EventFanout::new(1024));
         let (ready_tx, ready_rx) = watch::channel(BootstrapState::Starting);
         let tx = Arc::clone(&event_tx);
@@ -108,11 +108,14 @@ impl ClientTransport for InProcessTransport {
         self.wait_until_ready().await?;
         self.cmd_tx
             .send(command.clone())
+            .await
             .map_err(|_| TransportError::Connection("server task ended".into()))
     }
 
     /// 订阅事件 fan-out 通道，返回一个新的接收端。
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
+    async fn subscribe(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }
