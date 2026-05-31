@@ -201,9 +201,7 @@ impl BackgroundShellRegistry {
                 .filter(|(_, r)| r.session_id == session_id)
                 .map(|(id, _)| id.clone())
                 .collect();
-            ids.iter()
-                .filter_map(|id| shells.remove(id))
-                .collect()
+            ids.iter().filter_map(|id| shells.remove(id)).collect()
         };
         for record in records {
             kill_record(&record);

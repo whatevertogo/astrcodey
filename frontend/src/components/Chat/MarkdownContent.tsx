@@ -12,19 +12,34 @@ import { findStreamingCommitIndex } from './markdownStreaming'
 
 class MarkdownGuard extends Component<
   { fallback: string; children: React.ReactNode },
-  { hasError: boolean }
+  { hasError: boolean; prevFallback: string }
 > {
-  state = { hasError: false }
+  state = { hasError: false, prevFallback: this.props.fallback }
+
+  static getDerivedStateFromProps(
+    props: { fallback: string },
+    state: { hasError: boolean; prevFallback: string }
+  ) {
+    // Input changed → clear error so the next render retries ReactMarkdown.
+    if (state.hasError && props.fallback !== state.prevFallback) {
+      return { hasError: false, prevFallback: props.fallback }
+    }
+    if (props.fallback !== state.prevFallback) {
+      return { prevFallback: props.fallback }
+    }
+    return null
+  }
+
   static getDerivedStateFromError() {
     return { hasError: true }
   }
+
   render() {
     if (this.state.hasError) {
       return (
-        <pre
-          className="m-0 whitespace-pre-wrap overflow-wrap-anywhere font-inherit text-inherit"
-          children={this.props.fallback}
-        />
+        <pre className="m-0 whitespace-pre-wrap overflow-wrap-anywhere font-inherit text-inherit">
+          {this.props.fallback}
+        </pre>
       )
     }
     return this.props.children

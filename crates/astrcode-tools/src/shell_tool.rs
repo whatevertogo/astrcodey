@@ -579,8 +579,14 @@ async fn capture_stream(mut stream: impl AsyncRead + Unpin) -> CapturedOutput {
     let mut drain_buf = [0u8; 65536];
     let mut draining = false;
     loop {
-        let read_buf = if draining { &mut drain_buf[..] } else { &mut buf[..] };
-        let Ok(n) = stream.read(read_buf).await else { break };
+        let read_buf = if draining {
+            &mut drain_buf[..]
+        } else {
+            &mut buf[..]
+        };
+        let Ok(n) = stream.read(read_buf).await else {
+            break;
+        };
         if n == 0 {
             break;
         }
@@ -651,9 +657,9 @@ mod tests {
                                         [Console]::Out.WriteLine('after')"
                 .into(),
             // cmd.exe has no built-in sleep; delegate to powershell (always on PATH from cmd).
-            ShellFamily::Cmd => {
-                "echo before & powershell -NoProfile -Command \"Start-Sleep -Seconds 10\" & echo after".into()
-            },
+            ShellFamily::Cmd => "echo before & powershell -NoProfile -Command \"Start-Sleep \
+                                 -Seconds 10\" & echo after"
+                .into(),
             // POSIX shells (bash, zsh, Git Bash, WSL) all provide native `sleep`.
             ShellFamily::Posix | ShellFamily::Wsl => "echo before; sleep 10; echo after".into(),
         }
