@@ -24,6 +24,7 @@ members = [
     "crates/astrcode-extension-mode",
     "crates/astrcode-extension-memory",
     "crates/astrcode-extension-channels",
+    "crates/astrcode-extension-web-tools",
     "crates/astrcode-eval",
     "src-tauri",
 ]
