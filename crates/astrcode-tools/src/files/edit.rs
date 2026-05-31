@@ -6,12 +6,12 @@ use std::{
 };
 
 use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
     clean_quotes, compute_unified_diff, find_unique_occurrence,
-    remember_file_observation_with_store, resolve_sandboxed_path, run_blocking,
-    sandbox_escape_result, stale_file_guard_with_store, tool_call_id,
+    remember_file_observation_with_store, run_blocking, stale_file_guard_with_store, tool_call_id,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
 
@@ -71,10 +71,8 @@ impl Tool for EditFileTool {
     ) -> Result<Vec<ResourceAccess>, ToolError> {
         let args: EditFileArgs = serde_json::from_value(arguments.clone())
             .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
-        match resolve_sandboxed_path(working_dir, &args.path) {
-            Ok(path) => Ok(vec![ResourceAccess::read_write_file(path)]),
-            Err(_) => Ok(vec![ResourceAccess::all()]),
-        }
+        let path = resolve_path(working_dir, &args.path);
+        Ok(vec![ResourceAccess::read_write_file(path)])
     }
 
     /// 执行文件编辑：解析参数 → stale file guard → 查找匹配 → 替换 → 写回 → 刷新观察快照。
@@ -117,10 +115,7 @@ fn execute_edit_sync(
     file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
-    let path = match resolve_sandboxed_path(&working_dir, &path_raw) {
-        Ok(path) => path,
-        Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
-    };
+    let path = resolve_path(&working_dir, &path_raw);
 
     if let Some(stale_result) = stale_file_guard_with_store(
         file_observation_store.as_ref(),

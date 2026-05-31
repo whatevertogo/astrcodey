@@ -6,7 +6,7 @@ use std::{
 };
 
 use astrcode_core::{tool::*, tool_access::ResourceAccess};
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
+use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -453,16 +453,6 @@ fn resolve_patch_target<'a>(
         "updated"
     };
     let resolved_path = resolve_path(working_dir, Path::new(&path_label));
-    if !is_path_within(&resolved_path, working_dir) {
-        return Err(failed_file_change(
-            change_type,
-            &path_label,
-            format!(
-                "path escapes working directory: {}",
-                resolved_path.display()
-            ),
-        ));
-    }
     if is_unc_path(&resolved_path) {
         return Err(failed_file_change(
             change_type,

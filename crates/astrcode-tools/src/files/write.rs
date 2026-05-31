@@ -6,11 +6,10 @@ use std::{
 };
 
 use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
-use super::shared::{
-    compute_unified_diff, resolve_sandboxed_path, run_blocking, sandbox_escape_result, tool_call_id,
-};
+use super::shared::{compute_unified_diff, run_blocking, tool_call_id};
 // ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
@@ -48,10 +47,8 @@ impl Tool for WriteFileTool {
     ) -> Result<Vec<ResourceAccess>, ToolError> {
         let args: WriteFileArgs = serde_json::from_value(arguments.clone())
             .map_err(|e| ToolError::InvalidArguments(format!("invalid write args: {e}")))?;
-        match resolve_sandboxed_path(working_dir, &args.path) {
-            Ok(path) => Ok(vec![ResourceAccess::write_file(path)]),
-            Err(_) => Ok(vec![ResourceAccess::all()]),
-        }
+        let path = resolve_path(working_dir, &args.path);
+        Ok(vec![ResourceAccess::write_file(path)])
     }
 
     /// 执行文件写入：解析路径 → 安全校验 → 可选创建目录 → 写入文件。
@@ -81,10 +78,7 @@ fn execute_write_sync(
     call_id: String,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
-    let path = match resolve_sandboxed_path(&working_dir, &args.path) {
-        Ok(path) => path,
-        Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
-    };
+    let path = resolve_path(&working_dir, &args.path);
     if args.create_dirs {
         let Some(parent) = path.parent() else {
             return Err(ToolError::Execution("path has no parent directory".into()));

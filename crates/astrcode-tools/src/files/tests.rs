@@ -466,26 +466,29 @@ async fn glob_reports_truncation() {
 }
 
 #[tokio::test]
-async fn glob_blocks_root_escape() {
-    let temp = unique_temp_dir("find-files-escape");
-    std::fs::write(temp.path().join("local.txt"), "").expect("seed file");
+async fn glob_allows_absolute_root_outside_working_dir() {
+    let temp = unique_temp_dir("find-files-outside");
+    let outside = unique_temp_dir("find-files-outside-target");
+    std::fs::write(temp.path().join("local.txt"), "").expect("seed local file");
+    std::fs::write(outside.path().join("remote.txt"), "").expect("seed remote file");
     let tool = GlobTool {
         working_dir: temp.path().to_path_buf(),
     };
 
     let result = tool
         .execute(
-            serde_json::json!({ "pattern": "*.txt", "root": "../" }),
+            serde_json::json!({
+                "pattern": "*.txt",
+                "root": outside.path().display().to_string()
+            }),
             &empty_ctx(),
         )
         .await
         .expect("glob should execute");
 
-    assert!(result.is_error, "{result:?}");
-    assert_eq!(
-        result.metadata["pathEscapesWorkingDir"],
-        serde_json::json!(true)
-    );
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(result.metadata["count"], serde_json::json!(1));
+    assert!(result.content.contains("remote.txt"));
 }
 
 #[tokio::test]

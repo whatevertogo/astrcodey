@@ -7,7 +7,7 @@ use std::{
 };
 
 use astrcode_core::tool::*;
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
+use astrcode_support::hostpaths::resolve_path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -291,56 +291,6 @@ pub(super) fn read_image_file_result(
         metadata,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
     })
-}
-
-/// Resolve `raw` relative to `working_dir` and verify it stays within the sandbox.
-///
-/// On failure the returned `PathBuf` is the escaped absolute path (for metadata).
-pub(super) fn resolve_sandboxed_path(working_dir: &Path, raw: &Path) -> Result<PathBuf, PathBuf> {
-    match check_sandbox(working_dir, raw) {
-        SandboxCheck::WithinCwd(path) => Ok(path),
-        SandboxCheck::OutsideCwd(path) => Err(path),
-    }
-}
-
-/// Sandbox path resolution result for permission chain integration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SandboxCheck {
-    WithinCwd(PathBuf),
-    OutsideCwd(PathBuf),
-}
-
-pub(super) fn check_sandbox(working_dir: &Path, raw: &Path) -> SandboxCheck {
-    let path = resolve_path(working_dir, raw);
-    if is_path_within(&path, working_dir) {
-        SandboxCheck::WithinCwd(path)
-    } else {
-        SandboxCheck::OutsideCwd(path)
-    }
-}
-
-pub(super) fn sandbox_escape_result(
-    call_id: String,
-    started_at: Instant,
-    escaped: &Path,
-) -> ToolResult {
-    ToolResult {
-        call_id,
-        content: format!("path escapes working directory: {}", escaped.display()),
-        is_error: true,
-        error: Some(format!(
-            "path escapes working directory: {}",
-            escaped.display()
-        )),
-        metadata: BTreeMap::from([
-            (
-                "path".into(),
-                serde_json::json!(escaped.display().to_string()),
-            ),
-            ("pathEscapesWorkingDir".into(), serde_json::json!(true)),
-        ]),
-        duration_ms: Some(started_at.elapsed().as_millis() as u64),
-    }
 }
 
 /// 按行分页读取文本，避免大文件全量读入内存。

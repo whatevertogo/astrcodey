@@ -6,12 +6,10 @@ use std::{
 };
 
 use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
-use super::shared::{
-    FileCollectOptions, collect_candidate_files, resolve_sandboxed_path, run_blocking,
-    sandbox_escape_result, tool_call_id,
-};
+use super::shared::{FileCollectOptions, collect_candidate_files, run_blocking, tool_call_id};
 
 const DEFAULT_GLOB_MAX_RESULTS: usize = 100;
 
@@ -67,10 +65,7 @@ impl Tool for GlobTool {
         let args: GlobArgs = serde_json::from_value(arguments.clone())
             .map_err(|e| ToolError::InvalidArguments(format!("invalid glob args: {e}")))?;
         let root = match args.root {
-            Some(ref raw) => match resolve_sandboxed_path(working_dir, raw) {
-                Ok(path) => path,
-                Err(_) => return Ok(vec![ResourceAccess::all()]),
-            },
+            Some(ref raw) => resolve_path(working_dir, raw),
             None => working_dir.to_path_buf(),
         };
         Ok(vec![ResourceAccess::search_file(root, true)])
@@ -101,10 +96,7 @@ fn execute_glob_sync(
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let root = match args.root {
-        Some(ref raw) => match resolve_sandboxed_path(&working_dir, raw) {
-            Ok(path) => path,
-            Err(escaped) => return Ok(sandbox_escape_result(call_id, started_at, &escaped)),
-        },
+        Some(ref raw) => resolve_path(&working_dir, raw),
         None => working_dir.clone(),
     };
     let max_results = args.max_results.unwrap_or(DEFAULT_GLOB_MAX_RESULTS);
