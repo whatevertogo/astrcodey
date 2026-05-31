@@ -244,7 +244,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for pkg_dir in npm-dist/@whatevertogo/*/; do
-            if [ -f "$pkg_dir/package.json" ]; then
+            if [ -f "$pkg_dir/package.json" ] && [ "$(basename "$pkg_dir")" != "astrcode" ]; then
               echo "Publishing $(basename $pkg_dir)..."
               cd "$pkg_dir"
               npm publish --access public
