@@ -16,7 +16,10 @@ use astrcode_core::{
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
     events::ClientNotification,
-    http::{ConversationCursorDto, ConversationDeltaDto, ConversationStreamEnvelopeDto},
+    http::{
+        ConversationBlockDto, ConversationCursorDto, ConversationDeltaDto,
+        ConversationStreamEnvelopeDto,
+    },
 };
 use axum::{
     extract::{Path, Query, State},
@@ -29,6 +32,7 @@ use axum::{
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use super::{
     HttpState, error_response,
@@ -322,7 +326,8 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
                 buffered.push(ClientNotification::Event(event));
             },
             Ok(notification @ ClientNotification::StatusItemUpdate { .. })
-            | Ok(notification @ ClientNotification::ExtensionRegistryChanged) => {
+            | Ok(notification @ ClientNotification::ExtensionRegistryChanged)
+            | Ok(notification @ ClientNotification::ExtensionCommandResult { .. }) => {
                 buffered.push(notification);
             },
             // 非目标 session 事件和其它全局通知不属于 conversation stream。
@@ -410,6 +415,34 @@ async fn notification_to_sse_items(
                 session_id: state.session_id.to_string(),
                 cursor: ConversationCursorDto { value: cursor },
                 delta: ConversationDeltaDto::ExtensionRegistryChanged,
+            }))]
+        },
+        ClientNotification::ExtensionCommandResult {
+            command_name,
+            content,
+            is_error,
+        } => {
+            let cursor = get_or_fetch_cursor(state).await;
+            let block_id = format!("cmd-{}", Uuid::new_v4());
+            let block = if is_error {
+                ConversationBlockDto::Error {
+                    id: block_id,
+                    message: if content.trim().is_empty() {
+                        format!("/{command_name} failed")
+                    } else {
+                        content
+                    },
+                }
+            } else {
+                ConversationBlockDto::SystemNote {
+                    id: block_id,
+                    text: content,
+                }
+            };
+            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
+                session_id: state.session_id.to_string(),
+                cursor: ConversationCursorDto { value: cursor },
+                delta: ConversationDeltaDto::AppendBlock { block },
             }))]
         },
         _ => Vec::new(),

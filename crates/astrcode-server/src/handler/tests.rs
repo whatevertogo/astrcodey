@@ -2008,6 +2008,35 @@ async fn unknown_slash_command_falls_through_as_regular_prompt() {
 }
 
 #[tokio::test]
+async fn extension_display_slash_command_returns_content_in_handled_message() {
+    let runtime = test_runtime();
+    runtime
+        .extension_runner
+        .register(Arc::new(StaticCommandExtension {
+            id: "test-extension",
+            command_name: "demo-cmd",
+        }))
+        .await
+        .unwrap();
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
+    let sid = handler.create_session(".".into()).await.unwrap();
+
+    let result = handler
+        .submit_input_for_session(sid, "/demo-cmd".into())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            &result,
+            PromptSubmission::Handled { message } if message == "extension command"
+        ),
+        "expected display content in Handled message, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn skill_slash_command_uses_skill_content_as_user_message() {
     let workspace = unique_workspace("skill-slash-command");
     write_project_skill(

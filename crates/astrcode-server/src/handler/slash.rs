@@ -167,13 +167,19 @@ impl CommandHandler {
                 }
                 self.event_bus.send_notification(
                     astrcode_protocol::events::ClientNotification::ExtensionCommandResult {
-                        command_name: command.name,
-                        content,
+                        command_name: command.name.clone(),
+                        content: content.clone(),
                         is_error,
                     },
                 );
+                // HTTP 同步返回展示内容（Web 前端读 Handled.message）；TUI 走
+                // ExtensionCommandResult 通知。
                 Ok(PromptSubmission::Handled {
-                    message: "command handled".into(),
+                    message: if is_error {
+                        format!("Error: {content}")
+                    } else {
+                        content
+                    },
                 })
             },
             // 已处理，返回消息

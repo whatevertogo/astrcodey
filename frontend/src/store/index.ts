@@ -319,7 +319,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (response.message === 'compact accepted') {
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
-        } else if (response.message.trim()) {
+        } else if (
+          response.message.trim() &&
+          response.message !== 'command handled'
+        ) {
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
           }))
