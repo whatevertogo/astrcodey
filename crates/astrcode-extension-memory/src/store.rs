@@ -341,11 +341,16 @@ impl MemoryStore {
         Ok(std::fs::metadata(path)?.modified().ok())
     }
 
-    /// 返回 MEMORY.md 中 `user_pref` 类别的前几条，用于 PromptBuild 稳定注入。
+    /// 返回 MEMORY.md 中全部 `user_pref` 条目（PromptBuild session 级全量注入）。
+    pub(crate) fn all_user_preference_lines(&self) -> std::io::Result<Vec<String>> {
+        self.global_preference_lines(usize::MAX)
+    }
+
+    /// 返回 MEMORY.md 中 `user_pref` 类别的前 `limit` 条。
     pub(crate) fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
         let mtime = self.memory_file_mtime()?;
         if let Some(cache) = self.preference_lines_cache.lock().as_ref() {
-            if cache.memory_mtime == mtime && cache.lines.len() >= limit {
+            if cache.memory_mtime == mtime && (limit == usize::MAX || cache.lines.len() >= limit) {
                 return Ok(cache.lines.iter().take(limit).cloned().collect());
             }
         }
@@ -444,13 +449,18 @@ impl MemoryStore {
         if !removed.is_empty() {
             atomic_write(&self.memory_path(), &parsed.render())?;
         }
-        let mut index_removed = self.memory_index().delete_by_content_match(pattern)?;
-        if removed.is_empty() {
-            Ok(index_removed)
-        } else {
-            index_removed.extend(removed);
-            Ok(index_removed)
+        let index_removed = self.memory_index().delete_by_content_match(pattern)?;
+
+        // Dual-write: same logical entry exists in both MEMORY.md and index.
+        // Deduplicate the return value so the caller sees each logical entry once.
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::new();
+        for entry in index_removed.into_iter().chain(removed) {
+            if seen.insert(entry.clone()) {
+                deduped.push(entry);
+            }
         }
+        Ok(deduped)
     }
 
     // ─── List / Search (for /memory command) ───────────────────────

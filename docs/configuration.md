@@ -188,6 +188,10 @@ For example, the memory extension uses two scopes:
 
 `memory_save` with category `user_pref` writes to user memory; other categories write to the current project.
 
+**User preferences** (`user_pref`) are injected in full into the system prompt at PromptBuild and cached for the lifetime of the session (refreshed only when a new session starts).
+
+**Project facts** are ranked at **turn end** from the completed user/assistant exchange, then delivered on the **next** turn's first LLM request. Tune with `injectProjectMemoriesPerTurn`, `minProjectMemoryScore`, and `maxInjectedProjectMemories` under `extensions.astrcode.memory`.
+
 ## Default Values
 
 All configuration fields have sensible defaults defined in [`crates/astrcode-core/src/config/defaults.rs`](../crates/astrcode-core/src/config/defaults.rs). Missing fields will be filled with these defaults automatically.
@@ -219,7 +223,10 @@ You can configure individual extensions via the top-level `extensions` field. Th
       "autoExtract": true,
       "autoExtractAfterSave": true,
       "maxChangedSessions": 5,
-      "minConversationChars": 200
+      "minConversationChars": 200,
+      "injectProjectMemoriesPerTurn": true,
+      "maxInjectedProjectMemories": 5,
+      "minProjectMemoryScore": 0.35
     },
     "astrcode.mcp": {
       "mcpServers": {

@@ -309,20 +309,26 @@ impl ToolHandler for MemoryListHandler {
 
 pub(crate) struct MemoryRecallHandler {
     pub store_pool: Arc<MemoryStorePool>,
+    pub session_prefs: Arc<crate::turn_recall::SessionPrefsCache>,
 }
 
 #[async_trait::async_trait]
 impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let scoped = self
-            .store_pool
-            .get_scoped(&ctx.working_dir)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let store_pool = self.store_pool.clone();
+        let working_dir = ctx.working_dir.clone();
+        let session_id = ctx.session_id.clone();
+        let session_prefs = self.session_prefs.clone();
 
-        let global_prefs = tokio::task::spawn_blocking(move || scoped.global_preference_lines(3))
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?
-            .unwrap_or_default();
+        let global_prefs = tokio::task::spawn_blocking(move || {
+            session_prefs.lines_for_session(&session_id, || {
+                let scoped = store_pool.get_scoped(&working_dir)?;
+                scoped.all_user_preference_lines()
+            })
+        })
+        .await
+        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        .unwrap_or_default();
 
         let body = prompts::memory_tools_instruction(
             MEMORY_LIST_TOOL,

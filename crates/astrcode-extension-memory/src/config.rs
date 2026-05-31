@@ -17,6 +17,16 @@ pub(crate) struct MemoryConfig {
     pub min_conversation_chars: usize,
     /// Delete `contexts/` files older than this many days.
     pub max_context_age_days: u64,
+    /// Rank project memories at turn end; inject on the next turn's first LLM request.
+    pub inject_project_memories_per_turn: bool,
+    /// Max project memories to inject per turn.
+    pub max_injected_project_memories: usize,
+    /// Minimum relevance score (0–1) for injection.
+    pub min_project_memory_score: f64,
+    /// Max total characters for injected memory block.
+    pub max_injected_memory_chars: usize,
+    /// Skip turn-end recall when the exchange text is shorter than this (characters).
+    pub min_recall_query_chars: usize,
 }
 
 impl Default for MemoryConfig {
@@ -28,6 +38,11 @@ impl Default for MemoryConfig {
             max_changed_sessions: 5,
             min_conversation_chars: 200,
             max_context_age_days: 90,
+            inject_project_memories_per_turn: true,
+            max_injected_project_memories: 5,
+            min_project_memory_score: 0.35,
+            max_injected_memory_chars: 1500,
+            min_recall_query_chars: 12,
         }
     }
 }

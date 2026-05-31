@@ -371,6 +371,65 @@ impl MemoryIndex {
             .collect())
     }
 
+    /// Rank index records by relevance to `query` (project memories only).
+    pub(crate) fn rank_for_query(
+        &self,
+        query: &str,
+        limit: usize,
+        min_score: f64,
+    ) -> std::io::Result<Vec<(f64, String)>> {
+        let query = query.trim();
+        if query.len() < 4 {
+            return Ok(Vec::new());
+        }
+
+        let keywords: Vec<String> = query
+            .split_whitespace()
+            .filter(|w| w.chars().count() >= 2)
+            .map(|w| w.to_lowercase())
+            .collect();
+        if keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let index = self.load_index()?;
+        let entities = self.load_entities()?;
+        let query_lower = query.to_lowercase();
+        let norm_query = normalize_content(query);
+
+        let mut entity_boost_ids = HashSet::new();
+        for (entity, mem_ids) in &entities.links {
+            if query_lower.contains(entity) {
+                entity_boost_ids.extend(mem_ids.iter().cloned());
+            }
+        }
+
+        let mut scored = Vec::new();
+        for r in &index.records {
+            if r.category == crate::scope::USER_CATEGORY {
+                continue;
+            }
+            let norm = normalize_content(&r.content);
+            let mut score = word_jaccard(&norm_query, &norm);
+            let content_lower = r.content.to_lowercase();
+            for kw in &keywords {
+                if content_lower.contains(kw) {
+                    score += 0.12;
+                }
+            }
+            if entity_boost_ids.contains(&r.id) {
+                score += 0.25;
+            }
+            if score >= min_score {
+                scored.push((score, format!("[{}] {}", r.category, r.content)));
+            }
+        }
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
     pub(crate) fn records_for_entity_boost(&self, query: &str) -> std::io::Result<Vec<String>> {
         let entities = self.load_entities()?;
         let query_lower = query.to_lowercase();

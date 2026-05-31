@@ -58,8 +58,8 @@ impl ScopedMemoryStores {
         Ok(removed)
     }
 
-    pub(crate) fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
-        self.user.global_preference_lines(limit)
+    pub(crate) fn all_user_preference_lines(&self) -> std::io::Result<Vec<String>> {
+        self.user.all_user_preference_lines()
     }
 
     pub(crate) fn list_entries(&self, limit: usize) -> std::io::Result<Vec<String>> {

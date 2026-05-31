@@ -39,9 +39,10 @@ pub(crate) fn memory_tools_instruction(
     user_prefs: &[String],
 ) -> String {
     let mut out = format!(
-        "<memory>\nTools: `{list}` view/search, `{save}` store, `{delete}` remove.\nUser prefs: \
-         ~/.astrcode/memory (shared). Project facts: per workspace.\nAuto-sync on session start; \
-         use `{save}` to capture immediately."
+        "<memory>\nTools: `{list}` view/search, `{save}` store, `{delete}` remove.\nUser \
+         preferences below are fixed for this session. Project facts are recalled after each turn \
+         and appear at the start of the next turn.\nAuto-sync on session start; use `{save}` to \
+         capture immediately."
     );
     if !user_prefs.is_empty() {
         out.push_str("\n\nUser preferences:\n");
@@ -67,6 +68,15 @@ List or search stored memories. Omit query for recent entries.";
 
 pub(crate) const CMD_DESC: &str = "Manage long-term memory (list / search / delete)";
 
+pub(crate) fn project_memory_injection(lines: &[String]) -> String {
+    format!(
+        "<project-memory>\nAuto-recalled project memories from the previous turn. They may NOT \
+         match the current task or repository; use only if clearly relevant.\n\n{}\n\
+         </project-memory>",
+        lines.join("\n")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +93,12 @@ mod tests {
     fn batch_user_prompt_includes_existing_memories() {
         let out = batch_user_prompt("block", "2026-05-31", "- pref");
         assert!(out.contains("Existing memories:\n- pref"));
+    }
+
+    #[test]
+    fn project_memory_injection_includes_disclaimer() {
+        let body = project_memory_injection(&["- fact".to_string()]);
+        assert!(body.contains("may NOT match"));
+        assert!(body.contains("- fact"));
     }
 }

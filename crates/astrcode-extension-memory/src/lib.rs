@@ -4,6 +4,8 @@
 //! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/`
 //! - `memory_index.json`：结构化索引（BM25/子串搜索；相似条目 upsert）
 //! - **SessionStart** / **`memory_save` 后**：从有变化的 rollout 批量提取，更新 MEMORY.md
+//! - **PromptBuild**：全量用户偏好（按 session 缓存，新 session 才刷新）
+//! - **TurnEnd**：按当轮对话召回项目事实；下一 turn 首次 LLM 请求时注入
 //! - LLM 工具：`memory_save` / `memory_delete`
 
 mod config;
@@ -13,12 +15,13 @@ mod pipeline;
 mod prompts;
 mod scope;
 mod store;
+mod turn_recall;
 
 use std::sync::{Arc, OnceLock};
 
 use astrcode_extension_sdk::extension::{
     Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-    ExtensionHostServices, ExtensionTasks, HookMode, Registrar, StopReason,
+    ExtensionHostServices, ExtensionTasks, HookMode, ProviderEvent, Registrar, StopReason,
 };
 use handlers::{
     MemoryCommandHandler, MemoryDeleteHandler, MemoryListHandler, MemoryRecallHandler,
@@ -26,6 +29,10 @@ use handlers::{
 };
 use parking_lot::{Mutex, RwLock};
 use store::MemoryStorePool;
+use turn_recall::{
+    MemoryProjectRecallDeliveryProvider, MemoryProjectRecallTurnEndHandler, ProjectRecallBuffer,
+    SessionPrefsCache,
+};
 
 use crate::config::MemoryConfig;
 
@@ -33,10 +40,14 @@ use crate::config::MemoryConfig;
 pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
     let pipeline = Arc::new(handlers::MemoryPipelineCoordinator::default());
+    let session_prefs = Arc::new(SessionPrefsCache::default());
+    let project_recall_buffer = Arc::new(ProjectRecallBuffer::default());
     Arc::new(MemoryExtension {
         store_pool,
         services: Arc::new(OnceLock::new()),
         pipeline,
+        session_prefs,
+        project_recall_buffer,
         tasks: Arc::new(Mutex::new(None)),
         config: Arc::new(RwLock::new(MemoryConfig::default())),
     })
@@ -48,6 +59,8 @@ struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
     services: MemoryServices,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
+    session_prefs: Arc<SessionPrefsCache>,
+    project_recall_buffer: Arc<ProjectRecallBuffer>,
     tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     config: Arc<RwLock<MemoryConfig>>,
 }
@@ -96,6 +109,8 @@ impl Extension for MemoryExtension {
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
         *self.tasks.lock() = None;
         self.pipeline.reset();
+        self.session_prefs.reset();
+        self.project_recall_buffer.reset();
         Ok(())
     }
 
@@ -130,6 +145,26 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemoryRecallHandler {
                 store_pool: self.store_pool.clone(),
+                session_prefs: self.session_prefs.clone(),
+            }),
+        );
+        reg.on_provider(
+            ProviderEvent::BeforeRequest,
+            HookMode::Blocking,
+            40,
+            Arc::new(MemoryProjectRecallDeliveryProvider {
+                buffer: self.project_recall_buffer.clone(),
+                config: self.config.clone(),
+            }),
+        );
+        reg.on_event(
+            ExtensionEvent::TurnEnd,
+            HookMode::NonBlocking,
+            0,
+            Arc::new(MemoryProjectRecallTurnEndHandler {
+                store_pool: self.store_pool.clone(),
+                buffer: self.project_recall_buffer.clone(),
+                config: self.config.clone(),
             }),
         );
         reg.on_event(
