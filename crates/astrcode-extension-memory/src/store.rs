@@ -29,6 +29,14 @@ const PROJECT_SECTIONS: &[(&str, &str)] = &[
 
 const VALID_CATEGORIES: &[&str] = &["user_pref", "project_ctx", "decision", "general"];
 
+/// Result of a manual memory append operation.
+pub(crate) enum AppendResult {
+    /// Memory was saved successfully.
+    Saved,
+    /// Similar entries already exist; LLM should consolidate before saving.
+    SimilarExists(Vec<String>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryStoreScope {
     User,
@@ -371,12 +379,17 @@ impl MemoryStore {
     // ─── Write ─────────────────────────────────────────────────────
 
     /// 在指定 category section 追加一条记忆。
-    pub(crate) fn append(&self, category: &str, content: &str) -> std::io::Result<()> {
+    /// 如果 index 中已存在相似条目，返回 `AppendResult::SimilarExists` 而不写入。
+    pub(crate) fn append(&self, category: &str, content: &str) -> std::io::Result<AppendResult> {
         let _guard = self.write_lock.lock();
+        let similar = self.memory_index().find_similar(content)?;
+        if !similar.is_empty() {
+            return Ok(AppendResult::SimilarExists(similar));
+        }
         self.append_unlocked(category, content)?;
         self.memory_index()
             .add_record(content, category, MemorySource::Manual, None, &[])?;
-        Ok(())
+        Ok(AppendResult::Saved)
     }
 
     /// 按内容子串匹配删除条目，返回被删除的条目列表。

@@ -389,6 +389,34 @@ impl MemoryIndex {
             .collect())
     }
 
+    /// Returns content of records similar to the given content, without modifying anything.
+    pub(crate) fn find_similar(&self, content: &str) -> std::io::Result<Vec<String>> {
+        let norm_new = normalize_content(content);
+        if norm_new.len() < 8 {
+            return Ok(Vec::new());
+        }
+        let index = self.load_index()?;
+        let mut similar = Vec::new();
+        for r in &index.records {
+            let norm_old = normalize_content(&r.content);
+            if norm_new == norm_old {
+                similar.push(r.content.clone());
+                continue;
+            }
+            let score = if norm_old.len() >= 12
+                && (norm_new.contains(&norm_old) || norm_old.contains(&norm_new))
+            {
+                0.8
+            } else {
+                word_jaccard(&norm_new, &norm_old)
+            };
+            if score >= 0.55 {
+                similar.push(r.content.clone());
+            }
+        }
+        Ok(similar)
+    }
+
     pub(crate) fn trim_to_max(&self, max_records: usize) -> std::io::Result<usize> {
         let mut index = self.load_index()?;
         if index.records.len() <= max_records {

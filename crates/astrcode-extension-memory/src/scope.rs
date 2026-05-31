@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     index::MemorySource,
-    store::{MemoryEntry, MemoryStore},
+    store::{AppendResult, MemoryEntry, MemoryStore},
 };
 
 pub(crate) const USER_CATEGORY: &str = "user_pref";
@@ -38,7 +38,7 @@ impl ScopedMemoryStores {
         }
     }
 
-    pub(crate) fn append(&self, category: &str, content: &str) -> std::io::Result<()> {
+    pub(crate) fn append(&self, category: &str, content: &str) -> std::io::Result<AppendResult> {
         self.store_for_category(category).append(category, content)
     }
 

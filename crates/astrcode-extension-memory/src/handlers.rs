@@ -14,7 +14,12 @@ use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{MemoryServices, config::MemoryConfig, pipeline, store::MemoryStorePool};
+use crate::{
+    MemoryServices,
+    config::MemoryConfig,
+    pipeline,
+    store::{AppendResult, MemoryStorePool},
+};
 
 // ─── 常量 ────────────────────────────────────────────────────────────
 
@@ -117,27 +122,40 @@ impl ToolHandler for MemorySaveHandler {
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = args.content;
         let category = args.category;
-        tokio::task::spawn_blocking(move || scoped.append(&category, &content))
+        let result = tokio::task::spawn_blocking(move || scoped.append(&category, &content))
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))?
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        let cfg = self.config.read().clone();
-        if cfg.auto_extract_after_save {
-            if let Some(tasks) = self.tasks.lock().clone() {
-                spawn_memory_pipeline(
-                    &tasks,
-                    self.pipeline.clone(),
-                    self.store_pool.clone(),
-                    &self.services,
-                    self.config.clone(),
-                    ctx.session_id.to_string(),
-                    working_dir.to_string(),
-                );
+        match result {
+            AppendResult::Saved => {
+                let cfg = self.config.read().clone();
+                if cfg.auto_extract_after_save {
+                    if let Some(tasks) = self.tasks.lock().clone() {
+                        spawn_memory_pipeline(
+                            &tasks,
+                            self.pipeline.clone(),
+                            self.store_pool.clone(),
+                            &self.services,
+                            self.config.clone(),
+                            ctx.session_id.to_string(),
+                            working_dir.to_string(),
+                        );
+                    }
+                }
+                Ok(ok_text("Memory saved.".to_string()))
             }
+            AppendResult::SimilarExists(similar) => Ok(ok_text(format!(
+                "Similar memories already exist:\n{}\n\nPlease consolidate: \
+                 use memory_delete to remove the old entries, then memory_save the \
+                 consolidated version.",
+                similar
+                    .iter()
+                    .map(|s| format!("- {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))),
         }
-
-        Ok(ok_text("Memory saved.".to_string()))
     }
 }
 
