@@ -233,6 +233,34 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_open");
         },
+        EventPayload::ToolApprovalRequested {
+            call_id,
+            tool_name,
+            prompt,
+            ..
+        } => {
+            app.pending_tool_approval = Some(crate::tui::app::ToolApprovalPrompt {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.clone(),
+            });
+            app.status_text = format!("⚠ Approval required: {tool_name} — y/n");
+            app.push_message(
+                MessageRole::System,
+                "Approval".into(),
+                format!("Tool `{tool_name}` requires approval:\n{prompt}\nPress y to allow once, n to deny."),
+                false,
+                None,
+            );
+        },
+        EventPayload::ToolApprovalResolved { call_id, .. } => {
+            if app
+                .pending_tool_approval
+                .as_ref()
+                .is_some_and(|pending| pending.call_id == call_id.as_str())
+            {
+                app.pending_tool_approval = None;
+            }
+        },
         EventPayload::ToolCallRequested {
             call_id: _,
             tool_name,

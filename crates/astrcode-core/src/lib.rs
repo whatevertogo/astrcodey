@@ -26,6 +26,7 @@ pub mod event;
 pub mod extension;
 pub mod lifecycle;
 pub mod llm;
+pub mod permission;
 pub mod prompt;
 pub mod render;
 pub mod storage;

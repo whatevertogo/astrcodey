@@ -1,14 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::Event, extension::ChildToolPolicy, llm::LlmProvider, tool::FileObservationStore,
+    event::Event, extension::ChildToolPolicy, llm::LlmProvider, permission::ApprovalDecision,
+    tool::FileObservationStore, types::ToolCallId,
 };
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
+use tokio::sync::oneshot;
 
 use crate::{
-    compact_circuit_breaker::CompactCircuitBreaker, tool_exec::InMemoryFileObservationStore,
+    compact_circuit_breaker::CompactCircuitBreaker, permission::ApprovalHistoryStore,
+    tool_exec::InMemoryFileObservationStore,
 };
 
 /// 当前 session 使用的模型绑定；一次替换同时切换 provider 与模型标识。
@@ -75,6 +78,10 @@ pub struct SessionRuntimeState {
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
     event_out: Arc<EventFanout<Event>>,
+    /// 会话级 AllowAlways / DenyAlways 审批记忆。
+    approval_history: Arc<ApprovalHistoryStore>,
+    /// 挂起中的工具审批（call_id → oneshot sender）。
+    pending_approvals: Mutex<HashMap<ToolCallId, oneshot::Sender<ApprovalDecision>>>,
 }
 
 impl SessionRuntimeState {
@@ -104,6 +111,8 @@ impl SessionRuntimeState {
                 Duration::from_secs(60),
             )),
             event_out,
+            approval_history: Arc::new(ApprovalHistoryStore::default()),
+            pending_approvals: Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,6 +210,37 @@ impl SessionRuntimeState {
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
         self.event_out.send(event);
+    }
+
+    pub fn approval_history(&self) -> Arc<ApprovalHistoryStore> {
+        Arc::clone(&self.approval_history)
+    }
+
+    pub fn register_pending_approval(
+        &self,
+        call_id: ToolCallId,
+        sender: oneshot::Sender<ApprovalDecision>,
+    ) {
+        self.pending_approvals.lock().insert(call_id, sender);
+    }
+
+    pub fn resolve_tool_approval(
+        &self,
+        call_id: &ToolCallId,
+        decision: ApprovalDecision,
+    ) -> Result<(), String> {
+        let sender = self
+            .pending_approvals
+            .lock()
+            .remove(call_id)
+            .ok_or_else(|| format!("no pending approval for call_id {call_id}"))?;
+        sender
+            .send(decision)
+            .map_err(|_| format!("approval receiver dropped for call_id {call_id}"))
+    }
+
+    pub fn cancel_pending_approvals(&self) {
+        self.pending_approvals.lock().clear();
     }
 }
 

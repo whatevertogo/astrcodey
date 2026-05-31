@@ -28,6 +28,7 @@ pub(crate) mod viewport;
 use std::{io, sync::Arc};
 
 use astrcode_client::client::AstrcodeClient;
+use astrcode_core::permission::ApprovalDecision;
 use astrcode_protocol::commands::{ClientCommand, UiResponseValue};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio_stream::StreamExt;
@@ -166,6 +167,26 @@ async fn handle_key(
     client: &Arc<Client>,
     terminal: &mut TerminalSession,
 ) -> io::Result<()> {
+    if let Some(pending) = app.pending_tool_approval.clone() {
+        let decision = match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalDecision::AllowOnce),
+            KeyCode::Char('n') | KeyCode::Char('N') => Some(ApprovalDecision::DenyOnce),
+            _ => None,
+        };
+        if let Some(decision) = decision {
+            client
+                .send_command(&ClientCommand::ResolveToolApproval {
+                    call_id: pending.call_id.clone(),
+                    decision,
+                })
+                .await
+                .ok();
+            app.pending_tool_approval = None;
+            app.status_text = format!("● Approval sent for {}", pending.tool_name);
+            return Ok(());
+        }
+    }
+
     // 服务端 UI picker 模式：拦截 Up/Down/Enter/Esc
     if app.ui_picker.is_some() {
         match key.code {

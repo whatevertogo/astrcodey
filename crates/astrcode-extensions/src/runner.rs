@@ -776,6 +776,9 @@ impl ExtensionRunner {
                         PreToolUseResult::Block { reason } => {
                             return Ok(PreToolUseResult::Block { reason });
                         },
+                        PreToolUseResult::Ask { prompt, rule_key } => {
+                            return Ok(PreToolUseResult::Ask { prompt, rule_key });
+                        },
                         PreToolUseResult::ModifyInput { tool_input } => {
                             ctx = PreToolUseContext { tool_input, ..ctx };
                             modified = true;

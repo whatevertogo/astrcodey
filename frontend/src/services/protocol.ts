@@ -260,6 +260,12 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     case 'extensionRegistryChanged':
       return { kind }
+    case 'patchToolMetadata':
+      return {
+        kind,
+        blockId: requiredString(object, 'blockId'),
+        metadata: optionalObject(object, 'metadata') ?? {},
+      }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)
   }
@@ -467,10 +473,15 @@ export function decodeConfigView(value: unknown): ConfigView {
     activeModel: requiredString(object, 'activeModel'),
     activeSmallProfile: optionalString(object, 'activeSmallProfile'),
     activeSmallModel: optionalString(object, 'activeSmallModel'),
+    approvalMode: decodeApprovalMode(object['approvalMode']),
     extensionStates,
     profiles: arrayField(object, 'profiles').map(decodeProfileView),
     warning: optionalString(object, 'warning'),
   }
+}
+
+function decodeApprovalMode(value: unknown): 'manual' | 'yolo' {
+  return value === 'yolo' ? 'yolo' : 'manual'
 }
 
 function decodeProfileView(value: unknown): ProfileView {

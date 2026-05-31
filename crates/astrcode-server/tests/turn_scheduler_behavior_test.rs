@@ -120,6 +120,7 @@ fn build_scheduler_with_llm(
         },
         context: Default::default(),
         agent: Default::default(),
+        permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
     let capabilities = Arc::new(SessionRuntimeServices::new(

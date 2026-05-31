@@ -217,6 +217,7 @@ impl Config {
             small_llm,
             context: build_context_settings(&self.runtime),
             agent: build_agent_settings(&self.runtime),
+            permissions: self.permissions.clone().unwrap_or_default(),
             extensions: build_extension_settings(&self.runtime, self.extensions.as_ref()),
         })
     }
@@ -347,6 +348,11 @@ fn build_agent_settings(runtime: &RuntimeSection) -> AgentSettings {
         shell_timeout_secs: runtime
             .shell_timeout_secs
             .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
+        approval_mode: runtime
+            .approval_mode
+            .as_deref()
+            .and_then(crate::permission::ApprovalMode::parse)
+            .unwrap_or_default(),
     }
 }
 

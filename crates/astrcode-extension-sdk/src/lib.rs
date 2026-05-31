@@ -33,7 +33,8 @@ pub mod storage {
 pub mod tool {
     pub use astrcode_core::tool::{
         CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY, ExecutionMode,
-        SessionApiError, SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest,
+        SessionAccess, SessionAccessPair, SessionApiError, SessionHandle, SessionOperations,
+        SessionStatus, SubmitTurnRequest,
         SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities, ToolDefinition, ToolError,
         ToolExecutionContext, ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin,
         ToolPromptMetadata, ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths,
@@ -47,6 +48,11 @@ pub mod tool {
 
 pub mod types {
     pub use astrcode_core::types::project_key_from_path;
+}
+
+/// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
+pub mod permission {
+    pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
 
 pub mod builder;

@@ -225,6 +225,7 @@ fn pre_tool_use_context(command: &str) -> PreToolUseContext {
         model: astrcode_core::config::ModelSelection::simple("test-model"),
         tool_name: "shell".into(),
         tool_input: serde_json::json!({ "command": command }),
+        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
         available_tools: vec![],
         event_tx: None,
         extension_event_sink: None,

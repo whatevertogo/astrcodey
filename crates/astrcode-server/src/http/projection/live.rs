@@ -155,6 +155,31 @@ pub(in crate::http) fn event_to_deltas(
             }]
         },
 
+        EventPayload::ToolApprovalRequested {
+            call_id,
+            prompt,
+            rule_key,
+            ..
+        } => vec![ConversationDeltaDto::PatchToolMetadata {
+            block_id: call_id.to_string(),
+            metadata: serde_json::json!({
+                "toolGateApproval": {
+                    "pending": true,
+                    "prompt": prompt,
+                    "ruleKey": rule_key,
+                }
+            }),
+        }],
+
+        EventPayload::ToolApprovalResolved { call_id, .. } => {
+            vec![ConversationDeltaDto::PatchToolMetadata {
+                block_id: call_id.to_string(),
+                metadata: serde_json::json!({
+                    "toolGateApproval": { "pending": false }
+                }),
+            }]
+        },
+
         EventPayload::AgentSessionSpawned {
             child_session_id,
             agent_name,

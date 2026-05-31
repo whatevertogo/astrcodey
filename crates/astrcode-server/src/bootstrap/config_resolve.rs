@@ -64,6 +64,7 @@ fn fallback_default_effective() -> EffectiveConfig {
         small_llm: dummy_llm_settings(),
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
+        permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     }
 }

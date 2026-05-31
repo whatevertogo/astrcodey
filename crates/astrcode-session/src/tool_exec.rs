@@ -33,12 +33,29 @@ impl TurnToolContext {
         session_state: &astrcode_core::storage::SessionReadModel,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
+        let caps = session.caps();
+        let effective = caps.read_effective();
+        let approval_history = session.runtime().approval_history();
+        if let Some(dir) = session_store_dir.as_deref() {
+            let path = crate::permission::approval_history_path(dir);
+            if path.exists() {
+                approval_history
+                    .replace_from(&crate::permission::ApprovalHistoryStore::load_from(&path));
+            }
+        }
+        let permission_chain =
+            crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
             session_store_dir: session_store_dir.clone(),
             turn_event_tx: None,
+            approval_mode: effective.agent.approval_mode,
+            is_child_session: session_state.parent_session_id.is_some(),
+            child_tool_policy: session.runtime().child_tool_policy(),
+            permission_chain,
+            approval_history,
         };
         let capabilities = ToolRuntimeCapabilities::from_session(session, &shared);
         Self {

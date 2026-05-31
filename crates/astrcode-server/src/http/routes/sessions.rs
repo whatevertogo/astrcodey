@@ -11,7 +11,7 @@ use astrcode_protocol::{
         ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
         CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
         PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
-        SlashCommandListResponseDto,
+        SlashCommandListResponseDto, ToolApprovalRequest,
     },
 };
 use axum::{
@@ -134,6 +134,27 @@ pub(in crate::http) async fn inject_message(
             tracing::error!(session_id = %session_id, error = %error, "inject failed");
             handler_error_response(error, "inject_failed")
         },
+    }
+}
+
+pub(in crate::http) async fn resolve_tool_approval(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ToolApprovalRequest>,
+) -> Response {
+    let session_id_str = session_id.clone();
+    let Some(ops) = state.runtime.capabilities().session_ops() else {
+        return internal_error_response("session_ops_unavailable", "session operations unavailable");
+    };
+    match ops
+        .resolve_tool_approval(&session_id_str, &request.call_id, request.decision)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => handler_error_response(
+            HandlerError::SessionNotFound(error.to_string()),
+            "approval_failed",
+        ),
     }
 }
 

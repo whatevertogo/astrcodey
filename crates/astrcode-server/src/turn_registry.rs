@@ -237,6 +237,7 @@ mod tests {
                 },
                 context: Default::default(),
                 agent: Default::default(),
+                permissions: Default::default(),
                 extensions: ExtensionSettings::default(),
             },
         ))

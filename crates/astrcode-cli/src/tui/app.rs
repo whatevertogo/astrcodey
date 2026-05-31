@@ -48,6 +48,8 @@ pub struct App {
     pub needs_terminal_reset: bool,
     /// 服务端 UI 选择请求。
     pub ui_picker: Option<UiPicker>,
+    /// 挂起的工具审批（Tool Gate）。
+    pub pending_tool_approval: Option<ToolApprovalPrompt>,
     // Session picker（/resume 触发的选择模式）
     pub session_picker: Option<SessionPicker>,
     // Composer
@@ -68,6 +70,13 @@ pub struct App {
     pub message_renderers: MessageRendererRegistry,
     // Theme
     pub theme: Theme,
+}
+
+/// 会话列表中的一条会话。
+#[derive(Debug, Clone)]
+pub struct ToolApprovalPrompt {
+    pub call_id: String,
+    pub tool_name: String,
 }
 
 /// 会话列表中的一条会话。
@@ -124,6 +133,7 @@ impl App {
             needs_extension_refresh: false,
             needs_terminal_reset: false,
             ui_picker: None,
+            pending_tool_approval: None,
             session_picker: None,
             composer: ComposerState::default(),
             show_slash_palette: false,

@@ -1,14 +1,16 @@
 //! Tool execution pipeline — preprocessing, conflict-graph scheduling,
 //! result commit, and persistence.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::EventPayload,
     extension::{PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult},
+    permission::{ApprovalDecision, ApprovalSource, PermissionContext, PermissionDecision},
     storage::ToolResultArtifactReader,
     tool::{ToolDefinition, ToolResult},
     tool_access::ResourceAccess,
+    types::ToolCallId,
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_tools::registry::ToolRegistry;
@@ -17,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     deferred_tools::{discovered_deferred_tool_names, tool_is_visible, unavailable_tool_guidance},
+    permission::APPROVAL_TIMEOUT_SECS,
     tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_exec::{ToolCallRuntimeContext, TurnToolContext, execute_tool_call},
     tool_json_repair::parse_and_repair_json,
@@ -33,8 +36,8 @@ use crate::{
     session::Session,
     tool_results::{
         MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS,
-        persisted_tool_result_summary, should_persist_tool_result, tool_result_inline_limit,
-        tool_result_preview,
+        is_tool_result_artifact_path, persisted_tool_result_summary, should_persist_tool_result,
+        tool_result_inline_limit, tool_result_preview,
     },
 };
 
@@ -148,6 +151,7 @@ impl ToolCalls {
                 model: self.turn.shared.model_selection(),
                 tool_name: tc.name.clone(),
                 tool_input: args.clone(),
+                approval_mode: self.turn.shared.approval_mode,
                 available_tools: tools.to_vec(),
                 event_tx: self.turn.shared.turn_event_tx.clone(),
                 extension_event_sink: None,
@@ -156,16 +160,24 @@ impl ToolCalls {
 
             let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
 
-            let (tool_input, mut outcome) = match pre_hook_result {
+            let (tool_input, mut outcome) = match &pre_hook_result {
+                PreToolUseResult::Ask { prompt, rule_key } => (
+                    args,
+                    PreparedToolOutcome::NeedsApproval {
+                        prompt: prompt.clone(),
+                        rule_key: rule_key.clone(),
+                        source: ApprovalSource::Extension,
+                    },
+                ),
                 PreToolUseResult::ModifyInput { tool_input } => {
-                    (tool_input, PreparedToolOutcome::Ready)
+                    (tool_input.clone(), PreparedToolOutcome::Ready)
                 },
                 PreToolUseResult::Block { reason } => {
                     let outcome = PreparedToolOutcome::Blocked(ToolResult {
                         call_id: tc.call_id.clone(),
                         content: format!("Tool execution blocked by hook: {reason}"),
                         is_error: true,
-                        error: Some(reason),
+                        error: Some(reason.clone()),
                         metadata: Default::default(),
                         duration_ms: None,
                     });
@@ -174,11 +186,18 @@ impl ToolCalls {
                 PreToolUseResult::Allow => (args, PreparedToolOutcome::Ready),
             };
 
+            if matches!(outcome, PreparedToolOutcome::Ready) {
+                outcome = self.evaluate_permission_chain(&tc.call_id, &tc.name, &tool_input);
+            }
+
             let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
             outcome = match (outcome, same_step) {
                 (_, SameStepCheck::Duplicate) => PreparedToolOutcome::DuplicateSameStep,
                 (PreparedToolOutcome::Ready, SameStepCheck::Primary) => PreparedToolOutcome::Ready,
                 (blocked @ PreparedToolOutcome::Blocked(_), SameStepCheck::Primary) => blocked,
+                (needs @ PreparedToolOutcome::NeedsApproval { .. }, SameStepCheck::Primary) => {
+                    needs
+                },
                 (PreparedToolOutcome::DuplicateSameStep, SameStepCheck::Primary) => {
                     PreparedToolOutcome::DuplicateSameStep
                 },
@@ -195,9 +214,9 @@ impl ToolCalls {
                         Path::new(&self.turn.shared.working_dir),
                     )
                     .unwrap_or_else(|_| vec![ResourceAccess::all()]),
-                PreparedToolOutcome::Blocked(_) | PreparedToolOutcome::DuplicateSameStep => {
-                    Vec::new()
-                },
+                PreparedToolOutcome::Blocked(_)
+                | PreparedToolOutcome::DuplicateSameStep
+                | PreparedToolOutcome::NeedsApproval { .. } => Vec::new(),
             };
 
             prepared.push(PreparedToolCall {
@@ -211,6 +230,66 @@ impl ToolCalls {
         }
 
         Ok(prepared)
+    }
+
+    fn evaluate_permission_chain(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> PreparedToolOutcome {
+        let accesses = self
+            .tool_registry
+            .resource_accesses(
+                tool_name,
+                tool_input,
+                Path::new(&self.turn.shared.working_dir),
+            )
+            .unwrap_or_else(|_| vec![ResourceAccess::all()]);
+        let ctx = PermissionContext {
+            tool_name,
+            tool_input,
+            working_dir: Path::new(&self.turn.shared.working_dir),
+            resource_accesses: &accesses,
+            approval_mode: self.turn.shared.approval_mode,
+            session_id: self.turn.shared.session_id.as_str(),
+            is_child_session: self.turn.shared.is_child_session,
+            child_tool_policy: self.turn.shared.child_tool_policy.as_ref(),
+        };
+        match self.turn.shared.permission_chain.decide(&ctx) {
+            PermissionDecision::Allow => PreparedToolOutcome::Ready,
+            PermissionDecision::Deny { reason } => PreparedToolOutcome::Blocked(ToolResult {
+                call_id: call_id.to_string(),
+                content: reason.clone(),
+                is_error: true,
+                error: Some(reason),
+                metadata: Default::default(),
+                duration_ms: None,
+            }),
+            PermissionDecision::Ask { prompt, rule_key } => {
+                if let Some(key) = rule_key.as_deref() {
+                    if self.turn.shared.approval_history.is_allowed_always(key) {
+                        return PreparedToolOutcome::Ready;
+                    }
+                    if self.turn.shared.approval_history.is_denied_always(key) {
+                        return PreparedToolOutcome::Blocked(ToolResult {
+                            call_id: call_id.to_string(),
+                            content: format!("Denied by session approval memory ({key})"),
+                            is_error: true,
+                            error: Some(format!("Denied by session approval memory ({key})")),
+                            metadata: Default::default(),
+                            duration_ms: None,
+                        });
+                    }
+                }
+                PreparedToolOutcome::NeedsApproval {
+                    prompt,
+                    rule_key,
+                    source: ApprovalSource::Core,
+                }
+            },
+            PermissionDecision::Pass => PreparedToolOutcome::Ready,
+        }
     }
 
     /// 执行已预处理的工具调用。
@@ -235,6 +314,12 @@ impl ToolCalls {
             Blocked(ToolResult),
             Scheduled(oneshot::Receiver<(usize, ToolResult)>),
             DuplicateSameStep,
+            PendingApproval {
+                rx: oneshot::Receiver<ApprovalDecision>,
+                prompt: String,
+                rule_key: Option<String>,
+                source: ApprovalSource,
+            },
         }
 
         let mut sources = Vec::with_capacity(input.prepared.len());
@@ -248,6 +333,33 @@ impl ToolCalls {
                 },
                 PreparedToolOutcome::DuplicateSameStep => {
                     sources.push(ResultSource::DuplicateSameStep);
+                },
+                PreparedToolOutcome::NeedsApproval {
+                    prompt,
+                    rule_key,
+                    source,
+                } => {
+                    let (tx, rx) = oneshot::channel();
+                    self.session
+                        .runtime()
+                        .register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx);
+                    input
+                        .publisher
+                        .durable(EventPayload::ToolApprovalRequested {
+                            call_id: call.call_id.clone().into(),
+                            tool_name: call.name.clone(),
+                            prompt: prompt.clone(),
+                            rule_key: rule_key.clone(),
+                            source: *source,
+                            arguments: call.tool_input.clone(),
+                        })
+                        .await?;
+                    sources.push(ResultSource::PendingApproval {
+                        rx,
+                        prompt: prompt.clone(),
+                        rule_key: rule_key.clone(),
+                        source: *source,
+                    });
                 },
                 PreparedToolOutcome::Ready => {
                     let executable = call.to_executable();
@@ -282,6 +394,75 @@ impl ToolCalls {
                         .await
                         .map_err(|_| TurnError::Aborted)?;
                     result
+                },
+                ResultSource::PendingApproval {
+                    rx,
+                    prompt,
+                    rule_key,
+                    source,
+                } => {
+                    let call = &input.prepared[position];
+                    let decision =
+                        match tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx)
+                            .await
+                        {
+                            Ok(Ok(decision)) => decision,
+                            Ok(Err(_)) => ApprovalDecision::DenyOnce,
+                            Err(_) => ApprovalDecision::DenyOnce,
+                        };
+                    input
+                        .publisher
+                        .durable(EventPayload::ToolApprovalResolved {
+                            call_id: call.call_id.clone().into(),
+                            decision,
+                        })
+                        .await?;
+                    if matches!(
+                        decision,
+                        ApprovalDecision::AllowAlways | ApprovalDecision::DenyAlways
+                    ) {
+                        self.turn
+                            .shared
+                            .approval_history
+                            .record_decision(rule_key.as_deref(), decision);
+                        if let Some(dir) = self.turn.shared.session_store_dir.as_deref() {
+                            let path = crate::permission::approval_history_path(dir);
+                            let _ = self.turn.shared.approval_history.persist_to(&path);
+                        }
+                    }
+                    if decision.allows() {
+                        let executable = call.to_executable();
+                        let accesses = self
+                            .tool_registry
+                            .resource_accesses(
+                                &call.name,
+                                &call.tool_input,
+                                Path::new(&self.turn.shared.working_dir),
+                            )
+                            .unwrap_or_else(|_| vec![ResourceAccess::all()]);
+                        let tool_registry = Arc::clone(&self.tool_registry);
+                        let ctx =
+                            self.make_runtime_context(input.tools, Arc::clone(&input.publisher));
+                        let scheduled = scheduler.submit(accesses, move || async move {
+                            execute_tool_call(tool_registry, ctx, executable).await
+                        });
+                        let (_index, result) = scheduler
+                            .await_result(scheduled)
+                            .await
+                            .map_err(|_| TurnError::Aborted)?;
+                        result
+                    } else {
+                        let reason =
+                            format!("Tool execution denied by user ({source:?}): {prompt}");
+                        ToolResult {
+                            call_id: call.call_id.clone(),
+                            content: reason.clone(),
+                            is_error: true,
+                            error: Some(reason),
+                            metadata: Default::default(),
+                            duration_ms: None,
+                        }
+                    }
                 },
             };
 
@@ -456,6 +637,14 @@ impl ToolCalls {
         if is_artifact_read(result) {
             return Ok(());
         }
+        if result
+            .metadata
+            .get("path")
+            .and_then(|value| value.as_str())
+            .is_some_and(is_tool_result_artifact_path)
+        {
+            return Ok(());
+        }
         let original_content = result.content.clone();
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         let reference = self
@@ -503,7 +692,13 @@ impl ToolCalls {
                     tool_result_inline_limit(&pending.tool_name).is_some_and(|limit| {
                         should_persist_tool_result(&pending.result.content, limit)
                     }) && !pending.result.metadata.contains_key("persistedToolResult")
-                        && !is_artifact_read(&pending.result);
+                        && !is_artifact_read(&pending.result)
+                        && !pending
+                            .result
+                            .metadata
+                            .get("path")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(is_tool_result_artifact_path);
                 can_persist.then_some(index)
             })
             .collect();

@@ -52,6 +52,9 @@ pub struct Config {
     /// ```
     #[serde(default)]
     pub extensions: Option<BTreeMap<String, ExtensionRawConfig>>,
+    /// 用户权限规则（Tool Gate DSL）。
+    #[serde(default)]
+    pub permissions: Option<crate::permission::PermissionsSection>,
 }
 
 impl Default for Config {
@@ -65,6 +68,7 @@ impl Default for Config {
             runtime: RuntimeSection::default(),
             profiles: super::defaults::default_profiles(),
             extensions: None,
+            permissions: None,
         }
     }
 }
@@ -188,6 +192,8 @@ pub struct RuntimeSection {
     pub shell_timeout_secs: Option<u64>,
     /// 是否允许在解析 API key 时执行 `!command`。
     pub allow_api_key_shell_command: Option<bool>,
+    /// 工具审批模式：`manual`（默认）或 `yolo`。
+    pub approval_mode: Option<String>,
     // ── Extensions ───────────────────────────────────────────────────
     /// 通用扩展启停覆盖。适用于内置扩展和磁盘扩展。
     ///

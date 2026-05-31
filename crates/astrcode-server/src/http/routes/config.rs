@@ -1,5 +1,6 @@
 //! 配置查看 / 重载 / 激活选择路由。
 
+use astrcode_core::permission::ApprovalMode;
 use astrcode_protocol::http::{
     ConfigReloadResponseDto, ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto,
     UpdateActiveSelectionRequest, UpdateActiveSelectionResponseDto,
@@ -44,6 +45,12 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                 .collect(),
         })
         .collect();
+    let approval_mode = state
+        .runtime
+        .config_manager
+        .read_effective()
+        .agent
+        .approval_mode;
     Json(ConfigViewResponseDto {
         config_path,
         active_profile: raw.active_profile.clone(),
@@ -57,6 +64,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
             .extensions
             .extension_states
             .clone(),
+        approval_mode: approval_mode_to_wire(approval_mode),
         profiles,
         warning: None,
     })
@@ -117,6 +125,19 @@ pub(in crate::http) async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
+    let approval_mode = match ApprovalMode::parse(&request.approval_mode) {
+        Some(mode) => mode,
+        None => {
+            return bad_request_response(
+                "invalid_approval_mode",
+                format!(
+                    "Invalid approvalMode {:?}; expected \"manual\" or \"yolo\"",
+                    request.approval_mode
+                ),
+            );
+        }
+    };
+
     let mut candidate = state.runtime.config_manager().raw_config_snapshot();
     candidate.active_profile = request.active_profile;
     candidate.active_model = request.active_model;
@@ -125,6 +146,8 @@ pub(in crate::http) async fn update_active_selection(
         candidate.active_small_profile = Some(p);
         candidate.active_small_model = Some(m);
     }
+
+    candidate.runtime.approval_mode = Some(approval_mode_to_wire(approval_mode));
 
     // Validate before persisting.
     if let Err(error) = candidate.clone().into_effective() {
@@ -169,4 +192,11 @@ pub(in crate::http) async fn update_active_selection(
         warning: None,
     })
     .into_response()
+}
+
+fn approval_mode_to_wire(mode: ApprovalMode) -> String {
+    match mode {
+        ApprovalMode::Manual => "manual".to_string(),
+        ApprovalMode::Yolo => "yolo".to_string(),
+    }
 }

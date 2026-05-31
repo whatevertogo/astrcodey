@@ -11,9 +11,9 @@ pub const SHELL_TOOL_RESULT_INLINE_LIMIT: usize = 30_000;
 /// 搜索工具结果通常可重新分页查询，采用更低的默认阈值。
 pub const GREP_TOOL_RESULT_INLINE_LIMIT: usize = 20_000;
 
-/// read 工具自身已通过 maxChars 截断（默认 20K），此处阈值用于
-/// 超大读取场景的持久化以及多轮总预算超限时的候选选取。
-pub const READ_TOOL_RESULT_INLINE_LIMIT: usize = 40_000;
+/// read 工具输出由 maxChars 自行截断；再持久化到 tool-results 后让模型用 read
+/// 读回会形成循环（Claude Code 对 Read 使用 Infinity 阈值同理），故永不自动持久化。
+pub const READ_TOOL_RESULT_INLINE_LIMIT: Option<usize> = None;
 
 /// 同一轮工具结果进入 LLM history 的总预算。
 pub const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 200_000;
@@ -35,10 +35,17 @@ pub fn should_persist_tool_result(content: &str, inline_limit: usize) -> bool {
     content.len() > inline_limit
 }
 
+/// 路径是否指向 session 的 tool-results artifact 文件。
+pub fn is_tool_result_artifact_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .components()
+        .any(|component| component.as_os_str().to_str() == Some("tool-results"))
+}
+
 /// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
 pub fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
     match tool_name {
-        "read" => Some(READ_TOOL_RESULT_INLINE_LIMIT),
+        "read" => READ_TOOL_RESULT_INLINE_LIMIT,
         "shell" => Some(SHELL_TOOL_RESULT_INLINE_LIMIT),
         "grep" => Some(GREP_TOOL_RESULT_INLINE_LIMIT),
         _ => Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT),
@@ -68,8 +75,9 @@ pub fn persisted_tool_result_summary(
     match reference.path.as_deref() {
         Some(path) => format!(
             "Tool result was persisted because it is large ({} bytes).\nFull output saved to: \
-             {path}\nUse read with path {:?}, charOffset 0, and maxChars as needed to read \
-             it.\n\nPreview:\n{}{}",
+             {path}\nUse read with path {:?}, charOffset, and maxChars to paginate through the \
+             saved file. Do not expect the full content inline — increase charOffset on each read \
+             until hasMore is false.\n\nPreview:\n{}{}",
             reference.bytes, path, preview.content, more
         ),
         None => format!(
@@ -98,7 +106,7 @@ mod tests {
     fn tool_inline_limits_match_high_volume_tools() {
         assert_eq!(
             tool_result_inline_limit("read"),
-            Some(READ_TOOL_RESULT_INLINE_LIMIT)
+            READ_TOOL_RESULT_INLINE_LIMIT
         );
         assert_eq!(
             tool_result_inline_limit("shell"),
@@ -120,6 +128,19 @@ mod tests {
 
         assert_eq!(preview.content, "abc");
         assert!(preview.has_more);
+    }
+
+    #[test]
+    fn detects_tool_result_artifact_paths() {
+        assert!(is_tool_result_artifact_path(
+            r"C:\Users\me\.astrcode\projects\foo\sessions\abc\tool-results\shell-call-1.txt"
+        ));
+        assert!(is_tool_result_artifact_path(
+            "memory://session-1/tool-results/shell-call-1.txt"
+        ));
+        assert!(!is_tool_result_artifact_path(
+            r"C:\Users\me\projects\foo\src\main.rs"
+        ));
     }
 
     #[test]

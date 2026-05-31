@@ -17,7 +17,8 @@ use astrcode_extension_sdk::{
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     tool::{
-        CreateSessionRequest, ExecutionMode, SubmitTurnRequest, ToolDefinition, ToolOrigin,
+        CreateSessionRequest, ExecutionMode, SessionAccess, SubmitTurnRequest, ToolDefinition,
+        ToolOrigin,
         ToolResult, tool_metadata,
     },
 };
@@ -265,31 +266,33 @@ impl ToolHandler for AgentToolHandler {
             .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
 
         // 2. 提交 turn
+        let child_access = SessionAccess::new(
+            ctx.session_id.as_str(),
+            handle.session_id.as_str(),
+        );
         let submit = session_ops
             .submit_turn(
-                ctx.session_id.as_str(),
-                SubmitTurnRequest {
-                    target_session_id: handle.session_id.clone(),
-                    user_prompt: args.prompt,
-                    wait_for_result: args.wait_for_result,
-                    notify_parent_on_complete: if args.wait_for_result {
-                        None
-                    } else {
-                        Some(
-                            "[A background agent task has completed. Review the tool result above \
-                             and present the findings to the user.]"
-                                .into(),
-                        )
-                    },
-                    recycle_on_complete: !args.wait_for_result,
-                    tool_call_id: ctx.tool_call_id.clone(),
-                },
+                SubmitTurnRequest::for_child(
+                    ctx.session_id.as_str(),
+                    handle.session_id.as_str(),
+                    args.prompt,
+                )
+                .wait_for_result(args.wait_for_result)
+                .notify_parent_on_complete(if args.wait_for_result {
+                    None
+                } else {
+                    Some(
+                        "[A background agent task has completed. Review the tool result above \
+                         and present the findings to the user.]"
+                            .into(),
+                    )
+                })
+                .recycle_on_complete(!args.wait_for_result)
+                .tool_call_id(ctx.tool_call_id.clone()),
             )
             .await;
         if let Err(ref e) = submit {
-            if let Err(recycle_err) = session_ops
-                .recycle_session(ctx.session_id.as_str(), &handle.session_id)
-                .await
+            if let Err(recycle_err) = session_ops.recycle_session(child_access).await
             {
                 tracing::warn!(
                     child_session_id = %handle.session_id,
@@ -309,9 +312,7 @@ impl ToolHandler for AgentToolHandler {
         match result {
             astrcode_extension_sdk::tool::SubmitTurnResult::Completed { content } => {
                 // 同步路径：turn 完成后回收 ephemeral 子 session
-                if let Err(e) = session_ops
-                    .recycle_session(ctx.session_id.as_str(), &handle.session_id)
-                    .await
+                if let Err(e) = session_ops.recycle_session(child_access).await
                 {
                     tracing::warn!(
                         child_session_id = %handle.session_id,

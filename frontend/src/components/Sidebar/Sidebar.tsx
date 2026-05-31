@@ -183,13 +183,15 @@ export default function Sidebar() {
             profile,
             model,
             smallProfile,
-            smallModel
+            smallModel,
+            approvalMode
           ) => {
             await api.updateActiveSelection(
               profile,
               model,
               smallProfile,
-              smallModel
+              smallModel,
+              approvalMode ?? 'manual'
             )
             bumpModelRefreshKey()
           }}

@@ -19,7 +19,8 @@ interface SettingsModalProps {
     profile: string,
     model: string,
     smallProfile?: string,
-    smallModel?: string
+    smallModel?: string,
+    approvalMode?: 'manual' | 'yolo'
   ) => Promise<void>
   testConnection: () => Promise<ModelTestResult>
   extensions: ExtensionStateView[]
@@ -61,6 +62,7 @@ export default function SettingsModal({
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedSmallProfile, setSelectedSmallProfile] = useState('')
   const [selectedSmallModel, setSelectedSmallModel] = useState('')
+  const [yoloEnabled, setYoloEnabled] = useState(false)
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [testing, setTesting] = useState(false)
@@ -81,6 +83,7 @@ export default function SettingsModal({
         setSelectedModel(cfg.activeModel)
         setSelectedSmallProfile(cfg.activeSmallProfile ?? '')
         setSelectedSmallModel(cfg.activeSmallModel ?? '')
+        setYoloEnabled(cfg.approvalMode === 'yolo')
       } catch (err) {
         if (!cancelled) setErrorMessage(String(err))
       } finally {
@@ -108,7 +111,8 @@ export default function SettingsModal({
         selectedProfile,
         selectedModel,
         selectedSmallProfile || undefined,
-        selectedSmallModel || undefined
+        selectedSmallModel || undefined,
+        yoloEnabled ? 'yolo' : 'manual'
       )
       onClose()
     } catch (err) {
@@ -143,6 +147,7 @@ export default function SettingsModal({
       setSelectedModel(cfg.activeModel)
       setSelectedSmallProfile(cfg.activeSmallProfile ?? '')
       setSelectedSmallModel(cfg.activeSmallModel ?? '')
+      setYoloEnabled(cfg.approvalMode === 'yolo')
       setTestResult(null)
       await onRefreshExtensions()
     } catch (err) {
@@ -328,6 +333,32 @@ export default function SettingsModal({
                   ))}
               </select>
             )}
+          </div>
+
+          <div className="mb-4 rounded-xl border border-border px-3 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[13px] font-semibold text-text-primary">
+                  YOLO 模式
+                </p>
+                <p className="mt-0.5 text-[12px] leading-relaxed text-text-muted">
+                  开启后自动批准工具调用，跳过 Shell、写入等操作的审批提示
+                </p>
+              </div>
+              <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-xs text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={yoloEnabled}
+                  onChange={(e) => {
+                    setYoloEnabled(e.target.checked)
+                    setTestResult(null)
+                    setErrorMessage(null)
+                  }}
+                  className="h-4 w-4 accent-accent-strong"
+                />
+                {yoloEnabled ? '已开启' : '已关闭'}
+              </label>
+            </div>
           </div>
 
           <div className="mb-4 divide-y divide-border rounded-xl border border-border">

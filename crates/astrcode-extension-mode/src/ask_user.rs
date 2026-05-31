@@ -65,25 +65,6 @@ pub struct AskUserInput {
     pub metadata: Option<AskUserMetadata>,
 }
 
-/// Tool result payload (echo questions + user answers).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AskUserOutput {
-    pub questions: Vec<AskUserQuestion>,
-    pub answers: std::collections::BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<std::collections::BTreeMap<String, AskUserAnnotation>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskUserAnnotation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-}
-
 /// 后端注册：askUser 使用宿主内置 `questionnaire` Approval 卡片。
 pub fn ask_user_tool_ui() -> ToolUiWire {
     ToolUiWire {
@@ -290,29 +271,5 @@ mod tests {
     #[test]
     fn tool_definition_has_expected_name() {
         assert_eq!(ask_user_tool_definition().name, ASK_USER_TOOL_NAME);
-    }
-
-    #[test]
-    fn output_serializes_for_tool_result() {
-        let output = AskUserOutput {
-            questions: sample_input().questions,
-            answers: [("Which approach?".into(), "A".into())]
-                .into_iter()
-                .collect(),
-            annotations: Some(
-                [(
-                    "Which approach?".into(),
-                    AskUserAnnotation {
-                        preview: Some("First option".into()),
-                        notes: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            ),
-        };
-        let json = serde_json::to_string(&output).expect("serialize");
-        assert!(json.contains("\"answers\""));
-        assert!(json.contains("\"preview\""));
     }
 }

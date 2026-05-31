@@ -9,7 +9,8 @@ use astrcode_core::{
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{AgentSessionStatus, EventStore},
     tool::{
-        CreateSessionRequest, SessionOperations, SubmitTurnRequest, SubmitTurnResult,
+        CreateSessionRequest, SessionAccess, SessionOperations, SubmitTurnRequest,
+        SubmitTurnResult,
         ToolDefinition,
     },
     types::{SessionId, new_session_id},
@@ -142,6 +143,7 @@ fn build_test_ops_with_llm(
         },
         context: Default::default(),
         agent: Default::default(),
+        permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
     let capabilities = Arc::new(SessionRuntimeServices::new(
@@ -214,15 +216,8 @@ async fn inject_message_during_active_turn_binds_turn_id() {
 
     let _bg = ops
         .submit_turn(
-            parent_id.as_str(),
-            SubmitTurnRequest {
-                target_session_id: handle.session_id.clone(),
-                user_prompt: "start turn".into(),
-                wait_for_result: false,
-                notify_parent_on_complete: None,
-                recycle_on_complete: false,
-                tool_call_id: None,
-            },
+            SubmitTurnRequest::for_child(parent_id.as_str(), &handle.session_id, "start turn")
+                .wait_for_result(false),
         )
         .await
         .unwrap();
@@ -239,8 +234,7 @@ async fn inject_message_during_active_turn_binds_turn_id() {
     );
 
     ops.inject_message(
-        parent_id.as_str(),
-        child_id.as_str(),
+        SessionAccess::new(parent_id.as_str(), child_id.as_str()),
         "mid-turn inject".into(),
     )
     .await
@@ -295,17 +289,11 @@ async fn submit_turn_sync_returns_llm_output() {
         .unwrap();
 
     let result = ops
-        .submit_turn(
+        .submit_turn(SubmitTurnRequest::for_child(
             parent_id.as_str(),
-            SubmitTurnRequest {
-                target_session_id: handle.session_id.clone(),
-                user_prompt: "say hello".into(),
-                wait_for_result: true,
-                notify_parent_on_complete: None,
-                recycle_on_complete: false,
-                tool_call_id: None,
-            },
-        )
+            &handle.session_id,
+            "say hello",
+        ))
         .await
         .unwrap();
 
@@ -352,15 +340,9 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
 
     let result = ops
         .submit_turn(
-            parent_id.as_str(),
-            SubmitTurnRequest {
-                target_session_id: handle.session_id.clone(),
-                user_prompt: "do async work".into(),
-                wait_for_result: false,
-                notify_parent_on_complete: Some("[done]".into()),
-                recycle_on_complete: false,
-                tool_call_id: None,
-            },
+            SubmitTurnRequest::for_child(parent_id.as_str(), &handle.session_id, "do async work")
+                .wait_for_result(false)
+                .notify_parent_on_complete(Some("[done]".into())),
         )
         .await
         .unwrap();
@@ -438,15 +420,13 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
 
     let result = ops
         .submit_turn(
-            parent_id.as_str(),
-            SubmitTurnRequest {
-                target_session_id: handle.session_id.clone(),
-                user_prompt: "work then recycle".into(),
-                wait_for_result: false,
-                notify_parent_on_complete: None,
-                recycle_on_complete: true,
-                tool_call_id: None,
-            },
+            SubmitTurnRequest::for_child(
+                parent_id.as_str(),
+                &handle.session_id,
+                "work then recycle",
+            )
+            .wait_for_result(false)
+            .recycle_on_complete(true),
         )
         .await
         .unwrap();
@@ -541,17 +521,11 @@ async fn parent_abort_stops_sync_child_and_recycles() {
     let child_target = handle.session_id.clone();
     let sync_turn = tokio::spawn(async move {
         ops_for_turn
-            .submit_turn(
+            .submit_turn(SubmitTurnRequest::for_child(
                 parent_for_turn.as_str(),
-                SubmitTurnRequest {
-                    target_session_id: child_target,
-                    user_prompt: "sync work".into(),
-                    wait_for_result: true,
-                    notify_parent_on_complete: None,
-                    recycle_on_complete: false,
-                    tool_call_id: None,
-                },
-            )
+                child_target,
+                "sync work",
+            ))
             .await
     });
 

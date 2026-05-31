@@ -212,6 +212,10 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             }
             model.phase = Phase::CallingTool;
         },
+        EventPayload::ToolApprovalRequested { .. } => {
+            model.phase = Phase::CallingTool;
+        },
+        EventPayload::ToolApprovalResolved { .. } => {},
         EventPayload::ToolCallCompleted {
             call_id,
             tool_name,

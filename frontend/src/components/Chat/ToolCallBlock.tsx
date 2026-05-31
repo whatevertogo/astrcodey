@@ -11,6 +11,7 @@ import {
   toolApprovalSummary,
   type ToolUiContext,
 } from '../../tool-ui'
+import { GateApprovalCard, readGateApproval } from '../../tool-ui/components/GateApprovalCard'
 import { chevronIcon, toolPanelPaddingX, toolPanelScrollViewport } from '../../lib/styles'
 import { RenderSpecViewer } from './RenderSpecViewer'
 import './tools/builtinRenderers'
@@ -91,7 +92,12 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
       (block.status === 'streaming' ? '等待输出...' : '(无输出)')
   )
 
-  const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx)
+  const gateApproval = readGateApproval(block.metadata)
+  const gatePending = gateApproval?.pending === true
+  const autoExpand =
+    toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
+
+  const displayStatus = gatePending ? '待审批' : statusLabel(block.status)
 
   return (
     <details
@@ -101,7 +107,10 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
     >
       <summary className="flex min-w-0 cursor-pointer list-none items-center gap-3 py-2 font-mono text-[13px] leading-relaxed text-text-secondary select-none hover:opacity-90 [&::-webkit-details-marker]:hidden">
         <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-0.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-          <StatusIndicatorDot status={block.status} />
+          <StatusIndicatorDot
+            status={block.status}
+            pendingApproval={gatePending}
+          />
           {block.name}
         </span>
         <span
@@ -110,8 +119,13 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
         >
           {summaryLine}
         </span>
-        <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-          {statusLabel(block.status)}
+        <span
+          className={cn(
+            'shrink-0 text-[11px] font-semibold uppercase tracking-wider',
+            gatePending ? 'text-warning' : 'text-text-muted'
+          )}
+        >
+          {displayStatus}
         </span>
         <span className={chevronIcon}>
           <Icon name="chevron-right" size={14} />
@@ -120,11 +134,21 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
       <div className="mt-1.5 min-w-0 overflow-hidden rounded-xl border border-border bg-code-surface shadow-soft">
         <div className={toolPanelScrollViewport}>
           <div className={cn(toolPanelPaddingX, 'py-3')}>
-            <ToolDetails
-              toolContext={context}
-              approvalUi={approvalUi}
-              renderer={renderer}
-            />
+            {gatePending && sessionId ? (
+              <GateApprovalCard
+                sessionId={sessionId}
+                callId={block.id}
+                toolName={block.name}
+                metadata={block.metadata}
+                args={args}
+              />
+            ) : (
+              <ToolDetails
+                toolContext={context}
+                approvalUi={approvalUi}
+                renderer={renderer}
+              />
+            )}
           </div>
         </div>
       </div>

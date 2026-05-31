@@ -34,6 +34,7 @@ use astrcode_extension_sdk::{
         StatusItemUpdatePayload, ToolHandler,
     },
     llm::LlmMessage,
+    permission::ApprovalMode,
     state,
     tool::{ToolResult, tool_metadata},
 };
@@ -196,6 +197,10 @@ struct ModePreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for ModePreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        if ctx.approval_mode == ApprovalMode::Yolo {
+            return Ok(PreToolUseResult::Allow);
+        }
+
         let base = require_session_base(&ctx.session_store_dir)?;
         let mode_root = store::mode_dir_from_base(&base);
         let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;

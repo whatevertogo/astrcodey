@@ -60,6 +60,11 @@ pub(crate) struct SharedTurnContext {
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
     /// 当前 turn 的扩展事件通道（`ExtensionEvents` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_tx: Option<TurnEventTx>,
+    pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
+    pub(crate) is_child_session: bool,
+    pub(crate) child_tool_policy: Option<astrcode_core::extension::ChildToolPolicy>,
+    pub(crate) permission_chain: std::sync::Arc<astrcode_core::permission::PermissionChain>,
+    pub(crate) approval_history: std::sync::Arc<crate::permission::ApprovalHistoryStore>,
 }
 
 impl SharedTurnContext {
@@ -71,6 +76,15 @@ impl SharedTurnContext {
             model_id: model.model_id.clone(),
             session_store_dir: None,
             turn_event_tx: None,
+            approval_mode: astrcode_core::permission::ApprovalMode::default(),
+            is_child_session: model.parent_session_id.is_some(),
+            child_tool_policy: None,
+            permission_chain: std::sync::Arc::new(astrcode_core::permission::PermissionChain::new(
+                vec![],
+            )),
+            approval_history: std::sync::Arc::new(
+                crate::permission::ApprovalHistoryStore::default(),
+            ),
         }
     }
 

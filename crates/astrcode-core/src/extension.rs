@@ -815,6 +815,11 @@ pub enum PreToolUseResult {
     Allow,
     Block { reason: String },
     ModifyInput { tool_input: serde_json::Value },
+    /// 请求用户审批后再执行（扩展 Gate Ask）。
+    Ask {
+        prompt: String,
+        rule_key: Option<String>,
+    },
 }
 
 /// PostToolUse 钩子结果。
@@ -894,6 +899,7 @@ pub struct PreToolUseContext {
     pub model: ModelSelection,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
+    pub approval_mode: crate::permission::ApprovalMode,
     pub available_tools: Vec<ToolDefinition>,
     /// 当前 turn 事件通道；宿主按扩展能力派生 [`extension_event_sink`]。
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,

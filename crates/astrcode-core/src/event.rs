@@ -263,6 +263,23 @@ pub enum EventPayload {
         delta: String,
     },
 
+    /// 工具执行需用户审批（Tool Gate 挂起）。
+    ToolApprovalRequested {
+        call_id: ToolCallId,
+        tool_name: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule_key: Option<String>,
+        source: crate::permission::ApprovalSource,
+        arguments: serde_json::Value,
+    },
+
+    /// 用户对挂起审批的决议。
+    ToolApprovalResolved {
+        call_id: ToolCallId,
+        decision: crate::permission::ApprovalDecision,
+    },
+
     /// 工具调用已完成。
     ToolCallCompleted {
         /// 工具调用唯一标识。

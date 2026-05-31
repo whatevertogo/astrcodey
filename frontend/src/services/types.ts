@@ -205,6 +205,11 @@ export type ConversationDelta =
   | { kind: 'agentSessionRemoved'; childSessionId: string }
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }
+  | {
+      kind: 'patchToolMetadata'
+      blockId: string
+      metadata: Record<string, unknown>
+    }
 
 // ── App State ──
 
@@ -235,6 +240,7 @@ export interface ConfigView {
   activeModel: string
   activeSmallProfile?: string
   activeSmallModel?: string
+  approvalMode: 'manual' | 'yolo'
   extensionStates: Record<string, boolean>
   profiles: ProfileView[]
   warning?: string

@@ -29,6 +29,14 @@ pub struct PromptRequest {
     pub text: String,
 }
 
+/// 工具审批决议请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolApprovalRequest {
+    pub call_id: String,
+    pub decision: astrcode_core::permission::ApprovalDecision,
+}
+
 /// prompt 提交结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
@@ -351,6 +359,11 @@ pub enum ConversationDeltaDto {
     },
     /// 扩展注册表发生变化，客户端应重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
+    /// 合并 toolCall block 的 metadata（如 Tool Gate 审批挂起）。
+    PatchToolMetadata {
+        block_id: String,
+        metadata: serde_json::Value,
+    },
 }
 
 /// HTTP 错误响应。
@@ -383,8 +396,15 @@ pub struct ConfigViewResponseDto {
     pub active_small_model: Option<String>,
     #[serde(default)]
     pub extension_states: std::collections::BTreeMap<String, bool>,
+    /// 工具审批模式：`manual` 或 `yolo`。
+    #[serde(default = "default_approval_mode")]
+    pub approval_mode: String,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
+}
+
+fn default_approval_mode() -> String {
+    "manual".to_string()
 }
 
 /// GET /api/extensions 响应中的单个扩展状态。
@@ -470,6 +490,8 @@ pub struct UpdateActiveSelectionRequest {
     pub active_small_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
+    /// 工具审批模式：`manual` 或 `yolo`。
+    pub approval_mode: String,
 }
 
 /// POST /api/config/active-selection 响应。

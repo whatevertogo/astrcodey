@@ -10,6 +10,7 @@ pub(crate) mod deferred_tools;
 pub(crate) mod llm_request_history;
 pub(crate) mod llm_stream;
 pub mod payload;
+pub(crate) mod permission;
 pub mod post_compact;
 pub mod session;
 pub mod session_runtime;

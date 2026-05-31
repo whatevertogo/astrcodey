@@ -14,7 +14,10 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError, Registrar,
         StopReason,
     },
-    tool::{CreateRootSessionRequest, SessionOperations, SubmitTurnRequest, SubmitTurnResult},
+    tool::{
+        CreateRootSessionRequest, SessionAccess, SessionOperations, SubmitTurnRequest,
+        SubmitTurnResult,
+    },
 };
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
@@ -130,7 +133,7 @@ impl Extension for TelegramChannelsExtension {
         ]
     }
 
-    fn register(&self, _reg: &mut Registrar) {}
+    fn register(&self, _: &mut Registrar) {}
 
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
         let config = Self::load_config(&ctx.config)?;
@@ -163,7 +166,7 @@ impl Extension for TelegramChannelsExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _: StopReason) -> Result<(), ExtensionError> {
         self.runtime.lock().take();
         Ok(())
     }
@@ -239,17 +242,7 @@ impl ChannelRuntime {
             .await?;
         let result = self
             .session_ops
-            .submit_turn(
-                &session_id,
-                SubmitTurnRequest {
-                    target_session_id: session_id.clone(),
-                    user_prompt: inbound.text,
-                    wait_for_result: true,
-                    notify_parent_on_complete: None,
-                    recycle_on_complete: false,
-                    tool_call_id: None,
-                },
-            )
+            .submit_turn(SubmitTurnRequest::for_session(session_id, inbound.text))
             .await;
 
         let reply = match result {
@@ -308,7 +301,7 @@ impl ChannelRuntime {
     async fn cached_session_alive(&self, session_id: &str) -> bool {
         matches!(
             self.session_ops
-                .query_session(session_id, session_id)
+                .query_session(SessionAccess::same(session_id))
                 .await,
             Ok(status) if status.alive
         )
@@ -701,9 +694,7 @@ fn resolve_env_token(raw_env_name: &str) -> Result<String, ExtensionError> {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::tool::{
-        CreateSessionRequest, SessionApiError, SessionHandle, SessionStatus,
-    };
+    use astrcode_extension_sdk::tool::{SessionApiError, SessionHandle, SessionStatus};
 
     use super::*;
 
@@ -717,20 +708,20 @@ mod tests {
     impl TelegramApi for FakeTelegram {
         async fn get_updates(
             &self,
-            _bot_token: &str,
-            _offset: Option<i64>,
-            _timeout_secs: u64,
-            _request_timeout_secs: u64,
+            _: &str,
+            _: Option<i64>,
+            _: u64,
+            _: u64,
         ) -> Result<Vec<TelegramUpdate>, TelegramError> {
             Ok(Vec::new())
         }
 
         async fn send_message(
             &self,
-            _bot_token: &str,
+            _: &str,
             chat_id: &str,
             text: &str,
-            _request_timeout_secs: u64,
+            _: u64,
         ) -> Result<(), TelegramError> {
             self.sent
                 .lock()
@@ -741,9 +732,9 @@ mod tests {
 
         async fn set_commands(
             &self,
-            _bot_token: &str,
+            _: &str,
             commands: Vec<TelegramBotCommand>,
-            _request_timeout_secs: u64,
+            _: u64,
         ) -> Result<(), TelegramError> {
             *self.commands.lock().unwrap() = commands;
             Ok(())
@@ -769,26 +760,8 @@ mod tests {
             })
         }
 
-        async fn create_session(
-            &self,
-            _parent_session_id: &str,
-            _request: CreateSessionRequest,
-        ) -> Result<SessionHandle, SessionApiError> {
-            Err(SessionApiError::internal_msg("unused in channels tests"))
-        }
-
-        async fn inject_message(
-            &self,
-            _caller_session_id: &str,
-            _target_session_id: &str,
-            _content: String,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
-        }
-
         async fn submit_turn(
             &self,
-            _caller_session_id: &str,
             request: SubmitTurnRequest,
         ) -> Result<SubmitTurnResult, SessionApiError> {
             self.submitted_prompts
@@ -802,8 +775,7 @@ mod tests {
 
         async fn query_session(
             &self,
-            _caller_session_id: &str,
-            _target_session_id: &str,
+            _access: SessionAccess<'_>,
         ) -> Result<SessionStatus, SessionApiError> {
             Ok(SessionStatus {
                 alive: true,
@@ -813,26 +785,39 @@ mod tests {
             })
         }
 
-        async fn recycle_session(
+        async fn create_session(
             &self,
-            _caller_session_id: &str,
-            _target_session_id: &str,
+            _parent_session_id: &str,
+            _request: astrcode_extension_sdk::tool::CreateSessionRequest,
+        ) -> Result<SessionHandle, SessionApiError> {
+            Err(SessionApiError::internal_msg("unused in channels tests"))
+        }
+
+        async fn inject_message(
+            &self,
+            _access: SessionAccess<'_>,
+            _content: String,
         ) -> Result<(), SessionApiError> {
             Ok(())
         }
 
-        async fn delete_session(
-            &self,
-            _caller_session_id: &str,
-            _target_session_id: &str,
-        ) -> Result<(), SessionApiError> {
+        async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
             Ok(())
         }
 
-        async fn restore_session(
+        async fn delete_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn restore_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn resolve_tool_approval(
             &self,
-            _caller_session_id: &str,
             _target_session_id: &str,
+            _call_id: &str,
+            _decision: astrcode_extension_sdk::permission::ApprovalDecision,
         ) -> Result<(), SessionApiError> {
             Ok(())
         }

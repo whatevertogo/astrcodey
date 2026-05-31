@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use astrcode_core::{
+    permission::ApprovalSource,
     tool::{ToolDefinition, ToolResult},
     tool_access::ResourceAccess,
 };
@@ -58,6 +59,12 @@ pub enum PreparedToolOutcome {
     Blocked(ToolResult),
     /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
     DuplicateSameStep,
+    /// 需用户审批后执行。
+    NeedsApproval {
+        prompt: String,
+        rule_key: Option<String>,
+        source: ApprovalSource,
+    },
 }
 
 #[derive(Clone)]

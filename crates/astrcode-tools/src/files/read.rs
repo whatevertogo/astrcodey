@@ -11,9 +11,9 @@ use serde::Deserialize;
 
 use super::shared::{
     DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, directory_result,
-    error_result_with_call_id, image_media_type, is_binary, not_found_result,
-    read_image_file_result, read_lines_segment, remember_file_observation_with_store, run_blocking,
-    slice_chars, tool_call_id,
+    error_result_with_call_id, image_media_type, is_binary, is_tool_result_artifact_path,
+    not_found_result, read_image_file_result, read_lines_segment,
+    remember_file_observation_with_store, run_blocking, slice_chars, tool_call_id,
 };
 
 const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
@@ -75,6 +75,13 @@ impl Tool for ReadFileTool {
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
+        if is_tool_result_artifact_path(&path) {
+            if let Some(result) =
+                read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
+            {
+                return Ok(result);
+            }
+        }
         if !path.exists() {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
@@ -232,8 +239,11 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "- Listing paths → `glob`\n",
             "- Repo-wide content search → `grep` first\n\n",
             "Tips:\n",
-            "- Known file path (or persisted tool-result path)\n",
-            "- Multiple files may be read together when helpful\n\n",
+            "- Known file path, or a persisted tool-result path under tool-results/\n",
+            "- Multiple files may be read together when helpful\n",
+            "- Persisted tool results (large prior outputs saved to tool-results/) are paginated: ",
+            "pass charOffset and maxChars (default 60000 for those paths); repeat with the next ",
+            "charOffset until hasMore is false\n\n",
             "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),
@@ -244,12 +254,12 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path, or a persisted tool-result path from a prior result. Supports text, code, images, and binary detection."
+                    "description": "File path, or a persisted tool-result path (contains tool-results/). Supports text, code, images, and binary detection."
                 },
                 "maxChars": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Default 20000 (60000 for persisted results). Use with charOffset to paginate large files."
+                    "description": "Default 20000 for normal files; 60000 for tool-results/ paths. Use with charOffset to paginate."
                 },
                 "charOffset": {
                     "type": "integer",
@@ -285,7 +295,7 @@ async fn read_persisted_tool_result_path(
     let char_offset = args.char_offset.unwrap_or(0);
     let max_chars = args
         .max_chars
-        .unwrap_or(DEFAULT_MAX_CHARS)
+        .unwrap_or(MAX_TOOL_RESULT_READ_CHARS)
         .min(MAX_TOOL_RESULT_READ_CHARS);
     let path = path.display().to_string();
     let slice = match reader

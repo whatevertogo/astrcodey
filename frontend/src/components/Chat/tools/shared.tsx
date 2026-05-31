@@ -5,9 +5,16 @@ import { toolCodePreviewBleed } from '../../../lib/styles'
 import { DiffCodeLines } from '../DiffCodeLines'
 import { previewText, type ToolCall } from './helpers'
 
-export function StatusIndicatorDot({ status }: { status: string }) {
-  const dotColor =
-    status === 'complete'
+export function StatusIndicatorDot({
+  status,
+  pendingApproval,
+}: {
+  status: string
+  pendingApproval?: boolean
+}) {
+  const dotColor = pendingApproval
+    ? 'bg-warning animate-pulse'
+    : status === 'complete'
       ? 'bg-success'
       : status === 'error'
         ? 'bg-danger'

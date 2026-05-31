@@ -76,6 +76,7 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
         },
         context: ContextSettings::default(),
         agent: astrcode_core::config::AgentSettings::default(),
+        permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
     Arc::new(SessionRuntimeServices::new(

@@ -243,9 +243,14 @@ export async function updateActiveSelection(
   activeProfile: string,
   activeModel: string,
   activeSmallProfile?: string,
-  activeSmallModel?: string
+  activeSmallModel?: string,
+  approvalMode: 'manual' | 'yolo' = 'manual'
 ): Promise<{ success: boolean; warning?: string }> {
-  const body: Record<string, unknown> = { activeProfile, activeModel }
+  const body: Record<string, unknown> = {
+    activeProfile,
+    activeModel,
+    approvalMode,
+  }
   if (activeSmallProfile) body.activeSmallProfile = activeSmallProfile
   if (activeSmallModel) body.activeSmallModel = activeSmallModel
   return decodeActiveSelectionResponse(
@@ -326,4 +331,32 @@ export async function submitToolUiRespond(
   }
 
   return (await response.json()) as { accepted: boolean }
+}
+
+export type ToolGateApprovalDecision =
+  | 'allow_once'
+  | 'deny_once'
+  | 'allow_always'
+  | 'deny_always'
+
+export async function submitToolGateApproval(
+  sessionId: string,
+  callId: string,
+  decision: ToolGateApprovalDecision
+): Promise<void> {
+  const response = await (
+    await resolveFetch()
+  )(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify({ callId, decision }),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(await formatRequestError(response, body))
+  }
 }

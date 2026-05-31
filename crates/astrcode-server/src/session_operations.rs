@@ -5,11 +5,18 @@ use std::sync::Arc;
 use astrcode_core::{
     event::EventPayload,
     tool::{
-        CreateRootSessionRequest, CreateSessionRequest, SessionApiError, SessionHandle,
-        SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
+        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
+        SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
     },
     types::{SessionId, new_message_id},
 };
+
+fn session_ids(access: SessionAccess<'_>) -> (SessionId, SessionId) {
+    (
+        SessionId::from(access.caller_session_id),
+        SessionId::from(access.target_session_id),
+    )
+}
 
 use crate::{
     child_session::{ChildCleanup, ChildSessionCoordinator},
@@ -58,12 +65,10 @@ impl SessionOperations for ServerSessionOperations {
 
     async fn inject_message(
         &self,
-        caller_session_id: &str,
-        target_session_id: &str,
+        access: SessionAccess<'_>,
         content: String,
     ) -> Result<(), SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(target_session_id);
+        let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -104,11 +109,9 @@ impl SessionOperations for ServerSessionOperations {
 
     async fn submit_turn(
         &self,
-        caller_session_id: &str,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResult, SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(request.target_session_id.as_str());
+        let (caller_sid, target_sid) = session_ids(request.access.as_access());
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -151,11 +154,9 @@ impl SessionOperations for ServerSessionOperations {
 
     async fn query_session(
         &self,
-        caller_session_id: &str,
-        target_session_id: &str,
+        access: SessionAccess<'_>,
     ) -> Result<SessionStatus, SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(target_session_id);
+        let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -181,13 +182,8 @@ impl SessionOperations for ServerSessionOperations {
         })
     }
 
-    async fn recycle_session(
-        &self,
-        caller_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<(), SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(target_session_id);
+    async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -200,13 +196,8 @@ impl SessionOperations for ServerSessionOperations {
         Ok(())
     }
 
-    async fn delete_session(
-        &self,
-        caller_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<(), SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(target_session_id);
+    async fn delete_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -224,13 +215,8 @@ impl SessionOperations for ServerSessionOperations {
         Ok(())
     }
 
-    async fn restore_session(
-        &self,
-        caller_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<(), SessionApiError> {
-        let caller_sid = SessionId::from(caller_session_id);
-        let target_sid = SessionId::from(target_session_id);
+    async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
@@ -242,5 +228,26 @@ impl SessionOperations for ServerSessionOperations {
             .map_err(SessionApiError::internal)?;
 
         Ok(())
+    }
+
+    async fn resolve_tool_approval(
+        &self,
+        target_session_id: &str,
+        call_id: &str,
+        decision: astrcode_core::permission::ApprovalDecision,
+    ) -> Result<(), SessionApiError> {
+        let target_sid = SessionId::from(target_session_id);
+        let session = self
+            .session_manager
+            .open(target_sid.clone())
+            .await
+            .map_err(|_| SessionApiError::NotFound("session not found".into()))?;
+        session
+            .runtime()
+            .resolve_tool_approval(
+                &astrcode_core::types::ToolCallId::from(call_id),
+                decision,
+            )
+            .map_err(SessionApiError::internal_msg)
     }
 }

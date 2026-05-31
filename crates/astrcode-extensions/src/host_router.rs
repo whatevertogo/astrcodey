@@ -6,7 +6,10 @@ use astrcode_core::{
     event::EventPayload,
     extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHostServices},
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
-    tool::{CreateSessionRequest, SessionOperations, SubmitTurnRequest, SubmitTurnResult},
+    tool::{
+        CreateSessionRequest, SessionAccessPair, SessionOperations,
+        SubmitTurnRequest, SubmitTurnResult,
+    },
 };
 use astrcode_extension_sdk::{
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
@@ -362,15 +365,16 @@ impl HostRouter {
             )
         })?;
         let reader = Arc::clone(reader);
-        let target = target_session_id.to_string();
-        let caller = caller_session_id.to_string();
+        let access = SessionAccessPair::new(caller_session_id, target_session_id);
+        let caller_owned = access.caller_session_id.clone();
+        let target_owned = access.target_session_id.clone();
         if let Some(ops) = ctx.session_ops.as_ref() {
             let ops = Arc::clone(ops);
             block_on_async(async move {
-                ops.query_session(&caller, &target)
+                ops.query_session(access.as_access())
                     .await
                     .map_err(|e| ErrorPayload::new("permission_denied", e.to_string()))?;
-                let sid = astrcode_core::types::SessionId::new(&target);
+                let sid = astrcode_core::types::SessionId::new(&access.target_session_id);
                 reader
                     .replay_events(&sid)
                     .await
@@ -380,13 +384,13 @@ impl HostRouter {
                     })
                     .map_err(|e| ErrorPayload::new("read_failed", e.to_string()))
             })
-        } else if caller != target {
+        } else if caller_owned != target_owned {
             Err(ErrorPayload::new(
                 "permission_denied",
                 "session_history read is limited to the caller session without session_control",
             ))
         } else {
-            let sid = astrcode_core::types::SessionId::new(&target);
+            let sid = astrcode_core::types::SessionId::new(&target_owned);
             block_on_async(async move {
                 reader
                     .replay_events(&sid)
@@ -456,29 +460,30 @@ impl HostRouter {
                 "session_ops not available in context",
             )
         })?;
-        let req = SubmitTurnRequest {
-            target_session_id: input["target_session_id"]
-                .as_str()
-                .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?
-                .to_string(),
-            user_prompt: input["user_prompt"]
-                .as_str()
-                .ok_or_else(|| ErrorPayload::new("invalid_input", "user_prompt required"))?
-                .to_string(),
-            wait_for_result,
-            notify_parent_on_complete: input["notify_parent_on_complete"]
-                .as_str()
-                .map(str::to_string),
-            recycle_on_complete: input["recycle_on_complete"].as_bool().unwrap_or(false),
-            tool_call_id: input["tool_call_id"].as_str().map(str::to_string),
-        };
         let caller = ctx
             .session_id
             .clone()
             .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
+        let target_session_id = input["target_session_id"]
+            .as_str()
+            .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?
+            .to_string();
+        let user_prompt = input["user_prompt"]
+            .as_str()
+            .ok_or_else(|| ErrorPayload::new("invalid_input", "user_prompt required"))?
+            .to_string();
+        let req = SubmitTurnRequest::for_child(caller, target_session_id, user_prompt)
+            .wait_for_result(wait_for_result)
+            .notify_parent_on_complete(
+                input["notify_parent_on_complete"]
+                    .as_str()
+                    .map(str::to_string),
+            )
+            .recycle_on_complete(input["recycle_on_complete"].as_bool().unwrap_or(false))
+            .tool_call_id(input["tool_call_id"].as_str().map(str::to_string));
         let ops = Arc::clone(ops);
         block_on_async(async move {
-            ops.submit_turn(&caller, req)
+            ops.submit_turn(req)
                 .await
                 .map(submit_turn_result_json)
                 .map_err(|e| ErrorPayload::new("session_error", e.to_string()))
@@ -500,13 +505,14 @@ impl HostRouter {
             .as_str()
             .ok_or_else(|| ErrorPayload::new("invalid_input", "session_id required"))?;
         let ops = Arc::clone(ops);
-        let caller = ctx
-            .session_id
-            .clone()
-            .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
-        let target = session_id.to_string();
+        let access = SessionAccessPair::new(
+            ctx.session_id
+                .clone()
+                .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?,
+            session_id,
+        );
         block_on_async(async move {
-            ops.recycle_session(&caller, &target)
+            ops.recycle_session(access.as_access())
                 .await
                 .map(|()| json!({ "ok": true }))
                 .map_err(|e| ErrorPayload::new("session_error", e.to_string()))

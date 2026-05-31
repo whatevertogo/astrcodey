@@ -65,6 +65,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
         },
         context: ContextSettings::default(),
         agent: AgentSettings::default(),
+        permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
     Arc::new(SessionRuntimeServices::new(

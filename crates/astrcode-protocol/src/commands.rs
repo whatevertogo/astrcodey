@@ -137,6 +137,12 @@ pub enum ClientCommand {
         request_id: String,
         value: UiResponseValue,
     },
+
+    /// 解析挂起的工具审批（Tool Gate）。
+    ResolveToolApproval {
+        call_id: String,
+        decision: astrcode_core::permission::ApprovalDecision,
+    },
 }
 
 /// 提示中附带的文件/图片附件。

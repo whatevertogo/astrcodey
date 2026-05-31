@@ -245,6 +245,7 @@ mod tests {
             },
             context: ContextSettings::default(),
             agent: astrcode_core::config::AgentSettings::default(),
+            permissions: Default::default(),
             extensions: ExtensionSettings::default(),
         };
         Arc::new(SessionRuntimeServices::new(
@@ -436,6 +437,7 @@ mod tests {
             model: shared.model_selection(),
             tool_name: "any".into(),
             tool_input: serde_json::json!({}),
+            approval_mode: shared.approval_mode,
             available_tools: vec![],
             event_tx: shared.turn_event_tx.clone(),
             extension_event_sink: None,

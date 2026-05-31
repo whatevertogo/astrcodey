@@ -209,5 +209,28 @@ export function applyDeltaToState(
       set({ transientHint: '扩展已更新' })
       void get().refreshExtensionData()
       break
+
+    case 'patchToolMetadata': {
+      const { blockId, metadata } = delta
+      set((current) => {
+        const idx = current.blocks.findIndex((b) => b.id === blockId)
+        if (idx === -1) return {}
+        const block = current.blocks[idx]
+        if (block.kind !== 'toolCall') return {}
+        const merged = {
+          ...(block.metadata ?? {}),
+          ...metadata,
+          toolGateApproval: {
+            ...((block.metadata?.toolGateApproval as Record<string, unknown> | undefined) ??
+              {}),
+            ...((metadata.toolGateApproval as Record<string, unknown> | undefined) ?? {}),
+          },
+        }
+        const next = [...current.blocks]
+        next[idx] = { ...block, metadata: merged }
+        return { blocks: next }
+      })
+      break
+    }
   }
 }

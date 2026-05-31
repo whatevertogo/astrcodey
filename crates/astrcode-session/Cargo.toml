@@ -20,6 +20,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
+globset = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

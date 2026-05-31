@@ -155,6 +155,20 @@ impl CommandHandler {
             ClientCommand::UiResponse { request_id, value } => {
                 self.handle_ui_response(request_id, value).await?;
             },
+
+            ClientCommand::ResolveToolApproval { call_id, decision } => {
+                let sid = self.ensure_session().await?;
+                let Some(ops) = self.runtime.capabilities().session_ops() else {
+                    self.send_error(-32603, "session operations unavailable");
+                    return Ok(());
+                };
+                if let Err(error) = ops
+                    .resolve_tool_approval(&sid.into_string(), &call_id, decision)
+                    .await
+                {
+                    self.send_error(40400, &error.to_string());
+                }
+            },
         }
         Ok(())
     }

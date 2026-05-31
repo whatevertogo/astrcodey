@@ -267,46 +267,39 @@ pub trait SessionOperations: Send + Sync {
     /// 向目标 session 注入一条 UserMessage。
     async fn inject_message(
         &self,
-        caller_session_id: &str,
-        target_session_id: &str,
+        access: SessionAccess<'_>,
         content: String,
     ) -> Result<(), SessionApiError>;
 
     /// 向目标 session 提交一个 turn。
     async fn submit_turn(
         &self,
-        caller_session_id: &str,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResult, SessionApiError>;
 
     /// 查询目标 session 状态。
     async fn query_session(
         &self,
-        caller_session_id: &str,
-        target_session_id: &str,
+        access: SessionAccess<'_>,
     ) -> Result<SessionStatus, SessionApiError>;
 
     /// 回收目标 session 到 .recycled/ 目录（默认的清理方式）。
     ///
     /// 数据保留用于调试/审计，可通过 `restore_session` 恢复。
-    async fn recycle_session(
-        &self,
-        caller_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<(), SessionApiError>;
+    async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError>;
 
     /// 永久删除目标 session 及其所有数据。
-    async fn delete_session(
-        &self,
-        caller_session_id: &str,
-        target_session_id: &str,
-    ) -> Result<(), SessionApiError>;
+    async fn delete_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError>;
 
     /// 从 .recycled/ 恢复一个已回收的 session。
-    async fn restore_session(
+    async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError>;
+
+    /// 解析目标 session 上挂起的工具审批。
+    async fn resolve_tool_approval(
         &self,
-        caller_session_id: &str,
         target_session_id: &str,
+        call_id: &str,
+        decision: crate::permission::ApprovalDecision,
     ) -> Result<(), SessionApiError>;
 }
 
@@ -346,11 +339,65 @@ pub struct SessionHandle {
     pub session_id: String,
 }
 
+/// 跨 session 操作的调用方与目标（借用视图，用于 trait 方法参数）。
+///
+/// `caller` 须与 `target` 相同，或是 `target` 在 session 树中的祖先。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionAccess<'a> {
+    pub caller_session_id: &'a str,
+    pub target_session_id: &'a str,
+}
+
+impl<'a> SessionAccess<'a> {
+    pub const fn new(caller_session_id: &'a str, target_session_id: &'a str) -> Self {
+        Self {
+            caller_session_id,
+            target_session_id,
+        }
+    }
+
+    /// 在同一 session 上操作（调用方即目标）。
+    pub const fn same(session_id: &'a str) -> Self {
+        Self::new(session_id, session_id)
+    }
+}
+
+/// 跨 session 操作的调用方与目标（拥有所有权，用于请求 DTO）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAccessPair {
+    pub caller_session_id: String,
+    pub target_session_id: String,
+}
+
+impl SessionAccessPair {
+    pub fn new(caller_session_id: impl Into<String>, target_session_id: impl Into<String>) -> Self {
+        Self {
+            caller_session_id: caller_session_id.into(),
+            target_session_id: target_session_id.into(),
+        }
+    }
+
+    /// 在同一 session 上操作（调用方即目标）。
+    pub fn same(session_id: impl Into<String>) -> Self {
+        let session_id = session_id.into();
+        Self {
+            caller_session_id: session_id.clone(),
+            target_session_id: session_id,
+        }
+    }
+
+    pub fn as_access(&self) -> SessionAccess<'_> {
+        SessionAccess::new(
+            self.caller_session_id.as_str(),
+            self.target_session_id.as_str(),
+        )
+    }
+}
+
 /// 提交 turn 请求。
 #[derive(Debug, Clone)]
 pub struct SubmitTurnRequest {
-    /// 目标 session ID。
-    pub target_session_id: String,
+    pub access: SessionAccessPair,
     /// 用户提示词。
     pub user_prompt: String,
     /// 是否同步阻塞等待 turn 完成。
@@ -361,6 +408,56 @@ pub struct SubmitTurnRequest {
     pub recycle_on_complete: bool,
     /// 触发此次 turn 的工具调用 ID。
     pub tool_call_id: Option<String>,
+}
+
+impl SubmitTurnRequest {
+    fn with_access(access: SessionAccessPair, user_prompt: impl Into<String>) -> Self {
+        Self {
+            access,
+            user_prompt: user_prompt.into(),
+            wait_for_result: true,
+            notify_parent_on_complete: None,
+            recycle_on_complete: false,
+            tool_call_id: None,
+        }
+    }
+
+    /// 在同一 session 上提交 turn（例如外部通道 → 顶层会话）。
+    pub fn for_session(session_id: impl Into<String>, user_prompt: impl Into<String>) -> Self {
+        Self::with_access(SessionAccessPair::same(session_id), user_prompt)
+    }
+
+    /// 父 session 向子 session 提交 turn。
+    pub fn for_child(
+        caller_session_id: impl Into<String>,
+        child_session_id: impl Into<String>,
+        user_prompt: impl Into<String>,
+    ) -> Self {
+        Self::with_access(
+            SessionAccessPair::new(caller_session_id, child_session_id),
+            user_prompt,
+        )
+    }
+
+    pub fn wait_for_result(mut self, wait_for_result: bool) -> Self {
+        self.wait_for_result = wait_for_result;
+        self
+    }
+
+    pub fn notify_parent_on_complete(mut self, message: Option<String>) -> Self {
+        self.notify_parent_on_complete = message;
+        self
+    }
+
+    pub fn recycle_on_complete(mut self, recycle_on_complete: bool) -> Self {
+        self.recycle_on_complete = recycle_on_complete;
+        self
+    }
+
+    pub fn tool_call_id(mut self, tool_call_id: Option<String>) -> Self {
+        self.tool_call_id = tool_call_id;
+        self
+    }
 }
 
 /// 提交 turn 结果。

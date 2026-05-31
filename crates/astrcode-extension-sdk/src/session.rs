@@ -4,6 +4,6 @@
 //! 方便插件侧使用。
 
 pub use crate::tool::{
-    CreateSessionRequest, SessionApiError, SessionHandle, SessionOperations, SessionStatus,
-    SubmitTurnRequest, SubmitTurnResult,
+    CreateSessionRequest, SessionAccess, SessionAccessPair, SessionApiError, SessionHandle,
+    SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
 };

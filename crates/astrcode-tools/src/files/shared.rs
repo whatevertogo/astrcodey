@@ -19,6 +19,12 @@ pub(super) const MAX_INLINE_IMAGE_BASE64_BYTES: u64 = 1024 * 1024;
 /// 未指定行分页时允许全量读入的最大字节数，超出需使用 offset/limit。
 pub(super) const MAX_UNPAGINATED_READ_BYTES: u64 = 10 * 1024 * 1024;
 
+/// 路径是否指向 session 的 tool-results artifact 文件。
+pub(super) fn is_tool_result_artifact_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str().to_str() == Some("tool-results"))
+}
+
 /// 在 Tokio worker 上运行阻塞 I/O，避免拖慢运行时。
 pub(crate) async fn run_blocking<F, T>(f: F) -> Result<T, ToolError>
 where
@@ -291,11 +297,25 @@ pub(super) fn read_image_file_result(
 ///
 /// On failure the returned `PathBuf` is the escaped absolute path (for metadata).
 pub(super) fn resolve_sandboxed_path(working_dir: &Path, raw: &Path) -> Result<PathBuf, PathBuf> {
+    match check_sandbox(working_dir, raw) {
+        SandboxCheck::WithinCwd(path) => Ok(path),
+        SandboxCheck::OutsideCwd(path) => Err(path),
+    }
+}
+
+/// Sandbox path resolution result for permission chain integration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SandboxCheck {
+    WithinCwd(PathBuf),
+    OutsideCwd(PathBuf),
+}
+
+pub(super) fn check_sandbox(working_dir: &Path, raw: &Path) -> SandboxCheck {
     let path = resolve_path(working_dir, raw);
     if is_path_within(&path, working_dir) {
-        Ok(path)
+        SandboxCheck::WithinCwd(path)
     } else {
-        Err(path)
+        SandboxCheck::OutsideCwd(path)
     }
 }
 

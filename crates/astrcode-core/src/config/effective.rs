@@ -15,6 +15,8 @@ pub struct EffectiveConfig {
     pub context: ContextSettings,
     /// Agent 行为限制（嵌套深度、并行工具调用数等）。
     pub agent: AgentSettings,
+    /// 用户权限规则（Tool Gate DSL）。
+    pub permissions: crate::permission::PermissionsSection,
     /// 扩展加载设置。
     pub extensions: ExtensionSettings,
 }
@@ -124,6 +126,8 @@ pub struct AgentSettings {
     pub tool_max_parallel_calls: usize,
     /// Shell 工具默认超时时间（秒）。LLM 可通过参数覆盖，上限 600。
     pub shell_timeout_secs: u64,
+    /// 工具审批模式。
+    pub approval_mode: crate::permission::ApprovalMode,
 }
 
 impl Default for AgentSettings {
@@ -132,6 +136,7 @@ impl Default for AgentSettings {
             max_depth: super::defaults::DEFAULT_AGENT_MAX_DEPTH,
             tool_max_parallel_calls: super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS,
             shell_timeout_secs: super::defaults::DEFAULT_SHELL_TIMEOUT_SECS,
+            approval_mode: crate::permission::ApprovalMode::default(),
         }
     }
 }
