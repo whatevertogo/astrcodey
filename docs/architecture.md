@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~85.5k 行（Rust ~78.6k + TypeScript ~6.9k），`crates/` 下 22 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~88.2k 行（Rust ~79.5k + TypeScript ~8.6k），`crates/` 下 23 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -238,7 +238,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode / Memory / Channels / Web Tools）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
 
 ---
 

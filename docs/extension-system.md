@@ -42,7 +42,18 @@ E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 
 `ExtensionCapability` 控制宿主注入的敏感能力（`session_control`、`workspace_read` 等）。
 
----
+| 扩展 ID | Crate | 默认 | 说明 |
+|---------|-------|------|------|
+| `astrcode-agent-tools` | `astrcode-extension-agent-tools` | 启用 | 子 Agent 委派与发现 |
+| `astrcode-mcp` | `astrcode-extension-mcp` | 启用 | MCP 客户端（stdio/HTTP） |
+| `astrcode-skill` | `astrcode-extension-skill` | 启用 | 斜杠命令 Skill 发现与调度 |
+| `astrcode-todo-tool` | `astrcode-extension-todo-tool` | 启用 | Todo 进度追踪工具 |
+| `astrcode-mode` | `astrcode-extension-mode` | 启用 | Code / Plan 模式切换 |
+| `astrcode.memory` | `astrcode-extension-memory` | **关闭** | 项目级 Markdown 记忆 |
+| `astrcode-channels` | `astrcode-extension-channels` | **关闭** | Telegram 通道桥接 |
+| `astrcode-web-tools` | `astrcode-extension-web-tools` | 启用 | `web-search` / `fetch-url` 内置 Web 工具 |
+
+通过 `config.json` 的 `extensionStates` 覆盖默认开关。配置示例见 [configuration.md](configuration.md#web-tools-extension)。
 
 ## 4. 磁盘 s5r 扩展
 

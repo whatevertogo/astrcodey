@@ -1,41 +1,90 @@
 # AstrCode CLI
 
-AI-powered coding assistant CLI — 你的智能编程助手。
+**English | [中文](#中文)**
 
-## 安装
+AI-powered coding assistant CLI — your intelligent coding companion.
+
+## Installation
 
 ```bash
-npm install -g astrcode
+npm i @whatevertogo/astrcode
 ```
 
-## 支持平台
+Or install globally:
+
+```bash
+npm i -g @whatevertogo/astrcode
+```
+
+## Supported Platforms
 
 - Linux (x64, ARM64)
 - macOS (x64, ARM64 / Apple Silicon)
 - Windows (x64, ARM64)
 
-## 快速开始
+## Quick Start
 
-安装后，在终端运行：
+After installation, run in your terminal:
 
 ```bash
 astrcode
 ```
 
-## 功能特性
+Before the first run, configure an LLM provider in `~/.astrcode/config.json`. See the [Configuration Guide](https://github.com/whatevertogo/astrcode/blob/main/docs/configuration.md).
 
-- 🤖 **AI 驱动**：支持多 Provider（Anthropic、OpenAI 兼容、Google GenAI）
-- 📝 **智能编辑**：read、write、edit、patch 等结构化工具
-- 🔍 **代码搜索**：find、grep 快速定位代码
-- 🖥️ **多种前端**：TUI、Web、Desktop GUI
-- 🔌 **扩展系统**：支持插件、MCP、Skills
-- 📦 **会话管理**：Event Sourcing 架构，支持 fork、compact
+## Features
 
-## 更多信息
+- **Multi-provider AI**: Anthropic, OpenAI-compatible, Google GenAI
+- **Structured editing**: read, write, edit, patch tools
+- **Code search**: glob, grep
+- **Web tools**: built-in `web-search` and `fetch-url` (DuckDuckGo default; Brave/Serper optional)
+- **Multiple frontends**: TUI, Web, Desktop GUI (Tauri)
+- **Extension system**: plugins, MCP, Skills, disk s5r extensions
+- **Session management**: event-sourcing architecture with fork and compact
+
+## More Information
 
 - GitHub: https://github.com/whatevertogo/astrcode
-- 文档: https://github.com/whatevertogo/astrcode/tree/main/docs
+- Documentation: https://github.com/whatevertogo/astrcode/tree/main/docs
+- NPM: https://www.npmjs.com/package/@whatevertogo/astrcode
 
 ## License
 
 AGPL-3.0
+
+---
+
+## 中文
+
+AI 编程助手 CLI — 你的智能编程助手。
+
+### 安装
+
+```bash
+npm i @whatevertogo/astrcode
+```
+
+### 快速开始
+
+安装后在终端运行：
+
+```bash
+astrcode
+```
+
+首次运行前请在 `~/.astrcode/config.json` 中配置 LLM Provider，详见[配置指南](https://github.com/whatevertogo/astrcode/blob/main/docs/configuration.md)。
+
+### 功能特性
+
+- **多 Provider AI**：Anthropic、OpenAI 兼容、Google GenAI
+- **智能编辑**：read、write、edit、patch 等结构化工具
+- **代码搜索**：glob、grep 快速定位代码
+- **Web 工具**：内置 `web-search` 与 `fetch-url`（默认 DuckDuckGo；可选 Brave/Serper）
+- **多种前端**：TUI、Web、Desktop GUI
+- **扩展系统**：插件、MCP、Skills、s5r 磁盘扩展
+- **会话管理**：Event Sourcing 架构，支持 fork、compact
+
+### 更多信息
+
+- GitHub: https://github.com/whatevertogo/astrcode
+- 文档: https://github.com/whatevertogo/astrcode/tree/main/docs

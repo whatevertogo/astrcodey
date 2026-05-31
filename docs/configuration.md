@@ -238,12 +238,44 @@ You can configure individual extensions via the top-level `extensions` field. Th
     },
     "astrcode.mode": {
       "defaultMode": "code"
+    },
+    "astrcode-web-tools": {
+      "search": {
+        "provider": "duckduckgo",
+        "braveApiKeyEnv": "BRAVE_API_KEY",
+        "serperApiKeyEnv": "SERPER_API_KEY",
+        "defaultMaxResults": 5,
+        "requestTimeoutSecs": 30
+      },
+      "fetch": {
+        "requestTimeoutSecs": 60,
+        "maxContentBytes": 10485760,
+        "maxOutputChars": 100000,
+        "cacheTtlSecs": 900
+      }
     }
   }
 }
 ```
 
 Each extension receives its configuration via `ExtensionCtx::config` during `start()` and `on_config_changed()`.
+
+### Web Tools Extension
+
+The `astrcode-web-tools` extension registers two built-in tools:
+
+| Tool | Description |
+|------|-------------|
+| `web-search` | Search the public web. Default provider is DuckDuckGo (no API key). Set `search.provider` to `brave` or `serper` and configure the corresponding API key. |
+| `fetch-url` | Fetch and extract readable content from a public URL. Blocks localhost and private-network addresses (SSRF guard). Results are cached with configurable TTL and size limits. |
+
+Search providers:
+
+| `search.provider` | API key field |
+|---|---|
+| `duckduckgo` (default) | None required |
+| `brave` | `search.braveApiKey` or `search.braveApiKeyEnv` |
+| `serper` | `search.serperApiKey` or `search.serperApiKeyEnv` |
 
 ### Hot Reload
 
