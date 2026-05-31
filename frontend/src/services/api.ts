@@ -186,6 +186,23 @@ export async function listCommands(
   )
 }
 
+/** 执行扩展斜杠命令（与 CLI `ExecuteExtensionCommand` 对齐，不受 turn 忙碌影响）。 */
+export async function executeExtensionCommand(
+  sessionId: string,
+  command: string,
+  argumentsText = ''
+): Promise<PromptSubmitResponse> {
+  return decodePromptSubmitResponse(
+    await request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/commands/execute`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ command, arguments: argumentsText }),
+      }
+    )
+  )
+}
+
 export async function abortSession(sessionId: string): Promise<void> {
   await request(`/api/sessions/${encodeURIComponent(sessionId)}/abort`, {
     method: 'POST',
@@ -301,7 +318,7 @@ export async function setExtensionEnabled(
   )
 }
 
-/** Tool Approval UI 提交（如 askUser 问卷）。后端 command 待接。 */
+/** Tool Approval UI 提交（如 askUser 问卷）。 */
 export async function submitToolUiRespond(
   sessionId: string,
   callId: string,

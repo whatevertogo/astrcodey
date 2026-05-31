@@ -228,7 +228,8 @@ async fn read_file_reads_existing_tool_result_file_on_disk() {
         .await
         .expect("read should route through artifact reader");
 
-    assert_eq!(result.content, "cde");
+    assert!(result.content.starts_with("cde"));
+    assert!(result.content.contains("charOffset=5"));
     assert_eq!(
         result.metadata["source"],
         serde_json::json!("toolResultArtifact")
@@ -265,7 +266,8 @@ async fn read_file_reads_persisted_tool_result_path() {
         .expect("read should read persisted result");
 
     assert_eq!(result.call_id, "read-result");
-    assert_eq!(result.content, "cde");
+    assert!(result.content.starts_with("cde"));
+    assert!(result.content.contains("charOffset=5"));
     assert_eq!(result.metadata["path"], serde_json::json!(artifact_path));
     assert_eq!(
         result.metadata["source"],
@@ -374,6 +376,34 @@ async fn edit_file_applies_multiple_edits_atomically() {
     assert_eq!(
         std::fs::read_to_string(&file).expect("updated file should be readable"),
         "one\nbeta\nthree\n"
+    );
+}
+
+#[tokio::test]
+async fn edit_file_matches_source_literal_escape_sequences() {
+    let temp = unique_temp_dir("edit-source-escapes");
+    let file = temp.path().join("sample.rs");
+    std::fs::write(&file, "const FOO: &str = \"line1\\nline2\";\n").expect("seed file");
+    let tool = EditFileTool {
+        working_dir: temp.path().to_path_buf(),
+    };
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": "sample.rs",
+                "oldStr": "line1\nline2",
+                "newStr": "line1\nline3"
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("edit should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("updated file should be readable"),
+        "const FOO: &str = \"line1\\nline3\";\n"
     );
 }
 

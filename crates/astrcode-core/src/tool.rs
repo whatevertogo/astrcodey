@@ -301,6 +301,14 @@ pub trait SessionOperations: Send + Sync {
         call_id: &str,
         decision: crate::permission::ApprovalDecision,
     ) -> Result<(), SessionApiError>;
+
+    /// 提交 Tool Approval UI 的用户回答（如 askUser 问卷）。
+    async fn resolve_tool_ui_response(
+        &self,
+        target_session_id: &str,
+        call_id: &str,
+        answers: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SessionApiError>;
 }
 
 /// 创建顶层会话请求。

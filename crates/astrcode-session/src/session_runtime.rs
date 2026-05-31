@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, permission::ApprovalDecision,
@@ -20,6 +24,15 @@ pub enum ToolApprovalResolveError {
     #[error("no pending approval for call_id {call_id}")]
     NotPending { call_id: ToolCallId },
     #[error("approval receiver dropped for call_id {call_id}")]
+    ReceiverDropped { call_id: ToolCallId },
+}
+
+/// 解析挂起 Tool UI 交互（如 askUser 问卷）时的错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ToolUiResponseResolveError {
+    #[error("no pending tool UI response for call_id {call_id}")]
+    NotPending { call_id: ToolCallId },
+    #[error("tool UI response receiver dropped for call_id {call_id}")]
     ReceiverDropped { call_id: ToolCallId },
 }
 
@@ -91,6 +104,9 @@ pub struct SessionRuntimeState {
     approval_history: Arc<ApprovalHistoryStore>,
     /// 挂起中的工具审批（call_id → oneshot sender）。
     pending_approvals: Mutex<HashMap<ToolCallId, oneshot::Sender<ApprovalDecision>>>,
+    /// 挂起中的 Tool UI 交互（call_id → 问卷答案 sender）。
+    pending_tool_ui_responses:
+        Mutex<HashMap<ToolCallId, oneshot::Sender<BTreeMap<String, String>>>>,
 }
 
 impl SessionRuntimeState {
@@ -122,6 +138,7 @@ impl SessionRuntimeState {
             event_out,
             approval_history: Arc::new(ApprovalHistoryStore::default()),
             pending_approvals: Mutex::new(HashMap::new()),
+            pending_tool_ui_responses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -252,6 +269,39 @@ impl SessionRuntimeState {
 
     pub fn cancel_pending_approvals(&self) {
         self.pending_approvals.lock().clear();
+    }
+
+    pub fn register_pending_tool_ui_response(
+        &self,
+        call_id: ToolCallId,
+        sender: oneshot::Sender<BTreeMap<String, String>>,
+    ) {
+        self.pending_tool_ui_responses
+            .lock()
+            .insert(call_id, sender);
+    }
+
+    pub fn resolve_tool_ui_response(
+        &self,
+        call_id: &ToolCallId,
+        answers: BTreeMap<String, String>,
+    ) -> Result<(), ToolUiResponseResolveError> {
+        let sender = self
+            .pending_tool_ui_responses
+            .lock()
+            .remove(call_id)
+            .ok_or(ToolUiResponseResolveError::NotPending {
+                call_id: call_id.clone(),
+            })?;
+        sender
+            .send(answers)
+            .map_err(|_| ToolUiResponseResolveError::ReceiverDropped {
+                call_id: call_id.clone(),
+            })
+    }
+
+    pub fn cancel_pending_tool_ui_responses(&self) {
+        self.pending_tool_ui_responses.lock().clear();
     }
 }
 

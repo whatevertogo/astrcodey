@@ -254,4 +254,31 @@ impl SessionOperations for ServerSessionOperations {
                 } => SessionApiError::SessionBusy(error.to_string()),
             })
     }
+
+    async fn resolve_tool_ui_response(
+        &self,
+        target_session_id: &str,
+        call_id: &str,
+        answers: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SessionApiError> {
+        let target_sid = SessionId::from(target_session_id);
+        let session = self
+            .session_manager
+            .open(target_sid.clone())
+            .await
+            .map_err(|_| SessionApiError::NotFound("session not found".into()))?;
+        session
+            .runtime()
+            .resolve_tool_ui_response(&astrcode_core::types::ToolCallId::from(call_id), answers)
+            .map_err(|error| {
+                match error {
+                astrcode_session::session_runtime::ToolUiResponseResolveError::NotPending {
+                    ..
+                } => SessionApiError::NotFound(error.to_string()),
+                astrcode_session::session_runtime::ToolUiResponseResolveError::ReceiverDropped {
+                    ..
+                } => SessionApiError::SessionBusy(error.to_string()),
+            }
+            })
+    }
 }

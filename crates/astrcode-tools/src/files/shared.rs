@@ -347,20 +347,61 @@ pub(super) fn is_binary(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 按字符偏移和最大字符数截取字符串，超出时追加截断标记。
+/// LLM 历史只保留 tool result 的 `content`；续读提示必须写进正文。
+pub(super) fn char_pagination_footer(next_char_offset: usize) -> String {
+    format!(
+        "\n\n[Output truncated. Continue with read using charOffset={next_char_offset} until \
+         hasMore is false.]"
+    )
+}
+
+/// 按字符偏移和最大字符数截取字符串，超出时追加续读提示。
 pub(super) fn slice_chars(s: &str, char_offset: usize, max_chars: usize) -> TextSlice {
     let mut iter = s.chars().skip(char_offset);
-    let mut out: String = iter.by_ref().take(max_chars).collect();
+    let out: String = iter.by_ref().take(max_chars).collect();
     let returned_chars = out.chars().count();
     let has_more = iter.next().is_some();
-    if has_more {
-        out.push_str("\n... [truncated]");
-    }
+    let next_char_offset = has_more.then_some(char_offset.saturating_add(returned_chars));
+    let text = if let Some(next) = next_char_offset {
+        format!("{out}{}", char_pagination_footer(next))
+    } else {
+        out
+    };
     TextSlice {
-        text: out,
+        text,
         returned_chars,
-        next_char_offset: has_more.then_some(char_offset.saturating_add(returned_chars)),
+        next_char_offset,
         has_more,
+    }
+}
+
+/// 将 JSON 解码后的控制字符转为源码字符串字面量中的转义序列（如 `\n` 两字符）。
+fn source_literal_escape(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 2);
+    for ch in s.chars() {
+        match ch {
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            '\\' => result.push_str("\\\\"),
+            c => result.push(c),
+        }
+    }
+    result
+}
+
+/// 构造 edit 匹配候选：先 verbatim，再源码转义形式。
+///
+/// LLM 在 JSON 里写 `\n` 会被解析为真实换行，但 Rust/JS 等源码里常是字面量 `\` + `n`。
+pub(super) fn edit_match_candidates(old_str: &str, new_str: &str) -> Vec<(String, String)> {
+    let escaped_old = source_literal_escape(old_str);
+    if escaped_old == old_str {
+        vec![(old_str.to_string(), new_str.to_string())]
+    } else {
+        vec![
+            (old_str.to_string(), new_str.to_string()),
+            (escaped_old, source_literal_escape(new_str)),
+        ]
     }
 }
 
@@ -591,4 +632,25 @@ pub(super) fn compute_unified_diff(
     }
 
     (output, insertions, deletions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_match_candidates_prefers_verbatim_then_source_escapes() {
+        let candidates = edit_match_candidates("line1\nline2", "line1\nline3");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].0, "line1\nline2");
+        assert_eq!(candidates[1].0, "line1\\nline2");
+        assert_eq!(candidates[1].1, "line1\\nline3");
+    }
+
+    #[test]
+    fn edit_match_candidates_skips_escape_when_unnecessary() {
+        let candidates = edit_match_candidates("plain text", "other");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0, "plain text");
+    }
 }

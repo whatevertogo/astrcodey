@@ -48,10 +48,7 @@ fn web_search_description() -> String {
          dates\n- Follow up interesting hits with `fetch-url` for full page content\n- Use \
          `allowedDomains` or `blockedDomains` to narrow results\n\nIMPORTANT:\n- After answering, \
          include a Sources section with markdown hyperlinks to relevant URLs\n- The current month \
-         is {current_month_year}; include this year in queries about recent docs or \
-         events\n\nConfig:\n- Default provider is DuckDuckGo HTML (no API key)\n- Set \
-         `extensions.astrcode-web-tools.search.provider` to `brave` or `serper` with an API key \
-         for higher-quality results"
+         is {current_month_year}; include this year in queries about recent docs or events"
     )
 }
 
@@ -61,10 +58,7 @@ const FETCH_URL_DESCRIPTION: &str =
      dashboards)\n- Binary files such as PDFs or images\n- Localhost or private-network \
      addresses\n\nTips:\n- Use after `web-search` when you need the full page body\n- Prefer \
      official docs and primary sources\n- For GitHub URLs, prefer the `gh` CLI when shell access \
-     is available\n\nIMPORTANT:\n- This tool WILL FAIL for authenticated or private URLs\n- HTTP \
-     URLs are upgraded to HTTPS automatically\n- Cross-host redirects are not followed \
-     automatically; retry with the redirect URL when instructed\n- Repeated fetches of the same \
-     URL are cached for 15 minutes";
+     is available\n\nIMPORTANT:\n- This tool WILL FAIL for authenticated or private URLs";
 
 /// Return bundled web tools extension.
 pub fn extension() -> Arc<dyn Extension> {

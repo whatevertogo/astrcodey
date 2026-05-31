@@ -568,6 +568,46 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .expect("compact command");
     assert_eq!(compact.source, "builtin");
     assert!(!compact.needs_argument);
+
+    let mode_cmd = body
+        .commands
+        .iter()
+        .find(|command| command.name == "mode")
+        .expect("mode extension command");
+    assert_eq!(mode_cmd.source, "extension");
+
+    let shift_tab = body
+        .keybindings
+        .iter()
+        .find(|kb| kb.command == "mode")
+        .expect("shift+tab mode keybinding");
+    assert_eq!(shift_tab.key, "shift+tab");
+}
+
+#[tokio::test]
+async fn execute_extension_command_route_toggles_mode() {
+    let runtime = runtime(Arc::new(ImmediateLlm));
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+
+    let http_response = post_json(
+        app,
+        &format!("/api/sessions/{session_id}/commands/execute"),
+        r#"{"command":"mode","arguments":""}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(http_response.status(), StatusCode::OK);
+    let response: PromptSubmitResponse =
+        serde_json::from_slice(&body_bytes(http_response).await).unwrap();
+
+    match response {
+        PromptSubmitResponse::Handled { message, .. } => {
+            assert!(message.contains("plan") || message.contains("Switched"));
+        },
+        other => panic!("expected handled mode toggle, got {other:?}"),
+    }
 }
 
 #[tokio::test]

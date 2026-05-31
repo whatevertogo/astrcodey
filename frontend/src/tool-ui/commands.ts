@@ -16,7 +16,7 @@ export type ToolApprovalRespondPayload = {
 
 /**
  * 用户完成 Approval UI（如 askUser 问卷）后提交。
- * 后端待实现：POST …/tool-ui/respond → tool.approval.respond → ToolCallCompleted。
+ * POST …/tool-ui/respond → session.resolve_tool_ui_response → 解除 turn 阻塞并 commit 答案。
  */
 export async function submitToolApprovalRespond(
   payload: ToolApprovalRespondPayload

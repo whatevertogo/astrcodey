@@ -71,7 +71,15 @@ pub fn router(
             "/api/sessions/{id}/approve",
             post(sessions::resolve_tool_approval),
         )
+        .route(
+            "/api/sessions/{id}/tool-calls/{call_id}/tool-ui/respond",
+            post(sessions::submit_tool_ui_respond),
+        )
         .route("/api/sessions/{id}/commands", get(sessions::list_commands))
+        .route(
+            "/api/sessions/{id}/commands/execute",
+            post(sessions::execute_extension_command),
+        )
         .route(
             "/api/sessions/{id}/compact",
             post(sessions::compact_session),

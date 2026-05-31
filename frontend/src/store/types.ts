@@ -56,6 +56,10 @@ export interface AppState {
   refreshConversationSnapshot: () => Promise<void>
   refreshExtensionData: () => Promise<void>
   refreshCommands: () => Promise<void>
+  executeExtensionCommand: (
+    command: string,
+    argumentsText?: string
+  ) => Promise<boolean>
   submitPrompt: (text: string) => Promise<boolean>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: import('../services/types').ConversationDelta) => void

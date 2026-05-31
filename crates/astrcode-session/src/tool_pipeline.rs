@@ -10,6 +10,7 @@ use astrcode_core::{
     storage::ToolResultArtifactReader,
     tool::{ToolDefinition, ToolResult},
     tool_access::ResourceAccess,
+    tool_ui::{complete_questionnaire_content, is_awaiting_user_input_content},
     types::ToolCallId,
 };
 use astrcode_extensions::runner::ExtensionRunner;
@@ -387,7 +388,7 @@ impl ToolCalls {
                 return Err(TurnError::Aborted);
             }
 
-            let result = match source {
+            let mut result = match source {
                 ResultSource::Blocked(result) => result,
                 ResultSource::DuplicateSameStep => {
                     input
@@ -486,6 +487,12 @@ impl ToolCalls {
                 },
             };
 
+            if is_awaiting_user_input_content(&result.content) {
+                result = self
+                    .await_tool_ui_response(&input.prepared[position], result)
+                    .await?;
+            }
+
             let mut results = HashMap::new();
             results.insert(input.prepared[position].index, result);
             discovered_tools.extend(
@@ -500,6 +507,54 @@ impl ToolCalls {
         }
 
         Ok(discovered_tools)
+    }
+
+    async fn await_tool_ui_response(
+        &self,
+        call: &super::tool_types::PreparedToolCall,
+        mut result: ToolResult,
+    ) -> Result<ToolResult, TurnError> {
+        let (tx, rx) = oneshot::channel();
+        self.session
+            .runtime()
+            .register_pending_tool_ui_response(ToolCallId::from(call.call_id.as_str()), tx);
+
+        let answers = tokio::select! {
+            _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
+            response = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
+                match response {
+                    Ok(Ok(answers)) => answers,
+                    Ok(Err(_)) => {
+                        return Ok(tool_ui_response_error_result(
+                            &call.call_id,
+                            "tool UI response channel closed before user answered",
+                        ));
+                    }
+                    Err(_) => {
+                        return Ok(tool_ui_response_error_result(
+                            &call.call_id,
+                            &format!(
+                                "tool UI response timed out after {APPROVAL_TIMEOUT_SECS}s"
+                            ),
+                        ));
+                    }
+                }
+            }
+        };
+
+        let questions = call
+            .tool_input
+            .get("questions")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        let content = match complete_questionnaire_content(&questions, &answers) {
+            Ok(content) => content,
+            Err(error) => {
+                return Ok(tool_ui_response_error_result(&call.call_id, &error));
+            },
+        };
+        result.content = content;
+        Ok(result)
     }
 
     /// 提交工具执行结果。
@@ -780,6 +835,17 @@ fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
         content: message.clone(),
         is_error: true,
         error: Some(message),
+        metadata: Default::default(),
+        duration_ms: None,
+    }
+}
+
+fn tool_ui_response_error_result(call_id: &str, message: &str) -> ToolResult {
+    ToolResult {
+        call_id: call_id.to_string(),
+        content: message.to_string(),
+        is_error: true,
+        error: Some(message.to_string()),
         metadata: Default::default(),
         duration_ms: None,
     }

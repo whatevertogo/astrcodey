@@ -3,6 +3,7 @@ import * as api from '../services/api'
 import { resolveHostBridge } from '../lib/hostBridge'
 import type { ConversationDelta } from '../services/types'
 import { applyDeltaToState } from './delta/applyDelta'
+import { isRegisteredSlashCommand } from '../lib/keybindings'
 import {
   commandNoteBlock,
   isCompactCommand,
@@ -227,6 +228,36 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  executeExtensionCommand: async (command: string, argumentsText = '') => {
+    const { activeSessionId } = get()
+    if (!activeSessionId) return false
+
+    try {
+      const response = await api.executeExtensionCommand(
+        activeSessionId,
+        command,
+        argumentsText
+      )
+      if (response.kind === 'handled') {
+        if (get().activeSessionId !== response.sessionId) {
+          return true
+        }
+        if (response.message.trim() && response.message !== 'command handled') {
+          set((current) => ({
+            blocks: [...current.blocks, commandNoteBlock(response.message)],
+          }))
+        }
+      }
+      return true
+    } catch (err) {
+      console.error('executeExtensionCommand failed:', err)
+      set({
+        transientHint: err instanceof Error ? err.message : '命令执行失败',
+      })
+      return false
+    }
+  },
+
   refreshCommands: async () => {
     const { activeSessionId } = get()
     if (!activeSessionId) return
@@ -260,10 +291,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const busy = isExecutionPhase(state.phase, state.compactSubmitting)
+    const slashCommand = isRegisteredSlashCommand(text, state.slashCommands)
     const injectable = canInjectMidTurn(state.control, state.compactSubmitting)
 
     try {
-      if (busy && !compactCommand) {
+      if (busy && !compactCommand && !slashCommand) {
         if (state.composerDeliveryMode === 'inject') {
           if (!injectable) {
             set({

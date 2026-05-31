@@ -10,9 +10,9 @@ use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
-    DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, directory_result,
-    error_result_with_call_id, image_media_type, is_binary, is_tool_result_artifact_path,
-    not_found_result, read_image_file_result, read_lines_segment,
+    DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, char_pagination_footer,
+    directory_result, error_result_with_call_id, image_media_type, is_binary,
+    is_tool_result_artifact_path, not_found_result, read_image_file_result, read_lines_segment,
     remember_file_observation_with_store, run_blocking, slice_chars, tool_call_id,
 };
 
@@ -236,14 +236,12 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
         description: concat!(
             "Read a file with line numbers. MUST `read` before `edit`.\n\n",
             "When NOT to use:\n",
-            "- Listing paths → `glob`\n",
             "- Repo-wide content search → `grep` first\n\n",
             "Tips:\n",
             "- Known file path, or a persisted tool-result path under tool-results/\n",
             "- Multiple files may be read together when helpful\n",
-            "- Persisted tool results (large prior outputs saved to tool-results/) are paginated: ",
-            "pass charOffset and maxChars (default 60000 for those paths); repeat with the next ",
-            "charOffset until hasMore is false\n\n",
+            "- Paths containing tool-results/ use char pagination only (charOffset/maxChars, not ",
+            "offset/limit); repeat until hasMore is false\n\n",
             "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),
@@ -264,7 +262,7 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
                 "charOffset": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Continue a truncated read (character offset)."
+                    "description": "Character offset. Set to nextCharOffset from a truncated read to continue."
                 },
                 "offset": {
                     "type": "integer",
@@ -334,9 +332,16 @@ async fn read_persisted_tool_result_path(
         meta.insert("nextCharOffset".into(), serde_json::json!(next_char_offset));
     }
 
+    let mut content = slice.content;
+    if slice.has_more {
+        if let Some(next_char_offset) = slice.next_char_offset {
+            content.push_str(&char_pagination_footer(next_char_offset));
+        }
+    }
+
     Ok(Some(ToolResult {
         call_id: tool_call_id(ctx),
-        content: slice.content,
+        content,
         is_error: false,
         error: None,
         metadata: meta,

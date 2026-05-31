@@ -66,8 +66,6 @@ pub(crate) const DELETE_TOOL_DESC: &str =
 pub(crate) const LIST_TOOL_DESC: &str = "\
 List or search stored memories. Omit query for recent entries.";
 
-pub(crate) const CMD_DESC: &str = "Manage long-term memory (list / search / delete)";
-
 pub(crate) fn project_memory_injection(lines: &[String]) -> String {
     format!(
         "<project-memory>\nAuto-recalled project memories from the previous turn. They may NOT \

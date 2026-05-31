@@ -26,12 +26,12 @@ pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 const TODO_WRITE_DESCRIPTION: &str =
     "Update the session todo list to track multi-step task progress.\n\nWhen NOT to use:\n- \
      Simple Q&A or single straightforward task\n- One file, one edit, no progress tracking \
-     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n\nRules:\n- \
-     Send the full list every time (not a patch). Keep exactly one `in_progress`.\n- Mark \
-     `in_progress` BEFORE starting work. Mark `completed` only when fully done (tests pass, \
-     implementation complete).\n- After receiving new instructions, immediately add them as \
-     todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + `activeForm` (continuous: \
-     \"Fixing auth bug\").";
+     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n- `agent` \
+     steps: note serial/parallel in `content` if it matters\n\nRules:\n- Send the full list every \
+     time (not a patch). Keep exactly one `in_progress`.\n- Mark `in_progress` BEFORE starting \
+     work. Mark `completed` only when fully done (tests pass, implementation complete).\n- After \
+     receiving new instructions, immediately add them as todos.\n- Each item: `content` \
+     (imperative: \"Fix auth bug\") + `activeForm` (continuous: \"Fixing auth bug\").";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
@@ -601,7 +601,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Imperative form describing what needs to be done."
+                                "description": "Imperative form. Note serial/parallel `agent` if relevant."
                             },
                             "activeForm": {
                                 "type": "string",

@@ -1,6 +1,11 @@
 import type { ReactNode } from 'react'
 import type { ToolUiContext } from './types'
 import { QuestionnaireApprovalCard } from './components/QuestionnaireApprovalCard'
+import {
+  isAwaitingUserInput,
+  parseAskUserInput,
+  parseAskUserOutput,
+} from './components/questionnaireTypes'
 import { readToolUi, readToolUiPhase } from './wire'
 
 /**
@@ -56,4 +61,23 @@ export function toolApprovalShouldAutoExpand(ctx: ToolUiContext): boolean {
     (typeof ctx.block.text === 'string' &&
       ctx.block.text.includes('awaiting_user_input'))
   )
+}
+
+/** askUser 等问卷 UI 是否仍在等待用户提交。 */
+export function toolApprovalPending(ctx: ToolUiContext): boolean {
+  const wire = readToolUi(ctx.meta)
+  if (
+    wire?.approval?.kind !== 'builtin' ||
+    wire.approval.variant !== 'questionnaire'
+  ) {
+    return false
+  }
+  if (ctx.block.status === 'error') return false
+  const completed = parseAskUserOutput(ctx.block.text)
+  if (completed?.answers && Object.keys(completed.answers).length > 0) {
+    return false
+  }
+  const input = parseAskUserInput(ctx.block.argumentsJson ?? ctx.args)
+  if (!input || input.questions.length === 0) return false
+  return ctx.block.status === 'streaming' || isAwaitingUserInput(ctx.block.text)
 }

@@ -271,10 +271,13 @@ async fn handle_key(
                 submit_current_input(app, client).await?;
             }
         },
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) && !app.show_slash_palette => {
+            dispatch_keybinding("shift+tab", app, client).await?;
+        },
         KeyCode::Tab if app.show_slash_palette => {
             complete_slash_selection(app);
         },
-        // Shift+Tab: 查询插件注册的快捷键绑定
+        // Shift+Tab（部分终端上报为 BackTab）
         KeyCode::BackTab => {
             dispatch_keybinding("shift+tab", app, client).await?;
         },

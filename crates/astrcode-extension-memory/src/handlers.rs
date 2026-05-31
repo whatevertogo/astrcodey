@@ -1,12 +1,11 @@
-//! Memory handlers — Save, Delete, List, PromptBuild, SessionStart, Command。
+//! Memory handlers — Save, Delete, List, PromptBuild, SessionStart。
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionTasks, HookResult,
-        LifecycleContext, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, SlashCommand, ToolHandler,
+        ExtensionError, ExtensionTasks, HookResult, LifecycleContext, LifecycleHandler,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolHandler,
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
@@ -26,7 +25,6 @@ use crate::{
 const MEMORY_SAVE_TOOL: &str = "memory_save";
 const MEMORY_DELETE_TOOL: &str = "memory_delete";
 const MEMORY_LIST_TOOL: &str = "memory_list";
-const MEMORY_CMD: &str = "memory";
 const MAX_LIST_ENTRIES: usize = 50;
 const DEFAULT_LIST_LIMIT: usize = 20;
 
@@ -79,14 +77,6 @@ pub(crate) fn memory_list_definition() -> ToolDefinition {
         }),
         execution_mode: ExecutionMode::Sequential,
         origin: ToolOrigin::Extension,
-    }
-}
-
-pub(crate) fn memory_command_definition() -> SlashCommand {
-    SlashCommand {
-        name: MEMORY_CMD.to_string(),
-        description: prompts::CMD_DESC.to_string(),
-        args_schema: None,
     }
 }
 
@@ -515,73 +505,6 @@ impl LifecycleHandler for MemorySessionStartHandler {
         );
 
         Ok(HookResult::Allow)
-    }
-}
-
-// ─── Command Handler (/memory) ───────────────────────────────────────
-
-pub(crate) struct MemoryCommandHandler {
-    pub store_pool: Arc<MemoryStorePool>,
-}
-
-#[async_trait::async_trait]
-impl astrcode_extension_sdk::extension::CommandHandler for MemoryCommandHandler {
-    async fn execute(
-        &self,
-        _command_name: &str,
-        args: &str,
-        working_dir: &str,
-        _ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let scoped = self
-            .store_pool
-            .get_scoped(working_dir)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let args = args.trim().to_string();
-
-        let result = tokio::task::spawn_blocking(move || -> Result<String, std::io::Error> {
-            match args.as_str() {
-                "" | "list" => {
-                    let entries = scoped.list_entries(MAX_LIST_ENTRIES)?;
-                    if entries.is_empty() {
-                        Ok("No memories saved yet.".to_string())
-                    } else {
-                        Ok(entries.join("\n"))
-                    }
-                },
-                rest if rest.starts_with("search ") => {
-                    let query = &rest[7..];
-                    let results = scoped.search(query, 10)?;
-                    if results.is_empty() {
-                        Ok("No matching memories found.".to_string())
-                    } else {
-                        Ok(results.join("\n"))
-                    }
-                },
-                rest if rest.starts_with("delete ") => {
-                    let pattern = rest[7..].trim();
-                    if pattern.is_empty() {
-                        return Ok("No pattern provided. Nothing deleted.".to_string());
-                    }
-                    let removed = scoped.delete_by_content(pattern)?;
-                    if removed.is_empty() {
-                        Ok("No matching memories found to delete.".to_string())
-                    } else {
-                        Ok(format!(
-                            "Deleted {} entries:\n{}",
-                            removed.len(),
-                            removed.join("\n")
-                        ))
-                    }
-                },
-                _ => Ok("Usage: /memory [list|search <query>|delete <pattern>]".to_string()),
-            }
-        })
-        .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-
-        Ok(ExtensionCommandResult::display(result, false))
     }
 }
 

@@ -37,6 +37,21 @@ pub struct ToolApprovalRequest {
     pub decision: astrcode_core::permission::ApprovalDecision,
 }
 
+/// Tool Approval UI 提交（如 askUser 问卷答案）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUiRespondRequest {
+    pub tool_name: String,
+    pub answers: std::collections::BTreeMap<String, String>,
+}
+
+/// Tool Approval UI 提交响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUiRespondResponse {
+    pub accepted: bool,
+}
+
 /// prompt 提交结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
@@ -79,6 +94,16 @@ pub struct CompactSessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_session_id: Option<String>,
     pub message: String,
+}
+
+/// 执行扩展斜杠命令请求（与 CLI `ExecuteExtensionCommand` 对齐）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteExtensionCommandRequest {
+    /// 命令名（不含 `/`），如 `mode`。
+    pub command: String,
+    #[serde(default)]
+    pub arguments: String,
 }
 
 /// 斜杠命令列表响应。

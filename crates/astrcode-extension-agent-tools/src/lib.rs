@@ -104,13 +104,10 @@ impl AgentShared {
 // 定义 → 参数 → 构建逻辑 → 渲染 → Handler，自上而下阅读即可理解完整流程。
 
 const AGENT_TOOL_DESCRIPTION: &str =
-    "Launch a specialized subagent. Types: [Agents].\n\nWhen NOT to use:\n- Simple tasks you can \
-     finish quickly in the current mode\n- Known file path → `read`\n- Known symbol, class, or \
-     pattern → `grep`/`glob`\n- Needle queries or anything doable in a few direct tool \
-     calls\n\nTips:\n- Often useful for multi-step work that fits an [Agents] type (explore / \
-     reviewer / execute)\n- Parallel or serial calls are your choice; split prompts by concern \
-     when running several\n- Give each subagent a self-contained prompt (goal, scope, expected \
-     output)\n- `waitForResult=false` runs in background and notifies when done";
+    "Launch a specialized subagent. Types: [Agents].\n\nWhen NOT to use:\n- Simple or needle \
+     tasks; known path → `read`; symbol/pattern → `grep`/`glob`; few direct tool calls \
+     enough\n\nTips:\n- One focused subtask per `agent` call; include all context in `prompt`\n- \
+     In `todoWrite`, note when a step will use parallel or serial `agent`";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
@@ -370,15 +367,27 @@ fn agent_tool_metadata()
     let mut map = std::collections::HashMap::new();
     map.insert(
         "agent".to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
-            .example("Needle query (\"where is X defined?\") → `grep`/`glob`, not `agent`.")
-            .example(
-                "Multi-area exploration → `subagentType=explore`; parallel or serial as you see \
-                 fit.",
-            )
-            .caveat("Don't duplicate work you delegate — stop the same searches yourself.")
-            .caveat("Unknown `subagentType` → pick from [Agents]; do not invent agent names.")
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
+        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
+            "Before starting multi-step or multi-area work, consider the right approach:\n- Quick \
+             single lookup → use `read`/`grep`/`glob` directly, no agent needed\n- Scoped \
+             multi-step task → single agent (carries context across steps)\n- Multiple \
+             independent areas → parallel agents (faster than serial)\n\nUse `todoWrite` to plan \
+             complex tasks, then delegate steps to agents.",
+        )
+        .example(
+            "Add logging to 3 files in one module → `todoWrite` to plan, single `execute` agent.",
+        )
+        .example(
+            "Compare auth implementation vs test coverage → two parallel `explore` agents with \
+             focused prompts.",
+        )
+        .example(
+            "Fix a crash with unclear cause → serial: `explore` traces the issue, `execute` \
+             applies the fix.",
+        )
+        .caveat("Unknown `subagentType` → pick from [Agents].")
+        .caveat("Don't parallel `execute` on overlapping files.")
+        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
     );
     map
 }

@@ -2,6 +2,7 @@ export {
   renderToolApprovalUi,
   toolApprovalSummary,
   toolApprovalShouldAutoExpand,
+  toolApprovalPending,
 } from './host'
 export {
   TOOL_UI_METADATA_KEY,

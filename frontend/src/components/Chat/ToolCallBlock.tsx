@@ -13,6 +13,7 @@ import {
   renderToolApprovalUi,
   toolApprovalShouldAutoExpand,
   toolApprovalSummary,
+  toolApprovalPending,
   type ToolUiContext,
 } from '../../tool-ui'
 import {
@@ -113,13 +114,16 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
 
   const gateApproval = readGateApproval(block.metadata)
   const gatePending = gateApproval?.pending === true
+  const questionnairePending = toolApprovalPending(toolUiCtx)
   const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
 
   const displayStatus = gatePending
     ? '待审批'
-    : streaming
-      ? runningElapsedLabel(elapsed, 'zh')
-      : statusLabel(block.status)
+    : toolApprovalPending(toolUiCtx)
+      ? '待回答'
+      : streaming
+        ? runningElapsedLabel(elapsed, 'zh')
+        : statusLabel(block.status)
 
   return (
     <details
@@ -144,7 +148,11 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
         <span
           className={cn(
             'shrink-0 text-[11px] font-semibold uppercase tracking-wider',
-            gatePending ? 'text-warning' : 'text-text-muted'
+            gatePending
+              ? 'text-warning'
+              : questionnairePending
+                ? 'text-accent'
+                : 'text-text-muted'
           )}
         >
           {displayStatus}

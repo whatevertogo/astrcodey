@@ -11,13 +11,45 @@ pub struct RegisteredKeybinding {
     pub arguments: String,
 }
 
+fn canonical_key_id(key: &str) -> String {
+    key.split('+')
+        .map(|part| {
+            let p = part.trim().to_ascii_lowercase();
+            match p.as_str() {
+                "meta" | "cmd" | "command" => "ctrl".to_string(),
+                _ => p,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
 /// 在已注册的 keybindings 中查找匹配的命令。
 pub fn find_command_for_key<'a>(
     keybindings: &'a [RegisteredKeybinding],
     key_id: &str,
 ) -> Option<(&'a str, &'a str)> {
+    let pressed = canonical_key_id(key_id);
     keybindings
         .iter()
-        .find(|kb| kb.key == key_id)
+        .find(|kb| canonical_key_id(&kb.key) == pressed)
         .map(|kb| (kb.command.as_str(), kb.arguments.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_command_matches_canonical_key() {
+        let bindings = vec![RegisteredKeybinding {
+            key: "Shift+Tab".into(),
+            command: "mode".into(),
+            arguments: String::new(),
+        }];
+        assert_eq!(
+            find_command_for_key(&bindings, "shift+tab"),
+            Some(("mode", ""))
+        );
+    }
 }

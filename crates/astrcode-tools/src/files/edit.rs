@@ -10,7 +10,7 @@ use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
-    clean_quotes, compute_unified_diff, find_unique_occurrence,
+    clean_quotes, compute_unified_diff, edit_match_candidates, find_unique_occurrence,
     remember_file_observation_with_store, run_blocking, stale_file_guard_with_store, tool_call_id,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
@@ -282,30 +282,30 @@ fn apply_one_edit(
     replace_all: bool,
     path: &std::path::Path,
 ) -> Result<usize, ToolError> {
-    if replace_all {
-        if !content.contains(old_str) {
-            return Err(ToolError::Execution(format!(
-                "oldStr not found in {}. Re-`read` the file and copy oldStr verbatim from the \
-                 output — whitespace and line endings must match exactly.",
-                path.display()
-            )));
+    for (old_candidate, new_candidate) in edit_match_candidates(old_str, new_str) {
+        if replace_all {
+            if content.contains(&old_candidate) {
+                let replacements = content.matches(&old_candidate).count();
+                *content = content.replace(&old_candidate, &new_candidate);
+                return Ok(replacements);
+            }
+            continue;
         }
-        let replacements = content.matches(old_str).count();
-        *content = content.replace(old_str, new_str);
-        return Ok(replacements);
+
+        if let Some(pos) = find_unique_occurrence(content, &old_candidate)? {
+            let mut next =
+                String::with_capacity(content.len() - old_candidate.len() + new_candidate.len());
+            next.push_str(&content[..pos]);
+            next.push_str(&new_candidate);
+            next.push_str(&content[pos + old_candidate.len()..]);
+            *content = next;
+            return Ok(1);
+        }
     }
 
-    let Some(pos) = find_unique_occurrence(content, old_str)? else {
-        return Err(ToolError::Execution(format!(
-            "oldStr not found in {}. Re-`read` the file and copy oldStr verbatim from the output \
-             — whitespace and line endings must match exactly.",
-            path.display()
-        )));
-    };
-    let mut next = String::with_capacity(content.len() - old_str.len() + new_str.len());
-    next.push_str(&content[..pos]);
-    next.push_str(new_str);
-    next.push_str(&content[pos + old_str.len()..]);
-    *content = next;
-    Ok(1)
+    Err(ToolError::Execution(format!(
+        "oldStr not found in {}. Re-`read` the file and copy oldStr verbatim from the output — \
+         whitespace and line endings must match exactly.",
+        path.display()
+    )))
 }

@@ -24,8 +24,8 @@ use astrcode_extension_sdk::extension::{
     ExtensionHostServices, ExtensionTasks, HookMode, ProviderEvent, Registrar, StopReason,
 };
 use handlers::{
-    MemoryCommandHandler, MemoryDeleteHandler, MemoryListHandler, MemoryRecallHandler,
-    MemorySaveHandler, MemorySessionStartHandler,
+    MemoryDeleteHandler, MemoryListHandler, MemoryRecallHandler, MemorySaveHandler,
+    MemorySessionStartHandler,
 };
 use parking_lot::{Mutex, RwLock};
 use store::MemoryStorePool;
@@ -177,12 +177,6 @@ impl Extension for MemoryExtension {
                 pipeline: self.pipeline.clone(),
                 tasks: self.tasks.clone(),
                 config: self.config.clone(),
-            }),
-        );
-        reg.command(
-            handlers::memory_command_definition(),
-            Arc::new(MemoryCommandHandler {
-                store_pool: self.store_pool.clone(),
             }),
         );
     }

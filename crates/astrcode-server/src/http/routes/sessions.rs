@@ -9,9 +9,10 @@ use astrcode_protocol::{
     http::{
         AgentSessionLinkDto, CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
         ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
-        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
-        SlashCommandListResponseDto, ToolApprovalRequest,
+        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto,
+        ExecuteExtensionCommandRequest, PromptRequest, PromptSubmitResponse, SessionListItemDto,
+        SessionListResponseDto, SlashCommandListResponseDto, ToolApprovalRequest,
+        ToolUiRespondRequest, ToolUiRespondResponse,
     },
 };
 use axum::{
@@ -161,6 +162,36 @@ pub(in crate::http) async fn resolve_tool_approval(
     }
 }
 
+pub(in crate::http) async fn submit_tool_ui_respond(
+    State(state): State<HttpState>,
+    Path((session_id, call_id)): Path<(String, String)>,
+    Json(request): Json<ToolUiRespondRequest>,
+) -> Response {
+    let session_id_str = session_id.clone();
+    let Some(ops) = state.runtime.capabilities().session_ops() else {
+        return internal_error_response(
+            "session_ops_unavailable",
+            "session operations unavailable",
+        );
+    };
+    if request.answers.is_empty() {
+        return handler_error_response(
+            HandlerError::InvalidRequest("answers must not be empty".into()),
+            "tool_ui_respond_failed",
+        );
+    }
+    match ops
+        .resolve_tool_ui_response(&session_id_str, &call_id, request.answers)
+        .await
+    {
+        Ok(()) => Json(ToolUiRespondResponse { accepted: true }).into_response(),
+        Err(error) => handler_error_response(
+            HandlerError::SessionNotFound(error.to_string()),
+            "tool_ui_respond_failed",
+        ),
+    }
+}
+
 pub(in crate::http) async fn submit_prompt(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
@@ -199,6 +230,47 @@ pub(in crate::http) async fn submit_prompt(
             tracing::error!(session_id = %session_id, error = %error, "prompt failed");
             handler_error_response(error, "prompt_failed")
         },
+    }
+}
+
+pub(in crate::http) async fn execute_extension_command(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ExecuteExtensionCommandRequest>,
+) -> Response {
+    let session_id = SessionId::from(session_id);
+    let command_name = request.command.trim().to_ascii_lowercase();
+    if command_name.is_empty() {
+        return handler_error_response(
+            HandlerError::InvalidRequest("command must not be empty".into()),
+            "command_execute_failed",
+        );
+    }
+    let visible_text = if request.arguments.trim().is_empty() {
+        format!("/{command_name}")
+    } else {
+        format!("/{command_name} {}", request.arguments.trim())
+    };
+    match state
+        .handler
+        .submit_input_for_session(session_id.clone(), visible_text)
+        .await
+    {
+        Ok(PromptSubmission::Handled { message }) => Json(PromptSubmitResponse::Handled {
+            session_id: session_id.into_string(),
+            message,
+        })
+        .into_response(),
+        Ok(PromptSubmission::Accepted { turn_id }) => Json(PromptSubmitResponse::Accepted {
+            session_id: session_id.into_string(),
+            turn_id: turn_id.into_string(),
+            branched_from_session_id: None,
+        })
+        .into_response(),
+        Err(HandlerError::UnknownCommand(cmd)) => {
+            handler_error_response(HandlerError::UnknownCommand(cmd), "command_execute_failed")
+        },
+        Err(error) => handler_error_response(error, "command_execute_failed"),
     }
 }
 

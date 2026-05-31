@@ -255,8 +255,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
         description: concat!(
             "Search file contents by regex or literal text.\n\n",
             "When NOT to use:\n",
-            "- Finding paths → `glob`\n",
-            "- Known file path → `read`\n\n",
+            "- Finding paths → `glob`\n\n",
             "Tips:\n",
             "- Symbols, strings, classes, or regex patterns across files\n",
             "- Multiple searches may run together when helpful\n",
