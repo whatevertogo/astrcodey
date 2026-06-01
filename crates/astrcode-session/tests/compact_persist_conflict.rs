@@ -163,6 +163,7 @@ async fn seed_history(session: &Session, pairs: usize) {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(24)),
+                    attachments: vec![],
                 },
             )
             .await
@@ -250,6 +251,7 @@ impl LlmProvider for RaceOnCompactLlm {
                             EventPayload::UserMessage {
                                 message_id: new_message_id(),
                                 text: race_message,
+                                attachments: vec![],
                             },
                         )
                         .await
@@ -313,6 +315,7 @@ async fn persist_compact_result_accepts_new_tail_events() {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "race event".into(),
+                attachments: vec![],
             },
         )
         .await
@@ -381,7 +384,7 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
 
     let turn_id = new_turn_id();
     let handle = session
-        .submit("current turn".into(), turn_id)
+        .submit("current turn".into(), vec![], turn_id)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -440,7 +443,7 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
     );
 
     let follow_up = session
-        .submit("follow up".into(), new_turn_id())
+        .submit("follow up".into(), vec![], new_turn_id())
         .await
         .unwrap();
     let follow_up_result = follow_up.wait().await.unwrap();

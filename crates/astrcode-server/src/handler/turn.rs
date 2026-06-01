@@ -2,11 +2,13 @@
 
 use std::sync::Arc;
 
-use astrcode_core::types::*;
+use astrcode_core::{message_attachment::MessageAttachment, types::*};
 use tokio::sync::mpsc;
 
 use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_schedule_error_for_client};
-use crate::turn_scheduler::{CompletionParams, StartedExecution, TurnScheduleError, TurnScheduler};
+use crate::turn_scheduler::{
+    CompletionParams, PromptInput, StartedExecution, TurnScheduleError, TurnScheduler,
+};
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
@@ -27,12 +29,22 @@ impl CommandHandler {
         &self,
         sid: SessionId,
         user_text: String,
+        attachments: Vec<MessageAttachment>,
         completion_tx: Option<tokio::sync::oneshot::Sender<TurnCompletion>>,
     ) -> Result<TurnId, HandlerError> {
-        tracing::info!(session_id = %sid, text_len = user_text.len(), "start_turn");
+        tracing::info!(
+            session_id = %sid,
+            text_len = user_text.len(),
+            attachment_count = attachments.len(),
+            "start_turn"
+        );
+        let input = PromptInput {
+            text: user_text,
+            attachments,
+        };
         let crate::turn_scheduler::StartedExecution { turn_id, handle } = self
             .scheduler
-            .start_with_completion(sid.clone(), user_text)
+            .start_with_completion(sid.clone(), input)
             .await
             .map_err(|e| {
                 let (code, err) = turn_schedule_error_for_client(e);
@@ -96,10 +108,12 @@ impl CommandHandler {
     pub(in crate::handler) async fn submit_input_with_completion(
         &self,
         sid: SessionId,
-        text: String,
+        input: PromptInput,
     ) -> Result<(TurnId, tokio::sync::oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let turn_id = self.start_turn_for_session(sid, text, Some(tx)).await?;
+        let turn_id = self
+            .start_turn_for_session(sid, input.text, input.attachments, Some(tx))
+            .await?;
         Ok((turn_id, rx))
     }
 }

@@ -8,7 +8,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::{extension::ChildToolPolicy, llm::LlmMessage, tool::ToolResult, types::*};
+use crate::{
+    extension::ChildToolPolicy, llm::LlmMessage, message_attachment::MessageAttachment,
+    tool::ToolResult, types::*,
+};
 
 /// Event 顶层保留字段名集合。
 ///
@@ -189,6 +192,9 @@ pub enum EventPayload {
         message_id: MessageId,
         /// 消息文本内容。
         text: String,
+        /// 粘贴或选取的图片/文件（可选）。
+        #[serde(default)]
+        attachments: Vec<MessageAttachment>,
     },
 
     /// Recap 摘要已生成。
@@ -618,6 +624,7 @@ mod tests {
             payload: EventPayload::UserMessage {
                 message_id: "message-1".into(),
                 text: "hello".into(),
+                attachments: vec![],
             },
         };
 
@@ -921,6 +928,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: "m".into(),
                 text: "t".into(),
+                attachments: vec![],
             },
             EventPayload::RecapGenerated {
                 text: "t".into(),
@@ -1077,6 +1085,7 @@ mod tests {
             payload: EventPayload::UserMessage {
                 message_id: "m1".into(),
                 text: "hello".into(),
+                attachments: vec![],
             },
         };
         let value = serde_json::to_value(&event).unwrap();

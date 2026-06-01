@@ -241,7 +241,10 @@ impl ChildSessionCoordinator {
     ) -> Result<String, SessionApiError> {
         self.prepare_turn_target(target_sid).await?;
         let started = scheduler
-            .start_with_completion(target_sid.clone(), user_prompt)
+            .start_with_completion(
+                target_sid.clone(),
+                crate::turn_scheduler::PromptInput::text_only(user_prompt),
+            )
             .await
             .map_err(SessionApiError::internal)?;
 
@@ -293,7 +296,10 @@ impl ChildSessionCoordinator {
     ) -> Result<(TurnId, SessionId), SessionApiError> {
         self.prepare_turn_target(target_sid).await?;
         let started = scheduler
-            .start_with_completion(target_sid.clone(), user_prompt)
+            .start_with_completion(
+                target_sid.clone(),
+                crate::turn_scheduler::PromptInput::text_only(user_prompt),
+            )
             .await
             .map_err(SessionApiError::internal)?;
 
@@ -379,7 +385,7 @@ impl ChildSessionCoordinator {
                 if let Err(e) = scheduler
                     .deliver_input(
                         guard.parent_session_id().clone(),
-                        message,
+                        crate::turn_scheduler::PromptInput::text_only(message),
                         InputDelivery::InjectIfRunningElseStart,
                     )
                     .await

@@ -16,8 +16,8 @@ impl CommandHandler {
                 self.create_session(working_dir).await?;
             },
 
-            ClientCommand::SubmitPrompt { text, .. } => {
-                self.submit_prompt(text).await?;
+            ClientCommand::SubmitPrompt { text, attachments } => {
+                self.submit_prompt(text, attachments).await?;
             },
 
             ClientCommand::InjectMessage { text } => {

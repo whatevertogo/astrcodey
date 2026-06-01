@@ -17,6 +17,7 @@ import type {
   ModelView,
   Phase,
   ProfileView,
+  PromptAttachmentWire,
   PromptSubmitResponse,
   SlashCommandInfo,
   SlashCommandListResponse,
@@ -42,6 +43,15 @@ function isObject(value: unknown): value is JsonObject {
 
 function arrayField(source: JsonObject, name: string): unknown[] {
   const value = source[name]
+  if (!Array.isArray(value))
+    throw new ProtocolDecodeError(`expected array ${name}`)
+  return value
+}
+
+/** 缺省或 `null` 视为 `[]`（与 serde `skip_serializing_if` 省略字段对齐）。 */
+function optionalArrayField(source: JsonObject, name: string): unknown[] {
+  const value = source[name]
+  if (value == null) return []
   if (!Array.isArray(value))
     throw new ProtocolDecodeError(`expected array ${name}`)
   return value
@@ -124,19 +134,35 @@ export function decodeConversationCursor(value: unknown): ConversationCursor {
   return { value: requiredString(object, 'value') }
 }
 
+function decodePromptAttachmentWire(value: unknown): PromptAttachmentWire {
+  const object = decodeObject(value, 'prompt attachment')
+  return {
+    filename: requiredString(object, 'filename'),
+    content: requiredString(object, 'content'),
+    mediaType: requiredString(object, 'mediaType'),
+  }
+}
+
 export function decodeConversationBlock(value: unknown): ConversationBlock {
   const object = decodeObject(value, 'conversation block')
   const kind = requiredString(object, 'kind')
   const id = requiredString(object, 'id')
 
   switch (kind) {
-    case 'user':
+    case 'user': {
+      const rawAttachments = optionalArrayField(object, 'attachments')
+      const attachments =
+        rawAttachments.length > 0
+          ? rawAttachments.map(decodePromptAttachmentWire)
+          : undefined
       return {
         kind,
         id,
         text: requiredString(object, 'text'),
+        attachments,
         source: optionalString(object, 'source'),
       }
+    }
     case 'assistant':
       return {
         kind,

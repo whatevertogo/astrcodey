@@ -9,8 +9,9 @@
 //! - AdaptiveChunkingPolicy for streaming (codex design)
 
 pub(crate) mod app;
+pub(crate) mod clipboard_image;
 pub(crate) mod command;
-pub(crate) mod composer;
+mod composer;
 pub(crate) mod custom_terminal;
 pub(crate) mod ext;
 pub(crate) mod frame;
@@ -90,8 +91,14 @@ pub async fn run(bootstrap_opts: astrcode_server::bootstrap::BootstrapOptions) -
                         handle_key(key, &mut app, &client, &mut terminal).await?;
                     },
                     TuiEvent::Paste(text) => {
-                        let text = normalize_paste(&text);
-                        app.composer.insert_paste(&text);
+                        if let Some(attachment) = clipboard_image::read_image_attachment() {
+                            if !app.composer.add_attachment(attachment) {
+                                app.status_text = "Max 4 images".into();
+                            }
+                        } else {
+                            let text = normalize_paste(&text);
+                            app.composer.insert_paste(&text);
+                        }
                     },
                     TuiEvent::Draw => {
                         app.content_width = viewport::content_width();
@@ -287,7 +294,14 @@ async fn handle_key(
             app.composer.delete_previous_word();
         },
         KeyCode::Backspace => {
-            app.composer.backspace();
+            if app.composer.text().is_empty()
+                && app.composer.cursor() == 0
+                && app.composer.remove_last_attachment()
+            {
+                // removed pasted image
+            } else {
+                app.composer.backspace();
+            }
             app.sync_slash_filter_pub();
         },
         KeyCode::Delete => {
@@ -403,10 +417,10 @@ fn complete_slash_selection(app: &mut App) {
 }
 
 async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result<()> {
-    let input = app.input_text().trim_end().to_string();
-    if input.trim().is_empty() {
+    if !app.composer.can_submit() {
         return Ok(());
     }
+    let input = app.input_text().trim_end().to_string();
 
     if let Some(command) = slash::parse(&input, &app.extension_command_names) {
         let input = app.take_input();
@@ -420,9 +434,13 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
         if input.trim().is_empty() {
             return Ok(());
         }
+        if !app.composer.attachments().is_empty() {
+            app.status_text = "Injected text only; attachments kept until turn completes".into();
+        } else {
+            app.status_text = "Injected into active turn".into();
+        }
         app.remember_input(&input);
         app.push_user(&input);
-        app.status_text = "Injected into active turn".into();
         client
             .send_command(&ClientCommand::InjectMessage { text: input })
             .await
@@ -430,6 +448,7 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
         return Ok(());
     }
 
+    let attachments = app.composer.take_attachments();
     let input = app.take_input();
     app.remember_input(&input);
     app.push_user(&input);
@@ -437,7 +456,7 @@ async fn submit_current_input(app: &mut App, client: &Arc<Client>) -> io::Result
     client
         .send_command(&ClientCommand::SubmitPrompt {
             text: input,
-            attachments: vec![],
+            attachments,
         })
         .await
         .map_err(io_error)?;
@@ -549,6 +568,7 @@ async fn dispatch_keybinding(key_id: &str, app: &mut App, client: &Arc<Client>) 
 
 /// Panel state built from App, then rendered into the Frame.
 struct Panel {
+    attachment_lines: Vec<ratatui::text::Line<'static>>,
     composer_lines: Vec<ratatui::text::Line<'static>>,
     slash_lines: Vec<ratatui::text::Line<'static>>,
     status_line: ratatui::text::Line<'static>,
@@ -563,31 +583,51 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
 
     let width = viewport::content_width();
 
+    let attachment_lines: Vec<Line<'static>> = app
+        .composer
+        .attachments()
+        .iter()
+        .enumerate()
+        .map(|(index, att)| {
+            let label = if att.filename.is_empty() {
+                format!("图片 {}", index + 1)
+            } else {
+                att.filename.clone()
+            };
+            Line::from(vec![
+                Span::styled("  ", theme.dim),
+                Span::styled("▣ ", theme.popup_selected),
+                Span::styled(label, theme.composer),
+            ])
+        })
+        .collect();
+
     let vl = layout_visual_text(app.composer.text(), width, Some(app.composer.cursor()));
     let cursor_col = 2 + vl.cursor_column.unwrap_or(0) as u16;
-    let cursor_row = vl.cursor_row.unwrap_or(0) as u16;
+    let cursor_row = (attachment_lines.len() as u16) + vl.cursor_row.unwrap_or(0) as u16;
 
-    let composer_lines: Vec<Line<'static>> = if app.composer.text().is_empty() {
-        vec![Line::from(vec![
-            Span::styled("> ", theme.assistant_label),
-            Span::styled(
-                "Ask astrcode to inspect, edit, or explain...",
-                theme.composer_placeholder,
-            ),
-        ])]
-    } else {
-        vl.lines
-            .into_iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                let prefix = if idx == 0 { "> " } else { "  " };
-                Line::from(vec![
-                    Span::styled(prefix, theme.assistant_label),
-                    Span::styled(line, theme.composer),
-                ])
-            })
-            .collect()
-    };
+    let composer_lines: Vec<Line<'static>> =
+        if app.composer.text().is_empty() && attachment_lines.is_empty() {
+            vec![Line::from(vec![
+                Span::styled("> ", theme.assistant_label),
+                Span::styled(
+                    "Ask astrcode to inspect, edit, or explain...",
+                    theme.composer_placeholder,
+                ),
+            ])]
+        } else {
+            vl.lines
+                .into_iter()
+                .enumerate()
+                .map(|(idx, line)| {
+                    let prefix = if idx == 0 { "> " } else { "  " };
+                    Line::from(vec![
+                        Span::styled(prefix, theme.assistant_label),
+                        Span::styled(line, theme.composer),
+                    ])
+                })
+                .collect()
+        };
 
     let status_line = Line::from(Span::styled(format!("  {}", app.status_text), theme.dim));
 
@@ -789,6 +829,7 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
     let footer_line = Line::from(Span::styled(footer_text, theme.footer));
 
     Panel {
+        attachment_lines,
         composer_lines,
         slash_lines,
         status_line,
@@ -800,11 +841,12 @@ fn build_panel(app: &App, theme: &Theme) -> Panel {
 
 /// 计算 panel 需要的总行数（composer + slash palette + status + footer）。
 fn panel_total_height(panel: &Panel) -> u16 {
+    let attachments = panel.attachment_lines.len() as u16;
     let composer = panel.composer_lines.len().max(1) as u16;
     let slash = panel.slash_lines.len() as u16;
     let status = 1u16;
     let footer = 1u16;
-    composer + slash + status + footer
+    attachments + composer + slash + status + footer
 }
 
 fn render_panel(frame: &mut custom_terminal::Frame<'_>, panel: &Panel) {
@@ -819,15 +861,17 @@ fn render_panel(frame: &mut custom_terminal::Frame<'_>, panel: &Panel) {
         return;
     }
 
-    // Layout: [composer(N), slash_palette(?), status(1), footer(1)]
+    // Layout: [attachments(?), composer(N), slash_palette(?), status(1), footer(1)]
     let footer_height = 1u16;
     let status_height = 1u16;
     let slash_height = panel.slash_lines.len() as u16;
+    let attachment_height = panel.attachment_lines.len() as u16;
     let composer_height = panel.composer_lines.len().max(1) as u16;
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(attachment_height),
             Constraint::Length(composer_height),
             Constraint::Length(slash_height),
             Constraint::Length(status_height),
@@ -835,26 +879,43 @@ fn render_panel(frame: &mut custom_terminal::Frame<'_>, panel: &Panel) {
         ])
         .split(area);
 
+    let mut section = 0usize;
+    if attachment_height > 0 {
+        let attachment_text = Text::from(panel.attachment_lines.clone());
+        frame.render_widget(Paragraph::new(attachment_text), layout[section]);
+        section += 1;
+    }
+
     // Composer
     let text = Text::from(panel.composer_lines.clone());
-    frame.render_widget(Paragraph::new(text), layout[0]);
+    frame.render_widget(Paragraph::new(text), layout[section]);
 
     // Cursor position within the composer area.
-    let cx = layout[0].x + panel.cursor_col.min(layout[0].width.saturating_sub(1));
-    let cy = layout[0].y + panel.cursor_row.min(layout[0].height.saturating_sub(1));
+    let cx = layout[section].x
+        + panel
+            .cursor_col
+            .min(layout[section].width.saturating_sub(1));
+    let cy = layout[section].y
+        + panel
+            .cursor_row
+            .saturating_sub(attachment_height)
+            .min(layout[section].height.saturating_sub(1));
     frame.set_cursor_position((cx, cy));
+    section += 1;
 
     // Slash palette
     if !panel.slash_lines.is_empty() {
         let slash_text = Text::from(panel.slash_lines.clone());
-        frame.render_widget(Paragraph::new(slash_text), layout[1]);
+        frame.render_widget(Paragraph::new(slash_text), layout[section]);
+        section += 1;
     }
 
     // Status
-    frame.render_widget(Paragraph::new(panel.status_line.clone()), layout[2]);
+    frame.render_widget(Paragraph::new(panel.status_line.clone()), layout[section]);
+    section += 1;
 
     // Footer
-    frame.render_widget(Paragraph::new(panel.footer_line.clone()), layout[3]);
+    frame.render_widget(Paragraph::new(panel.footer_line.clone()), layout[section]);
 }
 
 fn compact_path(path: &str) -> String {

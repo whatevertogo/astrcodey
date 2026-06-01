@@ -64,6 +64,8 @@ globset = "0.4"
 ignore = "0.4"
 similar = "3.1.0"
 base64 = "0.22"
+arboard = "3.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

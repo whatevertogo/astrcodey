@@ -1029,6 +1029,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "hello".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1085,6 +1086,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "visible".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1121,6 +1123,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "hello".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1162,6 +1165,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "hello".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1386,6 +1390,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "visible".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1424,6 +1429,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "old message".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1540,6 +1546,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "read file".into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -1608,6 +1615,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "read files".into(),
+                attachments: vec![],
             },
         ))
         .await

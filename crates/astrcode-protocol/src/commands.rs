@@ -16,7 +16,11 @@
 //! - **扩展命令**：`ListExtensionCommands`、`ExecuteExtensionCommand`
 //! - **UI 响应**：`UiResponse`
 
+use astrcode_core::message_attachment::MessageAttachment;
 use serde::{Deserialize, Serialize};
+
+/// 提示中附带的文件/图片（与 core [`MessageAttachment`] 同型）。
+pub type Attachment = MessageAttachment;
 
 /// 客户端可发送给服务器的命令枚举。
 ///
@@ -143,30 +147,6 @@ pub enum ClientCommand {
         call_id: String,
         decision: astrcode_core::permission::ApprovalDecision,
     },
-}
-
-/// 提示中附带的文件/图片附件。
-///
-/// 用于在 `SubmitPrompt` 命令中传递额外的上下文资源，
-/// 如代码文件、图片、文档等。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Attachment {
-    /// 文件名（含扩展名）。
-    pub filename: String,
-    /// 文件内容。
-    ///
-    /// 根据 `media_type` 不同，可以是：
-    /// - Base64 编码的二进制数据（图片、二进制文件）
-    /// - 纯文本内容（代码、文档）
-    pub content: String,
-    /// 媒体类型（MIME type）。
-    ///
-    /// 常见值：
-    /// - `text/plain`：纯文本
-    /// - `text/x-rust`：Rust 源代码
-    /// - `image/png`、`image/jpeg`：图片
-    /// - `application/pdf`：PDF 文档
-    pub media_type: String,
 }
 
 /// 对服务器 UI 请求的响应值。

@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
 use crate::{
     bootstrap::ServerRuntime,
-    turn_scheduler::{DeliveryOutcome, InputDelivery, TurnScheduler},
+    turn_scheduler::{DeliveryOutcome, InputDelivery, PromptInput, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -64,12 +64,12 @@ impl CommandHandle {
     pub(crate) async fn submit_prompt_with_completion(
         &self,
         session_id: SessionId,
-        text: String,
+        input: PromptInput,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         let (reply, rx) = oneshot::channel();
         self.post(CommandMessage::SubmitInputWithCompletion {
             session_id,
-            text,
+            input,
             reply,
         })
         .await?;
@@ -80,12 +80,12 @@ impl CommandHandle {
     pub async fn submit_input_for_session(
         &self,
         session_id: SessionId,
-        text: String,
+        input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
         let (reply, rx) = oneshot::channel();
         self.post(CommandMessage::SubmitInputForSession {
             session_id,
-            text,
+            input,
             reply,
         })
         .await?;
@@ -202,7 +202,7 @@ pub(in crate::handler) enum CommandMessage {
     /// 提交输入
     SubmitInputForSession {
         session_id: SessionId,
-        text: String,
+        input: PromptInput,
         reply: oneshot::Sender<Result<PromptSubmission, HandlerError>>,
     },
     /// Mid-turn 注入（steer）
@@ -241,7 +241,7 @@ pub(in crate::handler) enum CommandMessage {
     /// 提交提示词并等待完成通知
     SubmitInputWithCompletion {
         session_id: SessionId,
-        text: String,
+        input: PromptInput,
         reply: oneshot::Sender<Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError>>,
     },
     /// 修复进程重启后残留的过期 turn phase
@@ -268,11 +268,11 @@ impl CommandHandler {
     async fn queue_input_for_next_turn(
         &self,
         session_id: SessionId,
-        text: String,
+        input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
         match self
             .scheduler
-            .deliver_input(session_id, text, InputDelivery::QueueIfRunningElseStart)
+            .deliver_input(session_id, input, InputDelivery::QueueIfRunningElseStart)
             .await
         {
             Ok(DeliveryOutcome::Queued { .. }) => Ok(PromptSubmission::Handled {
@@ -412,13 +412,13 @@ impl CommandHandler {
             },
             CommandMessage::SubmitInputForSession {
                 session_id,
-                text,
+                input,
                 reply,
             } => {
                 let result = if self.scheduler.registry().has_active(&session_id) {
-                    self.queue_input_for_next_turn(session_id, text).await
+                    self.queue_input_for_next_turn(session_id, input).await
                 } else {
-                    self.submit_input_for_session(session_id, text).await
+                    self.submit_input_for_session(session_id, input).await
                 };
                 let _ = reply.send(result);
             },
@@ -460,10 +460,10 @@ impl CommandHandler {
             },
             CommandMessage::SubmitInputWithCompletion {
                 session_id,
-                text,
+                input,
                 reply,
             } => {
-                let _ = reply.send(self.submit_input_with_completion(session_id, text).await);
+                let _ = reply.send(self.submit_input_with_completion(session_id, input).await);
             },
             CommandMessage::RepairStaleTurn { session_id, reply } => {
                 let _ = reply.send(self.repair_stale_session(&session_id).await);

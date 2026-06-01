@@ -84,10 +84,14 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     /// 向当前活跃会话提交提示词。
     ///
     /// - `text`: 用户输入的提示词文本。
-    pub async fn submit_prompt(&self, text: &str) -> Result<(), ClientError> {
+    pub async fn submit_prompt(
+        &self,
+        text: &str,
+        attachments: Vec<astrcode_protocol::commands::Attachment>,
+    ) -> Result<(), ClientError> {
         let cmd = ClientCommand::SubmitPrompt {
             text: text.into(),
-            attachments: vec![],
+            attachments,
         };
         self.transport.send(&cmd).await?;
         Ok(())
@@ -271,7 +275,7 @@ mod tests {
         let transport = StubTransport::new(vec![]);
         let client = AstrcodeClient::new(transport);
 
-        client.submit_prompt("hello").await.unwrap();
+        client.submit_prompt("hello", vec![]).await.unwrap();
 
         let sent = client.transport.sent.lock().expect("sent lock");
         assert_eq!(sent.len(), 1);

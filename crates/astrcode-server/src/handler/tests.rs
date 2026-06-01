@@ -923,6 +923,7 @@ async fn append_user_assistant_pair(
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: user.into(),
+                attachments: vec![],
             },
         ))
         .await
@@ -2247,6 +2248,7 @@ async fn auto_compact_applies_in_memory_during_turn() {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
+                    attachments: vec![],
                 },
             ))
             .await
@@ -2323,6 +2325,7 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
+                    attachments: vec![],
                 },
             ))
             .await

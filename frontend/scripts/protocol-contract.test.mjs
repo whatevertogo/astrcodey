@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   ProtocolDecodeError,
+  decodeConversationBlock,
+  decodeConversationSnapshot,
   decodeConversationStreamEnvelope,
 } from '../../target/frontend-contract/services/protocol.js'
 
@@ -135,3 +137,38 @@ assert.throws(
     }),
   ProtocolDecodeError
 )
+
+// User blocks omit `attachments` when empty (serde skip_serializing_if).
+const userWithoutAttachments = decodeConversationBlock({
+  kind: 'user',
+  id: 'u-1',
+  text: 'hello',
+})
+assert.equal(userWithoutAttachments.kind, 'user')
+assert.equal(userWithoutAttachments.text, 'hello')
+assert.equal(userWithoutAttachments.attachments, undefined)
+
+const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
+  sessionId: 's-1',
+  sessionTitle: 'title',
+  cursor: { value: '0' },
+  phase: 'idle',
+  control: {
+    phase: 'idle',
+    canSubmitPrompt: true,
+    canRequestCompact: false,
+    compactPending: false,
+    compacting: false,
+  },
+  blocks: [
+    { kind: 'user', id: 'u-1', text: 'prior message' },
+    {
+      kind: 'assistant',
+      id: 'a-1',
+      text: 'reply',
+      status: 'complete',
+    },
+  ],
+  agentSessions: [],
+})
+assert.equal(snapshotWithoutAttachmentFields.blocks.length, 2)

@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::tool::ToolDefinition;
+use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
 /// LLM 对话消息中的角色。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,9 @@ pub enum LlmContent {
         base64: String,
         /// 图片的 MIME 类型（如 "image/png"）。
         media_type: String,
+        /// 原始文件名；旧持久化记录可能缺失。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
     /// 助手请求的工具调用内容。
     ToolCall {
@@ -123,6 +126,11 @@ impl LlmMessage {
         }
     }
 
+    /// 由文本与附件构建用户消息（图片走 [`LlmContent::Image`]）。
+    pub fn user_with_attachments(text: &str, attachments: &[MessageAttachment]) -> Self {
+        user_message_with_attachments(text, attachments)
+    }
+
     /// 创建一条助手文本消息。
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
@@ -194,6 +202,72 @@ impl LlmMessage {
         self.reasoning_content
             .as_ref()
             .is_some_and(|r| !r.trim().is_empty())
+    }
+}
+
+fn xml_escape_attr(value: &str) -> String {
+    value.replace('&', "&amp;").replace('"', "&quot;")
+}
+
+/// 从用户 LLM 消息中提取附件（与 [`user_message_with_attachments`] 对称）。
+pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachment> {
+    message
+        .content
+        .iter()
+        .enumerate()
+        .filter_map(|(index, content)| match content {
+            LlmContent::Image {
+                base64,
+                media_type,
+                filename,
+            } => Some(MessageAttachment {
+                filename: filename
+                    .clone()
+                    .unwrap_or_else(|| format!("image-{}.png", index + 1)),
+                content: base64.clone(),
+                media_type: media_type.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 将用户文本与附件组装为 LLM 用户消息。
+pub fn user_message_with_attachments(text: &str, attachments: &[MessageAttachment]) -> LlmMessage {
+    let mut content = Vec::new();
+    for att in attachments {
+        if att.is_image() {
+            content.push(LlmContent::Image {
+                base64: att.content.clone(),
+                media_type: att.media_type.clone(),
+                filename: Some(att.filename.clone()),
+            });
+        } else {
+            content.push(LlmContent::Text {
+                text: format!(
+                    "<attachment filename=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
+                    xml_escape_attr(&att.filename),
+                    xml_escape_attr(&att.media_type),
+                    att.content
+                ),
+            });
+        }
+    }
+    if !text.is_empty() {
+        content.push(LlmContent::Text {
+            text: text.to_string(),
+        });
+    }
+    if content.is_empty() {
+        content.push(LlmContent::Text {
+            text: String::new(),
+        });
+    }
+    LlmMessage {
+        role: LlmRole::User,
+        content,
+        name: None,
+        reasoning_content: None,
     }
 }
 
@@ -581,5 +655,33 @@ mod tests {
         let visible = provider_visible_messages(messages);
 
         assert_eq!(visible, vec![LlmMessage::user("start")]);
+    }
+
+    #[test]
+    fn attachments_round_trip_preserves_image_filename() {
+        let attachments = vec![MessageAttachment::image_png("screenshot.png", "abc123")];
+        let message = user_message_with_attachments("hello", &attachments);
+        let round_trip = attachments_from_user_message(&message);
+        assert_eq!(round_trip, attachments);
+    }
+
+    #[test]
+    fn non_image_attachment_uses_xml_delimiters() {
+        let attachments = vec![MessageAttachment {
+            filename: "note.txt".into(),
+            content: "body".into(),
+            media_type: "text/plain".into(),
+        }];
+        let message = user_message_with_attachments("", &attachments);
+        let text = message
+            .content
+            .iter()
+            .find_map(|part| match part {
+                LlmContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("text attachment");
+        assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
+        assert!(text.ends_with("</attachment>"));
     }
 }

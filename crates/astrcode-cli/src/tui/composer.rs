@@ -2,6 +2,7 @@
 //!
 //! 光标位置使用 char 索引，便于和终端宽字符布局保持一致。
 
+use astrcode_core::message_attachment::{MAX_ATTACHMENTS, MessageAttachment};
 use unicode_width::UnicodeWidthChar;
 
 const PASTE_PLACEHOLDER_THRESHOLD: usize = 600;
@@ -15,6 +16,7 @@ pub struct ComposerState {
     history: Vec<String>,
     history_idx: Option<usize>,
     pasted: Vec<PastedContent>,
+    attachments: Vec<MessageAttachment>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,11 +34,35 @@ impl ComposerState {
         self.cursor
     }
 
+    pub fn attachments(&self) -> &[MessageAttachment] {
+        &self.attachments
+    }
+
+    pub fn add_attachment(&mut self, attachment: MessageAttachment) -> bool {
+        if self.attachments.len() >= MAX_ATTACHMENTS {
+            return false;
+        }
+        self.attachments.push(attachment);
+        true
+    }
+
+    pub fn remove_last_attachment(&mut self) -> bool {
+        if self.attachments.pop().is_some() {
+            return true;
+        }
+        false
+    }
+
+    pub fn take_attachments(&mut self) -> Vec<MessageAttachment> {
+        std::mem::take(&mut self.attachments)
+    }
+
     pub fn set_text(&mut self, text: String) {
         self.cursor = text.chars().count();
         self.text = text;
         self.history_idx = None;
         self.pasted.clear();
+        self.attachments.clear();
     }
 
     pub fn insert_char(&mut self, ch: char) -> bool {
@@ -187,6 +213,10 @@ impl ComposerState {
         self.history_idx = None;
         self.pasted.clear();
         expanded
+    }
+
+    pub fn can_submit(&self) -> bool {
+        !self.text.trim().is_empty() || !self.attachments.is_empty()
     }
 
     pub fn remember_input(&mut self, input: &str) {

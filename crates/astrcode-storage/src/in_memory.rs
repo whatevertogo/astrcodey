@@ -313,6 +313,7 @@ mod tests {
                 EventPayload::UserMessage {
                     message_id: "m1".into(),
                     text: "hello".into(),
+                    attachments: vec![],
                 },
             ))
             .await

@@ -19,6 +19,7 @@ import {
 } from './protocol'
 import type {
   CreateSessionResponse,
+  PromptAttachmentWire,
   PromptSubmitResponse,
   SessionListResponse,
   ConversationSnapshot,
@@ -160,14 +161,19 @@ export async function injectMessage(
 
 export async function submitPrompt(
   sessionId: string,
-  text: string
+  text: string,
+  attachments: PromptAttachmentWire[] = []
 ): Promise<PromptSubmitResponse> {
-  console.log('[api] submitPrompt →', { sessionId, text })
+  console.log('[api] submitPrompt →', {
+    sessionId,
+    text,
+    attachmentCount: attachments.length,
+  })
   try {
     const result = decodePromptSubmitResponse(
       await request(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
         method: 'POST',
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, attachments }),
       })
     )
     console.log('[api] submitPrompt ←', result)

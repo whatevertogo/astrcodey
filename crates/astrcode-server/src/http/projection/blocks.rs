@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
     storage::{CompactBoundaryView, SequencedLlmMessage},
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
@@ -39,9 +39,15 @@ pub(in crate::http) fn compact_summary_block(
 /// final block. Shared by live and replay delta functions.
 pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
     match &event.payload {
-        EventPayload::UserMessage { message_id, text } => Some(ConversationBlockDto::User {
+        EventPayload::UserMessage {
+            message_id,
+            text,
+            attachments,
+            ..
+        } => Some(ConversationBlockDto::User {
             id: message_id.to_string(),
             text: text.clone(),
+            attachments: attachments.clone(),
             source: None,
         }),
         EventPayload::AssistantMessageCompleted {
@@ -127,6 +133,7 @@ pub(in crate::http) fn messages_to_blocks(
             LlmRole::User => blocks.push(ConversationBlockDto::User {
                 id,
                 text: visible_message_text(message),
+                attachments: attachments_from_user_message(message),
                 source: source.clone(),
             }),
             LlmRole::Assistant => {
@@ -240,7 +247,7 @@ fn visible_message_text(message: &LlmMessage) -> String {
         .content
         .iter()
         .filter_map(|content| match content {
-            LlmContent::ToolCall { .. } => None,
+            LlmContent::ToolCall { .. } | LlmContent::Image { .. } => None,
             other => Some(other.to_display_text()),
         })
         .collect::<Vec<_>>()

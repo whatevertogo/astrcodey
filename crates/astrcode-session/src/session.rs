@@ -651,7 +651,12 @@ fn primary_llm_for_model_id(
 // ── Turn submission ──
 
 impl Session {
-    async fn emit_turn_start_events(&self, text: &str, turn_id: &TurnId) -> Result<(), TurnError> {
+    async fn emit_turn_start_events(
+        &self,
+        text: &str,
+        attachments: &[astrcode_core::message_attachment::MessageAttachment],
+        turn_id: &TurnId,
+    ) -> Result<(), TurnError> {
         self.emit_durable(Some(turn_id), EventPayload::TurnStarted)
             .await?;
         self.emit_durable(
@@ -659,6 +664,7 @@ impl Session {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: text.to_string(),
+                attachments: attachments.to_vec(),
             },
         )
         .await?;
@@ -785,8 +791,14 @@ impl Session {
         let _ = completion_tx.send(result);
     }
 
-    pub async fn submit(&self, text: String, turn_id: TurnId) -> Result<TurnHandle, TurnError> {
-        self.emit_turn_start_events(&text, &turn_id).await?;
+    pub async fn submit(
+        &self,
+        text: String,
+        attachments: Vec<astrcode_core::message_attachment::MessageAttachment>,
+        turn_id: TurnId,
+    ) -> Result<TurnHandle, TurnError> {
+        self.emit_turn_start_events(&text, &attachments, &turn_id)
+            .await?;
         let agent = self.prepare_turn_runner().await?;
         let cancellation_token = agent.cancellation_token();
         let (completion_tx, completion_rx) = oneshot::channel();

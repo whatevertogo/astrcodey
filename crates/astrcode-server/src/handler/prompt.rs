@@ -1,17 +1,27 @@
 //! Prompt 提交、注入与斜杠命令拦截。
 
-use astrcode_core::types::SessionId;
+use astrcode_core::{message_attachment::MessageAttachment, types::SessionId};
 
 use super::{CommandHandler, HandlerError, PromptSubmission, slash};
-use crate::turn_scheduler::{DeliveryOutcome, InputDelivery};
+use crate::turn_scheduler::{DeliveryOutcome, InputDelivery, PromptInput};
+
+fn validate_prompt_attachments(attachments: &[MessageAttachment]) -> Result<(), HandlerError> {
+    astrcode_core::message_attachment::validate_attachments(attachments)
+        .map_err(|error| HandlerError::InvalidRequest(error.to_string()))
+}
 
 impl CommandHandler {
-    pub(super) async fn submit_prompt(&mut self, text: String) -> Result<(), HandlerError> {
+    pub(super) async fn submit_prompt(
+        &mut self,
+        text: String,
+        attachments: Vec<MessageAttachment>,
+    ) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        match self
-            .submit_input_for_session(sid.clone(), text.clone())
-            .await
-        {
+        let input = PromptInput {
+            text: text.clone(),
+            attachments,
+        };
+        match self.submit_input_for_session(sid.clone(), input).await {
             Ok(_) => Ok(()),
             Err(HandlerError::TurnAlreadyRunning) => {
                 self.inject_mid_turn_message_for_session(&sid, text).await
@@ -58,7 +68,11 @@ impl CommandHandler {
         }
         match self
             .scheduler
-            .deliver_input(sid, text, InputDelivery::InjectIfRunningElseStart)
+            .deliver_input(
+                sid,
+                PromptInput::text_only(text),
+                InputDelivery::InjectIfRunningElseStart,
+            )
             .await?
         {
             DeliveryOutcome::Injected { .. } => Ok(PromptSubmission::Handled {
@@ -72,11 +86,12 @@ impl CommandHandler {
     pub async fn submit_input_for_session(
         &mut self,
         sid: SessionId,
-        text: String,
+        input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        if let Some(command) = slash::parse_slash_command(&text) {
+        validate_prompt_attachments(&input.attachments)?;
+        if let Some(command) = slash::parse_slash_command(&input.text) {
             match self
-                .execute_slash_command_for_session(sid.clone(), command, text.clone())
+                .execute_slash_command_for_session(sid.clone(), command, input.text.clone())
                 .await
             {
                 Err(HandlerError::UnknownCommand(_)) => {},
@@ -84,7 +99,7 @@ impl CommandHandler {
             }
         }
 
-        self.start_turn_for_session(sid, text, None)
+        self.start_turn_for_session(sid, input.text, input.attachments, None)
             .await
             .map(|turn_id| PromptSubmission::Accepted { turn_id })
     }

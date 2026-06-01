@@ -133,9 +133,12 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         },
         EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
             model.phase = Phase::Thinking;
-            if let EventPayload::UserMessage { text, .. } = &event.payload {
+            if let EventPayload::UserMessage {
+                text, attachments, ..
+            } = &event.payload
+            {
                 model.messages.push(SequencedLlmMessage {
-                    message: LlmMessage::user(text),
+                    message: LlmMessage::user_with_attachments(text, attachments),
                     updated_seq: event_seq,
                     source: None,
                 });
@@ -442,6 +445,7 @@ mod tests {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: "old user".into(),
+                    attachments: vec![],
                 },
             ),
             event(
@@ -459,6 +463,7 @@ mod tests {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: "recent user".into(),
+                    attachments: vec![],
                 },
             ),
         ];
@@ -534,6 +539,7 @@ mod tests {
             EventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "after compact".into(),
+                attachments: vec![],
             },
         ));
 
@@ -607,6 +613,7 @@ mod tests {
                 EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: "run a long command".into(),
+                    attachments: vec![],
                 },
             ),
             event(2, &session_id, EventPayload::TurnAbortedContext),

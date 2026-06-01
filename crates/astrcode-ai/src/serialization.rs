@@ -146,7 +146,7 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
                 LlmContent::Text { text } => {
                     Some(serde_json::json!({"type": "text", "text": text}))
                 },
-                LlmContent::Image { base64, media_type } => Some(serde_json::json!({
+                LlmContent::Image { base64, media_type, .. } => Some(serde_json::json!({
                     "type": "image_url",
                     "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
                 })),
@@ -216,7 +216,7 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
                     let kind = if input { "input_text" } else { "output_text" };
                     Some(serde_json::json!({"type": kind, "text": text}))
                 },
-                LlmContent::Image { base64, media_type } if input => Some(serde_json::json!({
+                LlmContent::Image { base64, media_type, .. } if input => Some(serde_json::json!({
                     "type": "input_image",
                     "image_url": format!("data:{};base64,{}", media_type, base64)
                 })),
@@ -287,7 +287,7 @@ pub(crate) trait ContentMapper {
             .iter()
             .filter_map(|c| match c {
                 LlmContent::Text { text } => Some(Self::text(text)),
-                LlmContent::Image { base64, media_type } => Some(Self::image(base64, media_type)),
+                LlmContent::Image { base64, media_type, .. } => Some(Self::image(base64, media_type)),
                 LlmContent::ToolResult {
                     tool_call_id,
                     content,

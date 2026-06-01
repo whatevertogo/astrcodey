@@ -399,6 +399,7 @@ mod tests {
             .durable(EventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "first".into(),
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -409,6 +410,7 @@ mod tests {
             .durable(EventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "second".into(),
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -425,6 +427,7 @@ mod tests {
             .durable(EventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "injected".into(),
+                attachments: vec![],
             })
             .await
             .unwrap();
@@ -548,6 +551,7 @@ mod tests {
                 tx.send(EventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("parallel-{index}"),
+                    attachments: vec![],
                 })
                 .unwrap();
                 sender.flush().await;

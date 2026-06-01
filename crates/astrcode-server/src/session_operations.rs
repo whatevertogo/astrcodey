@@ -76,7 +76,7 @@ impl SessionOperations for ServerSessionOperations {
         self.scheduler
             .deliver_input(
                 target_sid.clone(),
-                content,
+                crate::turn_scheduler::PromptInput::text_only(content),
                 InputDelivery::InjectIfRunningElseStart,
             )
             .await

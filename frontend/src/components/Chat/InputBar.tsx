@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react'
+import { useRef, useState, useCallback, useEffect, type ClipboardEvent } from 'react'
 import { useAppStore } from '../../store/conversation'
 import {
   composerShell,
@@ -10,6 +10,14 @@ import { cn } from '../../lib/utils'
 import ModelSelector from './ModelSelector'
 import CommandSelector from './CommandSelector'
 import PendingMessagesPanel from './PendingMessagesPanel'
+import ComposerAttachments from './ComposerAttachments'
+import {
+  attachmentToWire,
+  MAX_ATTACHMENTS,
+  readImageFiles,
+  revokeAttachmentPreviews,
+} from '../../lib/composerAttachments'
+import type { PromptAttachment } from '../../services/types'
 import { Icon } from '../ui'
 import * as api from '../../services/api'
 import type { SlashCommandInfo } from '../../services/types'
@@ -34,6 +42,9 @@ export default function InputBar() {
   const flushPendingQueued = useAppStore((s) => s.flushPendingQueued)
 
   const [value, setValue] = useState('')
+  const [attachments, setAttachments] = useState<PromptAttachment[]>([])
+  const attachmentsRef = useRef(attachments)
+  attachmentsRef.current = attachments
   const [isComposing, setIsComposing] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const isCompacting = phase === 'compacting' || compactSubmitting
@@ -58,6 +69,10 @@ export default function InputBar() {
   const slashTriggerStartRef = useRef(0)
   const slashTriggerEndRef = useRef(0)
   const slashAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => revokeAttachmentPreviews(attachmentsRef.current)
+  }, [])
 
   const closeSlashTrigger = useCallback(() => {
     setSlashTriggerVisible(false)
@@ -193,17 +208,64 @@ export default function InputBar() {
     updateSlashTrigger(value, textarea.selectionStart)
   }, [updateSlashTrigger, value])
 
+  const addAttachments = useCallback((incoming: PromptAttachment[]) => {
+    if (incoming.length === 0) return
+    setAttachments((current) => {
+      const merged = [...current, ...incoming]
+      if (merged.length <= MAX_ATTACHMENTS) return merged
+      revokeAttachmentPreviews(merged.slice(MAX_ATTACHMENTS))
+      return merged.slice(0, MAX_ATTACHMENTS)
+    })
+  }, [])
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => {
+      const target = current.find((item) => item.id === id)
+      if (target) URL.revokeObjectURL(target.previewUrl)
+      return current.filter((item) => item.id !== id)
+    })
+  }, [])
+
+  const handlePaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = event.clipboardData?.items
+      if (!items) return
+      const files: File[] = []
+      for (const item of items) {
+        if (item.kind !== 'file') continue
+        const file = item.getAsFile()
+        if (file?.type.startsWith('image/')) files.push(file)
+      }
+      if (files.length === 0) return
+      event.preventDefault()
+      addAttachments(readImageFiles(files))
+    },
+    [addAttachments]
+  )
+
   const submit = useCallback(async () => {
     const trimmed = value.trim()
-    if (!trimmed || !activeSessionId || !canSubmit) return
+    if ((!trimmed && attachments.length === 0) || !activeSessionId || !canSubmit) {
+      return
+    }
     closeSlashTrigger()
-    const accepted = await submitPrompt(trimmed)
+    const wireAttachments = await Promise.all(attachments.map(attachmentToWire))
+    const accepted = await submitPrompt(trimmed, wireAttachments)
     if (!accepted) return
+    revokeAttachmentPreviews(attachments)
+    setAttachments([])
     setValue('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, activeSessionId, canSubmit, submitPrompt, closeSlashTrigger])
+  }, [
+    value,
+    attachments,
+    activeSessionId,
+    canSubmit,
+    submitPrompt,
+    closeSlashTrigger,
+  ])
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -281,6 +343,10 @@ export default function InputBar() {
               </div>
             )}
             <div className="relative px-[var(--chat-composer-shell-padding-x)] py-3">
+              <ComposerAttachments
+                attachments={attachments}
+                onRemove={removeAttachment}
+              />
               <textarea
                 ref={textareaRef}
                 className="mb-2 max-h-60 min-h-10 w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[15px] leading-[1.6] text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
@@ -293,6 +359,7 @@ export default function InputBar() {
                 onKeyUp={handleCursorActivity}
                 onCompositionStart={() => setIsComposing(true)}
                 onCompositionEnd={() => setIsComposing(false)}
+                onPaste={handlePaste}
                 disabled={!activeSessionId}
               />
               <div className="flex items-center justify-between gap-3">
@@ -370,7 +437,11 @@ export default function InputBar() {
                     className={cn(composerSubmitButton)}
                     type="button"
                     onClick={() => void submit()}
-                    disabled={!value.trim() || !activeSessionId || !canSubmit}
+                    disabled={
+                      (!value.trim() && attachments.length === 0) ||
+                      !activeSessionId ||
+                      !canSubmit
+                    }
                     aria-label={submitActionLabel}
                     title={submitActionLabel}
                   >

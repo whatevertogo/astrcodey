@@ -193,7 +193,7 @@ impl CommandHandler {
                 } else {
                     instructions
                 };
-                self.start_turn_for_session(sid, user_text, None)
+                self.start_turn_for_session(sid, user_text, vec![], None)
                     .await
                     .map(|turn_id| PromptSubmission::Accepted { turn_id })
             },

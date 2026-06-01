@@ -3,7 +3,10 @@
 //! 这些类型只描述外部协议形状；server 负责把 storage read model 映射到这里，
 //! storage 不依赖也不返回这些 DTO。
 
-use astrcode_core::event::{Phase, ToolOutputStream};
+use astrcode_core::{
+    event::{Phase, ToolOutputStream},
+    message_attachment::MessageAttachment,
+};
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
@@ -27,6 +30,8 @@ pub struct CreateSessionResponseDto {
 #[serde(rename_all = "camelCase")]
 pub struct PromptRequest {
     pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
 }
 
 /// 工具审批决议请求。
@@ -261,6 +266,8 @@ pub enum ConversationBlockDto {
     User {
         id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<MessageAttachment>,
         #[serde(skip_serializing_if = "Option::is_none")]
         source: Option<String>,
     },

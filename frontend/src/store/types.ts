@@ -60,7 +60,10 @@ export interface AppState {
     command: string,
     argumentsText?: string
   ) => Promise<boolean>
-  submitPrompt: (text: string) => Promise<boolean>
+  submitPrompt: (
+    text: string,
+    attachments?: import('../services/types').PromptAttachmentWire[]
+  ) => Promise<boolean>
   abortCurrentTurn: () => Promise<void>
   applyDelta: (delta: import('../services/types').ConversationDelta) => void
   clearTransientHint: () => void

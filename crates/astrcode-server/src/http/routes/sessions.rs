@@ -197,11 +197,30 @@ pub(in crate::http) async fn submit_prompt(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
-    tracing::info!(session_id = %session_id, text_len = request.text.len(), "POST prompt submit");
+    if let Err(error) =
+        astrcode_core::message_attachment::validate_attachments(&request.attachments)
+    {
+        return handler_error_response(
+            HandlerError::InvalidRequest(error.to_string()),
+            "prompt_failed",
+        );
+    }
+    tracing::info!(
+        session_id = %session_id,
+        text_len = request.text.len(),
+        attachment_count = request.attachments.len(),
+        "POST prompt submit"
+    );
     let session_id = SessionId::from(session_id);
     let result = state
         .handler
-        .submit_input_for_session(session_id.clone(), request.text)
+        .submit_input_for_session(
+            session_id.clone(),
+            crate::turn_scheduler::PromptInput {
+                text: request.text,
+                attachments: request.attachments,
+            },
+        )
         .await;
     match result {
         Ok(PromptSubmission::Accepted { turn_id }) => {
@@ -253,7 +272,10 @@ pub(in crate::http) async fn execute_extension_command(
     };
     match state
         .handler
-        .submit_input_for_session(session_id.clone(), visible_text)
+        .submit_input_for_session(
+            session_id.clone(),
+            crate::turn_scheduler::PromptInput::text_only(visible_text),
+        )
         .await
     {
         Ok(PromptSubmission::Handled { message }) => Json(PromptSubmitResponse::Handled {

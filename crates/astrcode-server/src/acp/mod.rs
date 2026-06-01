@@ -134,7 +134,10 @@ async fn handle_prompt(
     let mut event_rx = event_tx.subscribe();
 
     let (turn_id, mut completion_rx) = command_handle
-        .submit_prompt_with_completion(session_id.clone(), text)
+        .submit_prompt_with_completion(
+            session_id.clone(),
+            crate::turn_scheduler::PromptInput::text_only(text),
+        )
         .await
         .map_err(handler_error_to_acp)?;
 
