@@ -28,7 +28,6 @@ impl ToolRenderer for ReadRenderer {
         if result.is_error {
             return None;
         }
-        let lines = result.content.lines().count().max(1);
         let path = result
             .metadata
             .get("path")
@@ -39,13 +38,29 @@ impl ToolRenderer for ReadRenderer {
             .get("fileType")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let suffix = if file_type.is_empty() {
-            String::new()
+        let text = if file_type == "image" {
+            let bytes = result
+                .metadata
+                .get("bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let size = if bytes >= 1024 {
+                format!("{}KB", bytes / 1024)
+            } else {
+                format!("{bytes}B")
+            };
+            format!("Read image ({size}) — {path}")
         } else {
-            format!(", {file_type}")
+            let lines = result.content.lines().count().max(1);
+            let suffix = if file_type.is_empty() {
+                String::new()
+            } else {
+                format!(", {file_type}")
+            };
+            format!("{path} ({lines} lines{suffix})")
         };
         Some(RenderSpec::Text {
-            text: format!("{path} ({lines} lines{suffix})"),
+            text,
             tone: RenderTone::Success,
         })
     }

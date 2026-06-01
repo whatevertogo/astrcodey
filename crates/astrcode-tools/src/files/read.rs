@@ -241,7 +241,9 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "- Known file path, or a persisted tool-result path under tool-results/\n",
             "- Multiple files may be read together when helpful\n",
             "- Paths containing tool-results/ use char pagination only (charOffset/maxChars, not ",
-            "offset/limit); repeat until hasMore is false\n\n",
+            "offset/limit); repeat until hasMore is false\n",
+            "- Images (PNG, JPG, GIF, WebP, etc.) are returned for multimodal models to view ",
+            "directly; use this tool for screenshots and image paths the user provides\n\n",
             "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),

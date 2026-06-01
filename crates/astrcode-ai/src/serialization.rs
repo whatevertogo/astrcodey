@@ -9,6 +9,10 @@ use astrcode_core::{
     tool::ToolDefinition,
 };
 
+use crate::tool_result_wire::{
+    openai_chat_tool_result_content, openai_responses_tool_result_output,
+};
+
 // ─── 工具序列化 ────────────────────────────────────────────────────────
 
 pub(crate) fn tools_to_json(tools: &[ToolDefinition]) -> serde_json::Value {
@@ -59,7 +63,11 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
             else {
                 return serde_json::json!({"role": "tool", "tool_call_id": "", "content": ""});
             };
-            serde_json::json!({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": openai_chat_tool_result_content(content),
+            })
         },
         LlmRole::Assistant
             if message
@@ -146,7 +154,9 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
                 LlmContent::Text { text } => {
                     Some(serde_json::json!({"type": "text", "text": text}))
                 },
-                LlmContent::Image { base64, media_type, .. } => Some(serde_json::json!({
+                LlmContent::Image {
+                    base64, media_type, ..
+                } => Some(serde_json::json!({
                     "type": "image_url",
                     "image_url": {"url": format!("data:{};base64,{}", media_type, base64)}
                 })),
@@ -198,7 +208,7 @@ pub(crate) fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Val
                 } => Some(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_call_id,
-                    "output": content
+                    "output": openai_responses_tool_result_output(content),
                 })),
                 _ => None,
             })
@@ -216,7 +226,9 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
                     let kind = if input { "input_text" } else { "output_text" };
                     Some(serde_json::json!({"type": kind, "text": text}))
                 },
-                LlmContent::Image { base64, media_type, .. } if input => Some(serde_json::json!({
+                LlmContent::Image {
+                    base64, media_type, ..
+                } if input => Some(serde_json::json!({
                     "type": "input_image",
                     "image_url": format!("data:{};base64,{}", media_type, base64)
                 })),
@@ -287,7 +299,9 @@ pub(crate) trait ContentMapper {
             .iter()
             .filter_map(|c| match c {
                 LlmContent::Text { text } => Some(Self::text(text)),
-                LlmContent::Image { base64, media_type, .. } => Some(Self::image(base64, media_type)),
+                LlmContent::Image {
+                    base64, media_type, ..
+                } => Some(Self::image(base64, media_type)),
                 LlmContent::ToolResult {
                     tool_call_id,
                     content,

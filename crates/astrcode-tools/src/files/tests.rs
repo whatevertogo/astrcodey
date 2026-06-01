@@ -4,11 +4,11 @@ use std::{
 };
 
 use astrcode_core::{
+    read_tool_image::ReadToolInlinePayload,
     storage::{StorageError, ToolResultArtifactReader, ToolResultArtifactSlice},
     tool::*,
     types::SessionId,
 };
-use serde_json::Value;
 
 use super::{shared::MAX_INLINE_IMAGE_BASE64_BYTES, *};
 
@@ -297,22 +297,22 @@ async fn read_file_returns_inline_image_payload() {
         .expect("read should execute");
 
     assert!(!result.is_error, "{result:?}");
-    let payload: Value =
+    let payload: ReadToolInlinePayload =
         serde_json::from_str(&result.content).expect("image output should be JSON");
-    assert_eq!(payload["type"], serde_json::json!("image"));
-    assert_eq!(payload["mediaType"], serde_json::json!("image/png"));
-    assert!(
-        payload["data"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
+    match payload {
+        ReadToolInlinePayload::Image { media_type, data } => {
+            assert_eq!(media_type, "image/png");
+            assert!(!data.is_empty());
+        },
+    }
     assert_eq!(result.metadata["fileType"], serde_json::json!("image"));
 }
 
 #[tokio::test]
 async fn read_file_rejects_oversize_image_payload() {
     let temp = unique_temp_dir("read-file-large-image");
-    std::fs::write(temp.path().join("large.png"), vec![1u8; 800 * 1024]).expect("seed large image");
+    // 原始 ~3.25MB → base64 略大于 4MB 附件上限
+    std::fs::write(temp.path().join("large.png"), vec![1u8; 3_250_000]).expect("seed large image");
     let tool = ReadFileTool {
         working_dir: temp.path().to_path_buf(),
     };

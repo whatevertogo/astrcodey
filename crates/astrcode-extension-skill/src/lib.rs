@@ -574,9 +574,9 @@ fn format_skills_for_model(skills: &[SkillDefinition]) -> String {
     }
 
     let mut output = String::from(
-        "When a task matches one of these skills, calling the Skill tool with the exact skill \
-         name is required before continuing. Users may also refer to skills as slash commands, \
-         such as /commit.\n",
+        "These skills provide workflows for matching tasks. When one seems relevant, consider \
+         calling the Skill tool with the exact skill name. Users may also refer to skills as \
+         slash commands, such as /commit.\n",
     );
     for skill in skills {
         let display = skill

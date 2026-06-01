@@ -17,6 +17,7 @@ use crate::{
         stream_text_delta, stream_with_event_type,
     },
     serialization::ContentMapper,
+    tool_result_wire::anthropic_tool_result_content,
 };
 
 pub struct AnthropicProvider {
@@ -465,7 +466,7 @@ fn convert_tool_result_block(msg: &LlmMessage) -> serde_json::Value {
             return serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_call_id,
-                "content": content,
+                "content": anthropic_tool_result_content(content),
                 "is_error": is_error,
             });
         }

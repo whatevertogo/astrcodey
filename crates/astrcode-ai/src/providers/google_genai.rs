@@ -12,6 +12,7 @@ use crate::{
         stream_with_retry,
     },
     serialization::ContentMapper,
+    tool_result_wire::gemini_tool_result_parts,
 };
 
 pub struct GeminiProvider {
@@ -83,7 +84,7 @@ impl GeminiProvider {
                     contents.push(GeminiMapper::map_user(msg));
                 },
                 LlmRole::Tool => {
-                    pending_tool_results.push(convert_tool_result_to_gemini(msg));
+                    pending_tool_results.extend(convert_tool_result_to_gemini(msg));
                 },
             }
         }
@@ -259,7 +260,7 @@ impl ContentMapper for GeminiMapper {
     }
 }
 
-fn convert_tool_result_to_gemini(msg: &LlmMessage) -> serde_json::Value {
+fn convert_tool_result_to_gemini(msg: &LlmMessage) -> Vec<serde_json::Value> {
     let mut name = String::new();
     let mut result_text = String::new();
     let mut is_error = false;
@@ -275,12 +276,7 @@ fn convert_tool_result_to_gemini(msg: &LlmMessage) -> serde_json::Value {
             is_error = *err;
         }
     }
-    serde_json::json!({
-        "functionResponse": {
-            "name": name,
-            "response": {"output": result_text, "error": is_error}
-        }
-    })
+    gemini_tool_result_parts(&name, &result_text, is_error)
 }
 
 fn flush_tool_results(pending: &mut Vec<serde_json::Value>, contents: &mut Vec<serde_json::Value>) {
@@ -340,10 +336,10 @@ mod tests {
         contents.push(GeminiMapper::map_assistant(&LlmMessage::assistant(
             "checking",
         )));
-        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool(
+        pending.extend(convert_tool_result_to_gemini(&LlmMessage::tool(
             "read", "call_1", "content", false,
         )));
-        pending.push(convert_tool_result_to_gemini(&LlmMessage::tool(
+        pending.extend(convert_tool_result_to_gemini(&LlmMessage::tool(
             "grep", "call_2", "match", false,
         )));
         flush_tool_results(&mut pending, &mut contents);

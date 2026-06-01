@@ -8,6 +8,7 @@ mod common;
 mod retry;
 mod serialization;
 mod stream_decoder;
+mod tool_result_wire;
 
 pub mod providers;
 

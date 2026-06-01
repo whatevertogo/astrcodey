@@ -6,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::tool::*;
+use astrcode_core::{
+    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES, read_tool_image::ReadToolInlinePayload,
+    tool::*,
+};
 use astrcode_support::hostpaths::resolve_path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -15,7 +18,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub(super) const DEFAULT_MAX_CHARS: usize = 20_000;
-pub(super) const MAX_INLINE_IMAGE_BASE64_BYTES: u64 = 1024 * 1024;
+/// 与 [`MAX_ATTACHMENT_CONTENT_BYTES`] 一致：限制 base64 展开后的内联体积。
+pub(super) const MAX_INLINE_IMAGE_BASE64_BYTES: u64 = MAX_ATTACHMENT_CONTENT_BYTES as u64;
 /// 未指定行分页时允许全量读入的最大字节数，超出需使用 offset/limit。
 pub(super) const MAX_UNPAGINATED_READ_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -277,12 +281,9 @@ pub(super) fn read_image_file_result(
         ));
     }
 
-    let content = serde_json::json!({
-        "type": "image",
-        "mediaType": media_type,
-        "data": BASE64.encode(bytes),
-    })
-    .to_string();
+    let content = ReadToolInlinePayload::image(media_type, BASE64.encode(bytes))
+        .to_content_string()
+        .map_err(|error| ToolError::Execution(format!("read: serialize image payload: {error}")))?;
     Ok(ToolResult {
         call_id,
         content,
