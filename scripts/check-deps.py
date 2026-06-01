@@ -71,6 +71,7 @@ LAYER_NAMES: dict[int, str] = {
 }
 
 ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
+    # L3: bundled-extensions aggregates same-layer extension crates.
     (dep, ext)
     for ext in (
         "astrcode-extension-agent-tools",
@@ -83,6 +84,10 @@ ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
         "astrcode-extension-web-tools",
     )
     for dep in ("astrcode-bundled-extensions",)
+} | {
+    # L1: extension-sdk is a facade that re-exports from other L1 crates.
+    ("astrcode-extension-sdk", "astrcode-protocol"),
+    ("astrcode-extension-sdk", "astrcode-support"),
 }
 
 

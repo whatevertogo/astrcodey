@@ -44,10 +44,11 @@ pub fn is_persisted_tool_result_summary(content: &str) -> bool {
 }
 
 /// 路径是否指向 session 的 tool-results artifact 文件。
+///
+/// 同时处理 `/`（POSIX）和 `\`（Windows）分隔符，确保跨平台一致。
 pub fn is_tool_result_artifact_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .components()
-        .any(|component| component.as_os_str().to_str() == Some("tool-results"))
+    path.split(&['/', '\\'])
+        .any(|segment| segment == "tool-results")
 }
 
 /// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
