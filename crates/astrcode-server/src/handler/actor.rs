@@ -479,6 +479,7 @@ impl CommandHandler {
                 let _ = reply.send(self.delete_project(working_dir).await);
             },
             CommandMessage::Shutdown { reply } => {
+                self.scheduler.drain_detached_tasks().await;
                 let _ = reply.send(());
             },
         }

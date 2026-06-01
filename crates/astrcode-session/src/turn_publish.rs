@@ -3,6 +3,13 @@
 //! 已打开 session 的 `read_model()` 克隆内存投影（非全量 replay）。本模块在 turn 内
 //! 用 [`astrcode_storage::projection::reduce`] 增量更新缓存，避免每步 tool commit / prepare
 //! 重复克隆整份 [`SessionReadModel`]。
+//!
+//! ## 事件 ingress
+//!
+//! Hook / 工具侧通过 [`TurnEventSender`] 非阻塞 `send`；单 FIFO worker 串行处理 durable，
+//! 避免并行工具各自 `spawn` bridge 时争用 [`TurnEvents::model_cache`] 或在 sender/await
+//! 上自挂。工具执行结束后 [`TurnEventSender::flush`] 即可保证此前入队事件已落盘/广播，
+//! 无需 per-tool bridge 与 drop 顺序协议。
 
 use std::sync::{
     Arc,
@@ -11,12 +18,15 @@ use std::sync::{
 
 use astrcode_core::{event::EventPayload, storage::SessionReadModel, types::TurnId};
 use astrcode_storage::projection;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
     session::Session,
     turn_context::{TurnError, TurnEventTx, send_event},
 };
+
+const DURABLE_PUBLISH_MAX_ATTEMPTS: u32 = 3;
+const DURABLE_PUBLISH_RETRY_BASE_MS: u64 = 50;
 
 /// Turn 内统一的事件发布入口。
 pub(crate) struct TurnEvents {
@@ -49,17 +59,27 @@ impl TurnEvents {
 
     /// 在 bypass 本 publisher 的 durable 写入后（如 compaction persist）从 store 重载投影。
     pub(crate) async fn reload_model_cache(&self) -> Result<(), TurnError> {
-        *self.model_cache.lock().await = Some(self.session.read_model().await?);
+        let model = self.session.read_model().await?;
+        *self.model_cache.lock().await = Some(model);
         Ok(())
     }
 
     /// 返回当前投影快照；优先使用 turn 内缓存，否则从 store 加载一次。
     pub(crate) async fn snapshot_model(&self) -> Result<SessionReadModel, TurnError> {
-        let mut cache = self.model_cache.lock().await;
-        if cache.is_none() {
-            *cache = Some(self.session.read_model().await?);
+        let cached = {
+            let guard = self.model_cache.lock().await;
+            guard.as_ref().cloned()
+        };
+        if let Some(model) = cached {
+            return Ok(model);
         }
-        cache.clone().ok_or(TurnError::ModelCacheEmpty)
+        let model = self.session.read_model().await?;
+        let mut cache = self.model_cache.lock().await;
+        if let Some(cached) = cache.as_ref() {
+            return Ok(cached.clone());
+        }
+        *cache = Some(model.clone());
+        Ok(model)
     }
 
     pub(crate) async fn durable(&self, payload: EventPayload) -> Result<(), TurnError> {
@@ -74,12 +94,22 @@ impl TurnEvents {
                 return Err(error.into());
             },
         };
+        let should_reduce = {
+            let cache = self.model_cache.lock().await;
+            cache.is_some()
+        };
+        if should_reduce {
+            let mut cache = self.model_cache.lock().await;
+            if let Some(model) = cache.as_mut() {
+                projection::reduce(&stored, model);
+            }
+            return Ok(());
+        }
+        let model = self.session.read_model().await?;
         let mut cache = self.model_cache.lock().await;
         match cache.as_mut() {
-            Some(model) => projection::reduce(&stored, model),
-            None => {
-                *cache = Some(self.session.read_model().await?);
-            },
+            Some(cached) => projection::reduce(&stored, cached),
+            None => *cache = Some(model),
         }
         Ok(())
     }
@@ -104,40 +134,116 @@ impl TurnEvents {
     }
 }
 
-/// 将扩展/钩子侧的 `event_tx.send` 转发到 [`TurnEvents`]（durable / live 由 payload 决定）。
-pub(crate) fn spawn_event_bridge(
-    publisher: Arc<TurnEvents>,
-) -> (TurnEventTx, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<EventPayload>();
-    let (durable_tx, mut durable_rx) = mpsc::unbounded_channel::<EventPayload>();
-    let durable_publisher = Arc::clone(&publisher);
-    let durable_worker = tokio::spawn(async move {
-        while let Some(payload) = durable_rx.recv().await {
-            if let Err(error) = durable_publisher.durable(payload).await {
-                tracing::error!(error = %error, "event bridge durable publish failed");
-            }
-        }
-    });
-    let handle = tokio::spawn(async move {
-        while let Some(payload) = rx.recv().await {
-            if payload.is_durable() {
-                if durable_tx.send(payload).is_err() {
-                    tracing::error!("event bridge durable worker unavailable");
+async fn durable_with_retry(publisher: &TurnEvents, payload: EventPayload) {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match publisher.durable(payload.clone()).await {
+            Ok(()) => break,
+            Err(error) if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS => {
+                tracing::warn!(
+                    error = %error,
+                    attempt,
+                    max_attempts = DURABLE_PUBLISH_MAX_ATTEMPTS,
+                    "turn event ingress durable publish failed, retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    DURABLE_PUBLISH_RETRY_BASE_MS * u64::from(attempt),
+                ))
+                .await;
+            },
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    attempt,
+                    "turn event ingress durable publish failed after retries"
+                );
+                if let Err(reload_error) = publisher.reload_model_cache().await {
+                    tracing::warn!(
+                        error = %reload_error,
+                        "failed to reload model cache after durable publish failure"
+                    );
                 }
-            } else {
-                publisher.live(payload).await;
-            }
+                break;
+            },
         }
-        drop(durable_tx);
-        let _ = durable_worker.await;
-    });
-    (tx, handle)
+    }
 }
 
-/// Turn 级扩展事件桥：在 `process_prompt` 期间为 hook 提供 `event_tx`。
+async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) {
+    if payload.is_durable() {
+        durable_with_retry(publisher, payload).await;
+    } else {
+        publisher.live(payload).await;
+    }
+}
+
+/// Turn 内 hook / 工具侧的事件入口：clone 后非阻塞 `send`，需要落盘时 `flush`。
+#[derive(Clone)]
+pub(crate) struct TurnEventSender {
+    publish_tx: TurnEventTx,
+    flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
+}
+
+impl TurnEventSender {
+    pub(crate) fn event_tx(&self) -> TurnEventTx {
+        self.publish_tx.clone()
+    }
+
+    /// 等待 ingress 队列中、本调用之前入队的 publish 全部处理完毕。
+    pub(crate) async fn flush(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.flush_tx.send(ack_tx).is_err() {
+            return;
+        }
+        let _ = ack_rx.await;
+    }
+}
+
+/// 单 FIFO worker：turn 内唯一的 hook/工具事件 ingress。
+pub(crate) struct TurnEventIngress {
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl TurnEventIngress {
+    pub(crate) fn start(publisher: Arc<TurnEvents>) -> (TurnEventSender, Self) {
+        let (publish_tx, mut publish_rx) = mpsc::unbounded_channel::<EventPayload>();
+        let (flush_tx, mut flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let sender = TurnEventSender {
+            publish_tx,
+            flush_tx,
+        };
+        let worker = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(payload) = publish_rx.recv() => {
+                        dispatch_payload(&publisher, payload).await;
+                    }
+                    Some(ack) = flush_rx.recv() => {
+                        while let Ok(payload) = publish_rx.try_recv() {
+                            dispatch_payload(&publisher, payload).await;
+                        }
+                        let _ = ack.send(());
+                    }
+                    else => break,
+                }
+            }
+        });
+        (sender, Self { worker })
+    }
+
+    pub(crate) async fn shutdown(self) {
+        if let Err(error) = self.worker.await {
+            tracing::error!(panic = %error, "turn event ingress worker panicked");
+        }
+    }
+}
+
+/// Turn 级扩展事件 ingress：在 `process_prompt` 期间为 hook / 工具提供 `event_tx`。
 pub(crate) struct ExtensionEvents {
-    tx: TurnEventTx,
-    handle: tokio::task::JoinHandle<()>,
+    ingress: TurnEventIngress,
+    sender: Arc<TurnEventSender>,
 }
 
 impl ExtensionEvents {
@@ -145,15 +251,16 @@ impl ExtensionEvents {
         publisher: Arc<TurnEvents>,
         shared: &mut crate::turn_context::SharedTurnContext,
     ) -> Self {
-        let (tx, handle) = spawn_event_bridge(publisher);
-        shared.turn_event_tx = Some(tx.clone());
-        Self { tx, handle }
+        let (sender, ingress) = TurnEventIngress::start(publisher);
+        let sender = Arc::new(sender);
+        shared.turn_event_sender = Some(Arc::clone(&sender));
+        Self { ingress, sender }
     }
 
     pub(crate) async fn shutdown(self, shared: &mut crate::turn_context::SharedTurnContext) {
-        shared.turn_event_tx = None;
-        drop(self.tx);
-        let _ = self.handle.await;
+        shared.turn_event_sender = None;
+        drop(self.sender);
+        self.ingress.shutdown().await;
     }
 }
 
@@ -256,8 +363,7 @@ mod tests {
         ))
     }
 
-    #[tokio::test]
-    async fn snapshot_model_uses_incremental_cache_after_durable() {
+    async fn test_session() -> Session {
         let store: Arc<dyn astrcode_core::storage::EventStore> =
             Arc::new(InMemoryEventStore::new());
         let caps = test_caps();
@@ -268,8 +374,8 @@ mod tests {
             "mock-model".into(),
         ));
         let session = Session::create_with_params(SessionCreateParams {
-            store: Arc::clone(&store),
-            sid: sid.clone(),
+            store,
+            sid,
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             model_id: "mock-model".into(),
             parent: None,
@@ -281,7 +387,12 @@ mod tests {
         .await
         .unwrap();
         session.refresh_tools(".").await;
+        session
+    }
 
+    #[tokio::test]
+    async fn snapshot_model_uses_incremental_cache_after_durable() {
+        let session = test_session().await;
         let turn_id = new_turn_id();
         let publisher = TurnEvents::new(session.clone(), turn_id, None);
         publisher
@@ -307,30 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_emit_updates_read_model() {
-        let store: Arc<dyn astrcode_core::storage::EventStore> =
-            Arc::new(InMemoryEventStore::new());
-        let caps = test_caps();
-        let sid = new_session_id();
-        let runtime = Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
-            "mock-model".into(),
-        ));
-        let session = Session::create_with_params(SessionCreateParams {
-            store: Arc::clone(&store),
-            sid: sid.clone(),
-            working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
-            model_id: "mock-model".into(),
-            parent: None,
-            tool_policy: None,
-            source_extension: None,
-            runtime,
-            caps,
-        })
-        .await
-        .unwrap();
-        session.refresh_tools(".").await;
-
+        let session = test_session().await;
         let turn_id = new_turn_id();
         let publisher = TurnEvents::new(session.clone(), turn_id.clone(), None);
         publisher
@@ -394,30 +482,8 @@ mod tests {
 
     #[tokio::test]
     async fn extension_event_bridge_delivers_hook_emit_to_store() {
-        let store: Arc<dyn astrcode_core::storage::EventStore> =
-            Arc::new(InMemoryEventStore::new());
-        let caps = test_caps();
-        let sid = new_session_id();
-        let runtime = Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
-            "mock-model".into(),
-        ));
-        let session = Session::create_with_params(SessionCreateParams {
-            store: Arc::clone(&store),
-            sid: sid.clone(),
-            working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
-            model_id: "mock-model".into(),
-            parent: None,
-            tool_policy: None,
-            source_extension: None,
-            runtime,
-            caps: Arc::clone(&caps),
-        })
-        .await
-        .unwrap();
-        session.refresh_tools(".").await;
-
+        let session = test_session().await;
+        let caps = session.caps();
         caps.extension_runner()
             .register(Arc::new(EmitProbeExtension))
             .await
@@ -438,7 +504,7 @@ mod tests {
             tool_input: serde_json::json!({}),
             approval_mode: shared.approval_mode,
             available_tools: vec![],
-            event_tx: shared.turn_event_tx.clone(),
+            event_tx: shared.turn_event_tx(),
             extension_event_sink: None,
             session_store_dir: None,
         };
@@ -449,7 +515,7 @@ mod tests {
 
         bridge.shutdown(&mut shared).await;
 
-        let events = store.replay_events(session.id()).await.unwrap();
+        let events = session.store.replay_events(session.id()).await.unwrap();
         assert!(events.iter().any(|e| matches!(
             &e.payload,
             EventPayload::ExtensionEvent {
@@ -458,5 +524,55 @@ mod tests {
                 ..
             } if extension_id == "emit-probe" && event_type == "emit.probe"
         )));
+    }
+
+    /// 模拟并行工具经同一 ingress 发 durable 并 flush。
+    #[tokio::test]
+    async fn parallel_tool_senders_flush_through_single_ingress_without_deadlock() {
+        use std::time::Duration;
+
+        use astrcode_core::types::new_message_id;
+
+        let session = test_session().await;
+        let publisher = Arc::new(TurnEvents::new(
+            session.clone(),
+            new_turn_id(),
+            None,
+        ));
+        publisher.invalidate_model_cache().await;
+
+        let (sender, ingress) = TurnEventIngress::start(Arc::clone(&publisher));
+        let sender = Arc::new(sender);
+
+        let mut workers = Vec::new();
+        for index in 0..8 {
+            let sender = Arc::clone(&sender);
+            workers.push(tokio::spawn(async move {
+                let tx = sender.event_tx();
+                tx.send(EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: format!("parallel-{index}"),
+                })
+                .unwrap();
+                sender.flush().await;
+            }));
+        }
+
+        for worker in workers {
+            worker.await.unwrap();
+        }
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(5), ingress.shutdown())
+            .await
+            .expect("parallel ingress flush timed out (possible model_cache deadlock)");
+
+        let events = session.store.replay_events(session.id()).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+                .count(),
+            8
+        );
     }
 }

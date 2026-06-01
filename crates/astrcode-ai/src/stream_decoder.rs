@@ -4,6 +4,30 @@
 //! - [`SseLineReader`]：跨 TCP chunk 拼接完整的 SSE 行。
 //! - [`Utf8StreamDecoder`]：跨 chunk 处理多字节 UTF-8 边界和坏字节。
 
+/// 流解码器内部缓冲上限（16 MiB）。
+pub const MAX_STREAM_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+
+/// 流解码器错误。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDecoderError {
+    BufferOverflow,
+}
+
+impl std::fmt::Display for StreamDecoderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BufferOverflow => {
+                write!(
+                    f,
+                    "stream buffer exceeded limit ({MAX_STREAM_BUFFER_BYTES} bytes)"
+                )
+            },
+        }
+    }
+}
+
+impl std::error::Error for StreamDecoderError {}
+
 // ─── SseLineReader ───────────────────────────────────────────────────────
 
 /// SSE 行缓冲器。
@@ -22,7 +46,10 @@ impl SseLineReader {
     }
 
     /// 追加一个文本 chunk，返回本次产出的完整行列表。
-    pub fn push_chunk(&mut self, text: &str) -> Vec<String> {
+    pub fn push_chunk(&mut self, text: &str) -> Result<Vec<String>, StreamDecoderError> {
+        if self.buffer.len().saturating_add(text.len()) > MAX_STREAM_BUFFER_BYTES {
+            return Err(StreamDecoderError::BufferOverflow);
+        }
         self.buffer.push_str(text);
         let mut lines = Vec::new();
         while let Some(pos) = self.buffer.find('\n') {
@@ -30,7 +57,7 @@ impl SseLineReader {
             self.buffer.drain(..=pos);
             lines.push(line);
         }
-        lines
+        Ok(lines)
     }
 
     /// 流结束后刷新缓冲区，返回残留的最后一行（如果有）。
@@ -69,12 +96,15 @@ impl Utf8StreamDecoder {
     }
 
     /// 追加一个新的字节块，并返回当前已经确认完整的 UTF-8 文本。
-    pub fn push(&mut self, chunk: &[u8]) -> Option<String> {
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Option<String>, StreamDecoderError> {
         if chunk.is_empty() {
-            return None;
+            return Ok(None);
+        }
+        if self.pending.len().saturating_add(chunk.len()) > MAX_STREAM_BUFFER_BYTES {
+            return Err(StreamDecoderError::BufferOverflow);
         }
         self.pending.extend_from_slice(chunk);
-        self.decode_available()
+        Ok(self.decode_available())
     }
 
     /// 在流结束时刷新尾部缓冲。
@@ -184,8 +214,7 @@ impl Default for Utf8StreamDecoder {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 fn valid_utf8_prefix(bytes: &[u8]) -> &str {
-    // SAFETY: slice comes from `Utf8Error::valid_up_to()`, which guarantees valid UTF-8.
-    unsafe { std::str::from_utf8_unchecked(bytes) }
+    std::str::from_utf8(bytes).expect("valid_up_to prefix must be valid UTF-8")
 }
 
 /// 格式化 UTF-8 字节片段用于日志输出。
@@ -226,37 +255,37 @@ mod tests {
     #[test]
     fn sse_line_reader_splits_on_newline() {
         let mut reader = SseLineReader::new();
-        let lines = reader.push_chunk("data: hello\ndata: world\n");
+        let lines = reader.push_chunk("data: hello\ndata: world\n").unwrap();
         assert_eq!(lines, vec!["data: hello", "data: world"]);
     }
 
     #[test]
     fn sse_line_reader_buffers_partial_line() {
         let mut reader = SseLineReader::new();
-        let lines = reader.push_chunk("data: hel");
+        let lines = reader.push_chunk("data: hel").unwrap();
         assert!(lines.is_empty());
-        let lines = reader.push_chunk("lo\n");
+        let lines = reader.push_chunk("lo\n").unwrap();
         assert_eq!(lines, vec!["data: hello"]);
     }
 
     #[test]
     fn sse_line_reader_flush_returns_remaining() {
         let mut reader = SseLineReader::new();
-        reader.push_chunk("data: last");
+        reader.push_chunk("data: last").unwrap();
         assert_eq!(reader.flush(), Some("data: last".to_string()));
     }
 
     #[test]
     fn sse_line_reader_flush_returns_none_when_empty() {
         let mut reader = SseLineReader::new();
-        reader.push_chunk("data: done\n");
+        reader.push_chunk("data: done\n").unwrap();
         assert_eq!(reader.flush(), None);
     }
 
     #[test]
     fn sse_line_reader_handles_crlf() {
         let mut reader = SseLineReader::new();
-        let lines = reader.push_chunk("data: hello\r\ndata: world\r\n");
+        let lines = reader.push_chunk("data: hello\r\ndata: world\r\n").unwrap();
         assert_eq!(lines, vec!["data: hello", "data: world"]);
     }
 
@@ -264,18 +293,38 @@ mod tests {
     fn utf8_decoder_handles_multibyte_boundary() {
         let mut decoder = Utf8StreamDecoder::new();
         // "你好" = e4 bd a0 e5 a5 bd
-        let first = decoder.push(&[0xe4, 0xbd]);
+        let first = decoder.push(&[0xe4, 0xbd]).unwrap();
         assert!(first.is_none());
-        let second = decoder.push(&[0xa0, 0xe5, 0xa5, 0xbd]);
+        let second = decoder.push(&[0xa0, 0xe5, 0xa5, 0xbd]).unwrap();
         assert_eq!(second.as_deref(), Some("你好"));
     }
 
     #[test]
     fn utf8_decoder_finish_replaces_incomplete_tail() {
         let mut decoder = Utf8StreamDecoder::new();
-        decoder.push(&[0xe4, 0xbd]);
+        decoder.push(&[0xe4, 0xbd]).unwrap();
         let result = decoder.finish();
         assert!(result.is_some());
         assert!(result.unwrap().contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn sse_line_reader_rejects_oversized_buffer() {
+        let mut reader = SseLineReader::new();
+        let chunk = "x".repeat(MAX_STREAM_BUFFER_BYTES + 1);
+        assert_eq!(
+            reader.push_chunk(&chunk),
+            Err(StreamDecoderError::BufferOverflow)
+        );
+    }
+
+    #[test]
+    fn utf8_decoder_rejects_oversized_buffer() {
+        let mut decoder = Utf8StreamDecoder::new();
+        let chunk = vec![0x41; MAX_STREAM_BUFFER_BYTES + 1];
+        assert_eq!(
+            decoder.push(&chunk),
+            Err(StreamDecoderError::BufferOverflow)
+        );
     }
 }

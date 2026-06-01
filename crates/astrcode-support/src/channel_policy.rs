@@ -5,7 +5,7 @@
 //! | 类别 | 策略 | 代表路径 |
 //! |------|------|----------|
 //! | **Fan-out + live UI** | **unbounded** | [`EventFanout`](crate::event_fanout::EventFanout) |
-//! | **Turn 事件桥** | **unbounded** + 有序 durable worker | `TurnEventTx` / `spawn_event_bridge` |
+//! | **Turn 事件 ingress** | **unbounded** + 单 FIFO worker 串行 durable | `TurnEventIngress` / `TurnEventSender` |
 //! | **控制面 / 低频信号** | bounded(小) | CLI 命令、scheduler finish、child 完成、stdio |
 //! | **外部 I/O 单消费者** | unbounded | `LlmEvent` provider → turn |
 //!

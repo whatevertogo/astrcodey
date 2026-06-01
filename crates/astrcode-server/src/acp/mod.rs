@@ -118,6 +118,7 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
             tokio::io::stdin().compat(),
         ))
         .await;
+    runtime.scheduler().drain_detached_tasks().await;
     runtime.shutdown_extensions().await;
     result
 }

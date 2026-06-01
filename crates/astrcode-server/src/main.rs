@@ -98,5 +98,6 @@ async fn main() {
     tracing::info!("Server shutting down");
     runtime.shutdown_token().cancel();
     handler.shutdown().await;
+    server_system.scheduler.drain_detached_tasks().await;
     runtime.shutdown_extensions().await;
 }

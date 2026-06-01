@@ -745,7 +745,7 @@ impl Session {
             emit_aborted_turn_context(&session, &turn_id).await;
         }
         if let Some(error_msg) = pending_error {
-            let _ = session
+            if let Err(e) = session
                 .emit_durable(
                     Some(&turn_id),
                     EventPayload::ErrorOccurred {
@@ -754,14 +754,30 @@ impl Session {
                         recoverable: false,
                     },
                 )
-                .await;
+                .await
+            {
+                tracing::error!(
+                    session_id = %session.id(),
+                    turn_id = %turn_id,
+                    error = %e,
+                    "CRITICAL: failed to persist ErrorOccurred; session may need stale repair on restart"
+                );
+            }
         }
-        let _ = session
+        if let Err(e) = session
             .emit_durable(
                 Some(&turn_id),
                 turn_completed_payload(finish_reason.clone()),
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                session_id = %session.id(),
+                turn_id = %turn_id,
+                error = %e,
+                "CRITICAL: failed to persist TurnCompleted; session may need stale repair on restart"
+            );
+        }
         session
             .emit_live(Some(&turn_id), agent_run_completed_payload(finish_reason))
             .await;

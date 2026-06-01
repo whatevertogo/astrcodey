@@ -27,6 +27,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
+    time::Duration,
 };
 
 use astrcode_core::{
@@ -44,6 +45,7 @@ use astrcode_session::{
 };
 use parking_lot::Mutex;
 use thiserror::Error;
+use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
 
 use crate::{
     child_session::ChildSessionCoordinator, session_manager::SessionManager,
@@ -112,7 +114,10 @@ pub(crate) struct PendingMessage {
 }
 
 type PendingQueue = VecDeque<PendingMessage>;
+type SessionDeliveryGate = Arc<AsyncMutex<()>>;
 const FORCE_KILL_GRACE_MS: u64 = 1500;
+const ABORT_WAIT_POLL_MS: u64 = 50;
+const ABORT_WAIT_EXTRA_MS: u64 = 500;
 
 #[derive(Clone)]
 pub struct TurnScheduler {
@@ -120,6 +125,8 @@ pub struct TurnScheduler {
     registry: Arc<TurnRegistry>,
     child_sessions: Arc<ChildSessionCoordinator>,
     pending_queues: Arc<Mutex<HashMap<SessionId, PendingQueue>>>,
+    delivery_gates: Arc<AsyncMutex<HashMap<SessionId, SessionDeliveryGate>>>,
+    detached_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl TurnScheduler {
@@ -133,6 +140,34 @@ impl TurnScheduler {
             registry,
             child_sessions,
             pending_queues: Arc::new(Mutex::new(HashMap::new())),
+            delivery_gates: Arc::new(AsyncMutex::new(HashMap::new())),
+            detached_tasks: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn session_delivery_gate(&self, session_id: &SessionId) -> SessionDeliveryGate {
+        let mut gates = self.delivery_gates.lock().await;
+        gates
+            .entry(session_id.clone())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    fn track_detached_task(&self, handle: JoinHandle<()>) {
+        self.detached_tasks.lock().push(handle);
+    }
+
+    /// 等待所有 detached completion / force-kill 任务结束（进程退出前调用）。
+    pub async fn drain_detached_tasks(&self) {
+        let handles: Vec<JoinHandle<()>> = self.detached_tasks.lock().drain(..).collect();
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    fn release_delivery_gate(&self, session_id: &SessionId) {
+        if let Ok(mut gates) = self.delivery_gates.try_lock() {
+            gates.remove(session_id);
         }
     }
 
@@ -176,6 +211,17 @@ impl TurnScheduler {
         text: String,
         delivery: InputDelivery,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
+        let gate = self.session_delivery_gate(&session_id).await;
+        let _guard = gate.lock().await;
+        self.deliver_input_locked(session_id, text, delivery).await
+    }
+
+    async fn deliver_input_locked(
+        &self,
+        session_id: SessionId,
+        text: String,
+        delivery: InputDelivery,
+    ) -> Result<DeliveryOutcome, TurnScheduleError> {
         match delivery {
             InputDelivery::StartNew => {
                 let started = self.start_execution(session_id.clone(), text).await?;
@@ -191,8 +237,22 @@ impl TurnScheduler {
             },
             InputDelivery::InjectIfRunningElseStart => {
                 if let Some(turn_id) = self.registry.active_turn_id(&session_id) {
-                    self.inject_internal(&session_id, text).await?;
-                    Ok(DeliveryOutcome::Injected { turn_id })
+                    match self.inject_internal(&session_id, text.clone()).await {
+                        Ok(()) => Ok(DeliveryOutcome::Injected { turn_id }),
+                        Err(TurnScheduleError::NoActiveTurn) => {
+                            let started = self.start_execution(session_id.clone(), text).await?;
+                            self.watch_detached_turn(
+                                session_id,
+                                started.turn_id.clone(),
+                                started.handle,
+                                "deliver_input:inject-fallback",
+                            );
+                            Ok(DeliveryOutcome::Started {
+                                turn_id: started.turn_id,
+                            })
+                        },
+                        Err(error) => Err(error),
+                    }
                 } else {
                     let started = self.start_execution(session_id.clone(), text).await?;
                     self.watch_detached_turn(
@@ -240,6 +300,8 @@ impl TurnScheduler {
         session_id: SessionId,
         text: String,
     ) -> Result<StartedExecution, TurnScheduleError> {
+        let gate = self.session_delivery_gate(&session_id).await;
+        let _guard = gate.lock().await;
         self.start_execution(session_id, text).await
     }
 
@@ -303,6 +365,8 @@ impl TurnScheduler {
             session_id = %completion.session_id,
             "auto-submitting next queued message for new turn"
         );
+        let gate = self.session_delivery_gate(&completion.session_id).await;
+        let _guard = gate.lock().await;
         match self
             .start_execution(completion.session_id.clone(), text)
             .await
@@ -340,11 +404,12 @@ impl TurnScheduler {
         source: &'static str,
     ) {
         let scheduler = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             scheduler
                 .run_detached_completion_watcher(session_id, turn_id, handle, source)
                 .await;
         });
+        self.track_detached_task(handle);
     }
 
     async fn run_detached_completion_watcher(
@@ -392,7 +457,14 @@ impl TurnScheduler {
         self.request_turn_shutdown(session_id).await?;
 
         if self.registry.has_active(session_id) {
-            return Ok(());
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(FORCE_KILL_GRACE_MS + ABORT_WAIT_EXTRA_MS);
+            while self.registry.has_active(session_id) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(ABORT_WAIT_POLL_MS)).await;
+            }
+            if self.registry.has_active(session_id) {
+                return Ok(());
+            }
         }
 
         let session = match self.session_manager.open(session_id.clone()).await {
@@ -448,11 +520,12 @@ impl TurnScheduler {
         if removed.is_some() {
             tracing::info!(session_id = %session_id, "cleaned up pending message queue");
         }
+        self.release_delivery_gate(session_id);
     }
 
     fn schedule_force_kill(&self, session_id: SessionId, turn_id: TurnId) {
         let scheduler = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(FORCE_KILL_GRACE_MS)).await;
             let Some((removed_turn_id, session)) = scheduler
                 .registry
@@ -469,6 +542,7 @@ impl TurnScheduler {
                 .emit_turn_aborted(&removed_turn_id, &session, &session_id)
                 .await;
         });
+        self.track_detached_task(handle);
     }
 
     async fn emit_turn_aborted(&self, turn_id: &TurnId, session: &Session, session_id: &SessionId) {

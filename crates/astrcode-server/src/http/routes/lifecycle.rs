@@ -18,6 +18,7 @@ pub(in crate::http) async fn shutdown(State(state): State<HttpState>) -> Respons
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         runtime.shutdown_token().cancel();
         handler.shutdown().await;
+        runtime.scheduler().drain_detached_tasks().await;
         runtime.shutdown_extensions().await;
     });
     tokio::spawn(async move {

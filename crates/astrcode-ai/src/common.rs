@@ -5,16 +5,21 @@
 //! 本模块将这一公共骨架提取为泛型函数，各 provider 只需提供
 //! SSE 事件处理和请求体构造。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use astrcode_core::llm::{LlmClientConfig, LlmError, LlmEvent};
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::{
     retry::RetryPolicy,
-    stream_decoder::{SseLineReader, Utf8StreamDecoder},
+    stream_decoder::{SseLineReader, StreamDecoderError, Utf8StreamDecoder},
 };
+
+fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
+    LlmError::StreamParse(error.to_string())
+}
 
 /// SSE 事件回调类型：接收 (event_type, parsed_json, tx)，返回 false 停止处理。
 type SseCallback =
@@ -48,8 +53,9 @@ pub fn stream_text_delta(accumulated: &mut String, fragment: &str) -> Option<Str
             return None;
         }
         let incremental = fragment[accumulated.len()..].to_string();
-        *accumulated = fragment.to_string();
-        return (!incremental.is_empty()).then_some(incremental);
+        accumulated.clear();
+        accumulated.push_str(fragment);
+        return Some(incremental);
     }
     if accumulated.starts_with(fragment) {
         return None;
@@ -128,7 +134,7 @@ impl SharedStreamSink {
     }
 
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut StreamEventSink) -> R) -> R {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock();
         f(&mut guard)
     }
 
@@ -153,7 +159,7 @@ impl SharedStreamSink {
     {
         let sink = Arc::clone(&self.inner);
         move |event_type, event, tx| {
-            let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = sink.lock();
             handler(&mut guard, event_type, event, tx)
         }
     }
@@ -190,6 +196,7 @@ pub fn retry_policy_from_config(config: &LlmClientConfig) -> RetryPolicy {
     RetryPolicy {
         max_retries: config.max_retries,
         base_delay_ms: config.retry_base_delay_ms,
+        max_delay_ms: crate::retry::DEFAULT_MAX_DELAY_MS,
         max_transport_retries: config.max_retries,
     }
 }
@@ -459,8 +466,11 @@ async fn parse_sse_bytes(
             let preview_len = bytes.len().min(512);
             body_preview = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
         }
-        if let Some(text) = decoder.push(&bytes) {
-            for line in line_reader.push_chunk(&text) {
+        if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
+            for line in line_reader
+                .push_chunk(&text)
+                .map_err(stream_decoder_error)?
+            {
                 if !dispatch_line(&line) {
                     return Ok(());
                 }
@@ -468,7 +478,10 @@ async fn parse_sse_bytes(
         }
     }
     if let Some(tail) = decoder.finish() {
-        for line in line_reader.push_chunk(&tail) {
+        for line in line_reader
+            .push_chunk(&tail)
+            .map_err(stream_decoder_error)?
+        {
             if !dispatch_line(&line) {
                 return Ok(());
             }
@@ -748,6 +761,7 @@ mod tests {
             RetryPolicy {
                 max_retries: 0,
                 base_delay_ms: 1,
+                max_delay_ms: 1,
                 max_transport_retries: 0,
             },
             tx,

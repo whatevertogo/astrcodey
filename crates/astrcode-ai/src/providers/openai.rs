@@ -18,8 +18,12 @@ use crate::{
         chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
         responses_tools_json, stable_hash_hex, system_text, tools_to_json,
     },
-    stream_decoder::{SseLineReader, Utf8StreamDecoder, clean_json_fragment},
+    stream_decoder::{SseLineReader, StreamDecoderError, Utf8StreamDecoder, clean_json_fragment},
 };
+
+fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
+    LlmError::StreamParse(error.to_string())
+}
 
 // ─── ChatAccumulator trait ──────────────────────────────────────────────
 
@@ -659,8 +663,11 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
                 )
             })?;
             bytes_read += bytes.len();
-            if let Some(text) = decoder.push(&bytes) {
-                for line in line_reader.push_chunk(&text) {
+            if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
+                for line in line_reader
+                    .push_chunk(&text)
+                    .map_err(stream_decoder_error)?
+                {
                     process_sse_line(&line, &mut accumulator, api_mode, tx);
                     if tx.is_closed() {
                         return Ok(());
@@ -669,7 +676,10 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             }
         }
         if let Some(tail_text) = decoder.finish() {
-            for line in line_reader.push_chunk(&tail_text) {
+            for line in line_reader
+                .push_chunk(&tail_text)
+                .map_err(stream_decoder_error)?
+            {
                 process_sse_line(&line, &mut accumulator, api_mode, tx);
                 if tx.is_closed() {
                     return Ok(());

@@ -5,6 +5,9 @@
 
 use std::time::Duration;
 
+/// 单次退避延迟上限（毫秒），防止 `max_retries` 配置过大导致长时间挂起。
+pub const DEFAULT_MAX_DELAY_MS: u64 = 30_000;
+
 /// 重试策略配置。
 ///
 /// 控制最大重试次数和基础退避延迟。
@@ -13,6 +16,8 @@ pub struct RetryPolicy {
     pub max_retries: u32,
     /// 基础退避延迟（毫秒），实际延迟为 base × 2^(attempt-1) ± 抖动
     pub base_delay_ms: u64,
+    /// 单次退避延迟上限（毫秒）。
+    pub max_delay_ms: u64,
     /// 传输层错误最大重试次数（连接重置、TLS 握手失败、DNS 临时错误等）。
     ///
     /// 这些错误不由 HTTP 状态码表示，是 reqwest 在无法取得响应时的底层错误。
@@ -26,6 +31,7 @@ impl Default for RetryPolicy {
         Self {
             max_retries: 2,
             base_delay_ms: 250,
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
             max_transport_retries: 2,
         }
     }
@@ -54,7 +60,8 @@ impl RetryPolicy {
     ///
     /// 加入抖动是为了在多个客户端同时重试时避免惊群效应。
     pub fn delay(&self, attempt: u32) -> Duration {
-        let base = self.base_delay_ms * 2u64.pow(attempt.saturating_sub(1));
+        let exponential = self.base_delay_ms * 2u64.pow(attempt.saturating_sub(1));
+        let base = exponential.min(self.max_delay_ms);
         let jitter = base / 4;
         let span = jitter.saturating_mul(2);
         let offset = random_jitter(span);
@@ -139,10 +146,22 @@ mod tests {
     }
 
     #[test]
+    fn delay_is_capped_by_max_delay_ms() {
+        let policy = RetryPolicy {
+            max_retries: 10,
+            base_delay_ms: 1_000,
+            max_delay_ms: 2_000,
+            max_transport_retries: 0,
+        };
+        assert!(policy.delay(5).as_millis() <= 2_500);
+    }
+
+    #[test]
     fn delay_grows_exponentially() {
         let policy = RetryPolicy {
             max_retries: 5,
             base_delay_ms: 100,
+            max_delay_ms: DEFAULT_MAX_DELAY_MS,
             max_transport_retries: 0,
         };
         let d1 = policy.delay(1).as_millis();

@@ -49,9 +49,10 @@ pub async fn enrich_post_compact_context(
     settings: &ContextSettings,
     session_store_dir: Option<PathBuf>,
 ) {
+    let retained_messages = std::mem::take(&mut compaction.retained_messages);
     let input = PostCompactCollectInput {
         source_messages: source_messages.to_vec(),
-        retained_messages: compaction.retained_messages.clone(),
+        retained_messages,
         working_dir: working_dir.to_string(),
         session_id: session_id.to_string(),
         system_prompt: system_prompt.map(str::to_string),
@@ -61,20 +62,25 @@ pub async fn enrich_post_compact_context(
     };
     let settings = input.settings.clone();
     let result = tokio::task::spawn_blocking(move || {
-        collect_post_compact_context(
+        let retained_messages = input.retained_messages;
+        let collected = collect_post_compact_context(
             &input.source_messages,
-            &input.retained_messages,
+            &retained_messages,
             &input.working_dir,
             &input.session_id,
             input.system_prompt.as_deref(),
             &input.tools,
             &input.settings,
             input.session_store_dir,
-        )
+        );
+        (retained_messages, collected)
     })
     .await;
     let (files, notes) = match result {
-        Ok(pair) => pair,
+        Ok((retained_messages, collected)) => {
+            compaction.retained_messages = retained_messages;
+            collected
+        },
         Err(panic) => {
             tracing::warn!(
                 session_id = session_id,

@@ -57,8 +57,8 @@ pub(crate) struct SharedTurnContext {
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
-    /// 当前 turn 的扩展事件通道（`ExtensionEvents` 在 `process_prompt` 期间注入）。
-    pub(crate) turn_event_tx: Option<TurnEventTx>,
+    /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
+    pub(crate) turn_event_sender: Option<std::sync::Arc<crate::turn_publish::TurnEventSender>>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
     pub(crate) is_child_session: bool,
     pub(crate) child_tool_policy: Option<astrcode_core::extension::ChildToolPolicy>,
@@ -74,7 +74,7 @@ impl SharedTurnContext {
             working_dir: model.working_dir.clone(),
             model_id: model.model_id.clone(),
             session_store_dir: None,
-            turn_event_tx: None,
+            turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
             is_child_session: model.parent_session_id.is_some(),
             child_tool_policy: None,
@@ -87,13 +87,20 @@ impl SharedTurnContext {
         }
     }
 
+    /// Hook / 工具侧非阻塞事件入口；turn 外为 `None`。
+    pub(crate) fn turn_event_tx(&self) -> Option<TurnEventTx> {
+        self.turn_event_sender
+            .as_ref()
+            .map(|sender| sender.event_tx())
+    }
+
     /// 构造扩展 lifecycle hook 的 ctx。
     pub fn lifecycle_ctx(&self) -> LifecycleContext {
         LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
-            event_tx: self.turn_event_tx.clone(),
+            event_tx: self.turn_event_tx(),
             extension_event_sink: None,
             last_exchange: None,
             mid_turn_user_messages_synced: 0,
@@ -110,7 +117,7 @@ impl SharedTurnContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
-            event_tx: self.turn_event_tx.clone(),
+            event_tx: self.turn_event_tx(),
             extension_event_sink: None,
             last_exchange: Some(ExchangeSummary {
                 user_message,

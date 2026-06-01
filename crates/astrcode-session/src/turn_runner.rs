@@ -25,7 +25,7 @@ use crate::{
     llm_request_history::build_llm_request_messages,
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     session::Session,
-    steer::count_visible_user_messages,
+    steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
     tool_types::ExecuteToolCalls,
@@ -243,6 +243,16 @@ impl TurnLoop {
                         )
                         .await?
                     {
+                        continue;
+                    }
+
+                    if self
+                        .has_pending_mid_turn_user_messages(publisher, &state)
+                        .await?
+                    {
+                        tracing::debug!(
+                            "pending mid-turn user messages; running one more agent step"
+                        );
                         continue;
                     }
 
@@ -524,6 +534,19 @@ impl TurnLoop {
         }
         state.set_tracked_user_message_count(current);
         Ok(synced)
+    }
+
+    async fn has_pending_mid_turn_user_messages(
+        &self,
+        publisher: &Arc<TurnEvents>,
+        state: &TurnState,
+    ) -> Result<bool, TurnError> {
+        publisher.invalidate_model_cache().await;
+        let model = publisher.snapshot_model().await?;
+        Ok(has_pending_mid_turn_user_messages(
+            &model,
+            state.tracked_user_message_count(),
+        ))
     }
 
     async fn should_continue_after_stop(

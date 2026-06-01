@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolCall,
-    turn_publish::TurnEvents,
 };
 
 // ─── Runtime context types ──────────────────────────────────────────────
@@ -50,7 +49,7 @@ impl TurnToolContext {
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
             session_store_dir: session_store_dir.clone(),
-            turn_event_tx: None,
+            turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
             is_child_session: session_state.parent_session_id.is_some(),
             child_tool_policy: session.runtime().child_tool_policy(),
@@ -105,9 +104,8 @@ impl ToolRuntimeCapabilities {
 
 pub(crate) struct ToolCallRuntimeContext {
     pub turn: TurnToolContext,
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Arc<[ToolDefinition]>,
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
-    pub publisher: Arc<TurnEvents>,
     pub cancellation_token: CancellationToken,
 }
 
@@ -220,11 +218,9 @@ pub async fn execute_tool_call(
     execute_tool_call_blocking(tool_registry, runtime, call).await
 }
 
-use crate::turn_publish::spawn_event_bridge;
-
 fn tool_capabilities_from_runtime(
     turn: &TurnToolContext,
-    tools: Vec<astrcode_core::tool::ToolDefinition>,
+    tools: Arc<[astrcode_core::tool::ToolDefinition]>,
     tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
 ) -> ToolCapabilities {
     use astrcode_core::tool::{
@@ -250,7 +246,7 @@ fn tool_capabilities_from_runtime(
         },
         host: ToolHostServices {
             result_reader: tool_result_reader,
-            available_tools: Some(tools),
+            available_tools: Some(tools.as_ref().to_vec()),
             extension_event_sink: None,
         },
     }
@@ -268,19 +264,15 @@ async fn execute_tool_call_blocking(
         turn,
         tools,
         tool_result_reader,
-        publisher,
         cancellation_token,
+        ..
     } = runtime;
     let capabilities = tool_capabilities_from_runtime(&turn, tools, tool_result_reader);
-    let tool_event_bridge = Some(spawn_event_bridge(publisher));
-    let tool_event_tx = tool_event_bridge
-        .as_ref()
-        .map(|(tool_tx, _)| tool_tx.clone());
     let tool_ctx = ToolExecutionContext::new(
         turn.shared.session_id.clone(),
         turn.shared.working_dir.clone(),
         Some(call.call_id.clone()),
-        tool_event_tx,
+        turn.shared.turn_event_tx(),
         capabilities,
     );
 
@@ -297,14 +289,9 @@ async fn execute_tool_call_blocking(
         },
         Err(e) => error_tool_result(call.call_id, &tool_name, e, started_at.elapsed()),
     };
-    // Release the tool-side sender before awaiting the bridge; otherwise the
-    // bridge keeps waiting for more tool progress events and this call hangs.
     drop(tool_ctx);
-    if let Some((tool_tx, bridge)) = tool_event_bridge {
-        drop(tool_tx);
-        if let Err(e) = bridge.await {
-            tracing::error!(tool_name, call_id = %result.call_id, panic = %e, "event bridge task panicked");
-        }
+    if let Some(sender) = turn.shared.turn_event_sender.as_ref() {
+        sender.flush().await;
     }
 
     if result.is_error {

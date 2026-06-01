@@ -18,6 +18,14 @@ pub(crate) fn count_visible_user_messages(model: &SessionReadModel) -> usize {
         .count()
 }
 
+/// 是否存在尚未并入 LLM 上下文的 mid-turn user 消息（如后台 shell 完成通知）。
+pub(crate) fn has_pending_mid_turn_user_messages(
+    model: &SessionReadModel,
+    tracked_count: usize,
+) -> bool {
+    count_visible_user_messages(model) > tracked_count
+}
+
 #[cfg(test)]
 mod tests {
     use astrcode_core::{llm::LlmMessage, storage::SequencedLlmMessage, types::SessionId};
@@ -46,5 +54,15 @@ mod tests {
             LlmMessage::user("also real"),
         ]);
         assert_eq!(count_visible_user_messages(&model), 2);
+    }
+
+    #[test]
+    fn has_pending_mid_turn_user_messages_detects_unsynced_inject() {
+        let model = model_with_messages(vec![
+            LlmMessage::user("hello"),
+            LlmMessage::user("<background-shell-notification>done</background-shell-notification>"),
+        ]);
+        assert!(!has_pending_mid_turn_user_messages(&model, 2));
+        assert!(has_pending_mid_turn_user_messages(&model, 1));
     }
 }

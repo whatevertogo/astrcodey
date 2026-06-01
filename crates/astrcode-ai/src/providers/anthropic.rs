@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        SharedStreamSink, StreamEventSink, build_client, retry_policy_from_config, send_event,
+        StreamEventSink, build_client, report_stream_error, retry_policy_from_config, send_event,
         stream_text_delta, stream_with_event_type,
     },
     serialization::ContentMapper,
@@ -171,12 +171,8 @@ impl LlmProvider for AnthropicProvider {
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
-            let sink = SharedStreamSink::new();
-            // SSE content block index → actual tool call id 的映射。
-            // content_block_start 带 id（如 "call_549f..."）和 index（如 0），
-            // content_block_delta 只有 index，需要通过此映射找到真实 call_id。
-            let index_to_call_id = Arc::new(Mutex::new(HashMap::new()));
-            let block_stream_state = Arc::new(Mutex::new(HashMap::new()));
+            let stream_state = Arc::new(Mutex::new(AnthropicStreamState::default()));
+            let stream_state_for_events = Arc::clone(&stream_state);
 
             let result = stream_with_event_type(
                 client,
@@ -185,23 +181,21 @@ impl LlmProvider for AnthropicProvider {
                 request_body,
                 retry,
                 tx.clone(),
-                {
-                    let index_to_call_id = Arc::clone(&index_to_call_id);
-                    let block_stream_state = Arc::clone(&block_stream_state);
-                    sink.wrap(move |sink, event_type, event, tx| {
-                        handle_anthropic_event(
-                            event_type,
-                            event,
-                            tx,
-                            &index_to_call_id,
-                            &block_stream_state,
-                            sink,
-                        )
-                    })
+                move |event_type, event, tx| {
+                    let mut state = stream_state_for_events
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    handle_anthropic_event(event_type, event, tx, &mut state)
                 },
             )
             .await;
-            sink.finalize(result, &tx);
+            if result.is_ok() {
+                let mut state = stream_state.lock().unwrap_or_else(|e| e.into_inner());
+                if !state.sink.done_sent() {
+                    state.sink.ensure_done(&tx);
+                }
+            }
+            report_stream_error(result, &tx);
         });
 
         Ok(rx)
@@ -213,6 +207,14 @@ impl LlmProvider for AnthropicProvider {
 }
 
 // ─── SSE event handling ──────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct AnthropicStreamState {
+    sink: StreamEventSink,
+    /// SSE content block index → actual tool call id。
+    index_to_call_id: HashMap<u64, String>,
+    block_stream_state: HashMap<u64, BlockStreamState>,
+}
 
 #[derive(Debug, Default)]
 struct BlockStreamState {
@@ -246,9 +248,7 @@ fn handle_anthropic_event(
     event_type: &str,
     event: &serde_json::Value,
     tx: &mpsc::UnboundedSender<LlmEvent>,
-    index_to_call_id: &Mutex<HashMap<u64, String>>,
-    block_stream_state: &Mutex<HashMap<u64, BlockStreamState>>,
-    sink: &mut StreamEventSink,
+    state: &mut AnthropicStreamState,
 ) -> bool {
     match event_type {
         "content_block_start" => {
@@ -266,10 +266,7 @@ fn handle_anthropic_event(
                             .unwrap_or_default()
                             .to_string();
                         if let Some(index) = event.get("index").and_then(|v| v.as_u64()) {
-                            index_to_call_id
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(index, call_id.clone());
+                            state.index_to_call_id.insert(index, call_id.clone());
                         }
                         let initial_args = block
                             .get("input")
@@ -287,14 +284,16 @@ fn handle_anthropic_event(
                     },
                     Some("thinking") => {
                         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let mut states =
-                            block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
-                        states.insert(index, BlockStreamState::default());
+                        state
+                            .block_stream_state
+                            .insert(index, BlockStreamState::default());
                         if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
                             if thinking.is_empty() {
                                 true
-                            } else if let Some(state) = states.get_mut(&index) {
-                                emit_block_stream_delta(state, tx, thinking, true)
+                            } else if let Some(block_state) =
+                                state.block_stream_state.get_mut(&index)
+                            {
+                                emit_block_stream_delta(block_state, tx, thinking, true)
                             } else {
                                 true
                             }
@@ -304,14 +303,16 @@ fn handle_anthropic_event(
                     },
                     Some("text") => {
                         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let mut states =
-                            block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
-                        states.insert(index, BlockStreamState::default());
+                        state
+                            .block_stream_state
+                            .insert(index, BlockStreamState::default());
                         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                             if text.is_empty() {
                                 true
-                            } else if let Some(state) = states.get_mut(&index) {
-                                emit_block_stream_delta(state, tx, text, false)
+                            } else if let Some(block_state) =
+                                state.block_stream_state.get_mut(&index)
+                            {
+                                emit_block_stream_delta(block_state, tx, text, false)
                             } else {
                                 true
                             }
@@ -334,10 +335,8 @@ fn handle_anthropic_event(
                             .and_then(|v| v.as_u64())
                             .unwrap_or_default();
                         if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
-                            let mut states =
-                                block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
-                            let state = states.entry(index).or_default();
-                            emit_block_stream_delta(state, tx, text, false)
+                            let block_state = state.block_stream_state.entry(index).or_default();
+                            emit_block_stream_delta(block_state, tx, text, false)
                         } else {
                             true
                         }
@@ -348,10 +347,8 @@ fn handle_anthropic_event(
                             .and_then(|v| v.as_u64())
                             .unwrap_or_default();
                         if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
-                            let mut states =
-                                block_stream_state.lock().unwrap_or_else(|e| e.into_inner());
-                            let state = states.entry(index).or_default();
-                            emit_block_stream_delta(state, tx, thinking, true)
+                            let block_state = state.block_stream_state.entry(index).or_default();
+                            emit_block_stream_delta(block_state, tx, thinking, true)
                         } else {
                             true
                         }
@@ -361,9 +358,8 @@ fn handle_anthropic_event(
                             .get("index")
                             .and_then(|v| v.as_u64())
                             .unwrap_or_default();
-                        let call_id = index_to_call_id
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                        let call_id = state
+                            .index_to_call_id
                             .get(&index)
                             .cloned()
                             .unwrap_or_else(|| index.to_string());
@@ -388,11 +384,12 @@ fn handle_anthropic_event(
         "message_delta" => {
             if let Some(stop_reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
             {
-                sink.emit_done(tx, stop_reason)
+                state.sink.emit_done(tx, stop_reason)
             } else {
                 true
             }
         },
+        "message_stop" => state.sink.ensure_done(tx),
         "error" => {
             let message = event
                 .pointer("/error/message")
@@ -670,41 +667,58 @@ mod tests {
     #[test]
     fn message_delta_emits_done_once() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let index_map = Mutex::new(HashMap::new());
-        let block_stream_state = Mutex::new(HashMap::new());
-        let mut sink = StreamEventSink::new();
+        let mut state = AnthropicStreamState::default();
         let event = serde_json::json!({"delta": {"stop_reason": "end_turn"}});
 
         assert!(handle_anthropic_event(
             "message_delta",
             &event,
             &tx,
-            &index_map,
-            &block_stream_state,
-            &mut sink,
+            &mut state,
         ));
         assert!(handle_anthropic_event(
             "message_delta",
             &event,
             &tx,
-            &index_map,
-            &block_stream_state,
-            &mut sink,
+            &mut state,
         ));
 
         let done_count = std::iter::from_fn(|| rx.try_recv().ok())
             .filter(|event| matches!(event, LlmEvent::Done { .. }))
             .count();
         assert_eq!(done_count, 1);
-        assert!(sink.done_sent());
+        assert!(state.sink.done_sent());
+    }
+
+    #[test]
+    fn message_stop_emits_done_once() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = AnthropicStreamState::default();
+
+        assert!(handle_anthropic_event(
+            "message_stop",
+            &serde_json::json!({}),
+            &tx,
+            &mut state
+        ));
+        assert!(handle_anthropic_event(
+            "message_stop",
+            &serde_json::json!({}),
+            &tx,
+            &mut state
+        ));
+
+        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| matches!(event, LlmEvent::Done { .. }))
+            .count();
+        assert_eq!(done_count, 1);
+        assert!(state.sink.done_sent());
     }
 
     #[test]
     fn thinking_start_plus_cumulative_delta_does_not_duplicate() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let index_map = Mutex::new(HashMap::new());
-        let block_stream_state = Mutex::new(HashMap::new());
-        let mut sink = StreamEventSink::new();
+        let mut state = AnthropicStreamState::default();
 
         let start = serde_json::json!({
             "index": 0,
@@ -714,9 +728,7 @@ mod tests {
             "content_block_start",
             &start,
             &tx,
-            &index_map,
-            &block_stream_state,
-            &mut sink,
+            &mut state,
         ));
 
         let delta = serde_json::json!({
@@ -727,9 +739,7 @@ mod tests {
             "content_block_delta",
             &delta,
             &tx,
-            &index_map,
-            &block_stream_state,
-            &mut sink,
+            &mut state,
         ));
 
         let thinking: String = std::iter::from_fn(|| rx.try_recv().ok())

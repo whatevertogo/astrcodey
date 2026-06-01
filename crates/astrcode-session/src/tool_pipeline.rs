@@ -86,18 +86,13 @@ impl ToolCalls {
     }
 
     /// 构建工具调用的运行时上下文。
-    fn make_runtime_context(
-        &self,
-        tools: &[ToolDefinition],
-        publisher: Arc<TurnEvents>,
-    ) -> ToolCallRuntimeContext {
+    fn make_runtime_context(&self, tools: Arc<[ToolDefinition]>) -> ToolCallRuntimeContext {
         ToolCallRuntimeContext {
             turn: self.turn.clone(),
-            tools: tools.to_vec(),
+            tools,
             tool_result_reader: Some(
                 Arc::new(self.session.clone()) as Arc<dyn ToolResultArtifactReader>
             ),
-            publisher,
             cancellation_token: self.cancellation_token.clone(),
         }
     }
@@ -155,7 +150,7 @@ impl ToolCalls {
                 tool_input: args.clone(),
                 approval_mode: self.turn.shared.approval_mode,
                 available_tools: tools.to_vec(),
-                event_tx: self.turn.shared.turn_event_tx.clone(),
+                event_tx: self.turn.shared.turn_event_tx(),
                 extension_event_sink: None,
                 session_store_dir: self.turn.shared.session_store_dir.clone(),
             };
@@ -215,7 +210,14 @@ impl ToolCalls {
                         &tool_input,
                         Path::new(&self.turn.shared.working_dir),
                     )
-                    .unwrap_or_else(|_| vec![ResourceAccess::all()]),
+                    .unwrap_or_else(|error| {
+                        tracing::debug!(
+                            tool_name = %tc.name,
+                            error = %error,
+                            "resource_accesses parse failed; treating as exclusive lock"
+                        );
+                        vec![ResourceAccess::all()]
+                    }),
                 PreparedToolOutcome::Blocked(_)
                 | PreparedToolOutcome::DuplicateSameStep
                 | PreparedToolOutcome::NeedsApproval { .. } => Vec::new(),
@@ -247,7 +249,14 @@ impl ToolCalls {
                 tool_input,
                 Path::new(&self.turn.shared.working_dir),
             )
-            .unwrap_or_else(|_| vec![ResourceAccess::all()]);
+            .unwrap_or_else(|error| {
+                tracing::debug!(
+                    tool_name,
+                    error = %error,
+                    "resource_accesses parse failed during permission check; treating as exclusive lock"
+                );
+                vec![ResourceAccess::all()]
+            });
         let ctx = PermissionContext {
             tool_name,
             tool_input,
@@ -304,7 +313,7 @@ impl ToolCalls {
     /// 执行已预处理的工具调用。
     ///
     /// 所有 Ready 调用提交给冲突图调度器；调度器基于资源访问声明决定并行/串行。
-    /// 结果按 LLM 返回的原始顺序依次 commit。
+    /// 结果按 LLM 返回的原始顺序 commit；`agent` 的 await 延后，避免阻塞同批已完成工具。
     pub async fn execute_and_commit(
         &self,
         input: ExecuteToolCalls<'_>,
@@ -318,6 +327,7 @@ impl ToolCalls {
             .max(1);
         let mut scheduler = ToolScheduler::new(max_parallel);
         let mut discovered_tools = Vec::new();
+        let tools = Arc::from(input.tools);
 
         enum ResultSource {
             Blocked(ToolResult),
@@ -374,7 +384,8 @@ impl ToolCalls {
                     let executable = call.to_executable();
                     let accesses = call.accesses.clone();
                     let tool_registry = Arc::clone(&self.tool_registry);
-                    let ctx = self.make_runtime_context(input.tools, Arc::clone(&input.publisher));
+                    let ctx =
+                        self.make_runtime_context(Arc::clone(&tools));
                     let rx = scheduler.submit(accesses, move || async move {
                         execute_tool_call(tool_registry, ctx, executable).await
                     });
@@ -383,12 +394,16 @@ impl ToolCalls {
             }
         }
 
+        let mut resolved = vec![None; sources.len()];
+        let mut deferred_agent_rxs = Vec::new();
+
         for (position, source) in sources.into_iter().enumerate() {
             if self.cancellation_token.is_cancelled() {
                 return Err(TurnError::Aborted);
             }
 
-            let mut result = match source {
+            let tool_name = &input.prepared[position].name;
+            let result = match source {
                 ResultSource::Blocked(result) => result,
                 ResultSource::DuplicateSameStep => {
                     input
@@ -398,6 +413,10 @@ impl ToolCalls {
                         .await
                 },
                 ResultSource::Scheduled(rx) => {
+                    if defers_serial_result_collection(tool_name) {
+                        deferred_agent_rxs.push((position, rx));
+                        continue;
+                    }
                     let (_index, result) = scheduler
                         .await_result(rx)
                         .await
@@ -411,20 +430,27 @@ impl ToolCalls {
                     source,
                 } => {
                     let call = &input.prepared[position];
-                    let (decision, resolution_detail) =
-                        match tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx)
-                            .await
-                        {
-                            Ok(Ok(decision)) => (decision, None),
-                            Ok(Err(_)) => (
-                                ApprovalDecision::DenyOnce,
-                                Some("approval receiver dropped".into()),
-                            ),
-                            Err(_) => (
-                                ApprovalDecision::DenyOnce,
-                                Some(format!("approval timed out after {APPROVAL_TIMEOUT_SECS}s")),
-                            ),
-                        };
+                    let (decision, resolution_detail) = tokio::select! {
+                        _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
+                        result = tokio::time::timeout(
+                            Duration::from_secs(APPROVAL_TIMEOUT_SECS),
+                            rx,
+                        ) => {
+                            match result {
+                                Ok(Ok(decision)) => (decision, None),
+                                Ok(Err(_)) => (
+                                    ApprovalDecision::DenyOnce,
+                                    Some("approval receiver dropped".into()),
+                                ),
+                                Err(_) => (
+                                    ApprovalDecision::DenyOnce,
+                                    Some(format!(
+                                        "approval timed out after {APPROVAL_TIMEOUT_SECS}s"
+                                    )),
+                                ),
+                            }
+                        }
+                    };
                     input
                         .publisher
                         .durable(EventPayload::ToolApprovalResolved {
@@ -455,13 +481,24 @@ impl ToolCalls {
                                 &call.tool_input,
                                 Path::new(&self.turn.shared.working_dir),
                             )
-                            .unwrap_or_else(|_| vec![ResourceAccess::all()]);
+                            .unwrap_or_else(|error| {
+                                tracing::debug!(
+                                    tool_name = %call.name,
+                                    error = %error,
+                                    "resource_accesses parse failed after approval; treating as exclusive lock"
+                                );
+                                vec![ResourceAccess::all()]
+                            });
                         let tool_registry = Arc::clone(&self.tool_registry);
-                        let ctx =
-                            self.make_runtime_context(input.tools, Arc::clone(&input.publisher));
+                        let ctx = self
+                            .make_runtime_context(Arc::clone(&tools));
                         let scheduled = scheduler.submit(accesses, move || async move {
                             execute_tool_call(tool_registry, ctx, executable).await
                         });
+                        if defers_serial_result_collection(tool_name) {
+                            deferred_agent_rxs.push((position, scheduled));
+                            continue;
+                        }
                         let (_index, result) = scheduler
                             .await_result(scheduled)
                             .await
@@ -485,6 +522,30 @@ impl ToolCalls {
                         }
                     }
                 },
+            };
+
+            resolved[position] = Some(result);
+        }
+
+        for (position, rx) in deferred_agent_rxs {
+            if self.cancellation_token.is_cancelled() {
+                return Err(TurnError::Aborted);
+            }
+            let (_index, result) = scheduler
+                .await_result(rx)
+                .await
+                .map_err(|_| TurnError::Aborted)?;
+            resolved[position] = Some(result);
+        }
+
+        for (position, result_slot) in resolved.into_iter().enumerate() {
+            if self.cancellation_token.is_cancelled() {
+                return Err(TurnError::Aborted);
+            }
+
+            let mut result = match result_slot {
+                Some(result) => result,
+                None => return Err(TurnError::Aborted),
             };
 
             if is_awaiting_user_input_content(&result.content) {
@@ -600,7 +661,7 @@ impl ToolCalls {
                     tool_input: call.tool_input.clone(),
                     tool_result: result.clone(),
                     is_error: result.is_error,
-                    event_tx: self.turn.shared.turn_event_tx.clone(),
+                    event_tx: self.turn.shared.turn_event_tx(),
                     extension_event_sink: None,
                     session_store_dir: self.turn.shared.session_store_dir.clone(),
                 };
@@ -861,5 +922,23 @@ fn tool_ui_response_error_result(call_id: &str, message: &str) -> ToolResult {
         error: Some(message.to_string()),
         metadata: Default::default(),
         duration_ms: None,
+    }
+}
+
+/// `agent` 在父 turn 内只编排子 session，耗时长；收集结果时延后 await，
+/// 避免阻塞同批已完成但排序靠后的工具 commit。
+fn defers_serial_result_collection(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case("agent")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_defers_serial_result_collection() {
+        assert!(defers_serial_result_collection("agent"));
+        assert!(defers_serial_result_collection("Agent"));
+        assert!(!defers_serial_result_collection("grep"));
     }
 }

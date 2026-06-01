@@ -11,6 +11,24 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{tool_types::PendingToolCall, turn_context::TurnError, turn_publish::TurnEvents};
 
+/// 单次 LLM 响应允许的最大 tool call 数量。
+const MAX_TOOL_CALLS_PER_RESPONSE: usize = 64;
+/// 单个 tool call 参数字节上限（4 MiB）。
+const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 4 * 1024 * 1024;
+
+fn stream_parse_limit_error(message: impl Into<String>) -> TurnError {
+    TurnError::Llm(LlmError::StreamParse(message.into()))
+}
+
+fn ensure_tool_call_args_limit(size: usize) -> Result<(), TurnError> {
+    if size > MAX_TOOL_CALL_ARGUMENTS_BYTES {
+        return Err(stream_parse_limit_error(format!(
+            "tool call arguments exceed limit ({MAX_TOOL_CALL_ARGUMENTS_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 // ─── StreamOutcome ───────────────────────────────────────────────────────
 
 pub enum StreamOutcome {
@@ -45,11 +63,17 @@ pub async fn consume_llm_stream(
     let mut reasoning_content = String::new();
     let mut tool_calls: Vec<PendingToolCall> = Vec::new();
     let mut message_started = false;
+    let mut pending: Option<LlmEvent> = None;
 
     loop {
-        let event = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(TurnError::Aborted),
-            event = rx.recv() => event,
+        let event = match pending.take() {
+            Some(event) => Some(event),
+            None => {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return Err(TurnError::Aborted),
+                    event = rx.recv() => event,
+                }
+            },
         };
         let Some(event) = event else {
             return Err(TurnError::StreamEndedUnexpectedly);
@@ -58,22 +82,48 @@ pub async fn consume_llm_stream(
             LlmEvent::ContentDelta { delta } => {
                 ensure_assistant_message_started(publisher, &message_id, &mut message_started)
                     .await;
-                current_text.push_str(&delta);
+                let mut batch = delta;
+                current_text.push_str(&batch);
+                while let Ok(next) = rx.try_recv() {
+                    match next {
+                        LlmEvent::ContentDelta { delta } => {
+                            current_text.push_str(&delta);
+                            batch.push_str(&delta);
+                        },
+                        other => {
+                            pending = Some(other);
+                            break;
+                        },
+                    }
+                }
                 publisher
                     .live(EventPayload::AssistantTextDelta {
                         message_id: message_id.clone(),
-                        delta,
+                        delta: batch,
                     })
                     .await;
             },
             LlmEvent::ThinkingDelta { delta } => {
                 ensure_assistant_message_started(publisher, &message_id, &mut message_started)
                     .await;
-                reasoning_content.push_str(&delta);
+                let mut batch = delta;
+                reasoning_content.push_str(&batch);
+                while let Ok(next) = rx.try_recv() {
+                    match next {
+                        LlmEvent::ThinkingDelta { delta } => {
+                            reasoning_content.push_str(&delta);
+                            batch.push_str(&delta);
+                        },
+                        other => {
+                            pending = Some(other);
+                            break;
+                        },
+                    }
+                }
                 publisher
                     .live(EventPayload::ThinkingDelta {
                         message_id: message_id.clone(),
-                        delta,
+                        delta: batch,
                     })
                     .await;
             },
@@ -88,9 +138,16 @@ pub async fn consume_llm_stream(
                         name,
                         "duplicate ToolCallStart with same call_id, replacing previous entry"
                     );
+                    ensure_tool_call_args_limit(arguments.len())?;
                     existing.name = name;
                     existing.arguments = arguments;
                 } else {
+                    if tool_calls.len() >= MAX_TOOL_CALLS_PER_RESPONSE {
+                        return Err(stream_parse_limit_error(format!(
+                            "tool call count exceeds limit ({MAX_TOOL_CALLS_PER_RESPONSE})"
+                        )));
+                    }
+                    ensure_tool_call_args_limit(arguments.len())?;
                     publisher
                         .live(EventPayload::ToolCallStarted {
                             call_id: call_id.clone().into(),
@@ -114,6 +171,7 @@ pub async fn consume_llm_stream(
             },
             LlmEvent::ToolCallDelta { call_id, delta } => {
                 if let Some(tc) = tool_calls.iter_mut().find(|t| t.call_id == call_id) {
+                    ensure_tool_call_args_limit(tc.arguments.len().saturating_add(delta.len()))?;
                     tc.arguments.push_str(&delta);
                 }
                 publisher

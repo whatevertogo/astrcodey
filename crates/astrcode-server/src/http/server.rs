@@ -142,6 +142,10 @@ pub async fn run_http_server(
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
+            runtime_for_shutdown
+                .scheduler()
+                .drain_detached_tasks()
+                .await;
             runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
