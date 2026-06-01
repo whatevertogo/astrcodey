@@ -6,11 +6,7 @@ import type {
   ModelTestResult,
 } from '../../services/types'
 import { btnPrimary, fieldInput } from '../../lib/styles'
-import {
-  getStoredTheme,
-  setTheme,
-  type ThemePreference,
-} from '../../lib/theme'
+import { getStoredTheme, setTheme, type ThemePreference } from '../../lib/theme'
 import { Modal, Button } from '../ui'
 import * as api from '../../services/api'
 
