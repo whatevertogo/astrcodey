@@ -694,9 +694,8 @@ mod tests {
         };
         let merged = merge_overlay(base, overlay);
         assert_eq!(merged.runtime.llm_max_retries, Some(5));
-        assert_eq!(
-            merged.runtime.extension_states.as_ref().unwrap()["astrcode.memory"],
-            true
+        assert!(
+            merged.runtime.extension_states.as_ref().unwrap()["astrcode.memory"]
         );
         let ext = merged.extensions.as_ref().unwrap();
         assert_eq!(ext["astrcode-web-tools"]["search"]["defaultMaxResults"], 3);
