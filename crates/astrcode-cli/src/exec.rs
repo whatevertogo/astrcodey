@@ -153,8 +153,8 @@ mod tests {
 
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(line["event"], "event");
-        assert_eq!(line["data"]["type"], "assistant_text_delta");
-        assert_eq!(line["data"]["delta"], "hello");
+        assert_eq!(line["data"]["payload"]["type"], "assistant_text_delta");
+        assert_eq!(line["data"]["payload"]["delta"], "hello");
         assert!(err.is_empty());
         assert_eq!(action, NotificationAction::Continue);
     }
@@ -170,7 +170,7 @@ mod tests {
         let action = render_notification(&notification, true, &mut out, &mut err).unwrap();
 
         let line: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(line["data"]["type"], "turn_completed");
+        assert_eq!(line["data"]["payload"]["type"], "turn_completed");
         assert!(err.is_empty());
         assert_eq!(action, NotificationAction::Finish);
     }

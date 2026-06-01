@@ -1,6 +1,6 @@
 //! 追加式 JSONL 事件日志，用于会话持久化。
 //!
-//! 每个会话对应一个事件日志文件，事件以换行分隔的扁平 JSON 对象写入，
+//! 每个会话对应一个事件日志文件，事件以换行分隔的 JSON 对象写入，
 //! 写入后不可修改。存储层在追加时分配单调递增的 `seq` 序号。
 
 use std::{
@@ -208,7 +208,7 @@ fn open_at_path(path: PathBuf) -> Result<EventLog, StorageError> {
 /// An append-only JSONL event log.
 ///
 /// Each session has one event log file. Events are written as newline-delimited
-/// flat JSON objects and never modified. Storage assigns `seq` at append time.
+/// JSON objects and never modified. Storage assigns `seq` at append time.
 ///
 /// 内部持有 BufWriter<File> 避免每次 append 都重开文件，大幅减少系统调用开销。
 pub struct EventLog {
@@ -722,6 +722,41 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, Some(0));
         assert_eq!(events[1].seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn event_log_writes_nested_payload_format() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested.jsonl");
+        let (_log, _start) = EventLog::create(path.clone(), make_start_event("s1"))
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        let first_line = content.lines().next().unwrap();
+        let value: serde_json::Value = serde_json::from_str(first_line).unwrap();
+        assert_eq!(value["session_id"], "s1");
+        assert_eq!(value["payload"]["type"], "session_started");
+        assert!(value.get("type").is_none());
+        assert!(value.get("working_dir").is_none());
+    }
+
+    #[test]
+    fn iterator_rejects_legacy_flat_event_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("flat.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"seq":0,"id":"event-1","session_id":"s1","timestamp":"2026-01-01T00:00:00Z","type":"turn_started"}"#,
+        )
+        .unwrap();
+
+        let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
+        let err = iter.next().unwrap().unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
+        ));
     }
 
     #[tokio::test]
