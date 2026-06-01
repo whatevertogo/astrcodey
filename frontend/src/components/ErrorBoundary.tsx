@@ -28,7 +28,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             </div>
             <button
               type="button"
-              className="rounded-xl border border-border bg-surface px-4 py-2 text-[13px] font-semibold text-text-primary hover:bg-white"
+              className="rounded-xl border border-border bg-surface px-4 py-2 text-[13px] font-semibold text-text-primary hover:bg-surface-muted"
               onClick={() => this.setState({ error: null })}
             >
               重试

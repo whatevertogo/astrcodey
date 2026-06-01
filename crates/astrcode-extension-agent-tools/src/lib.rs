@@ -372,11 +372,11 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Before starting multi-step or multi-area work, consider the right approach:\n- Quick \
+            "For multi-step work that is not simple or local, pick the right approach:\n- Quick \
              single lookup → use `read`/`grep`/`glob` directly, no agent needed\n- Scoped \
              multi-step task → single agent (carries context across steps)\n- Multiple \
-             independent areas → parallel agents (faster than serial)\n\nUse `todoWrite` to plan \
-             complex tasks, then delegate steps to agents.",
+             independent areas → parallel agents (faster than serial)\n\nWhen complexity warrants \
+             it, use `todoWrite` then delegate to agents; skip both for trivial edits.",
         )
         .example(
             "Add logging to 3 files in one module → `todoWrite` to plan, single `execute` agent.",

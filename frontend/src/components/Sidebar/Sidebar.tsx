@@ -141,7 +141,7 @@ export default function Sidebar() {
               'h-[38px] flex-1 rounded-xl border text-center text-sm font-semibold transition-all duration-150 ease-out hover:-translate-y-px active:translate-y-0 active:scale-[0.98] active:shadow-none',
               showNewProject
                 ? 'bg-accent-soft border-accent-strong/20 text-accent-strong shadow-inner translate-y-0 scale-[0.98]'
-                : 'bg-surface border-border text-text-primary shadow-soft hover:border-border-strong hover:bg-white'
+                : 'bg-surface border-border text-text-primary shadow-soft hover:border-border-strong hover:bg-surface-muted'
             )}
             onClick={() => setShowNewProject(true)}
           >
@@ -153,7 +153,7 @@ export default function Sidebar() {
               'inline-flex h-[38px] w-[38px] items-center justify-center rounded-xl border transition-all duration-150 ease-out hover:-translate-y-px active:translate-y-0 active:scale-[0.98] active:shadow-none',
               showSettings
                 ? 'bg-accent-soft border-accent-strong/20 text-accent-strong shadow-inner translate-y-0 scale-[0.98]'
-                : 'bg-surface border-border text-text-secondary shadow-soft hover:border-border-strong hover:bg-white hover:text-text-primary'
+                : 'bg-surface border-border text-text-secondary shadow-soft hover:border-border-strong hover:bg-surface-muted hover:text-text-primary'
             )}
             onClick={() => setShowSettings(true)}
             aria-label="打开设置"

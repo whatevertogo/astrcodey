@@ -53,7 +53,7 @@ function resolveIntent(args: JsonRecord): string | undefined {
 }
 
 const primaryButton =
-  'rounded-lg bg-text-primary px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40'
+  'rounded-lg bg-btn-primary-bg px-3 py-1.5 text-[12px] font-medium text-btn-primary-fg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40'
 const secondaryButton =
   'rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40'
 const dangerButton =

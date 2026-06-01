@@ -6,10 +6,22 @@ import type {
   ModelTestResult,
 } from '../../services/types'
 import { btnPrimary, fieldInput } from '../../lib/styles'
+import {
+  getStoredTheme,
+  setTheme,
+  type ThemePreference,
+} from '../../lib/theme'
 import { Modal, Button } from '../ui'
 import * as api from '../../services/api'
 
-type SettingsTab = 'model' | 'extensions'
+type SettingsTab = 'model' | 'extensions' | 'appearance'
+
+const THEME_OPTIONS: { value: ThemePreference; label: string; hint: string }[] =
+  [
+    { value: 'light', label: '浅色', hint: '始终使用浅色界面' },
+    { value: 'dark', label: '深色', hint: '始终使用深色界面' },
+    { value: 'system', label: '跟随系统', hint: '自动匹配系统外观设置' },
+  ]
 
 interface SettingsModalProps {
   onClose: () => void
@@ -70,6 +82,8 @@ export default function SettingsModal({
   const [reloading, setReloading] = useState(false)
   const [extensionBusy, setExtensionBusy] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [themePreference, setThemePreference] =
+    useState<ThemePreference>(getStoredTheme)
 
   useEffect(() => {
     let cancelled = false
@@ -192,6 +206,11 @@ export default function SettingsModal({
     }
   }, [onRefreshExtensions])
 
+  const handleThemeChange = useCallback((preference: ThemePreference) => {
+    setThemePreference(preference)
+    setTheme(preference)
+  }, [])
+
   return (
     <Modal
       title="设置"
@@ -220,6 +239,17 @@ export default function SettingsModal({
           onClick={() => setTab('extensions')}
         >
           扩展
+        </button>
+        <button
+          type="button"
+          className={`flex-1 rounded-lg px-3 py-2 text-[13px] font-semibold transition-colors ${
+            tab === 'appearance'
+              ? 'bg-surface text-text-primary shadow-soft'
+              : 'text-text-secondary hover:text-text-primary'
+          }`}
+          onClick={() => setTab('appearance')}
+        >
+          外观
         </button>
       </div>
 
@@ -409,6 +439,37 @@ export default function SettingsModal({
               {testResult.message}
             </div>
           )}
+        </>
+      ) : tab === 'appearance' ? (
+        <>
+          <p className="mb-4 text-[13px] text-text-secondary">
+            选择界面配色方案
+          </p>
+          <div className="divide-y divide-border rounded-xl border border-border">
+            {THEME_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className="flex cursor-pointer items-center justify-between gap-3 px-3 py-3 transition-colors hover:bg-surface-muted"
+              >
+                <div className="min-w-0">
+                  <p className="text-[13px] font-medium text-text-primary">
+                    {option.label}
+                  </p>
+                  <p className="mt-0.5 text-[12px] text-text-muted">
+                    {option.hint}
+                  </p>
+                </div>
+                <input
+                  type="radio"
+                  name="theme"
+                  value={option.value}
+                  checked={themePreference === option.value}
+                  onChange={() => handleThemeChange(option.value)}
+                  className="h-4 w-4 shrink-0 accent-accent-strong"
+                />
+              </label>
+            ))}
+          </div>
         </>
       ) : (
         <>

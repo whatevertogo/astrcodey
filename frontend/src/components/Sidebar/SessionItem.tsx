@@ -113,7 +113,7 @@ function SessionItem({
               <div className="flex gap-2">
                 <button
                   type="button"
-                  className="rounded-lg border border-border bg-surface-soft px-2.5 py-1 text-[12px] font-semibold text-text-secondary hover:bg-white"
+                  className="rounded-lg border border-border bg-surface-soft px-2.5 py-1 text-[12px] font-semibold text-text-secondary hover:bg-surface-muted"
                   onClick={handleCancelDelete}
                 >
                   取消

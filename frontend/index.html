@@ -10,6 +10,20 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <script>
+      ;(function () {
+        var stored = localStorage.getItem('astrocode-theme')
+        var pref =
+          stored === 'light' || stored === 'dark' || stored === 'system'
+            ? stored
+            : 'system'
+        var dark =
+          pref === 'dark' ||
+          (pref === 'system' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
