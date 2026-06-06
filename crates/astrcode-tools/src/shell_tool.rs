@@ -1121,10 +1121,12 @@ mod tests {
 
     fn command_with_delay() -> String {
         match resolve_shell().family {
-            ShellFamily::PowerShell => "[Console]::Out.WriteLine('before'); \
-                                        [Console]::Out.Flush(); Start-Sleep -Seconds 10; \
-                                        [Console]::Out.WriteLine('after')"
-                .into(),
+            // Use `cmd /c echo` to bypass PowerShell's .NET output buffering.
+            // `[Console]::Out.WriteLine` + `.Flush()` may not reach the OS pipe before
+            // `taskkill /F` destroys the process, losing the buffered data.
+            ShellFamily::PowerShell => {
+                "cmd /c echo before; Start-Sleep -Seconds 10; cmd /c echo after".into()
+            },
             // cmd.exe has no built-in sleep; delegate to powershell (always on PATH from cmd).
             ShellFamily::Cmd => "echo before & powershell -NoProfile -Command \"Start-Sleep \
                                  -Seconds 10\" & echo after"
