@@ -194,12 +194,14 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     lastScrollTopRef.current = 0
   }, [sessionId])
 
-  const streamingTailSignature = useMemo(() => {
+  // Stable streaming block identifier — changes only when streaming starts/stops
+  // or the streaming block changes, NOT on every text delta.  This prevents the
+  // ResizeObserver from being torn down and recreated ~30-60 times/sec during
+  // fast output, which was the main source of layout thrashing.
+  const streamingBlockId = useMemo(() => {
     const last = blocks[blocks.length - 1]
     if (last?.kind === 'assistant' && last.status === 'streaming') {
-      const textLen = last.text?.length ?? 0
-      const reasoningLen = last.reasoningContent?.length ?? 0
-      return `${last.id}:${textLen}:${reasoningLen}`
+      return last.id
     }
     return null
   }, [blocks])
@@ -222,22 +224,18 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     return () => cancelAnimationFrame(frame)
   }, [totalItemCount, followLatest])
 
-  // Streaming text growth: keep pinned when the user is following.
+  // Streaming: single ResizeObserver for the duration of streaming.
+  // Created once when streaming starts, kept alive until streaming ends.
+  // Fires scroll-to-bottom on content size change (text growth) — no per-delta teardown.
   useEffect(() => {
-    if (!streamingTailSignature) return
-
-    const frame = requestAnimationFrame(() => {
-      if (!shouldStickRef.current) return
-      followLatest()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [streamingTailSignature, followLatest])
-
-  // Virtual list remeasures asynchronously; follow again after layout settles.
-  useEffect(() => {
-    if (!streamingTailSignature) return
+    if (!streamingBlockId) return
     const content = contentRef.current
     if (!content) return
+
+    // Scroll to latest when streaming starts or the streaming block changes
+    if (shouldStickRef.current) {
+      followLatest()
+    }
 
     let raf = 0
     const observer = new ResizeObserver(() => {
@@ -253,7 +251,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
       cancelAnimationFrame(raf)
       observer.disconnect()
     }
-  }, [streamingTailSignature, followLatest])
+  }, [streamingBlockId, followLatest])
 
   const virtualItems = virtualizer.getVirtualItems()
 
