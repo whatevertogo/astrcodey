@@ -103,10 +103,7 @@ mod tests {
         let kernel = Kernel::builder()
             .with_tool_pack(Arc::new(StaticToolPack))
             .build();
-        let registry = kernel.build_tool_registry(&ToolPackScope {
-            working_dir: ".",
-            shell_timeout_secs: 1,
-        });
+        let registry = kernel.build_tool_registry(&ToolPackScope { working_dir: "." });
 
         assert!(registry.find_definition("static").is_some());
     }

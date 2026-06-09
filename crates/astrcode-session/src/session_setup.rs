@@ -36,14 +36,10 @@ pub async fn build_tool_registry_snapshot(
     extension_runner: &dyn ExtensionRuntime,
     tool_packs: &[std::sync::Arc<dyn ToolPack>],
     working_dir: &str,
-    timeout_secs: u64,
     tool_policy: Option<&ChildToolPolicy>,
 ) -> ToolRegistry {
     let mut tool_registry = ToolRegistry::new();
-    let scope = ToolPackScope {
-        working_dir,
-        shell_timeout_secs: timeout_secs,
-    };
+    let scope = ToolPackScope { working_dir };
 
     for pack in tool_packs {
         for tool in pack.tools(&scope) {

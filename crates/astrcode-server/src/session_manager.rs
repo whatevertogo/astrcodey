@@ -760,8 +760,7 @@ mod tests {
             .unwrap();
 
         let default_tool_packs = astrcode_tools::registry::default_tool_packs();
-        let registry =
-            build_tool_registry_snapshot(&runner, &default_tool_packs, ".", 1, None).await;
+        let registry = build_tool_registry_snapshot(&runner, &default_tool_packs, ".", None).await;
         let shell = registry.find_definition("shell").unwrap();
 
         assert_eq!(shell.origin, ToolOrigin::Extension);

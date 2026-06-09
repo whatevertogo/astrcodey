@@ -251,7 +251,11 @@ mod tests {
             Arc::clone(&llm),
             llm,
             effective,
-            crate::default_host::first_party_host_services(extension_runner, context_assembler),
+            crate::default_host::first_party_host_services(
+                extension_runner,
+                context_assembler,
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ),
         ))
     }
 

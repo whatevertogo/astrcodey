@@ -1,16 +1,50 @@
 //! Built-in tool pack implementation.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-use astrcode_core::tool::Tool;
+use astrcode_core::{config::defaults::DEFAULT_SHELL_TIMEOUT_SECS, tool::Tool};
 use astrcode_kernel::{ToolPack, ToolPackScope};
 
 /// First-party file, shell, and terminal tools.
-pub struct BuiltinToolPack;
+pub struct BuiltinToolPack {
+    shell_timeout_secs: Arc<AtomicU64>,
+}
+
+impl BuiltinToolPack {
+    pub fn new(shell_timeout_secs: u64) -> Self {
+        Self {
+            shell_timeout_secs: Arc::new(AtomicU64::new(shell_timeout_secs)),
+        }
+    }
+
+    pub fn with_shell_timeout_source(shell_timeout_secs: Arc<AtomicU64>) -> Self {
+        Self { shell_timeout_secs }
+    }
+
+    pub fn set_shell_timeout_secs(&self, shell_timeout_secs: u64) {
+        self.shell_timeout_secs
+            .store(shell_timeout_secs, Ordering::Relaxed);
+    }
+}
+
+impl Default for BuiltinToolPack {
+    fn default() -> Self {
+        Self::new(DEFAULT_SHELL_TIMEOUT_SECS)
+    }
+}
 
 impl ToolPack for BuiltinToolPack {
     fn tools(&self, scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
-        builtin_tools(PathBuf::from(scope.working_dir), scope.shell_timeout_secs)
+        builtin_tools(
+            PathBuf::from(scope.working_dir),
+            self.shell_timeout_secs.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -44,7 +78,15 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
 }
 
 pub fn default_tool_packs() -> Vec<Arc<dyn ToolPack>> {
-    vec![Arc::new(BuiltinToolPack)]
+    vec![Arc::new(BuiltinToolPack::default())]
+}
+
+pub fn default_tool_packs_with_shell_timeout_source(
+    shell_timeout_secs: Arc<AtomicU64>,
+) -> Vec<Arc<dyn ToolPack>> {
+    vec![Arc::new(BuiltinToolPack::with_shell_timeout_source(
+        shell_timeout_secs,
+    ))]
 }
 
 #[cfg(test)]

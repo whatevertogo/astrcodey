@@ -1,6 +1,6 @@
 //! First-party host profile for the server binary.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicU64};
 
 use astrcode_context::{
     context_assembler::LlmContextAssembler,
@@ -13,6 +13,7 @@ use astrcode_session::SessionHostServices;
 pub fn first_party_host_services(
     extension_runner: Arc<ExtensionRunner>,
     context_assembler: Arc<LlmContextAssembler>,
+    shell_timeout_secs: Arc<AtomicU64>,
 ) -> SessionHostServices {
     SessionHostServices::embedded(
         context_assembler,
@@ -21,5 +22,7 @@ pub fn first_party_host_services(
     )
     .with_extension_runner(extension_runner)
     .with_post_compact_enricher(Arc::new(DefaultPostCompactEnricher))
-    .with_tool_packs(astrcode_tools::registry::default_tool_packs())
+    .with_tool_packs(
+        astrcode_tools::registry::default_tool_packs_with_shell_timeout_source(shell_timeout_secs),
+    )
 }

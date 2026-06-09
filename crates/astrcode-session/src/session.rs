@@ -320,13 +320,11 @@ pub async fn emit_lifecycle_for_read_model(
 
 impl Session {
     pub async fn refresh_tools(&self, working_dir: &str) -> Arc<ToolRegistry> {
-        let timeout = self.caps.read_effective().agent.shell_timeout_secs;
         let tool_policy = self.runtime.child_tool_policy();
         let registry = crate::session_setup::build_tool_registry_snapshot(
             self.caps.extension_runner(),
             self.caps.tool_packs(),
             working_dir,
-            timeout,
             tool_policy.as_ref(),
         )
         .await;

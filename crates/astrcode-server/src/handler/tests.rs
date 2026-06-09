@@ -727,6 +727,7 @@ fn test_runtime_with_settings(
         Duration::from_secs(1),
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
+    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         llm_provider.clone(),
         llm_provider,
@@ -734,6 +735,7 @@ fn test_runtime_with_settings(
         crate::default_host::first_party_host_services(
             extension_runner.clone(),
             context_assembler.clone(),
+            std::sync::Arc::clone(&shell_timeout_secs),
         ),
     ));
     let config = Arc::new(crate::config_manager::ConfigManager::new(
@@ -742,6 +744,7 @@ fn test_runtime_with_settings(
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
+        shell_timeout_secs,
         Arc::clone(&capabilities),
     ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(

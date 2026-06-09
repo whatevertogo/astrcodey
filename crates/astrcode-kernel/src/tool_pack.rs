@@ -6,7 +6,6 @@ use astrcode_core::tool::Tool;
 #[derive(Debug, Clone)]
 pub struct ToolPackScope<'a> {
     pub working_dir: &'a str,
-    pub shell_timeout_secs: u64,
 }
 
 /// A host-provided source of tools.

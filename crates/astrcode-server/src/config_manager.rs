@@ -11,7 +11,10 @@
 //! [`crate::session_manager::SessionManager::sync_all_model_bindings_from_config`]
 //! 在配置写入后同步。
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use astrcode_ai::create_provider;
 use astrcode_core::{
@@ -32,6 +35,7 @@ pub struct ConfigManager {
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
     capabilities: Arc<SessionRuntimeServices>,
+    shell_timeout_secs: Arc<AtomicU64>,
 }
 
 fn build_provider_from_settings(
@@ -74,17 +78,23 @@ impl ConfigManager {
         extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
         context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
     ) -> Result<(Self, Arc<SessionRuntimeServices>), astrcode_core::llm::LlmError> {
+        let shell_timeout_secs = Arc::new(AtomicU64::new(effective.agent.shell_timeout_secs));
         let capabilities = Arc::new(SessionRuntimeServices::new(
             build_provider_from_settings(&effective.llm)?,
             build_provider_from_settings(&effective.small_llm)?,
             effective,
-            first_party_host_services(extension_runner.clone(), context_assembler),
+            first_party_host_services(
+                extension_runner.clone(),
+                context_assembler,
+                Arc::clone(&shell_timeout_secs),
+            ),
         ));
         let manager = Self {
             config_store,
             raw_config: RwLock::new(raw_config),
             extension_runner,
             capabilities: Arc::clone(&capabilities),
+            shell_timeout_secs,
         };
         Ok((manager, capabilities))
     }
@@ -94,12 +104,14 @@ impl ConfigManager {
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
         extension_runner: Arc<ExtensionRunner>,
+        shell_timeout_secs: Arc<AtomicU64>,
         capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
             extension_runner,
+            shell_timeout_secs,
             capabilities,
         }
     }
@@ -167,6 +179,8 @@ impl ConfigManager {
             let mut guard = self.raw_config.write();
             *guard = config;
         }
+        self.shell_timeout_secs
+            .store(new_effective.agent.shell_timeout_secs, Ordering::Relaxed);
         self.capabilities.update_effective(new_effective);
         self.rebuild_provider_from_effective();
         if changed {

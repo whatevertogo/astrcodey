@@ -123,6 +123,7 @@ fn build_scheduler_with_llm(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
+    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = Arc::new(SessionRuntimeServices::new(
         Arc::clone(&llm),
         llm,
@@ -130,6 +131,7 @@ fn build_scheduler_with_llm(
         astrcode_server::default_host::first_party_host_services(
             extension_runner.clone(),
             context_assembler,
+            std::sync::Arc::clone(&shell_timeout_secs),
         ),
     ));
     let config = Arc::new(ConfigManager::new(
@@ -138,6 +140,7 @@ fn build_scheduler_with_llm(
         )),
         Default::default(),
         Arc::clone(&extension_runner),
+        shell_timeout_secs,
         Arc::clone(&capabilities),
     ));
     let session_manager = Arc::new(SessionManager::new(
