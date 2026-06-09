@@ -1,6 +1,6 @@
 //! astrcode-tools: Built-in tool implementations.
 //!
-//! File tools, shell execution, and tool registry.
+//! File tools and shell execution.
 
 pub mod background_shell;
 pub mod files;

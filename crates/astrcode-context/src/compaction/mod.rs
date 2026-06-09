@@ -17,7 +17,6 @@ use crate::{
     token_budget::{estimate_request_tokens, estimate_text_tokens},
 };
 
-pub const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";
 const COMPACT_SUMMARY_END: &str = "</compact_summary>";
 const MAX_PTL_RETRIES: usize = 3;
 
@@ -27,52 +26,22 @@ mod plan;
 mod post_compact;
 mod prompt;
 
-pub use assemble::{CompactSummaryEnvelope, CompactSummaryRenderOptions, format_compact_summary};
+pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
+pub use astrcode_core::context::{
+    COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
+    CompactSummaryRenderOptions, is_compact_summary_message, is_compact_summary_text,
+    is_prompt_too_long_message, is_synthetic_context_message,
+};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
-pub use post_compact::{PostCompactFile, PostCompactNote, agent_status_note, recent_read_paths};
-
-/// 压缩操作的结果。
-///
-/// 记录压缩前后的 token 数量以及 LLM 生成的摘要文本。
-#[derive(Debug, Clone)]
-pub struct CompactResult {
-    /// 压缩前的 token 数量。
-    pub pre_tokens: usize,
-    /// 压缩后的 token 数量。
-    pub post_tokens: usize,
-    /// LLM 生成的对话摘要。
-    pub summary: String,
-    /// 压缩掉的可见消息数量。
-    pub messages_removed: usize,
-    /// 供 provider 使用的合成上下文消息。
-    pub context_messages: Vec<LlmMessage>,
-    /// 保留的可见消息尾部。
-    pub retained_messages: Vec<LlmMessage>,
-    /// compact 前 transcript snapshot 的可读路径。
-    pub transcript_path: Option<String>,
-}
+pub use post_compact::{
+    PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
+    recent_read_paths,
+};
 
 pub struct CompactExecution {
     pub result: CompactResult,
     pub llm_api_failed: bool,
-}
-
-impl CompactResult {
-    /// 追加 compact 后恢复的运行时上下文。
-    ///
-    /// 调用方只提供已经收集好的文件和运行时备注；是否生成 message、如何渲染
-    /// `<post_compact_context>`、以及如何加入 hidden context 由 compact 模块掌握。
-    pub fn append_post_compact_context(
-        &mut self,
-        files: Vec<PostCompactFile>,
-        notes: Vec<PostCompactNote>,
-        settings: &ContextSettings,
-    ) {
-        if let Some(message) = post_compact::post_compact_context_message(files, notes, settings) {
-            self.context_messages.push(message);
-        }
-    }
 }
 
 struct PreparedCompactParts {
@@ -83,48 +52,9 @@ struct PreparedCompactParts {
     messages_removed: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompactSkipReason {
-    /// 没有任何可压缩消息。
-    Empty,
-    /// 有消息，但根据当前切分策略没有安全的历史前缀可压缩。
-    NothingToCompact,
-}
-
-#[derive(Debug)]
-pub enum CompactError {
-    Skip(CompactSkipReason),
-    Parse(CompactParseError),
-    Llm(LlmError),
-}
-
-impl std::fmt::Display for CompactError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Skip(reason) => write!(f, "compact skipped: {reason:?}"),
-            Self::Parse(error) => write!(f, "compact parse error: {error}"),
-            Self::Llm(error) => write!(f, "compact llm error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for CompactError {}
-
-impl From<CompactSkipReason> for CompactError {
-    fn from(value: CompactSkipReason) -> Self {
-        Self::Skip(value)
-    }
-}
-
 impl From<CompactParseError> for CompactError {
     fn from(value: CompactParseError) -> Self {
-        Self::Parse(value)
-    }
-}
-
-impl From<LlmError> for CompactError {
-    fn from(value: LlmError) -> Self {
-        Self::Llm(value)
+        Self::Parse(value.to_string())
     }
 }
 
@@ -310,51 +240,6 @@ fn should_retry_prompt_too_long(error: &CompactError) -> bool {
 
 pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
     assemble::parse_compact_summary_message(content)
-}
-
-/// 判断消息是否是 compact 后注入的 synthetic context message。
-pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
-    message.role == LlmRole::User
-        && message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmContent::Text { text }
-                    if text.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-            )
-        })
-}
-
-/// 检测文本内容是否以 compact summary 标记开头。
-///
-/// 用于只持有序列化文本的客户端（如 TUI、snapshot DTO 转换），
-/// 不依赖 `LlmMessage` 结构化类型。
-pub fn is_compact_summary_text(content: &str) -> bool {
-    content.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-}
-
-/// 预留给更宽泛的 synthetic context 判断。
-pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
-    is_compact_summary_message(message) || post_compact::is_post_compact_context_message(message)
-}
-
-/// 粗略识别 provider 返回的上下文过长错误。
-///
-/// 这里故意排除 rate limit / quota 等错误，避免把限流误判为可 compact 重试。
-pub fn is_prompt_too_long_message(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    let positive = [
-        "prompt too long",
-        "context length",
-        "maximum context",
-        "too many tokens",
-        "input is too long",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let negative = ["rate limit", "quota", "throttle", "timeout"]
-        .iter()
-        .any(|needle| lower.contains(needle));
-    positive && !negative
 }
 
 /// 是否可在 `split_after` 所指的 message 之后切分压缩边界（Kimi `canSplitAfter` 语义）。

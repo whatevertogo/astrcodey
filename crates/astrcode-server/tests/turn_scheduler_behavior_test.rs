@@ -126,15 +126,18 @@ fn build_scheduler_with_llm(
     let capabilities = Arc::new(SessionRuntimeServices::new(
         Arc::clone(&llm),
         llm,
-        Arc::clone(&extension_runner),
-        context_assembler,
         effective,
+        astrcode_server::default_host::first_party_host_services(
+            extension_runner.clone(),
+            context_assembler,
+        ),
     ));
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/turn-behavior-config.json"),
         )),
         Default::default(),
+        Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
     ));
     let session_manager = Arc::new(SessionManager::new(

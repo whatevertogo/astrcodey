@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+use astrcode_core::{
+    context::POST_COMPACT_CONTEXT_MARKER,
+    llm::{LlmContent, LlmMessage, LlmRole},
+};
 
 use super::assemble::collapse_compaction_whitespace;
 use crate::{
@@ -10,7 +13,6 @@ use crate::{
     token_budget::{estimate_text_tokens, truncate_text_to_tokens},
 };
 
-const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
 const POST_COMPACT_CONTEXT_END: &str = "</post_compact_context>";
 const TRUNCATION_MARKER: &str = "\n\n[... file content truncated after compaction; use read on \
                                  this path if more detail is needed]";
@@ -25,17 +27,6 @@ pub struct PostCompactFile {
 pub struct PostCompactNote {
     pub title: String,
     pub body: String,
-}
-
-pub(crate) fn is_post_compact_context_message(message: &LlmMessage) -> bool {
-    message.role == LlmRole::User
-        && message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmContent::Text { text }
-                    if text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)
-            )
-        })
 }
 
 pub fn recent_read_paths(
@@ -98,6 +89,17 @@ pub fn agent_status_note(
         title: "Agent Task Status".into(),
         body: truncate_chars(&entries[start..].join("\n\n"), max_chars),
     })
+}
+
+pub fn append_post_compact_context(
+    compaction: &mut astrcode_core::context::CompactResult,
+    files: Vec<PostCompactFile>,
+    notes: Vec<PostCompactNote>,
+    settings: &ContextSettings,
+) {
+    if let Some(message) = post_compact_context_message(files, notes, settings) {
+        compaction.context_messages.push(message);
+    }
 }
 
 pub fn post_compact_context_message(

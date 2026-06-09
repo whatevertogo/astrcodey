@@ -1,7 +1,7 @@
 //! 事件载荷构造。
 
-use astrcode_context::compaction::CompactResult;
 use astrcode_core::{
+    context::CompactResult,
     event::EventPayload,
     extension::CompactStrategy,
     types::{Cursor, SessionId},

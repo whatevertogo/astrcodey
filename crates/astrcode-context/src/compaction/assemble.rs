@@ -3,6 +3,8 @@
 //! Parser 负责校验模型输出；assembler 负责把摘要变成后续 provider request
 //! 能稳定识别的 synthetic user message。
 
+use astrcode_core::context::CompactSummaryRenderOptions;
+
 use super::{COMPACT_SUMMARY_END, COMPACT_SUMMARY_MARKER, parse::extract_summary_for_context};
 
 pub const COMPACT_CONTINUATION_PREAMBLE: &str =
@@ -16,12 +18,6 @@ pub const COMPACT_CONTINUATION_INSTRUCTIONS: &str =
 pub const COMPACT_TRANSCRIPT_HINT_PREFIX: &str =
     "If you need specific details from before compaction (like exact code snippets, error \
      messages, or content you generated), read the full transcript at ";
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CompactSummaryRenderOptions {
-    pub transcript_path: Option<String>,
-    pub custom_instructions: Vec<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactSummaryEnvelope {

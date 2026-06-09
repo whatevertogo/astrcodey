@@ -2,18 +2,18 @@
 
 use std::sync::Arc;
 
-use astrcode_context::{
-    compaction::CompactResult,
-    context_assembler::{CompactIfNeededOutcome, CompactMessagesOptions, ContextPrepareInput},
-};
 use astrcode_core::{
+    context::{
+        CompactIfNeededOutcome, CompactMessagesOptions, CompactResult, CompactSummaryRenderOptions,
+        ContextPrepareInput, PostCompactEnrichInput,
+    },
     event::EventPayload,
     extension::{CompactStrategy, CompactTrigger},
     llm::LlmMessage,
     storage::SessionReadModel,
     types::TurnId,
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::ExtensionRuntime;
 use astrcode_support::{hash::hex_fingerprint, sync::lock_parking};
 
 use crate::{
@@ -61,7 +61,7 @@ pub(crate) struct CompactionHost<'a> {
     pub session: &'a Session,
     pub llm: &'a Arc<dyn astrcode_core::llm::LlmProvider>,
     pub shared: &'a SharedTurnContext,
-    pub extension_runner: &'a ExtensionRunner,
+    pub extension_runner: &'a dyn ExtensionRuntime,
 }
 
 /// Turn 内 compaction 编排：system prompt 快照、assembler 调用与 persist。
@@ -161,7 +161,7 @@ impl Compaction {
         let keep_recent_turns = request
             .keep_recent_turns
             .or_else(|| context_assembler.settings().compact_keep_recent_turns);
-        let render_options = astrcode_context::compaction::CompactSummaryRenderOptions {
+        let render_options = CompactSummaryRenderOptions {
             custom_instructions: custom_instructions.clone(),
             ..Default::default()
         };
@@ -321,7 +321,7 @@ impl Compaction {
         state: &TurnState,
         model: &SessionReadModel,
         compaction: &mut CompactResult,
-        settings: &astrcode_context::ContextSettings,
+        settings: &astrcode_core::config::ContextSettings,
         turn_id: &TurnId,
         meta: CompactionStageMeta,
     ) -> bool {
@@ -329,17 +329,23 @@ impl Compaction {
             .emit_live(Some(turn_id), EventPayload::CompactionStarted)
             .await;
         let visible_tools = state.visible_tools();
-        crate::post_compact::enrich_post_compact_context(
-            compaction,
-            host.shared.session_id.as_str(),
-            &model.provider_messages(),
-            &host.shared.working_dir,
-            Some(system_prompt),
-            &visible_tools,
-            settings,
-            host.shared.session_store_dir.clone(),
-        )
-        .await;
+        let provider_messages = model.provider_messages();
+        host.session
+            .caps()
+            .post_compact_enricher()
+            .enrich(
+                compaction,
+                PostCompactEnrichInput {
+                    session_id: host.shared.session_id.as_str(),
+                    source_messages: &provider_messages,
+                    working_dir: &host.shared.working_dir,
+                    system_prompt: Some(system_prompt),
+                    tools: &visible_tools,
+                    settings,
+                    session_store_dir: host.shared.session_store_dir.clone(),
+                },
+            )
+            .await;
         let hook_ctx = Self::compact_hook_context(host.shared, model, meta.trigger);
         if let Err(e) = dispatch_post_compact(host.extension_runner, hook_ctx, compaction).await {
             tracing::warn!(error = %e, "PostCompact extension dispatch failed");

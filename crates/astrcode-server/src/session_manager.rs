@@ -664,7 +664,6 @@ impl SessionRuntimeRegistry {
 mod tests {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
-    use astrcode_context::prompt_engine::load_system_prompt_files;
     use astrcode_core::{
         extension::{Extension, Registrar, ToolHandler},
         tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
@@ -720,17 +719,18 @@ mod tests {
     #[tokio::test]
     async fn child_extra_system_prompt_participates_in_snapshot_build() {
         let runner = ExtensionRunner::new(Duration::from_secs(1));
-        let prompt_files = load_system_prompt_files(".").await;
         let (system_prompt, fingerprint) =
             build_system_prompt_snapshot(SystemPromptSnapshotInput {
                 extension_runner: &runner,
+                prompt_provider: &astrcode_context::prompt_engine::DefaultPromptProvider,
+                prompt_file_provider: &astrcode_context::prompt_engine::DefaultPromptFileProvider,
                 session_id: "session-1",
                 working_dir: ".",
                 model_id: "mock",
                 tools: &[],
                 extra_system_prompt: Some("child body"),
                 tool_prompt_metadata: HashMap::new(),
-                prompt_files,
+                include_agents_rules: true,
             })
             .await
             .unwrap();
@@ -759,7 +759,9 @@ mod tests {
             .await
             .unwrap();
 
-        let registry = build_tool_registry_snapshot(&runner, ".", 1, None).await;
+        let default_tool_packs = astrcode_tools::registry::default_tool_packs();
+        let registry =
+            build_tool_registry_snapshot(&runner, &default_tool_packs, ".", 1, None).await;
         let shell = registry.find_definition("shell").unwrap();
 
         assert_eq!(shell.origin, ToolOrigin::Extension);

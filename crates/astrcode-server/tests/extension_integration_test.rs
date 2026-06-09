@@ -10,7 +10,7 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_tools::registry::ToolRegistry;
+use astrcode_kernel::ToolRegistry;
 
 // ─── Test extensions using register() ─────────────────────────────────────
 

@@ -12,8 +12,8 @@ use astrcode_core::{
     },
     types::*,
 };
+use astrcode_kernel::ToolRegistry;
 use astrcode_support::{hash::hex_fingerprint, perf_snapshot, shell::resolve_shell};
-use astrcode_tools::registry::ToolRegistry;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -324,6 +324,7 @@ impl Session {
         let tool_policy = self.runtime.child_tool_policy();
         let registry = crate::session_setup::build_tool_registry_snapshot(
             self.caps.extension_runner(),
+            self.caps.tool_packs(),
             working_dir,
             timeout,
             tool_policy.as_ref(),
@@ -446,11 +447,11 @@ impl Session {
         resolved_extra: Option<&str>,
         is_subagent: bool,
     ) -> Result<(String, String), SessionError> {
-        let prompt_files = astrcode_context::prompt_engine::load_system_prompt_files_with_scope(
-            working_dir,
-            !is_subagent,
-        )
-        .await;
+        let prompt_files = self
+            .caps
+            .prompt_file_provider()
+            .load(working_dir, !is_subagent)
+            .await;
         let tools_with_meta = self
             .runtime
             .loaded_tool_registry()
@@ -482,30 +483,14 @@ impl Session {
             extension_blocks: ext_data.extension_blocks,
             extra_instructions: resolved_extra.map(str::to_string),
         };
-        let stable_fingerprint =
-            astrcode_context::prompt_engine::compute_stable_fingerprint(&prompt_input);
-
-        let (text, fingerprint) = match self.runtime.stable_prefix_cache() {
-            Some((cached_text, cached_fingerprint)) if cached_fingerprint == stable_fingerprint => {
-                let dynamic = astrcode_context::prompt_engine::build_dynamic_suffix(&prompt_input);
-                let text = if dynamic.is_empty() {
-                    cached_text
-                } else {
-                    format!("{}\n\n{}", cached_text.trim(), dynamic.trim())
-                };
-                let fingerprint = hex_fingerprint(text.as_bytes());
-                (text, fingerprint)
-            },
-            _ => {
-                let text = astrcode_context::prompt_engine::build_system_prompt(&prompt_input);
-                let fingerprint = hex_fingerprint(text.as_bytes());
-                let stable_prefix =
-                    astrcode_context::prompt_engine::build_stable_prefix(&prompt_input);
-                self.runtime
-                    .store_stable_prefix_cache(stable_prefix, stable_fingerprint);
-                (text, fingerprint)
-            },
-        };
+        let text = self
+            .caps
+            .prompt_provider()
+            .assemble(prompt_input)
+            .await
+            .system_prompt
+            .unwrap_or_default();
+        let fingerprint = hex_fingerprint(text.as_bytes());
         Ok((text, fingerprint))
     }
 }
@@ -524,7 +509,7 @@ impl Session {
         fingerprint: String,
         extra_system_prompt: Option<String>,
         trigger_name: String,
-        compaction: astrcode_context::compaction::CompactResult,
+        compaction: astrcode_core::context::CompactResult,
         base_event_seq: u64,
         strategy: astrcode_core::extension::CompactStrategy,
     ) -> Result<Vec<Event>, SessionError> {
@@ -564,7 +549,6 @@ impl Session {
             ))
             .await?,
         );
-        self.runtime.invalidate_stable_prefix_cache();
         if let Some(cursor) = self.latest_cursor().await? {
             self.checkpoint(&cursor).await?;
         }

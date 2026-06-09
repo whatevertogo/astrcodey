@@ -112,8 +112,8 @@ impl CommandHandler {
         let context_assembler = self.runtime.context_assembler();
         let result = compact_idle_session(
             session,
-            self.runtime.extension_runner(),
-            context_assembler,
+            self.runtime.extension_runner().as_ref(),
+            context_assembler.as_ref(),
             llm,
             &state,
             &tools,

@@ -11,7 +11,6 @@ pub(crate) mod llm_request_history;
 pub(crate) mod llm_stream;
 pub mod payload;
 pub(crate) mod permission;
-pub mod post_compact;
 pub mod session;
 pub mod session_runtime;
 pub mod session_runtime_services;
@@ -35,7 +34,7 @@ pub use payload::{
 };
 pub use session::{Session, SessionCreateParams, SessionError};
 pub use session_runtime::{SessionModelBinding, SessionRuntimeState};
-pub use session_runtime_services::SessionRuntimeServices;
+pub use session_runtime_services::{SessionHostServices, SessionRuntimeServices};
 pub use tool_exec::interrupted_tool_result;
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::TurnHandle;

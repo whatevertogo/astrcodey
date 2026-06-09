@@ -6,16 +6,17 @@
 
 use std::collections::HashMap;
 
-use astrcode_context::prompt_engine::{PromptFiles, build_system_prompt};
 use astrcode_core::{
     config::ModelSelection,
     extension::{ChildToolPolicy, ExtensionError, PromptBuildContext},
-    prompt::{ExtensionPromptBlock, ExtensionSection, SystemPromptInput},
+    prompt::{
+        ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
+        SystemPromptInput,
+    },
     tool::{ToolDefinition, ToolPromptMetadata},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::{ExtensionRuntime, ToolPack, ToolPackScope, ToolRegistry};
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
-use astrcode_tools::registry::{ToolRegistry, builtin_tools};
 
 use crate::session::normalize_extra_system_prompt;
 
@@ -32,21 +33,28 @@ use crate::session::normalize_extra_system_prompt;
 /// 过滤在表构建末尾一次完成，确保 LLM schema、prompt 渲染、运行时白名单三处
 /// 都看到同一份工具集。
 pub async fn build_tool_registry_snapshot(
-    extension_runner: &ExtensionRunner,
+    extension_runner: &dyn ExtensionRuntime,
+    tool_packs: &[std::sync::Arc<dyn ToolPack>],
     working_dir: &str,
     timeout_secs: u64,
     tool_policy: Option<&ChildToolPolicy>,
 ) -> ToolRegistry {
     let mut tool_registry = ToolRegistry::new();
+    let scope = ToolPackScope {
+        working_dir,
+        shell_timeout_secs: timeout_secs,
+    };
 
-    for tool in builtin_tools(std::path::PathBuf::from(working_dir), timeout_secs) {
-        tool_registry.register(tool);
+    for pack in tool_packs {
+        for tool in pack.tools(&scope) {
+            tool_registry.register(tool);
+        }
     }
 
-    // Extensions override builtins, and earlier registered extensions keep
-    // precedence over later registered extensions with the same tool name.
+    // Extensions override host tool packs, and earlier registered extensions
+    // keep precedence over later registered extensions with the same tool name.
     for tool in extension_runner
-        .collect_tool_adapters_typed(working_dir)
+        .collect_tool_adapters(working_dir)
         .await
         .into_iter()
         .rev()
@@ -70,14 +78,16 @@ fn apply_child_tool_policy(registry: &mut ToolRegistry, policy: &ChildToolPolicy
 }
 
 pub struct SystemPromptSnapshotInput<'a> {
-    pub extension_runner: &'a ExtensionRunner,
+    pub extension_runner: &'a dyn ExtensionRuntime,
+    pub prompt_provider: &'a dyn PromptProvider,
+    pub prompt_file_provider: &'a dyn PromptFileProvider,
     pub session_id: &'a str,
     pub working_dir: &'a str,
     pub model_id: &'a str,
     pub tools: &'a [ToolDefinition],
     pub extra_system_prompt: Option<&'a str>,
     pub tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
-    pub prompt_files: PromptFiles,
+    pub include_agents_rules: bool,
 }
 
 /// 扩展动态贡献的收集结果（extension blocks + merged tool metadata）。
@@ -90,7 +100,7 @@ pub struct ExtensionPromptData {
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
 pub async fn collect_extension_prompt_data(
-    extension_runner: &ExtensionRunner,
+    extension_runner: &dyn ExtensionRuntime,
     session_id: &str,
     working_dir: &str,
     model_id: &str,
@@ -104,7 +114,7 @@ pub async fn collect_extension_prompt_data(
         tools: tools.to_vec(),
     };
     let contributions = extension_runner
-        .collect_prompt_contributions_typed(prompt_ctx)
+        .collect_prompt_contributions(prompt_ctx)
         .await?;
 
     let mut extension_blocks = Vec::new();
@@ -134,7 +144,7 @@ pub async fn collect_extension_prompt_data(
     }
 
     let mut merged_metadata = base_tool_prompt_metadata;
-    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata_typed().await);
+    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata().await);
 
     Ok(ExtensionPromptData {
         extension_blocks,
@@ -150,13 +160,15 @@ pub async fn build_system_prompt_snapshot(
 ) -> Result<(String, String), ExtensionError> {
     let SystemPromptSnapshotInput {
         extension_runner,
+        prompt_provider,
+        prompt_file_provider,
         session_id,
         working_dir,
         model_id,
         tools,
         extra_system_prompt,
         tool_prompt_metadata,
-        prompt_files,
+        include_agents_rules,
     } = input;
 
     let ext_data = collect_extension_prompt_data(
@@ -170,6 +182,9 @@ pub async fn build_system_prompt_snapshot(
     .await?;
 
     let extra_instructions = normalize_extra_system_prompt(extra_system_prompt);
+    let prompt_files = prompt_file_provider
+        .load(working_dir, include_agents_rules)
+        .await;
 
     let prompt_input = SystemPromptInput {
         working_dir: working_dir.to_string(),
@@ -185,7 +200,11 @@ pub async fn build_system_prompt_snapshot(
         extra_instructions,
     };
 
-    let system_prompt = build_system_prompt(&prompt_input);
+    let system_prompt = prompt_provider
+        .assemble(prompt_input)
+        .await
+        .system_prompt
+        .unwrap_or_default();
     let fingerprint = hex_fingerprint(system_prompt.as_bytes());
     Ok((system_prompt, fingerprint))
 }

@@ -8,8 +8,8 @@ use astrcode_core::{
     event::Event, extension::ChildToolPolicy, llm::LlmProvider, permission::ApprovalDecision,
     tool::FileObservationStore, types::ToolCallId,
 };
+use astrcode_kernel::ToolRegistry;
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
-use astrcode_tools::registry::ToolRegistry;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
@@ -73,9 +73,6 @@ struct TurnConfiguration {
     /// `refresh_tools` 在每次重建工具表时读取此字段，保证子 session 的所有 turn
     /// 都看到一致的裁剪后工具集（含 resume 路径）。
     tool_policy: Mutex<Option<ChildToolPolicy>>,
-    /// 缓存的稳定前缀文本及其指纹（Identity → ProjectRules）。
-    /// 首次构建后跨 turn 复用，compact 后清空触发全量重建。
-    cached_stable_prefix: Mutex<Option<(String, String)>>,
 }
 
 /// 单个 session 在当前进程内持有的瞬态状态。
@@ -129,7 +126,6 @@ impl SessionRuntimeState {
             configuration: TurnConfiguration {
                 extra_system_prompt: Mutex::new(None),
                 tool_policy: Mutex::new(None),
-                cached_stable_prefix: Mutex::new(None),
             },
             compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
                 3,
@@ -213,19 +209,6 @@ impl SessionRuntimeState {
 
     pub fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
         lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
-    }
-
-    pub fn stable_prefix_cache(&self) -> Option<(String, String)> {
-        lock_parking(&self.configuration.cached_stable_prefix).clone()
-    }
-
-    pub(crate) fn store_stable_prefix_cache(&self, text: String, fingerprint: String) {
-        *lock_parking(&self.configuration.cached_stable_prefix) = Some((text, fingerprint));
-    }
-
-    /// 清空缓存的稳定前缀，强制下一 turn 全量重建（compact 后调用）。
-    pub fn invalidate_stable_prefix_cache(&self) {
-        *lock_parking(&self.configuration.cached_stable_prefix) = None;
     }
 
     /// 订阅本 session 的事件流。

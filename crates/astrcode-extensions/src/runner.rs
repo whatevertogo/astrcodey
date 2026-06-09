@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{event::EventPayload, tool_access::ResourceAccess};
+use astrcode_core::{event::EventPayload, tool::ToolPromptMetadata, tool_access::ResourceAccess};
 use astrcode_extension_sdk::{
     extension::*,
     tool::{
@@ -20,6 +20,7 @@ use astrcode_extension_sdk::{
         ToolResult,
     },
 };
+use astrcode_kernel::ExtensionRuntime;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 
 /// 将生命周期事件分发到所有已注册的扩展。
@@ -1247,6 +1248,81 @@ impl ExtensionRunner {
     /// 判断是否有任何扩展注册了类型化能力。
     pub async fn has_records(&self) -> bool {
         !self.records.read().await.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl ExtensionRuntime for ExtensionRunner {
+    async fn emit_pre_tool_use(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<PreToolUseResult, ExtensionError> {
+        ExtensionRunner::emit_pre_tool_use(self, ctx).await
+    }
+
+    async fn emit_post_tool_use(
+        &self,
+        ctx: PostToolUseContext,
+    ) -> Result<PostToolUseResult, ExtensionError> {
+        ExtensionRunner::emit_post_tool_use(self, ctx).await
+    }
+
+    async fn emit_provider(
+        &self,
+        event: ProviderEvent,
+        ctx: ProviderContext,
+    ) -> Result<ProviderResult, ExtensionError> {
+        ExtensionRunner::emit_provider(self, event, ctx).await
+    }
+
+    async fn collect_prompt_contributions(
+        &self,
+        ctx: PromptBuildContext,
+    ) -> Result<PromptContributions, ExtensionError> {
+        ExtensionRunner::collect_prompt_contributions_typed(self, ctx).await
+    }
+
+    async fn emit_compact(
+        &self,
+        event: CompactEvent,
+        ctx: CompactContext,
+    ) -> Result<CompactResult, ExtensionError> {
+        ExtensionRunner::emit_compact(self, event, ctx).await
+    }
+
+    async fn emit_post_tool_use_failure(&self, ctx: PostToolUseFailureContext) {
+        ExtensionRunner::emit_post_tool_use_failure(self, ctx).await;
+    }
+
+    async fn emit_continue_after_stop(
+        &self,
+        ctx: ContinueAfterStopContext,
+    ) -> Result<ContinueAfterStopResult, ExtensionError> {
+        ExtensionRunner::emit_continue_after_stop(self, ctx).await
+    }
+
+    async fn emit_lifecycle(
+        &self,
+        event: ExtensionEvent,
+        ctx: LifecycleContext,
+    ) -> Result<(), ExtensionError> {
+        ExtensionRunner::emit_lifecycle(self, event, ctx).await
+    }
+
+    async fn collect_tool_adapters(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
+        ExtensionRunner::collect_tool_adapters_typed(self, working_dir).await
+    }
+
+    async fn collect_tool_prompt_metadata(
+        &self,
+    ) -> std::collections::HashMap<String, ToolPromptMetadata> {
+        ExtensionRunner::collect_tool_prompt_metadata_typed(self).await
+    }
+
+    fn session_ops(&self) -> Option<Arc<dyn SessionOperations>> {
+        let ops_ref = self.session_ops_ref();
+        let guard = ops_ref.read().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
     }
 }
 

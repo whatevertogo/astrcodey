@@ -1,25 +1,20 @@
 //! Compact pipeline — hook 桥接与 LLM 请求构造。
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::Arc;
 
-use astrcode_context::compaction::{CompactError, CompactResult};
 use astrcode_core::{
     config::ModelSelection,
+    context::{CompactError, CompactRequestFn, CompactResult},
     event::Event,
     extension::{
         CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactStrategy,
         ExtensionError,
     },
-    llm::{self, LlmMessage, LlmProvider},
+    llm::{self, LlmProvider},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::ExtensionRuntime;
 
 use crate::{Session, session::SessionError};
-
-type CompactRequestFn = Box<
-    dyn FnMut(Vec<LlmMessage>) -> Pin<Box<dyn Future<Output = Result<String, CompactError>> + Send>>
-        + Send,
->;
 
 #[derive(Clone, Copy)]
 pub struct CompactHookContext<'a> {
@@ -46,7 +41,7 @@ impl<'a> CompactHookContext<'a> {
 }
 
 pub async fn collect_compact_instructions(
-    extension_runner: &ExtensionRunner,
+    extension_runner: &dyn ExtensionRuntime,
     input: CompactHookContext<'_>,
 ) -> Result<Vec<String>, ExtensionError> {
     let ctx = input.build_compact_context(None);
@@ -66,7 +61,7 @@ pub async fn collect_compact_instructions(
 }
 
 pub async fn dispatch_post_compact(
-    extension_runner: &ExtensionRunner,
+    extension_runner: &dyn ExtensionRuntime,
     input: CompactHookContext<'_>,
     compaction: &CompactResult,
 ) -> Result<(), ExtensionError> {

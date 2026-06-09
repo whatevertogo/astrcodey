@@ -2,6 +2,7 @@
 resolver = "2"
 default-members = ["crates/astrcode-cli"]
 members = [
+    "crates/astrcode-kernel",
     "crates/astrcode-core",
     "crates/astrcode-support",
     "crates/astrcode-ai",

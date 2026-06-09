@@ -299,6 +299,14 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 
 工具是运行时基础能力，extension、SDK、MCP 都只是 tool source。所有工具走同一条执行路径，确保可观测性和统一调度。
 
+### 内核化嵌入边界
+
+`astrcode-session` 只依赖 `astrcode-core` / `astrcode-kernel` / storage/support 等内核契约，
+不直接依赖 first-party 的 context、tools、extensions 或 server 默认实现。嵌入宿主通过
+`SessionHostServices` 注入 context、prompt、extension runtime、post-compact enrichment 和 tool packs。
+
+最小嵌入方式与可替换能力清单见 [kernel-embedding.md](kernel-embedding.md)。
+
 ### 前后端分离
 
 前端不负责业务逻辑，只负责交互和渲染。后端通过 HTTP/SSE 提供标准化 API，支持多种前端形态（TUI/GUI/Headless）。

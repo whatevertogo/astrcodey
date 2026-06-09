@@ -1,82 +1,24 @@
 use std::future::Future;
 
-use astrcode_core::llm::{LlmMessage, ModelLimits};
+use astrcode_core::{
+    context::{
+        CompactError, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
+        CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput, PrepareMessagesOptions,
+        PreparedCompaction, PreparedContext,
+    },
+    llm::{LlmMessage, ModelLimits},
+};
 
 use crate::{
     ContextSettings,
     compaction::{
-        CompactError, CompactExecution, CompactResult, CompactSkipReason,
-        CompactSummaryRenderOptions, compact_messages_deterministic,
+        CompactExecution, CompactSkipReason, compact_messages_deterministic,
         compact_messages_with_fallback,
     },
     token_budget::{
         build_prompt_snapshot, estimate_turn_growth, should_compact, should_compact_predictive,
     },
 };
-
-/// 一次 provider request 的上下文准备输入。
-///
-/// `model_limits` 必须由调用方在每次请求前传入当前模型的限制，
-/// 这样切换模型后 compact 阈值会立即跟随新窗口大小。
-#[derive(Debug, Clone)]
-pub struct ContextPrepareInput<'a> {
-    /// 不包含 system prompt 的可见对话消息。
-    pub messages: Vec<LlmMessage>,
-    /// 已组装好的 system prompt；这里只参与 token 估算和 compact request。
-    pub system_prompt: Option<&'a str>,
-    /// 当前 provider/model 的上下文限制。
-    pub model_limits: ModelLimits,
-    /// 插件提供的 compact 指令，追加到 compact summary 中。
-    pub custom_instructions: Vec<String>,
-}
-
-/// 已准备好的 provider 消息。
-///
-/// system prompt 不在这里返回；server 可以继续用自己的 system-message 前缀，
-/// 这里负责返回 compact 后的可见消息窗口。
-#[derive(Debug, Clone)]
-pub struct PreparedContext {
-    pub messages: Vec<LlmMessage>,
-    pub compaction: Option<PreparedCompaction>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreparedCompaction {
-    pub result: CompactResult,
-    pub llm_api_failed: bool,
-}
-
-/// 是否执行 compact，以及 compact 时是否调用 LLM。
-#[derive(Debug, Clone, Copy)]
-pub struct CompactMessagesOptions {
-    pub run: bool,
-    pub use_llm: bool,
-    pub keep_recent_turns: Option<usize>,
-}
-
-/// compact 执行结果（不含持久化）。
-#[derive(Debug, Clone)]
-pub enum CompactIfNeededOutcome {
-    /// 未触发 compact（阈值未到且非 force）。
-    NotRun { messages: Vec<LlmMessage> },
-    /// 触发但无安全前缀可压（Empty / NothingToCompact）。
-    Skipped { messages: Vec<LlmMessage> },
-    /// 已生成摘要与新的可见窗口。
-    Applied {
-        messages: Vec<LlmMessage>,
-        compaction: PreparedCompaction,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PrepareMessagesOptions {
-    /// 根据阈值或 force 执行 compact（与是否调用 LLM 无关）。
-    pub run_compact: bool,
-    /// compact 时是否调用 LLM；为 false 时仅用确定性模板。
-    pub use_llm_for_compact: bool,
-    pub force_compact: bool,
-    pub keep_recent_turns: Option<usize>,
-}
 
 /// LLM 上下文组装门面。
 ///
@@ -266,6 +208,38 @@ impl LlmContextAssembler {
             model_limits,
             self.settings.compact_threshold_percent,
         )
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextAssembler for LlmContextAssembler {
+    fn settings(&self) -> &ContextSettings {
+        self.settings()
+    }
+
+    fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
+        self.should_auto_compact(input)
+    }
+
+    async fn compact_if_needed(
+        &self,
+        messages: Vec<LlmMessage>,
+        system_prompt: Option<&str>,
+        custom_instructions: &[String],
+        render_options: CompactSummaryRenderOptions,
+        options: CompactMessagesOptions,
+        request_text: CompactRequestFn,
+    ) -> CompactIfNeededOutcome {
+        LlmContextAssembler::compact_if_needed(
+            self,
+            messages,
+            system_prompt,
+            custom_instructions,
+            render_options,
+            options,
+            request_text,
+        )
+        .await
     }
 }
 

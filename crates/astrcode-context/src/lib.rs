@@ -12,5 +12,6 @@ pub use astrcode_core::config::ContextSettings;
 pub mod compaction;
 pub mod context_assembler;
 pub mod contribution;
+pub mod post_compact_enricher;
 pub mod prompt_engine;
 pub mod token_budget;

@@ -1,8 +1,8 @@
 //! 从 EventStore 读模型构建 LLM 请求历史（projection SSOT）。
 
-use astrcode_context::prompt_engine::system_messages_from_prompt;
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
+    prompt::system_messages_from_prompt,
     storage::SessionReadModel,
 };
 

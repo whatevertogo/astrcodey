@@ -136,7 +136,7 @@ impl TurnLoop {
             .process_prompt_inner(user_text, turn_id, publisher)
             .await;
         if result.is_err() {
-            self.finalize_turn_on_error(&extension_runner).await;
+            self.finalize_turn_on_error(extension_runner.as_ref()).await;
         }
         event_bridge.shutdown(self.tools.shared_mut()).await;
         result
@@ -145,7 +145,7 @@ impl TurnLoop {
     /// Turn 失败时统一补发 `TurnEnd`，避免 `?` 旁路错误漏掉扩展生命周期钩子。
     async fn finalize_turn_on_error(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
     ) {
         if let Err(hook_error) = extension_runner
             .emit_lifecycle(ExtensionEvent::TurnEnd, self.shared().lifecycle_ctx())
@@ -194,7 +194,7 @@ impl TurnLoop {
                 .await?;
 
             let prepared = self
-                .prepare_stage(&extension_runner, &state, turn_id, publisher)
+                .prepare_stage(extension_runner.as_ref(), &state, turn_id, publisher)
                 .await?;
             let visible_tools = state.visible_tools();
             let outcome = match self.llm_stage(prepared, &visible_tools, publisher).await {
@@ -208,7 +208,7 @@ impl TurnLoop {
                         session: &self.session,
                         llm: &self.llm,
                         shared: &shared,
-                        extension_runner: &extension_runner,
+                        extension_runner: extension_runner.as_ref(),
                     };
                     if !self
                         .compaction
@@ -247,11 +247,11 @@ impl TurnLoop {
                                 .await?;
                         }
                     }
-                    on_step_end_best_effort(&extension_runner, &lifecycle_ctx).await;
+                    on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
 
                     if self
                         .should_continue_after_stop(
-                            &extension_runner,
+                            extension_runner.as_ref(),
                             &assistant_text_for_continue,
                             &finish_reason,
                             &mut state,
@@ -273,7 +273,7 @@ impl TurnLoop {
 
                     return self
                         .postprocess_complete_stage(
-                            &extension_runner,
+                            extension_runner.as_ref(),
                             _user_text.to_string(),
                             state,
                             finish_reason,
@@ -309,11 +309,16 @@ impl TurnLoop {
                             .await?;
                     }
 
-                    self.tools_stage(&extension_runner, &mut state, &tool_calls, publisher)
-                        .await?;
+                    self.tools_stage(
+                        extension_runner.as_ref(),
+                        &mut state,
+                        &tool_calls,
+                        publisher,
+                    )
+                    .await?;
 
                     state.tool_deduplicator_mut().end_step();
-                    on_step_end_best_effort(&extension_runner, &lifecycle_ctx).await;
+                    on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
                 },
             }
         }
@@ -321,7 +326,7 @@ impl TurnLoop {
 
     async fn prepare_stage(
         &mut self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         state: &TurnState,
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
@@ -383,7 +388,7 @@ impl TurnLoop {
 
     async fn tools_stage(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::PendingToolCall],
         publisher: &Arc<TurnEvents>,
@@ -425,7 +430,7 @@ impl TurnLoop {
 
     async fn postprocess_complete_stage(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         user_text: String,
         state: TurnState,
         finish_reason: String,
@@ -462,14 +467,13 @@ impl TurnLoop {
     /// 消除 clone 需要扩展点演进：
     /// 1. `ProviderContext.messages: Arc<Vec<LlmMessage>>`，caller 共享 所有权 `Arc::clone` 代替
     ///    `Vec::clone`；
-    /// 2. `ExtensionRunner::emit_provider` 内部用 `Arc::make_mut` 实现 copy-on-write，hook
-    ///    未改就零拷贝；
+    /// 2. `ExtensionRuntime::emit_provider` 内部可用 copy-on-write，hook 未改就零拷贝；
     /// 3. `ProviderEvent::BeforeRequest` hook 保持现状（接受只读快照）。
     ///
     /// 是**API 演进**而非 bug——参考 issue #TBD。不优先动。
     async fn apply_before_provider_request_hook(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         send_messages: Vec<LlmMessage>,
     ) -> Result<Vec<LlmMessage>, TurnError> {
         match extension_runner
@@ -527,7 +531,7 @@ impl TurnLoop {
 
     async fn dispatch_after_provider_response(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
     ) -> Result<(), TurnError> {
         if let Err(e) = extension_runner
             .emit_lifecycle(
@@ -587,7 +591,7 @@ impl TurnLoop {
 
     async fn should_continue_after_stop(
         &self,
-        extension_runner: &astrcode_extensions::runner::ExtensionRunner,
+        extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         assistant_text: &str,
         finish_reason: &str,
         state: &mut TurnState,

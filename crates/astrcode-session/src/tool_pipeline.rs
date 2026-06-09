@@ -13,8 +13,7 @@ use astrcode_core::{
     tool_ui::{complete_questionnaire_content, is_awaiting_user_input_content},
     types::ToolCallId,
 };
-use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_tools::registry::ToolRegistry;
+use astrcode_kernel::{ExtensionRuntime, ToolRegistry};
 use tokio::{sync::oneshot, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -45,7 +44,7 @@ use crate::{
 pub struct ToolCalls {
     turn: TurnToolContext,
     tool_registry: Arc<ToolRegistry>,
-    extension_runner: Arc<ExtensionRunner>,
+    extension_runner: Arc<dyn ExtensionRuntime>,
     session: Session,
     cancellation_token: CancellationToken,
 }
@@ -54,7 +53,7 @@ impl ToolCalls {
     pub fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
-        extension_runner: Arc<ExtensionRunner>,
+        extension_runner: Arc<dyn ExtensionRuntime>,
         session: Session,
         cancellation_token: CancellationToken,
     ) -> Self {

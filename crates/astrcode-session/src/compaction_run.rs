@@ -2,17 +2,17 @@
 
 use std::sync::Arc;
 
-use astrcode_context::{
-    compaction::CompactSummaryRenderOptions,
-    context_assembler::{CompactIfNeededOutcome, CompactMessagesOptions, LlmContextAssembler},
-};
 use astrcode_core::{
+    context::{
+        CompactIfNeededOutcome, CompactMessagesOptions, CompactSummaryRenderOptions,
+        ContextAssembler, PostCompactEnrichInput,
+    },
     extension::{CompactStrategy, CompactTrigger},
     llm::LlmProvider,
     storage::SessionReadModel,
     tool::ToolDefinition,
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::ExtensionRuntime;
 use astrcode_support::hash::hex_fingerprint;
 
 use crate::{
@@ -21,7 +21,6 @@ use crate::{
         CompactHookContext, PersistCompactError, collect_compact_instructions,
         dispatch_post_compact, make_compact_request_fn, persist_compact_result,
     },
-    post_compact::enrich_post_compact_context,
     session::SessionError,
 };
 
@@ -53,8 +52,8 @@ pub enum IdleCompactionError {
 /// 在无 active turn 时压缩会话历史并持久化。
 pub async fn compact_idle_session(
     session: &Session,
-    extension_runner: &ExtensionRunner,
-    context_assembler: &LlmContextAssembler,
+    extension_runner: &dyn ExtensionRuntime,
+    context_assembler: &dyn ContextAssembler,
     llm: Arc<dyn LlmProvider>,
     state: &SessionReadModel,
     tools: &[ToolDefinition],
@@ -103,17 +102,22 @@ pub async fn compact_idle_session(
     };
 
     let session_store_dir = session.session_store_dir().await;
-    enrich_post_compact_context(
-        &mut compaction,
-        session.id.as_str(),
-        &provider_messages,
-        &state.working_dir,
-        state.system_prompt.as_deref(),
-        tools,
-        context_assembler.settings(),
-        session_store_dir,
-    )
-    .await;
+    session
+        .caps()
+        .post_compact_enricher()
+        .enrich(
+            &mut compaction,
+            PostCompactEnrichInput {
+                session_id: session.id.as_str(),
+                source_messages: &provider_messages,
+                working_dir: &state.working_dir,
+                system_prompt: state.system_prompt.as_deref(),
+                tools,
+                settings: context_assembler.settings(),
+                session_store_dir,
+            },
+        )
+        .await;
 
     dispatch_post_compact(extension_runner, hook_ctx, &compaction).await?;
 

@@ -8,7 +8,7 @@ use astrcode_core::{
     storage::SessionReadModel,
     types::*,
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::ExtensionRuntime;
 use tokio::sync::mpsc;
 
 // ─── Turn event channel ──────────────────────────────────────────────────
@@ -24,7 +24,7 @@ pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) 
 
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
-    extension_runner: &ExtensionRunner,
+    extension_runner: &dyn ExtensionRuntime,
     ctx: &LifecycleContext,
 ) {
     if let Err(error) = extension_runner

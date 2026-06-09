@@ -22,9 +22,12 @@ use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::SessionRuntimeServices;
 use parking_lot::RwLock;
 
+use crate::default_host::first_party_host_services;
+
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
     raw_config: RwLock<Config>,
+    extension_runner: Arc<ExtensionRunner>,
     /// 共享给所有 session 的运行时能力。
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
@@ -74,13 +77,13 @@ impl ConfigManager {
         let capabilities = Arc::new(SessionRuntimeServices::new(
             build_provider_from_settings(&effective.llm)?,
             build_provider_from_settings(&effective.small_llm)?,
-            extension_runner.clone(),
-            context_assembler,
             effective,
+            first_party_host_services(extension_runner.clone(), context_assembler),
         ));
         let manager = Self {
             config_store,
             raw_config: RwLock::new(raw_config),
+            extension_runner,
             capabilities: Arc::clone(&capabilities),
         };
         Ok((manager, capabilities))
@@ -90,17 +93,19 @@ impl ConfigManager {
     pub fn new(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
+        extension_runner: Arc<ExtensionRunner>,
         capabilities: Arc<SessionRuntimeServices>,
     ) -> Self {
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
+            extension_runner,
             capabilities,
         }
     }
 
     fn extension_runner(&self) -> &ExtensionRunner {
-        self.capabilities.extension_runner()
+        &self.extension_runner
     }
 
     pub fn capabilities(&self) -> &Arc<SessionRuntimeServices> {

@@ -7,6 +7,7 @@ description = "Built-in tools: file ops, shell execution, agent collaboration, e
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-kernel = { path = "../astrcode-kernel" }
 astrcode-support = { path = "../astrcode-support" }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "process", "io-util", "fs"] }
 serde = { workspace = true }

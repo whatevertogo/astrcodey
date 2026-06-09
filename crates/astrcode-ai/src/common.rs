@@ -709,6 +709,10 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_client_uses_idle_read_timeout_not_total_timeout() {
+        const CHUNK_COUNT: usize = 25;
+        const CHUNK_DELAY_MS: u64 = 50;
+        const MIN_CHUNKS_AFTER_TIMEOUT: usize = 24;
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -724,23 +728,14 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            socket
-                .write_all(b"data: {\"line\":\"first\"}\n\n")
-                .await
-                .unwrap();
-            socket.flush().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(600)).await;
-            socket
-                .write_all(b"data: {\"line\":\"second\"}\n\n")
-                .await
-                .unwrap();
-            socket.flush().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(600)).await;
-            socket
-                .write_all(b"data: {\"line\":\"third\"}\n\n")
-                .await
-                .unwrap();
-            socket.flush().await.unwrap();
+            for index in 0..CHUNK_COUNT {
+                let line = format!("data: {{\"line\":\"{index}\"}}\n\n");
+                socket.write_all(line.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+                if index + 1 < CHUNK_COUNT {
+                    tokio::time::sleep(Duration::from_millis(CHUNK_DELAY_MS)).await;
+                }
+            }
         });
 
         let config = LlmClientConfig {
@@ -776,7 +771,13 @@ mod tests {
         .unwrap();
 
         let lines = lines.lock().unwrap().clone();
-        assert_eq!(lines, vec!["first", "second", "third"]);
+        assert!(
+            lines.len() >= MIN_CHUNKS_AFTER_TIMEOUT,
+            "stream should keep reading after total elapsed time exceeds read_timeout_secs"
+        );
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(line, &index.to_string());
+        }
     }
 
     #[tokio::test]

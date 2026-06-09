@@ -266,16 +266,29 @@ impl ExtensionEvents {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use astrcode_core::{
         config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+        context::{
+            CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
+            CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
+            NoopPostCompactEnricher,
+        },
         event::EventPayload,
+        extension::{
+            CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
+            ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
+            PostToolUseContext, PostToolUseFailureContext, PostToolUseResult, PreToolUseContext,
+            PreToolUseResult, PromptBuildContext, PromptContributions, ProviderContext,
+            ProviderEvent, ProviderResult,
+        },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        tool::ToolDefinition,
+        prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
+        tool::{SessionOperations, Tool, ToolDefinition, ToolPromptMetadata},
         types::{new_session_id, new_turn_id},
     };
-    use astrcode_extensions::runner::ExtensionRunner;
+    use astrcode_kernel::{ExtensionRuntime, extension_runtime::NoopExtensionRuntime};
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
@@ -283,7 +296,7 @@ mod tests {
     use crate::{
         session::{Session, SessionCreateParams},
         session_runtime::SessionRuntimeState,
-        session_runtime_services::SessionRuntimeServices,
+        session_runtime_services::{SessionHostServices, SessionRuntimeServices},
     };
 
     struct UnusedLlm;
@@ -306,14 +319,65 @@ mod tests {
         }
     }
 
+    struct TestContextAssembler {
+        settings: ContextSettings,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextAssembler for TestContextAssembler {
+        fn settings(&self) -> &ContextSettings {
+            &self.settings
+        }
+
+        fn should_auto_compact(&self, _input: &ContextPrepareInput<'_>) -> bool {
+            false
+        }
+
+        async fn compact_if_needed(
+            &self,
+            messages: Vec<LlmMessage>,
+            _system_prompt: Option<&str>,
+            _custom_instructions: &[String],
+            _render_options: CompactSummaryRenderOptions,
+            _options: CompactMessagesOptions,
+            _request_text: CompactRequestFn,
+        ) -> CompactIfNeededOutcome {
+            CompactIfNeededOutcome::NotRun { messages }
+        }
+    }
+
+    struct TestPromptProvider;
+
+    #[async_trait::async_trait]
+    impl PromptProvider for TestPromptProvider {
+        async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
+            PromptPlan::from_system_prompt(format!(
+                "[Identity]\n  test host\n\n[Environment]\n  Working directory: {}",
+                input.working_dir
+            ))
+        }
+    }
+
+    struct TestPromptFileProvider;
+
+    #[async_trait::async_trait]
+    impl PromptFileProvider for TestPromptFileProvider {
+        async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
+            PromptFiles::default()
+        }
+    }
+
     fn test_caps() -> Arc<SessionRuntimeServices> {
+        test_caps_with_runtime(Arc::new(NoopExtensionRuntime))
+    }
+
+    fn test_caps_with_runtime(
+        extension_runner: Arc<dyn ExtensionRuntime>,
+    ) -> Arc<SessionRuntimeServices> {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-        let extension_runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
-        let context_assembler = Arc::new(
-            astrcode_context::context_assembler::LlmContextAssembler::new(
-                ContextSettings::default(),
-            ),
-        );
+        let context_assembler = Arc::new(TestContextAssembler {
+            settings: ContextSettings::default(),
+        });
         let effective = EffectiveConfig {
             llm: LlmSettings {
                 provider_kind: "mock".into(),
@@ -357,16 +421,25 @@ mod tests {
         Arc::new(SessionRuntimeServices::new(
             llm.clone(),
             llm,
-            extension_runner,
-            context_assembler,
             effective,
+            SessionHostServices {
+                extension_runner,
+                context_assembler,
+                post_compact_enricher: Arc::new(NoopPostCompactEnricher),
+                prompt_provider: Arc::new(TestPromptProvider),
+                prompt_file_provider: Arc::new(TestPromptFileProvider),
+                tool_packs: Vec::new(),
+            },
         ))
     }
 
     async fn test_session() -> Session {
+        test_session_with_caps(test_caps()).await
+    }
+
+    async fn test_session_with_caps(caps: Arc<SessionRuntimeServices>) -> Session {
         let store: Arc<dyn astrcode_core::storage::EventStore> =
             Arc::new(InMemoryEventStore::new());
-        let caps = test_caps();
         let sid = new_session_id();
         let runtime = Arc::new(SessionRuntimeState::new(
             caps.llm(),
@@ -444,53 +517,92 @@ mod tests {
         }));
     }
 
-    use astrcode_core::extension::{
-        Extension, ExtensionCapability, HookMode, PreToolUseContext, PreToolUseHandler,
-        PreToolUseResult, Registrar,
-    };
-
-    struct EmitProbeExtension;
-
-    impl Extension for EmitProbeExtension {
-        fn id(&self) -> &str {
-            "emit-probe"
-        }
-
-        fn capabilities(&self) -> &[ExtensionCapability] {
-            &[ExtensionCapability::EmitEvents]
-        }
-
-        fn register(&self, reg: &mut Registrar) {
-            reg.extension_event("emit.probe").register();
-            reg.on_pre_tool_use(HookMode::Blocking, 0, Arc::new(EmitOnPreToolUse));
-        }
-    }
-
-    struct EmitOnPreToolUse;
+    struct EmitEventRuntime;
 
     #[async_trait::async_trait]
-    impl PreToolUseHandler for EmitOnPreToolUse {
-        async fn handle(
+    impl ExtensionRuntime for EmitEventRuntime {
+        async fn emit_pre_tool_use(
             &self,
             ctx: PreToolUseContext,
         ) -> Result<PreToolUseResult, astrcode_core::extension::ExtensionError> {
-            let sink = ctx.extension_event_sink.as_ref().ok_or_else(|| {
-                astrcode_core::extension::ExtensionError::Internal("no extension_event_sink".into())
-            })?;
-            sink.emit("emit.probe", 1, serde_json::json!({ "probe": true }))
-                .await?;
+            let tx = ctx
+                .event_tx
+                .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
+            tx.send(EventPayload::ExtensionEvent {
+                extension_id: "emit-probe".into(),
+                event_type: "emit.probe".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "probe": true }),
+            })
+            .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
             Ok(PreToolUseResult::Allow)
+        }
+
+        async fn emit_post_tool_use(
+            &self,
+            _ctx: PostToolUseContext,
+        ) -> Result<PostToolUseResult, ExtensionError> {
+            Ok(PostToolUseResult::Allow)
+        }
+
+        async fn emit_provider(
+            &self,
+            _event: ProviderEvent,
+            _ctx: ProviderContext,
+        ) -> Result<ProviderResult, ExtensionError> {
+            Ok(ProviderResult::Allow)
+        }
+
+        async fn collect_prompt_contributions(
+            &self,
+            _ctx: PromptBuildContext,
+        ) -> Result<PromptContributions, ExtensionError> {
+            Ok(PromptContributions::default())
+        }
+
+        async fn emit_compact(
+            &self,
+            _event: CompactEvent,
+            _ctx: CompactContext,
+        ) -> Result<CompactResult, ExtensionError> {
+            Ok(CompactResult::Allow)
+        }
+
+        async fn emit_post_tool_use_failure(&self, _ctx: PostToolUseFailureContext) {}
+
+        async fn emit_continue_after_stop(
+            &self,
+            _ctx: ContinueAfterStopContext,
+        ) -> Result<ContinueAfterStopResult, ExtensionError> {
+            Ok(ContinueAfterStopResult::EndTurn)
+        }
+
+        async fn emit_lifecycle(
+            &self,
+            _event: ExtensionEvent,
+            _ctx: LifecycleContext,
+        ) -> Result<(), ExtensionError> {
+            Ok(())
+        }
+
+        async fn collect_tool_adapters(&self, _working_dir: &str) -> Vec<Arc<dyn Tool>> {
+            Vec::new()
+        }
+
+        async fn collect_tool_prompt_metadata(&self) -> HashMap<String, ToolPromptMetadata> {
+            HashMap::new()
+        }
+
+        fn session_ops(&self) -> Option<Arc<dyn SessionOperations>> {
+            None
         }
     }
 
     #[tokio::test]
     async fn extension_event_bridge_delivers_hook_emit_to_store() {
-        let session = test_session().await;
+        let session =
+            test_session_with_caps(test_caps_with_runtime(Arc::new(EmitEventRuntime))).await;
         let caps = session.caps();
-        caps.extension_runner()
-            .register(Arc::new(EmitProbeExtension))
-            .await
-            .unwrap();
 
         let turn_id = new_turn_id();
         let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone(), None));

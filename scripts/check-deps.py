@@ -3,7 +3,7 @@
 
 Layer hierarchy:
   L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Infrastructure: astrcode-support, astrcode-protocol, astrcode-ai
+  L1 Infrastructure: astrcode-kernel, astrcode-support, astrcode-protocol, astrcode-ai
   L2 Domain:       astrcode-log, astrcode-storage, astrcode-context,
                    astrcode-tools, astrcode-extensions, astrcode-client
   L3 Extensions:   astrcode-extension-*, astrcode-bundled-extensions
@@ -30,6 +30,7 @@ LAYERS: dict[str, int] = {
     "astrcode-core": 0,
     "astrcode-desktop": 0,
     # L1 – Infrastructure
+    "astrcode-kernel": 1,
     "astrcode-support": 1,
     "astrcode-protocol": 1,
     "astrcode-ai": 1,
@@ -90,6 +91,19 @@ ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
     ("astrcode-extension-sdk", "astrcode-support"),
 }
 
+FORBIDDEN_DEPS: dict[str, set[str]] = {
+    # Session is the embeddable runtime kernel. It must not depend on the
+    # first-party default implementations, including in tests, so alternate
+    # hosts can reuse it without inheriting AstrCode's built-in profile.
+    "astrcode-session": {
+        "astrcode-context",
+        "astrcode-tools",
+        "astrcode-extensions",
+        "astrcode-bundled-extensions",
+        "astrcode-server",
+    },
+}
+
 
 # ── Workspace discovery ────────────────────────────────────────────
 
@@ -136,6 +150,23 @@ def extract_deps(manifest: Path, all_names: set[str]) -> set[str]:
     for dep_name, spec in data.get("dependencies", {}).items():
         if dep_name in all_names:
             deps.add(dep_name)
+    return deps
+
+
+def extract_deps_from_sections(
+    manifest: Path,
+    all_names: set[str],
+    sections: tuple[str, ...],
+) -> set[str]:
+    """Extract workspace-internal dependencies from selected manifest sections."""
+    with open(manifest, "rb") as f:
+        data = tomllib.load(f)
+
+    deps: set[str] = set()
+    for section in sections:
+        for dep_name in data.get(section, {}):
+            if dep_name in all_names:
+                deps.add(dep_name)
     return deps
 
 
@@ -204,6 +235,20 @@ def main() -> None:
                 violations.append(
                     f"  {crate} (L{crate_layer}) -> {dep} (L{dep_layer}) [{direction}]"
                 )
+
+    # Check explicit crate boundary rules. These include test-only dependencies
+    # when the boundary is part of the embeddable public shape.
+    for crate, forbidden in sorted(FORBIDDEN_DEPS.items()):
+        manifest = members.get(crate)
+        if manifest is None:
+            continue
+        deps = extract_deps_from_sections(
+            manifest,
+            all_names,
+            ("dependencies", "dev-dependencies", "build-dependencies"),
+        )
+        for dep in sorted(deps & forbidden):
+            violations.append(f"  {crate} must not depend on first-party default crate {dep}")
 
     # Check cycles
     cycles = detect_cycles(graph)

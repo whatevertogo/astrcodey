@@ -2,6 +2,7 @@
 
 pub mod acp;
 pub mod bootstrap;
+pub mod default_host;
 pub mod handler;
 pub mod http;
 pub mod task_utils;

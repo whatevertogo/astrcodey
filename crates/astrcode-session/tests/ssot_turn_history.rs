@@ -8,73 +8,21 @@ use std::{
     time::Duration,
 };
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{
-        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-        OpenAiApiMode,
-    },
     event::EventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
     types::{new_message_id, new_session_id, new_turn_id},
 };
-use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
+mod common;
+
 fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
-    let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 200_000,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 200_000,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-        },
-        context: ContextSettings::default(),
-        agent: AgentSettings::default(),
-        permissions: Default::default(),
-        extensions: ExtensionSettings::default(),
-    };
-    Arc::new(SessionRuntimeServices::new(
-        llm.clone(),
-        llm,
-        extension_runner,
-        context_assembler,
-        effective,
-    ))
+    common::test_runtime_services(llm)
 }
 
 async fn spawn_session(llm: Arc<dyn LlmProvider>) -> Session {

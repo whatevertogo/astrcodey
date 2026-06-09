@@ -9,7 +9,7 @@ use astrcode_core::{
         ToolError, ToolExecutionContext, ToolResult,
     },
 };
-use astrcode_tools::registry::ToolRegistry;
+use astrcode_kernel::ToolRegistry;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 

@@ -1094,15 +1094,18 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         llm_provider.clone(),
         llm_provider,
-        Arc::clone(&extension_runner),
-        Arc::clone(&context_assembler),
         effective,
+        astrcode_server::default_host::first_party_host_services(
+            extension_runner.clone(),
+            context_assembler.clone(),
+        ),
     ));
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-config.json"),
         )),
         astrcode_core::config::Config::default(),
+        Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
     ));
     let session_manager = Arc::new(SessionManager::new(

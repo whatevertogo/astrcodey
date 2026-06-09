@@ -70,7 +70,7 @@ pub enum HandlerError {
     #[error(transparent)]
     Turn(astrcode_session::turn_context::TurnError),
     #[error(transparent)]
-    Compact(astrcode_context::compaction::CompactError),
+    Compact(astrcode_core::context::CompactError),
     #[error("LLM error: {0}")]
     Llm(#[source] astrcode_core::llm::LlmError),
     #[error(transparent)]

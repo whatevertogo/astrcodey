@@ -23,6 +23,7 @@
 //! 而非依赖 crate root 的 glob re-export。
 
 pub mod config;
+pub mod context;
 pub mod event;
 pub mod extension;
 pub mod lifecycle;

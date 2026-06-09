@@ -1,19 +1,18 @@
 //! Session 跨实例恢复时 extra_system_prompt 不丢失。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::EventStore,
     tool::ToolDefinition,
     types::new_session_id,
 };
-use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{Session, SessionRuntimeServices, SessionRuntimeState};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
+
+mod common;
 
 struct UnusedLlm;
 
@@ -37,55 +36,7 @@ impl LlmProvider for UnusedLlm {
 
 fn test_caps() -> Arc<SessionRuntimeServices> {
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
-    let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-        },
-        context: ContextSettings::default(),
-        agent: astrcode_core::config::AgentSettings::default(),
-        permissions: Default::default(),
-        extensions: ExtensionSettings::default(),
-    };
-    Arc::new(SessionRuntimeServices::new(
-        llm.clone(),
-        llm,
-        extension_runner,
-        context_assembler,
-        effective,
-    ))
+    common::test_runtime_services(llm)
 }
 
 #[tokio::test]

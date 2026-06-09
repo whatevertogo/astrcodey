@@ -1,32 +1,31 @@
 //! Compact 持久化 CAS 与 turn 内回退行为的集成测试。
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
-use astrcode_context::{
-    compaction::{CompactResult, is_compact_summary_message},
-    context_assembler::LlmContextAssembler,
-};
 use astrcode_core::{
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
         OpenAiApiMode,
     },
+    context::{
+        COMPACT_SUMMARY_MARKER, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
+        CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
+        NoopPostCompactEnricher, PreparedCompaction, is_compact_summary_message,
+    },
     event::EventPayload,
     extension::CompactStrategy,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
+    prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
     storage::EventStore,
     tool::ToolDefinition,
     types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_kernel::extension_runtime::NoopExtensionRuntime;
 use astrcode_session::{
-    Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState,
+    Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
     compact::persist_compact_result,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
@@ -62,9 +61,91 @@ const VALID_COMPACT_SUMMARY: &str = r#"<summary>
    - (none)
 </summary>"#;
 
+struct TestPromptProvider;
+
+#[async_trait::async_trait]
+impl PromptProvider for TestPromptProvider {
+    async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
+        PromptPlan::from_system_prompt("integration system prompt".into())
+    }
+}
+
+struct TestPromptFileProvider;
+
+#[async_trait::async_trait]
+impl PromptFileProvider for TestPromptFileProvider {
+    async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
+        PromptFiles::default()
+    }
+}
+
+struct TestContextAssembler {
+    settings: ContextSettings,
+}
+
+#[async_trait::async_trait]
+impl ContextAssembler for TestContextAssembler {
+    fn settings(&self) -> &ContextSettings {
+        &self.settings
+    }
+
+    fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
+        self.settings.auto_compact_enabled && !input.messages.is_empty()
+    }
+
+    async fn compact_if_needed(
+        &self,
+        messages: Vec<LlmMessage>,
+        _system_prompt: Option<&str>,
+        _custom_instructions: &[String],
+        _render_options: CompactSummaryRenderOptions,
+        options: CompactMessagesOptions,
+        mut request_text: CompactRequestFn,
+    ) -> CompactIfNeededOutcome {
+        if !options.run {
+            return CompactIfNeededOutcome::NotRun { messages };
+        }
+        if messages.is_empty() {
+            return CompactIfNeededOutcome::Skipped { messages };
+        }
+
+        let summary = if options.use_llm {
+            request_text(vec![LlmMessage::user(
+                "Do not call tools. Summarize the conversation for compaction.",
+            )])
+            .await
+            .unwrap()
+        } else {
+            "deterministic compact summary".into()
+        };
+        let retained_messages = messages.last().cloned().into_iter().collect::<Vec<_>>();
+        let context_messages = vec![LlmMessage::user(format!(
+            "{COMPACT_SUMMARY_MARKER}\nSummary:\n{summary}\n</compact_summary>"
+        ))];
+        let mut compacted_messages = context_messages.clone();
+        compacted_messages.extend(retained_messages.clone());
+        CompactIfNeededOutcome::Applied {
+            messages: compacted_messages,
+            compaction: PreparedCompaction {
+                result: CompactResult {
+                    pre_tokens: messages.len(),
+                    post_tokens: retained_messages.len().saturating_add(1),
+                    summary,
+                    messages_removed: messages.len().saturating_sub(retained_messages.len()),
+                    context_messages,
+                    retained_messages,
+                    transcript_path: None,
+                },
+                llm_api_failed: false,
+            },
+        }
+    }
+}
+
 fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<SessionRuntimeServices> {
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let context_assembler = Arc::new(LlmContextAssembler::new(context.clone()));
+    let context_assembler = Arc::new(TestContextAssembler {
+        settings: context.clone(),
+    });
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -108,9 +189,15 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
     Arc::new(SessionRuntimeServices::new(
         llm.clone(),
         llm,
-        extension_runner,
-        context_assembler,
         effective,
+        SessionHostServices {
+            extension_runner: Arc::new(NoopExtensionRuntime),
+            context_assembler,
+            post_compact_enricher: Arc::new(NoopPostCompactEnricher),
+            prompt_provider: Arc::new(TestPromptProvider),
+            prompt_file_provider: Arc::new(TestPromptFileProvider),
+            tool_packs: Vec::new(),
+        },
     ))
 }
 

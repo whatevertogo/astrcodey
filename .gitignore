@@ -42,6 +42,8 @@ Desktop.ini
 # Local agent runtime state
 /.omx/logs/
 /.omx/state/
+/.astrcode/
+**/.astrcode/
 
 .claude/
 .codex/

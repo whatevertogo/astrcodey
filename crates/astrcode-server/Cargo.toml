@@ -20,6 +20,7 @@ testing = ["astrcode-storage/testing"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-kernel = { path = "../astrcode-kernel" }
 astrcode-support = { path = "../astrcode-support" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-ai = { path = "../astrcode-ai" }

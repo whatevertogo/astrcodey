@@ -1,31 +1,33 @@
-//! Runtime-owned post-compact context restoration.
-//!
-//! `astrcode-context` decides how compact summaries are shaped. Runtime facts
-//! that require filesystem or tool-registry access stay here.
+//! First-party post-compact context restoration.
 
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
-use astrcode_context::{
-    ContextSettings,
-    compaction::{
-        CompactResult, PostCompactFile, PostCompactNote, agent_status_note, recent_read_paths,
-    },
-    token_budget::truncate_text_to_tokens,
-};
 use astrcode_core::{
+    config::ContextSettings,
+    context::{CompactResult, PostCompactEnrichInput, PostCompactEnricher},
     llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
+
+use crate::{
+    compaction::{
+        PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
+        recent_read_paths,
+    },
+    token_budget::truncate_text_to_tokens,
+};
 
 const PLAN_NOTE_MAX_CHARS: usize = 40_000;
 const SKILLS_TOKEN_BUDGET: usize = 25_000;
 const AGENT_NOTE_MAX_CHARS: usize = 20_000;
 const TOOL_NOTE_MAX_CHARS: usize = 16_000;
 const TOKEN_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
+
+pub struct DefaultPostCompactEnricher;
 
 struct PostCompactCollectInput {
     source_messages: Vec<LlmMessage>,
@@ -38,59 +40,52 @@ struct PostCompactCollectInput {
     session_store_dir: Option<PathBuf>,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn enrich_post_compact_context(
-    compaction: &mut CompactResult,
-    session_id: &str,
-    source_messages: &[LlmMessage],
-    working_dir: &str,
-    system_prompt: Option<&str>,
-    tools: &[ToolDefinition],
-    settings: &ContextSettings,
-    session_store_dir: Option<PathBuf>,
-) {
-    let retained_messages = std::mem::take(&mut compaction.retained_messages);
-    let input = PostCompactCollectInput {
-        source_messages: source_messages.to_vec(),
-        retained_messages,
-        working_dir: working_dir.to_string(),
-        session_id: session_id.to_string(),
-        system_prompt: system_prompt.map(str::to_string),
-        tools: tools.to_vec(),
-        settings: settings.clone(),
-        session_store_dir,
-    };
-    let settings = input.settings.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let retained_messages = input.retained_messages;
-        let collected = collect_post_compact_context(
-            &input.source_messages,
-            &retained_messages,
-            &input.working_dir,
-            &input.session_id,
-            input.system_prompt.as_deref(),
-            &input.tools,
-            &input.settings,
-            input.session_store_dir,
-        );
-        (retained_messages, collected)
-    })
-    .await;
-    let (files, notes) = match result {
-        Ok((retained_messages, collected)) => {
-            compaction.retained_messages = retained_messages;
-            collected
-        },
-        Err(panic) => {
-            tracing::warn!(
-                session_id = session_id,
-                "post-compact context collection panicked, skipping enrichment: {panic}"
+#[async_trait::async_trait]
+impl PostCompactEnricher for DefaultPostCompactEnricher {
+    async fn enrich(&self, compaction: &mut CompactResult, input: PostCompactEnrichInput<'_>) {
+        let retained_messages = std::mem::take(&mut compaction.retained_messages);
+        let collect_input = PostCompactCollectInput {
+            source_messages: input.source_messages.to_vec(),
+            retained_messages,
+            working_dir: input.working_dir.to_string(),
+            session_id: input.session_id.to_string(),
+            system_prompt: input.system_prompt.map(str::to_string),
+            tools: input.tools.to_vec(),
+            settings: input.settings.clone(),
+            session_store_dir: input.session_store_dir,
+        };
+        let settings = collect_input.settings.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let retained_messages = collect_input.retained_messages;
+            let collected = collect_post_compact_context(
+                &collect_input.source_messages,
+                &retained_messages,
+                &collect_input.working_dir,
+                &collect_input.session_id,
+                collect_input.system_prompt.as_deref(),
+                &collect_input.tools,
+                &collect_input.settings,
+                collect_input.session_store_dir,
             );
-            return;
-        },
-    };
+            (retained_messages, collected)
+        })
+        .await;
+        let (files, notes) = match result {
+            Ok((retained_messages, collected)) => {
+                compaction.retained_messages = retained_messages;
+                collected
+            },
+            Err(panic) => {
+                tracing::warn!(
+                    session_id = input.session_id,
+                    "post-compact context collection panicked, skipping enrichment: {panic}"
+                );
+                return;
+            },
+        };
 
-    compaction.append_post_compact_context(files, notes, &settings);
+        append_post_compact_context(compaction, files, notes, &settings);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -279,14 +274,15 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::token_budget::estimate_text_tokens;
     use astrcode_core::{
+        context::PostCompactEnricher,
         llm::{LlmContent, LlmRole},
         tool::ToolOrigin,
     };
     use serde_json::json;
 
     use super::*;
+    use crate::token_budget::estimate_text_tokens;
 
     fn read_call(call_id: &str, path: &str) -> LlmMessage {
         LlmMessage {
@@ -319,18 +315,22 @@ mod tests {
             retained_messages: Vec::new(),
             transcript_path: None,
         };
+        let settings = ContextSettings::default();
 
-        enrich_post_compact_context(
-            &mut compaction,
-            "session-post-compact-reread",
-            &messages,
-            temp.to_str().unwrap(),
-            None,
-            &[],
-            &ContextSettings::default(),
-            None,
-        )
-        .await;
+        DefaultPostCompactEnricher
+            .enrich(
+                &mut compaction,
+                PostCompactEnrichInput {
+                    session_id: "session-post-compact-reread",
+                    source_messages: &messages,
+                    working_dir: temp.to_str().unwrap(),
+                    system_prompt: None,
+                    tools: &[],
+                    settings: &settings,
+                    session_store_dir: None,
+                },
+            )
+            .await;
 
         let restored = compaction
             .context_messages
@@ -397,7 +397,7 @@ mod tests {
             &settings,
             Some(session_dir),
         );
-        compaction.append_post_compact_context(files, notes, &settings);
+        append_post_compact_context(&mut compaction, files, notes, &settings);
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
         let restored = compaction

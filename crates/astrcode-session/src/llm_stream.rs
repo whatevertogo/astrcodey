@@ -1,7 +1,7 @@
 //! LLM 流消费 — 从 LLM provider 接收事件流，发射 live 事件，解析文本/工具调用。
 
-use astrcode_context::compaction::is_prompt_too_long_message;
 use astrcode_core::{
+    context::is_prompt_too_long_message,
     event::EventPayload,
     llm::{LlmError, LlmEvent},
     types::*,
