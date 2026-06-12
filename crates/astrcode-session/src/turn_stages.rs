@@ -90,6 +90,10 @@ impl TurnState {
         &self.final_text
     }
 
+    pub(crate) fn set_final_text(&mut self, text: String) {
+        self.final_text = text;
+    }
+
     pub(crate) fn reactive_compact_used(&self) -> bool {
         self.reactive_compact_used
     }
@@ -98,8 +102,8 @@ impl TurnState {
         self.reactive_compact_used = true;
     }
 
-    pub(crate) fn take_output_parts(self) -> (String, Vec<ToolResult>) {
-        (self.final_text, self.tool_results)
+    pub(crate) fn take_output_parts(&mut self) -> (String, Vec<ToolResult>) {
+        (std::mem::take(&mut self.final_text), std::mem::take(&mut self.tool_results))
     }
 
     pub(crate) fn all_tool_snapshots(&self) -> &[ToolSnapshot] {

@@ -12,7 +12,7 @@ use astrcode_core::{
         ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
         ProviderResult,
     },
-    llm::{LlmError, LlmEvent, LlmMessage, provider_visible_messages},
+    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, provider_visible_messages},
     storage::SessionReadModel,
     tool::ToolDefinition,
     types::*,
@@ -196,6 +196,7 @@ impl TurnLoop {
             let prepared = self
                 .prepare_stage(extension_runner.as_ref(), &state, turn_id, publisher)
                 .await?;
+            let request_messages = prepared.messages.clone();
             let visible_tools = state.visible_tools();
             let outcome = match self.llm_stage(prepared, &visible_tools, publisher).await {
                 Ok(outcome) => outcome,
@@ -224,6 +225,35 @@ impl TurnLoop {
                 },
                 Err(error) => return Err(error),
             };
+
+            let mut hook_messages = request_messages;
+            match &outcome {
+                StreamOutcome::Complete { text, .. } => {
+                    hook_messages.push(LlmMessage::assistant(text));
+                },
+                StreamOutcome::ToolCalls { text, tool_calls, .. } => {
+                    let mut content: Vec<LlmContent> = Vec::new();
+                    if let Some(t) = text {
+                        if !t.is_empty() {
+                            content.push(LlmContent::Text { text: t.clone() });
+                        }
+                    }
+                    for tc in tool_calls {
+                        content.push(LlmContent::ToolCall {
+                            call_id: tc.call_id.clone(),
+                            name: tc.name.clone(),
+                            arguments: serde_json::from_str(&tc.arguments)
+                                .unwrap_or(serde_json::Value::Null),
+                        });
+                    }
+                    hook_messages.push(LlmMessage {
+                        role: LlmRole::Assistant,
+                        content,
+                        name: None,
+                        reasoning_content: None,
+                    });
+                },
+            }
 
             match outcome {
                 StreamOutcome::Complete {
@@ -275,8 +305,9 @@ impl TurnLoop {
                         .postprocess_complete_stage(
                             extension_runner.as_ref(),
                             _user_text.to_string(),
-                            state,
+                            &mut state,
                             finish_reason,
+                            hook_messages,
                         )
                         .await;
                 },
@@ -314,6 +345,7 @@ impl TurnLoop {
                         &mut state,
                         &tool_calls,
                         publisher,
+                        hook_messages,
                     )
                     .await?;
 
@@ -392,8 +424,9 @@ impl TurnLoop {
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::PendingToolCall],
         publisher: &Arc<TurnEvents>,
+        hook_messages: Vec<LlmMessage>,
     ) -> Result<(), TurnError> {
-        self.dispatch_after_provider_response(extension_runner)
+        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
             .await?;
 
         let visible_tools = state.visible_tools();
@@ -432,10 +465,11 @@ impl TurnLoop {
         &self,
         extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         user_text: String,
-        state: TurnState,
+        state: &mut TurnState,
         finish_reason: String,
+        hook_messages: Vec<LlmMessage>,
     ) -> Result<TurnOutput, TurnError> {
-        self.dispatch_after_provider_response(extension_runner)
+        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
             .await?;
         let end_ctx = self
             .shared()
@@ -532,17 +566,30 @@ impl TurnLoop {
     async fn dispatch_after_provider_response(
         &self,
         extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
+        messages: Vec<LlmMessage>,
+        state: &mut TurnState,
     ) -> Result<(), TurnError> {
-        if let Err(e) = extension_runner
-            .emit_lifecycle(
-                ExtensionEvent::AfterProviderResponse,
-                self.shared().lifecycle_ctx(),
-            )
-            .await
+        let ctx = self.shared().provider_ctx(messages);
+        match extension_runner
+            .emit_provider(ProviderEvent::AfterResponse, ctx)
+            .await?
         {
-            return end_turn_with_error_typed(e);
+            ProviderResult::Block { reason } => Err(TurnError::ProviderBlocked { reason }),
+            ProviderResult::ReplaceMessages { messages } => {
+                if let Some(text) = extract_last_assistant_text(&messages) {
+                    state.set_final_text(text);
+                }
+                Ok(())
+            },
+            ProviderResult::AppendMessages { messages } => {
+                let extra = extract_text_from_messages(&messages);
+                if !extra.is_empty() {
+                    state.append_final_text(&extra);
+                }
+                Ok(())
+            },
+            ProviderResult::Allow => Ok(()),
         }
-        Ok(())
     }
 
     fn check_aborted(&self) -> Result<(), TurnError> {
@@ -614,6 +661,31 @@ impl TurnLoop {
         }
         Ok(false)
     }
+}
+
+fn extract_last_assistant_text(messages: &[LlmMessage]) -> Option<String> {
+    messages.iter().rev().find(|m| m.role == LlmRole::Assistant).map(|msg| {
+        msg.content
+            .iter()
+            .filter_map(|c| match c {
+                LlmContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    })
+}
+
+fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
+    messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|c| match c {
+            LlmContent::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 #[derive(Debug)]
