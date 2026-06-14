@@ -14,7 +14,8 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
     ChildSessionCoordinator, CompletionParams, ConfigManager, DeliveryOutcome, InputDelivery,
-    SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
+    MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry,
+    TurnScheduleError, TurnScheduler,
 };
 use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::in_memory::InMemoryEventStore;
@@ -207,6 +208,47 @@ async fn running_submit_returns_busy() {
 }
 
 #[tokio::test]
+async fn concurrent_start_with_completion_accepts_only_one_turn() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let first_scheduler = scheduler.clone();
+    let first_sid = sid.clone();
+    let first = tokio::spawn(async move {
+        first_scheduler
+            .start_with_completion(first_sid, "first".into())
+            .await
+    });
+    let second_scheduler = scheduler.clone();
+    let second_sid = sid.clone();
+    let second = tokio::spawn(async move {
+        second_scheduler
+            .start_with_completion(second_sid, "second".into())
+            .await
+    });
+
+    let outcomes = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| {
+                matches!(result.as_ref(), Err(TurnScheduleError::TurnAlreadyRunning))
+            })
+            .count(),
+        1
+    );
+
+    let events = store.replay_events(&sid).await.unwrap();
+    let user_messages = events
+        .iter()
+        .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+        .count();
+    assert_eq!(user_messages, 1);
+}
+
+#[tokio::test]
 async fn running_inject_writes_user_message_under_active_turn() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
@@ -265,6 +307,77 @@ async fn running_queue_does_not_start_second_turn() {
         .unwrap();
     assert!(matches!(outcome, DeliveryOutcome::Queued { queue_len: 1 }));
     assert!(scheduler.registry().has_active(&sid));
+}
+
+#[tokio::test]
+async fn running_queue_rejects_when_pending_limit_is_reached() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let _started = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    for index in 0..MAX_PENDING_INPUTS_PER_SESSION {
+        let outcome = scheduler
+            .deliver_input(
+                sid.clone(),
+                format!("queued {index}").into(),
+                InputDelivery::QueueIfRunningElseStart,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            DeliveryOutcome::Queued { queue_len } if queue_len == index + 1
+        ));
+    }
+
+    let err = scheduler
+        .deliver_input(
+            sid,
+            "too many".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        TurnScheduleError::QueueFull {
+            max: MAX_PENDING_INPUTS_PER_SESSION
+        }
+    ));
+}
+
+#[tokio::test]
+async fn oversized_prompt_is_rejected_before_turn_starts() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+
+    let text = "x".repeat(MAX_PROMPT_TEXT_BYTES + 1);
+    let result = scheduler
+        .start_with_completion(sid.clone(), text.into())
+        .await;
+    let err = match result {
+        Ok(_) => panic!("oversized prompt should be rejected"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        err,
+        TurnScheduleError::InputTooLarge {
+            actual,
+            max: MAX_PROMPT_TEXT_BYTES
+        } if actual == MAX_PROMPT_TEXT_BYTES + 1
+    ));
+
+    let events = store.replay_events(&sid).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload, EventPayload::TurnStarted))
+    );
 }
 
 fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String> {
@@ -374,4 +487,36 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
 
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(reasons, vec!["aborted"]);
+}
+
+#[tokio::test]
+async fn detached_task_tracking_prunes_finished_handles() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        if scheduler.tracked_detached_task_count() == 0
+            && scheduler.tracked_detached_task_slots() == 1
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(scheduler.tracked_detached_task_count(), 0);
+    assert_eq!(scheduler.tracked_detached_task_slots(), 1);
+
+    scheduler
+        .deliver_input(sid, "second".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    assert_eq!(
+        scheduler.tracked_detached_task_slots(),
+        1,
+        "tracking a new detached task should prune finished handles first"
+    );
 }

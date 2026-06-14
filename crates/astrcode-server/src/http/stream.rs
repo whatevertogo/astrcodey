@@ -46,12 +46,12 @@ type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
 ///
 /// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
 struct LiveStreamState {
-    rx: mpsc::UnboundedReceiver<ClientNotification>,
+    rx: mpsc::Receiver<ClientNotification>,
     runtime: Arc<ServerRuntime>,
     session_id: SessionId,
     /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
     replay_max_seq: Option<u64>,
-    /// Lagged 后设为 true，下一次 poll 返回 None 关闭流。
+    /// 需要主动关闭流时设为 true，下一次 poll 返回 None。
     closing: bool,
     /// 单个事件产出多条 delta 时，剩余待发送的缓冲。
     pending: std::collections::VecDeque<SseItem>,

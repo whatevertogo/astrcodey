@@ -1,9 +1,8 @@
 //! 泛型 fan-out 广播器。
 //!
 //! ## 背压与慢消费者策略
-//! - 内部使用 **unbounded** mpsc channel，避免 live delta 等高频事件填满 bounded buffer 后把 SSE
-//!   订阅者踢掉（live-only 事件无法 replay，丢订阅 = UI 假死）
-//! - `send()` 仅在接收端已关闭时移除对应订阅者
+//! - 内部使用 bounded mpsc channel，避免慢消费者无限积压事件导致进程内存增长。
+//! - `send()` 在接收端已关闭或队列已满时移除对应订阅者。
 //!
 //! ## 订阅者生命周期
 //! - 订阅者 drop 后在**下一次** `send()` 时自动清理
@@ -12,12 +11,12 @@
 //! ## 使用约束
 //! - 仅用于 in-process 事件分发（订阅者 ≤ 两位数）
 //! - 不用于远程/多进程场景
-//! - 内存由消费者速度约束；慢消费者会导致内存增长而非静默丢事件
+//! - 慢消费者会被移除；上层需要通过 snapshot/cursor 机制重连恢复。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::sync::lock_parking;
 
@@ -26,7 +25,9 @@ use crate::sync::lock_parking;
 pub struct EventFanoutStats {
     send_total: AtomicU64,
     dropped_subscribers: AtomicU64,
+    dropped_subscribers_full: AtomicU64,
     dropped_subscribers_closed: AtomicU64,
+    max_queue_depth: AtomicUsize,
 }
 
 /// [`EventFanoutStats`] 快照。
@@ -34,10 +35,10 @@ pub struct EventFanoutStats {
 pub struct EventFanoutStatsSnapshot {
     pub send_total: u64,
     pub dropped_subscribers: u64,
-    /// unbounded 模式下恒为 0（保留字段便于监控面板兼容）。
+    /// 因 bounded 队列已满而移除的慢订阅者数。
     pub dropped_subscribers_full: u64,
     pub dropped_subscribers_closed: u64,
-    /// unbounded 模式下无队列深度；恒为 0。
+    /// 已观察到的单个订阅者最大排队深度。
     pub max_queue_depth: usize,
 }
 
@@ -46,22 +47,23 @@ impl EventFanoutStats {
         EventFanoutStatsSnapshot {
             send_total: self.send_total.load(Ordering::Relaxed),
             dropped_subscribers: self.dropped_subscribers.load(Ordering::Relaxed),
-            dropped_subscribers_full: 0,
+            dropped_subscribers_full: self.dropped_subscribers_full.load(Ordering::Relaxed),
             dropped_subscribers_closed: self.dropped_subscribers_closed.load(Ordering::Relaxed),
-            max_queue_depth: 0,
+            max_queue_depth: self.max_queue_depth.load(Ordering::Relaxed),
         }
     }
 }
 
 pub struct EventFanout<T: Clone> {
-    senders: Mutex<Vec<mpsc::UnboundedSender<T>>>,
+    capacity: usize,
+    senders: Mutex<Vec<mpsc::Sender<T>>>,
     stats: EventFanoutStats,
 }
 
 impl<T: Clone> EventFanout<T> {
-    /// `capacity` 保留以兼容既有调用点，当前实现使用 unbounded channel。
-    pub fn new(_capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
+            capacity: capacity.max(1),
             senders: Mutex::new(Vec::new()),
             stats: EventFanoutStats::default(),
         }
@@ -79,25 +81,22 @@ impl<T: Clone> EventFanout<T> {
         if before == 0 {
             return;
         }
-        let backup = if before > 1 {
-            Some(event.clone())
-        } else {
-            None
-        };
-        let mut owned = Some(event);
+        let mut dropped_full = 0u64;
         let mut dropped_closed = 0u64;
-        senders.retain(|tx| {
-            let payload = owned
-                .take()
-                .unwrap_or_else(|| backup.as_ref().expect("backup set when len > 1").clone());
-            match tx.send(payload) {
-                Ok(()) => true,
-                Err(err) => {
-                    owned = Some(err.0);
-                    dropped_closed += 1;
-                    false
-                },
-            }
+        senders.retain(|tx| match tx.try_send(event.clone()) {
+            Ok(()) => {
+                self.record_queue_depth(tx);
+                true
+            },
+            Err(TrySendError::Full(_)) => {
+                dropped_full += 1;
+                self.record_queue_depth(tx);
+                false
+            },
+            Err(TrySendError::Closed(_)) => {
+                dropped_closed += 1;
+                false
+            },
         });
         let dropped = before - senders.len();
         if dropped > 0 {
@@ -105,14 +104,33 @@ impl<T: Clone> EventFanout<T> {
                 .dropped_subscribers
                 .fetch_add(dropped as u64, Ordering::Relaxed);
             self.stats
+                .dropped_subscribers_full
+                .fetch_add(dropped_full, Ordering::Relaxed);
+            self.stats
                 .dropped_subscribers_closed
                 .fetch_add(dropped_closed, Ordering::Relaxed);
             tracing::debug!(dropped, "removed closed event fanout subscribers");
         }
     }
 
-    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<T> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn record_queue_depth(&self, tx: &mpsc::Sender<T>) {
+        let depth = tx.max_capacity().saturating_sub(tx.capacity());
+        let mut current = self.stats.max_queue_depth.load(Ordering::Relaxed);
+        while depth > current {
+            match self.stats.max_queue_depth.compare_exchange_weak(
+                current,
+                depth,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    pub fn subscribe(&self) -> mpsc::Receiver<T> {
+        let (tx, rx) = mpsc::channel(self.capacity);
         lock_parking(&self.senders).push(tx);
         rx
     }
@@ -133,14 +151,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn slow_consumer_does_not_get_dropped_under_burst() {
-        let fanout = EventFanout::new(1024);
-        let mut rx = fanout.subscribe();
-        for i in 0..5000 {
+    async fn slow_consumer_is_dropped_when_buffer_fills() {
+        let fanout = EventFanout::new(2);
+        let _rx = fanout.subscribe();
+        for i in 0..3 {
             fanout.send(i);
         }
-        assert_eq!(fanout.subscriber_count(), 1);
-        assert_eq!(fanout.stats().dropped_subscribers, 0);
-        assert_eq!(rx.recv().await, Some(0));
+        assert_eq!(fanout.subscriber_count(), 0);
+        assert_eq!(fanout.stats().dropped_subscribers, 1);
+        assert_eq!(fanout.stats().dropped_subscribers_full, 1);
+        assert_eq!(fanout.stats().max_queue_depth, 2);
     }
 }

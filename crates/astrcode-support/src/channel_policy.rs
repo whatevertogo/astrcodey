@@ -4,18 +4,17 @@
 //!
 //! | 类别 | 策略 | 代表路径 |
 //! |------|------|----------|
-//! | **Fan-out + live UI** | **unbounded** | [`EventFanout`](crate::event_fanout::EventFanout) |
+//! | **Fan-out + live UI** | bounded + drop slow subscriber | [`EventFanout`](crate::event_fanout::EventFanout) |
 //! | **Turn 事件 ingress** | **unbounded** + 单 FIFO worker 串行 durable | `TurnEventIngress` / `TurnEventSender` |
 //! | **控制面 / 低频信号** | bounded(小) | CLI 命令、scheduler finish、child 完成、stdio |
 //! | **外部 I/O 单消费者** | unbounded | `LlmEvent` provider → turn |
 //!
-//! 事件路径用 unbounded 是为了：**不丢 live 事件、不踢 SSE 订阅、durable 写入保序**。
+//! fan-out 用 bounded 是为了：**有界内存，慢订阅者通过 snapshot/cursor 重连恢复**。
 //! 控制面用 bounded 是为了：**有界内存、对慢 handler 施加背压**。
 //!
 //! 未单独设计：MCP pool 响应 multiplex、extension-sdk peer 事件。
 
-/// 客户端通知 fan-out 容量参数（保留兼容；[`EventFanout`](crate::event_fanout::EventFanout) 内部为
-/// unbounded）。
+/// 客户端通知 fan-out 容量参数。
 pub const EVENT_FANOUT_CAPACITY: usize = 1024;
 
 /// 进程内 CLI → server 命令队列。
