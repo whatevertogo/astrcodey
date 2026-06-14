@@ -8,6 +8,12 @@ impl From<TurnScheduleError> for HandlerError {
         match error {
             TurnScheduleError::TurnAlreadyRunning => HandlerError::TurnAlreadyRunning,
             TurnScheduleError::NoActiveTurn => HandlerError::NoActiveTurn,
+            TurnScheduleError::QueueFull { max } => {
+                HandlerError::InvalidRequest(format!("pending input queue is full ({max} items)"))
+            },
+            TurnScheduleError::InputTooLarge { actual, max } => HandlerError::InvalidRequest(
+                format!("prompt text is too large ({actual} bytes, max {max} bytes)"),
+            ),
             TurnScheduleError::SessionNotFound(msg) => HandlerError::SessionNotFound(msg),
             TurnScheduleError::SessionManager(e) => HandlerError::SessionManager(e),
             TurnScheduleError::Session(e) => HandlerError::Session(e),
@@ -21,6 +27,9 @@ impl From<TurnScheduleError> for HandlerError {
 pub(crate) fn turn_schedule_error_for_client(error: TurnScheduleError) -> (i32, HandlerError) {
     match &error {
         TurnScheduleError::TurnAlreadyRunning => (40900, HandlerError::TurnAlreadyRunning),
+        TurnScheduleError::QueueFull { .. } | TurnScheduleError::InputTooLarge { .. } => {
+            (-32602, HandlerError::from(error))
+        },
         _ => (-32603, HandlerError::from(error)),
     }
 }

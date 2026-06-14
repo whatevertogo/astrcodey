@@ -168,7 +168,7 @@ impl Session {
         self.store.session_store_dir(&self.id).await.ok().flatten()
     }
 
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<astrcode_core::event::Event> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<astrcode_core::event::Event> {
         self.runtime.subscribe()
     }
 
@@ -823,7 +823,7 @@ impl Session {
 async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
     match session.read_model().await {
         Ok(state) => {
-            if let Err(e) = emit_interrupted_tool_results(session, &state, turn_id).await {
+            if let Err(e) = emit_interrupted_tool_results(session, &state, Some(turn_id)).await {
                 tracing::warn!(
                     session_id = %session.id(),
                     turn_id = %turn_id,
@@ -842,10 +842,7 @@ async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
         },
     }
 
-    if let Err(e) = session
-        .emit_durable(Some(turn_id), EventPayload::TurnAbortedContext)
-        .await
-    {
+    if let Err(e) = emit_turn_aborted_context(session, Some(turn_id)).await {
         tracing::warn!(
             session_id = %session.id(),
             turn_id = %turn_id,
@@ -855,11 +852,12 @@ async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
     }
 }
 
-async fn emit_interrupted_tool_results(
+pub async fn emit_interrupted_tool_results(
     session: &Session,
     state: &SessionReadModel,
-    turn_id: &TurnId,
-) -> Result<(), SessionError> {
+    turn_id: Option<&TurnId>,
+) -> Result<usize, SessionError> {
+    let mut emitted = 0;
     for pending in state.tool_calls_needing_interruption() {
         let result = interrupted_tool_result(
             pending.call_id.clone(),
@@ -868,7 +866,7 @@ async fn emit_interrupted_tool_results(
         );
         session
             .emit_durable(
-                Some(turn_id),
+                turn_id,
                 EventPayload::ToolCallCompleted {
                     call_id: pending.call_id.into(),
                     tool_name: pending.tool_name,
@@ -878,6 +876,17 @@ async fn emit_interrupted_tool_results(
                 },
             )
             .await?;
+        emitted += 1;
     }
+    Ok(emitted)
+}
+
+pub async fn emit_turn_aborted_context(
+    session: &Session,
+    turn_id: Option<&TurnId>,
+) -> Result<(), SessionError> {
+    session
+        .emit_durable(turn_id, EventPayload::TurnAbortedContext)
+        .await?;
     Ok(())
 }

@@ -7,12 +7,12 @@ use tokio::sync::mpsc;
 
 /// 服务端事件流的订阅接收器。
 pub struct ConversationStream {
-    rx: mpsc::UnboundedReceiver<ClientNotification>,
+    rx: mpsc::Receiver<ClientNotification>,
 }
 
 impl ConversationStream {
     /// 从 mpsc 接收端创建事件流。
-    pub fn new(rx: mpsc::UnboundedReceiver<ClientNotification>) -> Self {
+    pub fn new(rx: mpsc::Receiver<ClientNotification>) -> Self {
         Self { rx }
     }
 
@@ -50,7 +50,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_stream_recv_returns_events() {
-        let (tx, rx) = mpsc::unbounded_channel::<ClientNotification>();
+        let (tx, rx) = mpsc::channel::<ClientNotification>(1);
         let mut stream = ConversationStream::new(rx);
 
         let event = astrcode_core::event::Event::new(
@@ -58,7 +58,9 @@ mod tests {
             None,
             astrcode_core::event::EventPayload::TurnStarted,
         );
-        tx.send(ClientNotification::Event(event.clone())).unwrap();
+        tx.send(ClientNotification::Event(event.clone()))
+            .await
+            .unwrap();
 
         let received = stream.recv().await.unwrap();
         match received {
@@ -69,7 +71,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_stream_recv_returns_disconnected() {
-        let (_, rx) = mpsc::unbounded_channel::<ClientNotification>();
+        let (_, rx) = mpsc::channel::<ClientNotification>(1);
         let mut stream = ConversationStream::new(rx);
         // tx is dropped immediately, so recv should return Disconnected
         let err = stream.recv().await.unwrap_err();
@@ -78,12 +80,12 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_stream_drain_pending_collects_buffered() {
-        let (tx, rx) = mpsc::unbounded_channel::<ClientNotification>();
+        let (tx, rx) = mpsc::channel::<ClientNotification>(2);
         let mut stream = ConversationStream::new(rx);
 
         let notification = ClientNotification::ExtensionRegistryChanged;
-        tx.send(notification.clone()).unwrap();
-        tx.send(notification.clone()).unwrap();
+        tx.send(notification.clone()).await.unwrap();
+        tx.send(notification.clone()).await.unwrap();
         drop(tx); // close so drain stops
 
         let items = stream.drain_pending();

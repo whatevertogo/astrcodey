@@ -49,9 +49,7 @@ pub trait ClientTransport: Send + Sync {
     }
 
     /// 订阅服务端事件流，返回一个 mpsc 接收端。
-    async fn subscribe(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError>;
+    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError>;
 }
 
 pub use astrcode_protocol::transport::TransportError;
@@ -194,9 +192,7 @@ impl ClientTransport for StdioClientTransport {
         self.write_command(command)
     }
 
-    async fn subscribe(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

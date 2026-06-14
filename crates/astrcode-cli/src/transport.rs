@@ -126,9 +126,7 @@ impl ClientTransport for InProcessTransport {
     }
 
     /// 订阅事件 fan-out 通道，返回一个新的接收端。
-    async fn subscribe(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<ClientNotification>, TransportError> {
+    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

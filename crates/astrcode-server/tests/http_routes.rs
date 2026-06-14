@@ -25,7 +25,8 @@ use astrcode_server::{
     bootstrap::ServerRuntime,
     http::router,
     test_support::{
-        ChildSessionCoordinator, ConfigManager, SessionManager, TurnRegistry, TurnScheduler,
+        ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
+        TurnRegistry, TurnScheduler,
     },
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
@@ -218,6 +219,23 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
         kinds.contains(&"handled"),
         "expected one Handled (queued): {kinds:?}"
     );
+}
+
+#[tokio::test]
+async fn oversized_prompt_route_returns_bad_request() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let prompt_uri = format!("/api/sessions/{session_id}/prompt");
+    let body = serde_json::json!({
+        "text": "x".repeat(MAX_PROMPT_TEXT_BYTES + 1)
+    })
+    .to_string();
+
+    let response = post_json_owned(app, &prompt_uri, body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -841,6 +859,25 @@ async fn post_json(
     app: Router,
     uri: &str,
     body: &'static str,
+    token: &str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn post_json_owned(
+    app: Router,
+    uri: &str,
+    body: String,
     token: &str,
 ) -> axum::response::Response {
     app.oneshot(

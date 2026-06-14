@@ -18,6 +18,28 @@ use crate::{
     tool_exec::InMemoryFileObservationStore,
 };
 
+pub struct PendingApprovalRegistration<'a> {
+    runtime: &'a SessionRuntimeState,
+    call_id: ToolCallId,
+}
+
+impl Drop for PendingApprovalRegistration<'_> {
+    fn drop(&mut self) {
+        self.runtime.remove_pending_approval(&self.call_id);
+    }
+}
+
+pub struct PendingToolUiResponseRegistration<'a> {
+    runtime: &'a SessionRuntimeState,
+    call_id: ToolCallId,
+}
+
+impl Drop for PendingToolUiResponseRegistration<'_> {
+    fn drop(&mut self) {
+        self.runtime.remove_pending_tool_ui_response(&self.call_id);
+    }
+}
+
 /// 解析挂起工具审批时的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolApprovalResolveError {
@@ -212,7 +234,7 @@ impl SessionRuntimeState {
     }
 
     /// 订阅本 session 的事件流。
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Event> {
         self.event_out.subscribe()
     }
 
@@ -229,8 +251,18 @@ impl SessionRuntimeState {
         &self,
         call_id: ToolCallId,
         sender: oneshot::Sender<ApprovalDecision>,
-    ) {
-        self.pending_approvals.lock().insert(call_id, sender);
+    ) -> PendingApprovalRegistration<'_> {
+        self.pending_approvals
+            .lock()
+            .insert(call_id.clone(), sender);
+        PendingApprovalRegistration {
+            runtime: self,
+            call_id,
+        }
+    }
+
+    fn remove_pending_approval(&self, call_id: &ToolCallId) {
+        self.pending_approvals.lock().remove(call_id);
     }
 
     pub fn resolve_tool_approval(
@@ -258,10 +290,18 @@ impl SessionRuntimeState {
         &self,
         call_id: ToolCallId,
         sender: oneshot::Sender<BTreeMap<String, String>>,
-    ) {
+    ) -> PendingToolUiResponseRegistration<'_> {
         self.pending_tool_ui_responses
             .lock()
-            .insert(call_id, sender);
+            .insert(call_id.clone(), sender);
+        PendingToolUiResponseRegistration {
+            runtime: self,
+            call_id,
+        }
+    }
+
+    fn remove_pending_tool_ui_response(&self, call_id: &ToolCallId) {
+        self.pending_tool_ui_responses.lock().remove(call_id);
     }
 
     pub fn resolve_tool_ui_response(
@@ -368,5 +408,53 @@ mod tests {
         running.store(false, Ordering::Relaxed);
         reader.join().unwrap();
         assert_consistent_binding(&runtime.model_binding());
+    }
+
+    #[test]
+    fn pending_approval_registration_cleans_up_on_drop() {
+        let runtime = SessionRuntimeState::new(provider(1), provider(1001), "1".to_string());
+        let (tx, _rx) = oneshot::channel();
+        let call_id = ToolCallId::from("tool-1");
+
+        let guard = runtime.register_pending_approval(call_id.clone(), tx);
+        drop(guard);
+
+        assert!(matches!(
+            runtime.resolve_tool_approval(&call_id, ApprovalDecision::DenyOnce),
+            Err(ToolApprovalResolveError::NotPending { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_approval_resolve_then_guard_drop_is_noop() {
+        let runtime = SessionRuntimeState::new(provider(1), provider(1001), "1".to_string());
+        let (tx, _rx) = oneshot::channel();
+        let call_id = ToolCallId::from("tool-1");
+
+        let guard = runtime.register_pending_approval(call_id.clone(), tx);
+        runtime
+            .resolve_tool_approval(&call_id, ApprovalDecision::DenyOnce)
+            .unwrap();
+        drop(guard);
+
+        assert!(matches!(
+            runtime.resolve_tool_approval(&call_id, ApprovalDecision::DenyOnce),
+            Err(ToolApprovalResolveError::NotPending { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_tool_ui_response_registration_cleans_up_on_drop() {
+        let runtime = SessionRuntimeState::new(provider(1), provider(1001), "1".to_string());
+        let (tx, _rx) = oneshot::channel();
+        let call_id = ToolCallId::from("tool-1");
+
+        let guard = runtime.register_pending_tool_ui_response(call_id.clone(), tx);
+        drop(guard);
+
+        assert!(matches!(
+            runtime.resolve_tool_ui_response(&call_id, BTreeMap::new()),
+            Err(ToolUiResponseResolveError::NotPending { .. })
+        ));
     }
 }
