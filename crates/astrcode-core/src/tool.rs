@@ -557,7 +557,7 @@ pub struct ToolModelAccess {
     pub tiers: LlmModelIds,
 }
 
-/// 会话存储路径（`session_state` 能力）。
+/// 当前 session 的命名空间状态基础路径。
 #[derive(Clone, Debug, Default)]
 pub struct ToolSessionPaths {
     /// 当前 session 在存储层中的真实目录路径。

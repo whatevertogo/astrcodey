@@ -5,7 +5,6 @@ use crate::extension::ExtensionCapability;
 /// 将 enum 能力映射为 s5r 线缆名（`astrcode.*` 或 snake_case 请求名）。
 pub fn astrcode_capability_name(cap: ExtensionCapability) -> &'static str {
     match cap {
-        ExtensionCapability::SessionState => "astrcode.session.state",
         ExtensionCapability::SessionControl => "astrcode.session.control",
         ExtensionCapability::MainModel => "astrcode.llm.main_chat",
         ExtensionCapability::SmallModel => "astrcode.llm.small_chat",
@@ -20,7 +19,6 @@ pub fn astrcode_capability_name(cap: ExtensionCapability) -> &'static str {
 /// manifest / Initialize 请求中的 snake_case 名。
 pub fn capability_to_wire(cap: ExtensionCapability) -> &'static str {
     match cap {
-        ExtensionCapability::SessionState => "session_state",
         ExtensionCapability::SessionControl => "session_control",
         ExtensionCapability::MainModel => "main_model",
         ExtensionCapability::SmallModel => "small_model",
@@ -34,7 +32,6 @@ pub fn capability_to_wire(cap: ExtensionCapability) -> &'static str {
 
 pub fn capability_from_wire(name: &str) -> Option<ExtensionCapability> {
     match name {
-        "session_state" => Some(ExtensionCapability::SessionState),
         "session_control" => Some(ExtensionCapability::SessionControl),
         "main_model" => Some(ExtensionCapability::MainModel),
         "small_model" => Some(ExtensionCapability::SmallModel),
@@ -58,9 +55,4 @@ pub fn is_reserved_capability_prefix(name: &str) -> bool {
 /// `astrcode.session.control` 子动作。
 pub fn session_control_action(cap: &str) -> Option<&str> {
     cap.strip_prefix("astrcode.session.control.")
-}
-
-/// `astrcode.session.state` 子动作。
-pub fn session_state_action(cap: &str) -> Option<&str> {
-    cap.strip_prefix("astrcode.session.state.")
 }

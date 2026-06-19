@@ -5,7 +5,9 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::EventPayload,
-    extension::{PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult},
+    extension::{
+        AfterToolResult, PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
+    },
     permission::{ApprovalDecision, ApprovalSource, PermissionContext, PermissionDecision},
     storage::ToolResultArtifactReader,
     tool::{ExecutionMode, ToolDefinition, ToolResult},
@@ -24,8 +26,8 @@ use super::{
     tool_exec::{ToolCallRuntimeContext, TurnToolContext, execute_tool_call},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
-        CommitToolResults, ExecutableToolCall, ExecuteToolCalls, PendingCommittedToolResult,
-        PendingToolCall, PreparedToolCall, PreparedToolOutcome,
+        CommitToolResults, CommittedToolResults, ExecutableToolCall, ExecuteToolCalls,
+        PendingCommittedToolResult, PendingToolCall, PreparedToolCall, PreparedToolOutcome,
     },
     turn_context::{SharedTurnContext, TurnError},
     turn_publish::TurnEvents,
@@ -301,8 +303,8 @@ impl ToolCalls {
     pub async fn execute_and_commit(
         &self,
         mut input: ExecuteToolCalls<'_>,
-    ) -> Result<Vec<String>, TurnError> {
-        let mut discovered_tools = Vec::new();
+    ) -> Result<CommittedToolResults, TurnError> {
+        let mut committed = CommittedToolResults::default();
         let tools = Arc::from(input.tools);
         let mut parallel_batch = Vec::new();
         let mut parallel_batch_start = None;
@@ -314,7 +316,7 @@ impl ToolCalls {
             let call = &input.prepared[position];
             match &call.outcome {
                 PreparedToolOutcome::Blocked(result) => {
-                    discovered_tools.extend(
+                    committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
@@ -323,13 +325,13 @@ impl ToolCalls {
                         )
                         .await?,
                     );
-                    discovered_tools.extend(
+                    committed.extend(
                         self.commit_single_result(&mut input, position, result.clone())
                             .await?,
                     );
                 },
                 PreparedToolOutcome::DuplicateSameStep => {
-                    discovered_tools.extend(
+                    committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
@@ -343,7 +345,7 @@ impl ToolCalls {
                         .tool_deduplicator()
                         .await_same_step_result(&input.prepared[position].call_id)
                         .await;
-                    discovered_tools.extend(
+                    committed.extend(
                         self.commit_single_result(&mut input, position, result)
                             .await?,
                     );
@@ -353,7 +355,7 @@ impl ToolCalls {
                     rule_key,
                     source,
                 } => {
-                    discovered_tools.extend(
+                    committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
@@ -372,7 +374,7 @@ impl ToolCalls {
                             Arc::clone(&tools),
                         )
                         .await?;
-                    discovered_tools.extend(
+                    committed.extend(
                         self.commit_single_result(&mut input, position, result)
                             .await?,
                     );
@@ -384,7 +386,7 @@ impl ToolCalls {
                     parallel_batch.push(call.to_executable());
                 },
                 PreparedToolOutcome::Ready => {
-                    discovered_tools.extend(
+                    committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
@@ -399,7 +401,7 @@ impl ToolCalls {
                             Arc::clone(&tools),
                         )
                         .await?;
-                    discovered_tools.extend(
+                    committed.extend(
                         self.commit_single_result(&mut input, position, result)
                             .await?,
                     );
@@ -407,7 +409,7 @@ impl ToolCalls {
             }
         }
 
-        discovered_tools.extend(
+        committed.extend(
             self.flush_and_commit_parallel_batch(
                 &mut parallel_batch,
                 &mut parallel_batch_start,
@@ -417,7 +419,7 @@ impl ToolCalls {
             .await?,
         );
 
-        Ok(discovered_tools)
+        Ok(committed)
     }
 
     async fn request_approval_and_resolve(
@@ -505,9 +507,9 @@ impl ToolCalls {
         parallel_batch_start: &mut Option<usize>,
         input: &mut ExecuteToolCalls<'_>,
         tools: Arc<[ToolDefinition]>,
-    ) -> Result<Vec<String>, TurnError> {
+    ) -> Result<CommittedToolResults, TurnError> {
         let Some(batch_start) = parallel_batch_start.take() else {
-            return Ok(Vec::new());
+            return Ok(CommittedToolResults::default());
         };
         let batch_len = parallel_batch.len();
         let batch_end = batch_start + batch_len;
@@ -600,7 +602,7 @@ impl ToolCalls {
         input: &mut ExecuteToolCalls<'_>,
         position: usize,
         mut result: ToolResult,
-    ) -> Result<Vec<String>, TurnError> {
+    ) -> Result<CommittedToolResults, TurnError> {
         if is_awaiting_user_input_content(&result.content) {
             result = self
                 .await_tool_ui_response(
@@ -688,7 +690,7 @@ impl ToolCalls {
     pub async fn commit_tool_results(
         &self,
         mut input: CommitToolResults<'_>,
-    ) -> Result<Vec<String>, TurnError> {
+    ) -> Result<CommittedToolResults, TurnError> {
         let mut pending_results = Vec::with_capacity(input.prepared.len());
         for call in input.prepared {
             let mut result = input
@@ -779,7 +781,7 @@ impl ToolCalls {
         self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending_results)
             .await?;
 
-        let mut discovered_tools = Vec::new();
+        let mut committed = CommittedToolResults::default();
         for pending in pending_results {
             let PendingCommittedToolResult {
                 call_id,
@@ -788,7 +790,15 @@ impl ToolCalls {
                 arguments,
                 arguments_json,
             } = pending;
-            discovered_tools.extend(discovered_deferred_tool_names(&result));
+            committed
+                .discovered_tools
+                .extend(discovered_deferred_tool_names(&result));
+            committed.tool_results.push(AfterToolResult {
+                call_id: call_id.clone().into(),
+                tool_name: tool_name.clone(),
+                tool_input: arguments_json.clone(),
+                tool_result: result.clone(),
+            });
             input
                 .publisher
                 .durable(EventPayload::ToolCallCompleted {
@@ -802,7 +812,7 @@ impl ToolCalls {
             input.state.push_tool_result(result);
         }
 
-        Ok(discovered_tools)
+        Ok(committed)
     }
 
     /// 检查工具结果是否超过 inline 限制，超限则持久化到磁盘并替换为摘要引用。

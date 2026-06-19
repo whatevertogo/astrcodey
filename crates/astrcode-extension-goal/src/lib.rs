@@ -33,10 +33,7 @@ const GET_GOAL_TOOL_NAME: &str = "getGoal";
 const CREATE_GOAL_TOOL_NAME: &str = "createGoal";
 const UPDATE_GOAL_TOOL_NAME: &str = "updateGoal";
 
-const CAPABILITIES: &[ExtensionCapability] = &[
-    ExtensionCapability::SessionState,
-    ExtensionCapability::SessionHistory,
-];
+const CAPABILITIES: &[ExtensionCapability] = &[ExtensionCapability::SessionHistory];
 
 const CREATE_GOAL_DESCRIPTION: &str =
     "Create a session goal for multi-turn autonomous work. Use this only when the user asks for a \
@@ -193,7 +190,6 @@ impl Extension for GoalExtension {
             }),
         );
         reg.on_continue_after_stop(
-            HookMode::Blocking,
             40,
             ContinueAfterStopOptions::unlimited(),
             Arc::new(GoalContinueAfterStopHandler {

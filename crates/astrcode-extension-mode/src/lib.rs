@@ -27,9 +27,9 @@ use std::{path::PathBuf, sync::Arc};
 pub use ask_user::{ASK_USER_TOOL_NAME, ask_user_tool_definition, handle_ask_user};
 use astrcode_extension_sdk::{
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
+        HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
+        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
         StatusItemUpdatePayload, ToolHandler,
     },
     llm::LlmMessage,
@@ -52,7 +52,7 @@ fn require_session_base(session_store_dir: &Option<PathBuf>) -> Result<PathBuf, 
     session_store_dir
         .as_deref()
         .map(|base| state::session_data_dir(base, "astrcode-mode"))
-        .ok_or_else(|| ExtensionError::Internal("session state capability not available".into()))
+        .ok_or_else(|| ExtensionError::Internal("session store not available".into()))
 }
 
 pub fn extension() -> Arc<dyn Extension> {
@@ -69,10 +69,6 @@ struct ModeExtension {
 impl Extension for ModeExtension {
     fn id(&self) -> &str {
         "astrcode-mode"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::SessionState]
     }
 
     fn register(&self, reg: &mut Registrar) {

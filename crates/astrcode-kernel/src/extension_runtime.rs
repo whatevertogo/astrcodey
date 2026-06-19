@@ -2,11 +2,12 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     extension::{
-        CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
-        ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
-        PostToolUseContext, PostToolUseFailureContext, PostToolUseResult, PreToolUseContext,
-        PreToolUseResult, PromptBuildContext, PromptContributions, ProviderContext, ProviderEvent,
-        ProviderResult,
+        AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
+        CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
+        ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
+        PostToolUseResult, PreToolUseContext, PreToolUseResult, PromptBuildContext,
+        PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
+        UserMessageEnvelopeContext, UserMessageEnvelopeResult,
     },
     tool::{SessionOperations, Tool, ToolPromptMetadata},
 };
@@ -51,6 +52,16 @@ pub trait ExtensionRuntime: Send + Sync {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError>;
+
+    async fn emit_user_message_envelope(
+        &self,
+        ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError>;
+
+    async fn emit_after_tool_results(
+        &self,
+        ctx: AfterToolResultsContext,
+    ) -> Result<AfterToolResultsResult, ExtensionError>;
 
     async fn emit_lifecycle(
         &self,
@@ -114,6 +125,20 @@ impl ExtensionRuntime for NoopExtensionRuntime {
         _ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         Ok(ContinueAfterStopResult::EndTurn)
+    }
+
+    async fn emit_user_message_envelope(
+        &self,
+        _ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        Ok(UserMessageEnvelopeResult::Allow)
+    }
+
+    async fn emit_after_tool_results(
+        &self,
+        _ctx: AfterToolResultsContext,
+    ) -> Result<AfterToolResultsResult, ExtensionError> {
+        Ok(AfterToolResultsResult::Continue)
     }
 
     async fn emit_lifecycle(

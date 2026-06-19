@@ -111,7 +111,6 @@ impl HandlerRegistry {
 
     pub(crate) fn register_continue_after_stop_hook(
         &mut self,
-        mode: impl Into<String>,
         options: ContinueAfterStopOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
@@ -124,7 +123,7 @@ impl HandlerRegistry {
         }
         self.catalog.hooks.push(HookManifestEntry {
             on: on.clone(),
-            mode: mode.into(),
+            mode: "blocking".into(),
             options: HookManifestOptions {
                 max_per_turn: Some(options.max_per_turn),
             },

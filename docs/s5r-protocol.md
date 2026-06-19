@@ -31,7 +31,16 @@
 | 常量 | 用途 |
 |------|------|
 | `handler.invoke` | 宿主调用扩展注册的工具 / 命令 / 钩子 |
-| `astrcode.*` | 扩展调用宿主（须在 manifest 中声明 capability） |
+| `astrcode.*` | 扩展调用宿主（除默认 session state API 外，须在 manifest 中声明 capability） |
+
+## Hook manifest
+
+`metadata.hooks[]` 使用 `{ "on": "...", "mode": "blocking|non_blocking|advisory" }`。
+`continue_after_stop` 是 typed decision hook，必须为 `blocking`，可通过
+`options.max_per_turn` 声明每 turn 自动续跑上限；缺省与 `-1` 都表示不限制，非负数表示限制次数。
+
+`user_message_envelope` 与 `after_tool_results` 目前只支持进程内 Rust 扩展的
+`Registrar` typed API，不支持 s5r manifest 声明。
 
 ## extension.json（发现阶段）
 

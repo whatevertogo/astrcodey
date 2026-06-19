@@ -34,6 +34,8 @@
 参考实现：`crates/astrcode-extensions/tests/s5r-guest/`  
 E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 
+Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
+
 ---
 
 ## 3. 内置扩展（进程内）
@@ -41,6 +43,8 @@ E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 实现 `Extension` trait，在 `start()` 时通过 `ExtensionCtx` 获取配置与 `host_services`。
 
 `ExtensionCapability` 控制宿主注入的敏感能力（`session_control`、`workspace_read` 等）。
+当前 session 的 `session_store_dir` 和按 extension id 隔离的
+`astrcode.session.state.read/write` 是默认 session 上下文/API，不需要 capability。
 
 | 扩展 ID | Crate | 默认 | 说明 |
 |---------|-------|------|------|
@@ -96,7 +100,17 @@ E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 
 ## 5. 宿主能力
 
-见 `HostRouter`；子进程 invoke 的 capability 须以 `astrcode.` 开头，且 manifest 中已声明对应 capability。
+见 `HostRouter`；除默认 session state API 外，子进程 invoke 的 capability 须以
+`astrcode.` 开头，且 manifest 中已声明对应 capability。
+
+默认可用、无需 manifest capability：
+
+| API | 说明 |
+|------|------|
+| `astrcode.session.state.read` | 读取当前 session 下按 extension id 隔离的状态。 |
+| `astrcode.session.state.write` | 写入当前 session 下按 extension id 隔离的状态。 |
+
+`session_state` 不是有效 capability，插件不要在 manifest 中声明它。
 
 ---
 
@@ -108,8 +122,24 @@ E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
 
 ### ContinueAfterStop 预算
 
-`ContinueAfterStop` hook 注册时可声明 `ContinueAfterStopOptions`。默认不做 host 级次数限制，是否继续主要交给 handler 自己的状态机决定；需要 host 代为限制时声明 `ContinueAfterStopOptions::limited(n)`，需要明确表达无限续跑时声明 `ContinueAfterStopOptions::unlimited()`。
+`ContinueAfterStop` 是 blocking-only decision hook，注册时可声明
+`ContinueAfterStopOptions`。默认不做 host 级次数限制，是否继续主要交给 handler
+自己的状态机决定；需要 host 代为限制时声明 `ContinueAfterStopOptions::limited(n)`，
+需要明确表达无限续跑时声明 `ContinueAfterStopOptions::unlimited()`。
 
 磁盘 s5r 扩展的握手 manifest 可在 `continue_after_stop` hook 的 `options.max_per_turn` 上携带数字字段；缺省表示不限制，`-1` 也表示无限续跑，非负数表示每 turn 上限。宿主调用 hook 时会在 input 中传入 `continuations_this_turn`，表示当前 turn 已经发生的自动续跑次数。
+
+### Typed decision hooks
+
+进程内扩展还可以注册 typed decision hook：
+
+| Hook | 用途 |
+|------|------|
+| `on_user_message_envelope(priority, handler)` | 用户消息写入 durable transcript 前的改写或阻断。 |
+| `on_after_tool_results(priority, handler)` | 工具结果批次已提交后的继续/结束决策。 |
+
+这两个 hook 不接收 `HookMode`，宿主总是按优先级同步等待。它们暂不暴露给磁盘
+s5r manifest；s5r manifest 中声明 `user_message_envelope` 或
+`after_tool_results` 会在握手校验阶段失败。
 
 协议细节见 [s5r-protocol.md](s5r-protocol.md)。

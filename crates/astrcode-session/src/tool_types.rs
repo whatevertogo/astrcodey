@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use astrcode_core::{
+    extension::AfterToolResult,
     permission::ApprovalSource,
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
@@ -51,6 +52,19 @@ pub struct PendingCommittedToolResult {
     pub result: ToolResult,
     pub arguments: String,
     pub arguments_json: serde_json::Value,
+}
+
+#[derive(Default)]
+pub struct CommittedToolResults {
+    pub discovered_tools: Vec<String>,
+    pub tool_results: Vec<AfterToolResult>,
+}
+
+impl CommittedToolResults {
+    pub fn extend(&mut self, other: Self) {
+        self.discovered_tools.extend(other.discovered_tools);
+        self.tool_results.extend(other.tool_results);
+    }
 }
 
 pub enum PreparedToolOutcome {

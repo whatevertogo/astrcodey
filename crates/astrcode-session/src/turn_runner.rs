@@ -9,8 +9,8 @@ use std::{sync::Arc, time::Duration};
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
-        ProviderResult,
+        AfterToolResultsContext, AfterToolResultsResult, ContinueAfterStopContext,
+        ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, provider_visible_messages},
     storage::SessionReadModel,
@@ -354,17 +354,35 @@ impl TurnLoop {
                             .await?;
                     }
 
-                    self.tools_stage(
-                        extension_runner.as_ref(),
-                        &mut state,
-                        &tool_calls,
-                        publisher,
-                        hook_messages,
-                    )
-                    .await?;
+                    let tool_decision = self
+                        .tools_stage(
+                            extension_runner.as_ref(),
+                            &mut state,
+                            &tool_calls,
+                            publisher,
+                            hook_messages,
+                        )
+                        .await?;
 
                     state.tool_deduplicator_mut().end_step();
                     on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
+                    if let ToolStageDecision::EndTurn { reason } = tool_decision {
+                        extension_runner
+                            .emit_lifecycle(
+                                ExtensionEvent::TurnEnd,
+                                self.shared().lifecycle_ctx_with_exchange(
+                                    _user_text.to_string(),
+                                    state.final_text().to_string(),
+                                ),
+                            )
+                            .await?;
+                        let (text, tool_results) = state.take_output_parts();
+                        return Ok(TurnOutput {
+                            text,
+                            finish_reason: reason,
+                            tool_results,
+                        });
+                    }
                 },
             }
         }
@@ -439,7 +457,7 @@ impl TurnLoop {
         tool_calls: &[crate::tool_types::PendingToolCall],
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
-    ) -> Result<(), TurnError> {
+    ) -> Result<ToolStageDecision, TurnError> {
         self.dispatch_after_provider_response(extension_runner, hook_messages, state)
             .await?;
 
@@ -456,7 +474,7 @@ impl TurnLoop {
             },
         };
 
-        let discovered_tools = match self
+        let committed = match self
             .tools
             .execute_and_commit(ExecuteToolCalls {
                 prepared: &prepared_tool_calls,
@@ -471,8 +489,23 @@ impl TurnLoop {
                 return end_turn_with_error_typed(error);
             },
         };
-        state.activate_deferred_tools(discovered_tools);
-        Ok(())
+        state.activate_deferred_tools(committed.discovered_tools);
+        if committed.tool_results.is_empty() {
+            return Ok(ToolStageDecision::Continue);
+        }
+        let decision = extension_runner
+            .emit_after_tool_results(AfterToolResultsContext {
+                session_id: self.shared().session_id.to_string(),
+                working_dir: self.shared().working_dir.clone(),
+                model: self.shared().model_selection(),
+                tool_results: committed.tool_results,
+                session_store_dir: self.shared().session_store_dir.clone(),
+            })
+            .await?;
+        Ok(match decision {
+            AfterToolResultsResult::Continue => ToolStageDecision::Continue,
+            AfterToolResultsResult::EndTurn { reason } => ToolStageDecision::EndTurn { reason },
+        })
     }
 
     async fn postprocess_complete_stage(
@@ -709,6 +742,11 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+enum ToolStageDecision {
+    Continue,
+    EndTurn { reason: String },
 }
 
 #[derive(Debug)]

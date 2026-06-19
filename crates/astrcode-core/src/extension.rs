@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::ModelSelection,
     llm::LlmProvider,
+    message_attachment::MessageAttachment,
     storage::{EventReader, EventStore},
     tool::{SessionOperations, ToolDefinition, ToolPromptMetadata, ToolResult},
     tool_ui::ToolUiWire,
@@ -81,8 +82,6 @@ pub trait Extension: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionCapability {
-    /// 访问该 session 下命名空间隔离的持久状态。
-    SessionState,
     /// 创建子 session、提交 turn 与回收 session。
     SessionControl,
     /// 调用宿主配置的主模型（当前 session 的 active model）。
@@ -438,10 +437,14 @@ pub enum ExtensionEvent {
     AfterProviderResponse,
     /// LLM 自然结束（无 tool call）后是否再跑一个 agent step。
     ContinueAfterStop,
+    /// 一批工具结果落盘后是否继续 agent loop。
+    AfterToolResults,
 
     // ── 用户输入 ──
     /// 用户提交提示词。
     UserPromptSubmit,
+    /// 用户消息写入 durable transcript 前的 envelope 变换。
+    UserMessageEnvelope,
 
     // ── Prompt 组装 ──
     /// 构建 system prompt 前收集插件提供的提示词片段。
@@ -651,9 +654,20 @@ pub struct ToolHookRegistration<H: ?Sized> {
 
 #[derive(Clone)]
 pub struct ContinueAfterStopRegistration<H: ?Sized> {
-    pub mode: HookMode,
     pub priority: i32,
     pub options: ContinueAfterStopOptions,
+    pub handler: std::sync::Arc<H>,
+}
+
+#[derive(Clone)]
+pub struct UserMessageEnvelopeRegistration<H: ?Sized> {
+    pub priority: i32,
+    pub handler: std::sync::Arc<H>,
+}
+
+#[derive(Clone)]
+pub struct AfterToolResultsRegistration<H: ?Sized> {
+    pub priority: i32,
     pub handler: std::sync::Arc<H>,
 }
 
@@ -1025,6 +1039,49 @@ pub struct ContinueAfterStopContext {
     pub continuations_this_turn: u32,
 }
 
+/// 用户消息写入 transcript 前的扩展变换上下文。
+#[derive(Debug, Clone)]
+pub struct UserMessageEnvelopeContext {
+    pub session_id: String,
+    pub turn_id: String,
+    pub working_dir: String,
+    pub model: ModelSelection,
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+    pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserMessageEnvelopeResult {
+    Allow,
+    ReplaceText { text: String },
+    AppendText { text: String },
+    Block { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AfterToolResult {
+    pub call_id: crate::types::ToolCallId,
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub tool_result: ToolResult,
+}
+
+#[derive(Debug, Clone)]
+pub struct AfterToolResultsContext {
+    pub session_id: String,
+    pub working_dir: String,
+    pub model: ModelSelection,
+    pub tool_results: Vec<AfterToolResult>,
+    pub session_store_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterToolResultsResult {
+    Continue,
+    EndTurn { reason: String },
+}
+
 /// Provider 钩子结果。
 #[derive(Debug, Clone)]
 pub enum ProviderResult {
@@ -1269,6 +1326,24 @@ pub trait ContinueAfterStopHandler: Send + Sync {
     ) -> Result<ContinueAfterStopResult, ExtensionError>;
 }
 
+/// 用户消息 envelope 变换钩子。
+#[async_trait::async_trait]
+pub trait UserMessageEnvelopeHandler: Send + Sync {
+    async fn handle(
+        &self,
+        ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError>;
+}
+
+/// 工具结果批次落盘后的继续/结束决策钩子。
+#[async_trait::async_trait]
+pub trait AfterToolResultsHandler: Send + Sync {
+    async fn handle(
+        &self,
+        ctx: AfterToolResultsContext,
+    ) -> Result<AfterToolResultsResult, ExtensionError>;
+}
+
 /// 工具执行处理器。
 #[async_trait::async_trait]
 pub trait ToolHandler: Send + Sync {
@@ -1349,6 +1424,8 @@ pub struct Registrar {
     compact: Vec<(CompactEvent, i32, std::sync::Arc<dyn CompactHandler>)>,
     post_tool_use_failure: Vec<(i32, std::sync::Arc<dyn PostToolUseFailureHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
+    user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
+    after_tool_results: Vec<AfterToolResultsRegistration<dyn AfterToolResultsHandler>>,
     lifecycle: Vec<(
         ExtensionEvent,
         HookMode,
@@ -1377,6 +1454,8 @@ impl Registrar {
             compact: Vec::new(),
             post_tool_use_failure: Vec::new(),
             continue_after_stop: Vec::new(),
+            user_message_envelope: Vec::new(),
+            after_tool_results: Vec::new(),
             lifecycle: Vec::new(),
             extension_event_decls: Vec::new(),
             needs_extension_data_dir: false,
@@ -1544,18 +1623,34 @@ impl Registrar {
 
     pub fn on_continue_after_stop(
         &mut self,
-        mode: HookMode,
         priority: i32,
         options: ContinueAfterStopOptions,
         handler: std::sync::Arc<dyn ContinueAfterStopHandler>,
     ) {
         self.continue_after_stop
             .push(ContinueAfterStopRegistration {
-                mode,
                 priority,
                 options,
                 handler,
             });
+    }
+
+    pub fn on_user_message_envelope(
+        &mut self,
+        priority: i32,
+        handler: std::sync::Arc<dyn UserMessageEnvelopeHandler>,
+    ) {
+        self.user_message_envelope
+            .push(UserMessageEnvelopeRegistration { priority, handler });
+    }
+
+    pub fn on_after_tool_results(
+        &mut self,
+        priority: i32,
+        handler: std::sync::Arc<dyn AfterToolResultsHandler>,
+    ) {
+        self.after_tool_results
+            .push(AfterToolResultsRegistration { priority, handler });
     }
 
     pub fn on_event(
@@ -1583,6 +1678,8 @@ impl Registrar {
             && self.compact.is_empty()
             && self.post_tool_use_failure.is_empty()
             && self.continue_after_stop.is_empty()
+            && self.user_message_envelope.is_empty()
+            && self.after_tool_results.is_empty()
             && self.lifecycle.is_empty()
             && self.extension_event_decls.is_empty()
             && !self.needs_extension_data_dir
@@ -1665,6 +1762,18 @@ impl Registrar {
         &self,
     ) -> &[ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>] {
         &self.continue_after_stop
+    }
+
+    pub fn user_message_envelope(
+        &self,
+    ) -> &[UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>] {
+        &self.user_message_envelope
+    }
+
+    pub fn after_tool_results(
+        &self,
+    ) -> &[AfterToolResultsRegistration<dyn AfterToolResultsHandler>] {
+        &self.after_tool_results
     }
 
     pub fn lifecycle(

@@ -206,7 +206,6 @@ impl Extension for S5rExtension {
                 },
                 ExtensionEvent::ContinueAfterStop => {
                     reg.on_continue_after_stop(
-                        *mode,
                         0,
                         *options,
                         Arc::new(S5rContinueAfterStopHandler { session, ext_id }),
@@ -214,6 +213,13 @@ impl Extension for S5rExtension {
                 },
                 ExtensionEvent::PromptBuild => {
                     reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
+                },
+                ExtensionEvent::UserMessageEnvelope | ExtensionEvent::AfterToolResults => {
+                    tracing::warn!(
+                        extension_id = %ext_id,
+                        hook = event_to_name(event),
+                        "s5r manifest requested an internal typed decision hook; ignoring"
+                    );
                 },
                 ExtensionEvent::PreCompact => {
                     reg.on_compact(

@@ -276,7 +276,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `manifest`：扩展 manifest 校验。
 - `runtime`：扩展 runtime 内部通信、取消、stream、transport、task utils。
 - `s5r`：s5r 子进程协议消息、capabilities、effects。
-- `worker`：s5r worker builder、host client、handler adapter、manifest catalog。
+- `worker`：s5r worker builder、host client、handler adapter、manifest catalog；`continue_after_stop` 使用 typed options，其它 typed decision hook 暂不进 s5r manifest。
 - `session`：扩展侧 session 相关 re-export。
 - `state`：`session_data_dir`，给扩展规范 session-local 数据目录。
 - `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
@@ -294,7 +294,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 主要模块：
 
 - `loader`：扩展源 `ExtensionSource`、加载上下文、加载结果和多源加载。
-- `runner`：扩展生命周期、hook 分发、工具/命令/状态注册执行。
+- `runner`：扩展生命周期、hook 分发、工具/命令/状态注册执行；维护 typed decision hook 的优先级排序和短路语义。
 - `host_router`：把扩展请求路由到宿主能力，例如 session、storage、provider、event 等。
 - `extension_manifest`：本地扩展 manifest 解析和验证。
 - `remote_manifest`：远程/外部扩展 manifest 表示。
@@ -425,7 +425,7 @@ Feature：
 - 所有项目完成时清空存储。
 - 多步骤列表全部完成但没有 verification/test/check 语义时，返回验证提醒。
 
-能力声明：`SessionState`。
+能力声明：无。session-local todo state 使用默认 namespaced session state API。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录通过 SDK `state::session_data_dir` 规范化。
 
@@ -456,7 +456,7 @@ Feature：
 - plan 模式的工具限制由 `PreToolUse` blocking hook 执行；yolo mode 下放行。
 - 模式切换指令通过 `BeforeProviderRequest` 追加 user message，而不是改变 system prompt，利于 KV cache 稳定。
 
-能力声明：`SessionState`。
+能力声明：无。session-local mode state 使用默认 namespaced session state API。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。
 
@@ -474,10 +474,10 @@ Feature：
 - 工具：`getGoal`、`createGoal`、`updateGoal`。
 - Slash command：`/goal`，可显示、创建、暂停、恢复、清空、complete 或 blocked 当前 goal。
 - 持久化：`<session>/extension_data/astrcode-goal/goal/goal-state.json`。
-- 续跑：注册 `ContinueAfterStopOptions::unlimited()` 的 blocking `ContinueAfterStop` hook；hook 只设置下一步续跑意图，真正的目标上下文由 `BeforeProviderRequest` 以非持久 provider-visible user message 注入。
+- 续跑：注册 `ContinueAfterStopOptions::unlimited()` 的 blocking-only `ContinueAfterStop` decision hook；hook 只设置下一步续跑意图，真正的目标上下文由 `BeforeProviderRequest` 以非持久 provider-visible user message 注入，避免写入 durable transcript。
 - Token 预算：声明 `SessionHistory` 后通过 SDK `EventReader` 汇总 `TokenUsageRecorded`，达到 `tokenBudget` 时把 goal 标为 `budget_limited` 并停止自动续跑。
 
-能力声明：`SessionState`、`SessionHistory`。
+能力声明：`SessionHistory`。session-local goal state 使用默认 namespaced session state API。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录、事件读取和 LLM/tool 类型都通过 SDK re-export 使用。
 

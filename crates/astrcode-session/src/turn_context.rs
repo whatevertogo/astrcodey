@@ -162,6 +162,8 @@ pub enum TurnError {
     StreamEndedUnexpectedly,
     #[error("turn aborted")]
     Aborted,
+    #[error("input blocked by extension: {reason}")]
+    InputBlocked { reason: String },
     #[error("provider blocked request: {reason}")]
     ProviderBlocked { reason: String },
     #[error("tool task join failed: {0}")]

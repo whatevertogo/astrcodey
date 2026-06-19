@@ -89,12 +89,11 @@ impl Worker {
     /// 非负数为每 turn 上限。
     pub fn on_continue_after_stop(
         &mut self,
-        mode: impl Into<String>,
         options: ContinueAfterStopOptions,
         handler: HookHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry
-            .register_continue_after_stop_hook(mode, options, handler)?;
+            .register_continue_after_stop_hook(options, handler)?;
         Ok(self)
     }
 

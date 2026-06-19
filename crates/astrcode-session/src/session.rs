@@ -667,6 +667,45 @@ impl Session {
         Ok(())
     }
 
+    async fn apply_user_message_envelope(
+        &self,
+        text: String,
+        attachments: &[astrcode_core::message_attachment::MessageAttachment],
+        turn_id: &TurnId,
+    ) -> Result<String, TurnError> {
+        let state = self.read_model().await?;
+        let original_text = text.clone();
+        let ctx = astrcode_core::extension::UserMessageEnvelopeContext {
+            session_id: self.id.to_string(),
+            turn_id: turn_id.to_string(),
+            working_dir: state.working_dir.clone(),
+            model: astrcode_core::config::ModelSelection::simple(state.model_id),
+            text,
+            attachments: attachments.to_vec(),
+            session_store_dir: self.session_store_dir().await,
+        };
+        match self
+            .caps()
+            .extension_runner_arc()
+            .emit_user_message_envelope(ctx)
+            .await?
+        {
+            astrcode_core::extension::UserMessageEnvelopeResult::Allow => Ok(original_text),
+            astrcode_core::extension::UserMessageEnvelopeResult::ReplaceText { text } => Ok(text),
+            astrcode_core::extension::UserMessageEnvelopeResult::AppendText { text } => {
+                let mut combined = original_text;
+                if !combined.is_empty() && !text.is_empty() {
+                    combined.push_str("\n\n");
+                }
+                combined.push_str(&text);
+                Ok(combined)
+            },
+            astrcode_core::extension::UserMessageEnvelopeResult::Block { reason } => {
+                Err(TurnError::InputBlocked { reason })
+            },
+        }
+    }
+
     async fn prepare_turn_runner(&self) -> Result<TurnLoop, TurnError> {
         let model = self.runtime.model_binding();
         if let Err(e) = self.update_model_id(model.model_id()).await {
@@ -791,6 +830,9 @@ impl Session {
         attachments: Vec<astrcode_core::message_attachment::MessageAttachment>,
         turn_id: TurnId,
     ) -> Result<TurnHandle, TurnError> {
+        let text = self
+            .apply_user_message_envelope(text, &attachments, &turn_id)
+            .await?;
         self.emit_turn_start_events(&text, &attachments, &turn_id)
             .await?;
         let agent = self.prepare_turn_runner().await?;

@@ -123,8 +123,7 @@ impl HostRouter {
             ExtensionCapability::ProcessSpawn | ExtensionCapability::NetworkClient => {
                 HostCapabilityStatus::Reserved
             },
-            ExtensionCapability::SessionState
-            | ExtensionCapability::SessionControl
+            ExtensionCapability::SessionControl
             | ExtensionCapability::MainModel
             | ExtensionCapability::SmallModel
             | ExtensionCapability::SessionHistory
@@ -137,6 +136,9 @@ impl HostRouter {
         cap: &str,
         declared: &[ExtensionCapability],
     ) -> Result<(), ErrorPayload> {
+        if cap.starts_with("astrcode.session.state") {
+            return Ok(());
+        }
         let required = required_capability_for_astrcode(cap);
         let Some(required) = required else {
             return Err(ErrorPayload::new(
@@ -666,7 +668,6 @@ fn required_capability_for_astrcode(cap: &str) -> Option<ExtensionCapability> {
         "astrcode.llm.small_chat" => Some(ExtensionCapability::SmallModel),
         "astrcode.session.read_events" => Some(ExtensionCapability::SessionHistory),
         c if c.starts_with("astrcode.session.control") => Some(ExtensionCapability::SessionControl),
-        c if c.starts_with("astrcode.session.state") => Some(ExtensionCapability::SessionState),
         "astrcode.event.emit" => Some(ExtensionCapability::EmitEvents),
         "astrcode.workspace.read" => Some(ExtensionCapability::WorkspaceRead),
         "astrcode.process.spawn" => Some(ExtensionCapability::ProcessSpawn),
@@ -728,24 +729,6 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
             CapabilityDescriptor {
                 name: "astrcode.session.control.dispose".into(),
                 description: "Dispose a session".into(),
-                input_schema: object_schema.clone(),
-                output_schema: object_schema,
-                supports_stream: false,
-                cancelable: false,
-            },
-        ],
-        ExtensionCapability::SessionState => vec![
-            CapabilityDescriptor {
-                name: "astrcode.session.state.read".into(),
-                description: "Read extension namespaced state".into(),
-                input_schema: object_schema.clone(),
-                output_schema: object_schema.clone(),
-                supports_stream: false,
-                cancelable: false,
-            },
-            CapabilityDescriptor {
-                name: "astrcode.session.state.write".into(),
-                description: "Write extension namespaced state".into(),
                 input_schema: object_schema.clone(),
                 output_schema: object_schema,
                 supports_stream: false,
@@ -942,6 +925,35 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, "not_implemented");
+    }
+
+    #[test]
+    fn session_state_api_does_not_require_declared_capability() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ctx = InvokeContext {
+            extension_id: "stateful-test".into(),
+            session_store_dir: Some(temp.path().to_path_buf()),
+            declared_capabilities: Vec::new(),
+            ..Default::default()
+        };
+
+        router
+            .invoke_sync(
+                "astrcode.session.state.write",
+                &json!({ "key": "goal", "content": "active" }).to_string(),
+                &ctx,
+            )
+            .expect("write state without capability");
+        let read = router
+            .invoke_sync(
+                "astrcode.session.state.read",
+                &json!({ "key": "goal" }).to_string(),
+                &ctx,
+            )
+            .expect("read state without capability");
+
+        assert_eq!(read["content"], "active");
     }
 
     #[test]

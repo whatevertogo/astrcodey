@@ -127,17 +127,11 @@ fn manifest_deserializes_with_extra_legacy_fields() {
 #[test]
 fn manifest_declares_requested_host_capabilities() {
     let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "id": "stateful-test",
-        "name": "Stateful Test",
-        "capabilities": ["session_state", "emit_events"]
+        "id": "eventful-test",
+        "name": "Eventful Test",
+        "capabilities": ["emit_events"]
     }))
     .expect("manifest should parse capabilities");
 
-    assert_eq!(
-        manifest.capabilities,
-        vec![
-            ExtensionCapability::SessionState,
-            ExtensionCapability::EmitEvents
-        ]
-    );
+    assert_eq!(manifest.capabilities, vec![ExtensionCapability::EmitEvents]);
 }

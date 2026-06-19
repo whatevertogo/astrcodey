@@ -21,6 +21,18 @@ pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> 
     if reg.extension_id.trim().is_empty() {
         return Err("extension id is empty".into());
     }
+    for hook in &reg.hooks {
+        if let Some(event) = event_from_name(&hook.on) {
+            let mode = mode_from_name(&hook.mode)
+                .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
+            if s5r_unsupported_typed_hook(&event) {
+                return Err(format!("{} is not supported by s5r manifest", hook.on));
+            }
+            if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
+                return Err(format!("{} is a blocking-only hook", hook.on));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -59,6 +71,9 @@ pub fn build_subscriptions(
         .iter()
         .filter_map(|h: &ManifestHook| {
             let event = event_from_name(&h.on)?;
+            if s5r_unsupported_typed_hook(&event) {
+                return None;
+            }
             let mode = mode_from_name(&h.mode)?;
             Some((
                 event,
@@ -72,6 +87,13 @@ pub fn build_subscriptions(
             ))
         })
         .collect()
+}
+
+fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
+    matches!(
+        event,
+        ExtensionEvent::AfterToolResults | ExtensionEvent::UserMessageEnvelope
+    )
 }
 
 pub fn handler_id(extension_id: &str, kind: &str, name: &str) -> String {
@@ -236,4 +258,46 @@ pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, Extens
 
 pub fn event_decls_map(reg: &ExtensionRegistration) -> HashMap<String, ExtensionEventDecl> {
     crate::host_router::decls_to_map(&reg.extension_events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extension_manifest::manifest_types::{ManifestHook, ManifestHookOptions};
+
+    fn registration_with_hook(on: &str, mode: &str) -> ExtensionRegistration {
+        ExtensionRegistration {
+            extension_id: "test-extension".into(),
+            version: "0.0.0".into(),
+            capabilities: Vec::new(),
+            tools: Vec::new(),
+            commands: Vec::new(),
+            hooks: vec![ManifestHook {
+                on: on.into(),
+                mode: mode.into(),
+                options: ManifestHookOptions::default(),
+            }],
+            extension_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn validate_registration_rejects_non_blocking_continue_after_stop() {
+        let reg = registration_with_hook("continue_after_stop", "non_blocking");
+
+        let err = validate_registration(&reg).unwrap_err();
+
+        assert!(err.contains("blocking-only"));
+    }
+
+    #[test]
+    fn validate_registration_rejects_s5r_internal_typed_hooks() {
+        for hook in ["user_message_envelope", "after_tool_results"] {
+            let reg = registration_with_hook(hook, "blocking");
+
+            let err = validate_registration(&reg).unwrap_err();
+
+            assert!(err.contains("not supported by s5r manifest"));
+        }
+    }
 }

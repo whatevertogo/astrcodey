@@ -295,11 +295,12 @@ mod tests {
         },
         event::EventPayload,
         extension::{
-            CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
-            ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
-            PostToolUseContext, PostToolUseFailureContext, PostToolUseResult, PreToolUseContext,
-            PreToolUseResult, PromptBuildContext, PromptContributions, ProviderContext,
-            ProviderEvent, ProviderResult,
+            AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
+            CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
+            ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
+            PostToolUseResult, PreToolUseContext, PreToolUseResult, PromptBuildContext,
+            PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
+            UserMessageEnvelopeContext, UserMessageEnvelopeResult,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
@@ -593,6 +594,20 @@ mod tests {
             _ctx: ContinueAfterStopContext,
         ) -> Result<ContinueAfterStopResult, ExtensionError> {
             Ok(ContinueAfterStopResult::EndTurn)
+        }
+
+        async fn emit_user_message_envelope(
+            &self,
+            _ctx: UserMessageEnvelopeContext,
+        ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+            Ok(UserMessageEnvelopeResult::Allow)
+        }
+
+        async fn emit_after_tool_results(
+            &self,
+            _ctx: AfterToolResultsContext,
+        ) -> Result<AfterToolResultsResult, ExtensionError> {
+            Ok(AfterToolResultsResult::Continue)
         }
 
         async fn emit_lifecycle(

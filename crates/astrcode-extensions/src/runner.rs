@@ -207,10 +207,11 @@ impl ExtensionEventSink for BoundExtensionEventSink {
 
 type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
-type ContinueAfterStopExtensionHandler<H> = (String, HookMode, ContinueAfterStopOptions, Arc<H>);
+type ContinueAfterStopExtensionHandler<H> = (String, ContinueAfterStopOptions, Arc<H>);
+type SimpleExtensionHandler<H> = (String, Arc<H>);
 type PrioritizedToolHandler<H> = (i32, String, HookMode, ToolHookTarget, Arc<H>);
-type PrioritizedContinueAfterStopHandler<H> =
-    (i32, String, HookMode, ContinueAfterStopOptions, Arc<H>);
+type PrioritizedContinueAfterStopHandler<H> = (i32, String, ContinueAfterStopOptions, Arc<H>);
+type PrioritizedSimpleHandler<H> = (i32, String, Arc<H>);
 type PrioritizedEventHandler<K, H> = (K, i32, String, HookMode, Arc<H>);
 
 /// 预排序的 handler 索引。
@@ -226,6 +227,8 @@ struct HandlerIndex {
     compact: HashMap<CompactEvent, Vec<Arc<dyn CompactHandler>>>,
     post_tool_use_failure: Vec<Arc<dyn PostToolUseFailureHandler>>,
     continue_after_stop: Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
+    user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
+    after_tool_results: Vec<SimpleExtensionHandler<dyn AfterToolResultsHandler>>,
     lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
     tool_metadata:
@@ -268,6 +271,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
     let mut cas: Vec<PrioritizedContinueAfterStopHandler<dyn ContinueAfterStopHandler>> =
         Vec::new();
+    let mut ume: Vec<PrioritizedSimpleHandler<dyn UserMessageEnvelopeHandler>> = Vec::new();
+    let mut atr: Vec<PrioritizedSimpleHandler<dyn AfterToolResultsHandler>> = Vec::new();
     let mut lc: Vec<PrioritizedEventHandler<ExtensionEvent, dyn LifecycleHandler>> = Vec::new();
     let mut tool_metadata = std::collections::HashMap::new();
     let mut tool_ui = std::collections::HashMap::new();
@@ -328,8 +333,21 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
             cas.push((
                 registration.priority,
                 record.id.clone(),
-                registration.mode,
                 registration.options,
+                Arc::clone(&registration.handler),
+            ));
+        }
+        for registration in record.reg.user_message_envelope() {
+            ume.push((
+                registration.priority,
+                record.id.clone(),
+                Arc::clone(&registration.handler),
+            ));
+        }
+        for registration in record.reg.after_tool_results() {
+            atr.push((
+                registration.priority,
+                record.id.clone(),
                 Arc::clone(&registration.handler),
             ));
         }
@@ -384,6 +402,8 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     cmp.sort_by_key(|b| std::cmp::Reverse(b.1));
     ptuf.sort_by_key(|b| std::cmp::Reverse(b.0));
     cas.sort_by_key(|b| std::cmp::Reverse(b.0));
+    ume.sort_by_key(|b| std::cmp::Reverse(b.0));
+    atr.sort_by_key(|b| std::cmp::Reverse(b.0));
     lc.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     HandlerIndex {
@@ -401,8 +421,10 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         post_tool_use_failure: ptuf.into_iter().map(|(_, h)| h).collect(),
         continue_after_stop: cas
             .into_iter()
-            .map(|(_, id, m, options, h)| (id, m, options, h))
+            .map(|(_, id, options, h)| (id, options, h))
             .collect(),
+        user_message_envelope: ume.into_iter().map(|(_, id, h)| (id, h)).collect(),
+        after_tool_results: atr.into_iter().map(|(_, id, h)| (id, h)).collect(),
         lifecycle: group_by_event_with_mode(lc),
         tool_metadata,
         tool_ui,
@@ -537,6 +559,8 @@ impl ExtensionRunner {
                 compact: HashMap::new(),
                 post_tool_use_failure: Vec::new(),
                 continue_after_stop: Vec::new(),
+                user_message_envelope: Vec::new(),
+                after_tool_results: Vec::new(),
                 lifecycle: HashMap::new(),
                 tool_metadata: std::collections::HashMap::new(),
                 tool_ui: std::collections::HashMap::new(),
@@ -1012,9 +1036,6 @@ impl ExtensionRunner {
                 continue;
             }
             let mut handler_ctx = ctx.clone();
-            if !index.allows(extension_id, ExtensionCapability::SessionState) {
-                handler_ctx.session_store_dir = None;
-            }
             handler_ctx.extension_event_sink =
                 attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
@@ -1125,9 +1146,6 @@ impl ExtensionRunner {
                 continue;
             }
             let mut handler_ctx = ctx.clone();
-            if !index.allows(extension_id, ExtensionCapability::SessionState) {
-                handler_ctx.session_store_dir = None;
-            }
             handler_ctx.extension_event_sink =
                 attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
@@ -1239,10 +1257,7 @@ impl ExtensionRunner {
         let mut ctx = ctx;
         let mut modified = false;
         for (extension_id, mode, handler) in handlers {
-            let mut handler_ctx = ctx.clone();
-            if !index.allows(extension_id, ExtensionCapability::SessionState) {
-                handler_ctx.session_store_dir = None;
-            }
+            let handler_ctx = ctx.clone();
             match mode {
                 HookMode::Blocking => {
                     let started = std::time::Instant::now();
@@ -1425,7 +1440,7 @@ impl ExtensionRunner {
             return Ok(ContinueAfterStopResult::EndTurn);
         }
 
-        for (extension_id, mode, options, handler) in &index.continue_after_stop {
+        for (extension_id, options, handler) in &index.continue_after_stop {
             if !options.allows(ctx.continuations_this_turn) {
                 tracing::debug!(
                     extension_id = %extension_id,
@@ -1434,37 +1449,145 @@ impl ExtensionRunner {
                 );
                 continue;
             }
-            match mode {
-                HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
-                        .await
-                        .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
-                    if result == ContinueAfterStopResult::ContinueOneStep {
-                        tracing::debug!(
-                            extension_id = %extension_id,
-                            "ContinueAfterStop: extension requested one more step"
-                        );
-                        return Ok(ContinueAfterStopResult::ContinueOneStep);
-                    }
-                },
-                HookMode::Advisory => {
-                    if let Err(e) = handler.handle(ctx.clone()).await {
-                        tracing::warn!(error = %e, "advisory continue_after_stop handler failed");
-                    }
-                },
-                HookMode::NonBlocking => {
-                    let handler = Arc::clone(handler);
-                    let ctx = ctx.clone();
-                    self.spawn_extension_task(extension_id, "continue_after_stop", async move {
-                        if let Err(e) = handler.handle(ctx).await {
-                            tracing::warn!(error = %e, "non-blocking continue_after_stop failed");
-                        }
-                    })
-                    .await;
-                },
+            let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
+                .await
+                .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+            if result == ContinueAfterStopResult::ContinueOneStep {
+                tracing::debug!(
+                    extension_id = %extension_id,
+                    "ContinueAfterStop: extension requested one more step"
+                );
+                return Ok(ContinueAfterStopResult::ContinueOneStep);
             }
         }
         Ok(ContinueAfterStopResult::EndTurn)
+    }
+
+    /// 用户消息写入 durable transcript 前的 envelope 变换。
+    pub async fn emit_user_message_envelope(
+        &self,
+        ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        let index = self.load_index();
+        if index.user_message_envelope.is_empty() {
+            return Ok(UserMessageEnvelopeResult::Allow);
+        }
+
+        let mut ctx = ctx;
+        let mut modified = false;
+        for (extension_id, handler) in &index.user_message_envelope {
+            let started = std::time::Instant::now();
+            let result = match tokio::time::timeout(self.timeout, handler.handle(ctx.clone())).await
+            {
+                Ok(Ok(result)) => {
+                    self.record_hook_result(
+                        extension_id,
+                        "user_message_envelope",
+                        started.elapsed(),
+                        None,
+                        false,
+                    );
+                    result
+                },
+                Ok(Err(error)) => {
+                    self.record_hook_result(
+                        extension_id,
+                        "user_message_envelope",
+                        started.elapsed(),
+                        Some(error.to_string()),
+                        false,
+                    );
+                    return Err(error);
+                },
+                Err(_) => {
+                    let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
+                    self.record_hook_result(
+                        extension_id,
+                        "user_message_envelope",
+                        started.elapsed(),
+                        Some(error.to_string()),
+                        true,
+                    );
+                    return Err(error);
+                },
+            };
+
+            match result {
+                UserMessageEnvelopeResult::Allow => {},
+                UserMessageEnvelopeResult::ReplaceText { text } => {
+                    ctx.text = text;
+                    modified = true;
+                },
+                UserMessageEnvelopeResult::AppendText { text } => {
+                    append_user_message_text(&mut ctx.text, &text);
+                    modified = true;
+                },
+                UserMessageEnvelopeResult::Block { reason } => {
+                    return Ok(UserMessageEnvelopeResult::Block { reason });
+                },
+            }
+        }
+
+        if modified {
+            Ok(UserMessageEnvelopeResult::ReplaceText { text: ctx.text })
+        } else {
+            Ok(UserMessageEnvelopeResult::Allow)
+        }
+    }
+
+    /// 一批工具结果落盘后的继续/结束决策。
+    pub async fn emit_after_tool_results(
+        &self,
+        ctx: AfterToolResultsContext,
+    ) -> Result<AfterToolResultsResult, ExtensionError> {
+        let index = self.load_index();
+        if index.after_tool_results.is_empty() {
+            return Ok(AfterToolResultsResult::Continue);
+        }
+
+        for (extension_id, handler) in &index.after_tool_results {
+            let started = std::time::Instant::now();
+            let result = match tokio::time::timeout(self.timeout, handler.handle(ctx.clone())).await
+            {
+                Ok(Ok(result)) => {
+                    self.record_hook_result(
+                        extension_id,
+                        "after_tool_results",
+                        started.elapsed(),
+                        None,
+                        false,
+                    );
+                    result
+                },
+                Ok(Err(error)) => {
+                    self.record_hook_result(
+                        extension_id,
+                        "after_tool_results",
+                        started.elapsed(),
+                        Some(error.to_string()),
+                        false,
+                    );
+                    return Err(error);
+                },
+                Err(_) => {
+                    let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
+                    self.record_hook_result(
+                        extension_id,
+                        "after_tool_results",
+                        started.elapsed(),
+                        Some(error.to_string()),
+                        true,
+                    );
+                    return Err(error);
+                },
+            };
+
+            if let AfterToolResultsResult::EndTurn { reason } = result {
+                return Ok(AfterToolResultsResult::EndTurn { reason });
+            }
+        }
+
+        Ok(AfterToolResultsResult::Continue)
     }
 
     /// 通用生命周期事件分发。
@@ -1633,7 +1756,6 @@ impl ExtensionRunner {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let index = self.load_index();
         let cmds = self.collect_commands_for_typed(working_dir).await;
         let mut matched: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = cmds
             .into_iter()
@@ -1641,13 +1763,9 @@ impl ExtensionRunner {
             .collect();
         matched.sort_by_key(|a| std::cmp::Reverse(command_dispatch_priority(&a.0)));
 
-        if let Some((extension_id, _, handler)) = matched.into_iter().next() {
-            let mut scoped_ctx = ctx.clone();
-            if !index.allows(&extension_id, ExtensionCapability::SessionState) {
-                scoped_ctx.session_store_dir = None;
-            }
+        if let Some((_, _, handler)) = matched.into_iter().next() {
             handler
-                .execute(command_name, arguments, working_dir, &scoped_ctx)
+                .execute(command_name, arguments, working_dir, ctx)
                 .await
         } else {
             Err(ExtensionError::NotFound(command_name.into()))
@@ -1710,6 +1828,20 @@ impl ExtensionRuntime for ExtensionRunner {
         ExtensionRunner::emit_continue_after_stop(self, ctx).await
     }
 
+    async fn emit_user_message_envelope(
+        &self,
+        ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        ExtensionRunner::emit_user_message_envelope(self, ctx).await
+    }
+
+    async fn emit_after_tool_results(
+        &self,
+        ctx: AfterToolResultsContext,
+    ) -> Result<AfterToolResultsResult, ExtensionError> {
+        ExtensionRunner::emit_after_tool_results(self, ctx).await
+    }
+
     async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
@@ -1749,6 +1881,16 @@ fn provider_hook_name(event: ProviderEvent) -> &'static str {
         ProviderEvent::BeforeRequest => "before_provider_request",
         ProviderEvent::AfterResponse => "after_provider_response",
     }
+}
+
+fn append_user_message_text(base: &mut String, addition: &str) {
+    if addition.is_empty() {
+        return;
+    }
+    if !base.is_empty() {
+        base.push_str("\n\n");
+    }
+    base.push_str(addition);
 }
 
 fn stage_diagnostics_mut(
@@ -1809,12 +1951,6 @@ impl Tool for HandlerTool {
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let mut ctx = ctx.clone();
-        if !self
-            .capabilities
-            .contains(&ExtensionCapability::SessionState)
-        {
-            ctx.capabilities.paths.store_dir = None;
-        }
         if !self
             .capabilities
             .contains(&ExtensionCapability::SessionControl)
@@ -1928,11 +2064,13 @@ mod tests {
     use astrcode_core::{config::ModelSelection, event::EventPayload, tool_access::ResourceAccess};
     use astrcode_extension_sdk::{
         extension::{
-            ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-            ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCtx, ExtensionError,
-            HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
-            ProviderEvent, ProviderHandler, ProviderResult, Registrar, StopReason, ToolHandler,
-            ToolHookTarget,
+            AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
+            AfterToolResultsResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+            ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
+            ExtensionCtx, ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler,
+            PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
+            Registrar, StopReason, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
+            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
         tool::{
             ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
@@ -1959,9 +2097,7 @@ mod tests {
 
     struct UnhealthyExtension;
 
-    struct StateProbeExtension {
-        allowed: bool,
-    }
+    struct StateProbeExtension;
 
     struct StateProbeTool;
 
@@ -1996,18 +2132,34 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct UserMessageEnvelopeProbeExtension {
+        id: &'static str,
+        priority: i32,
+        result: UserMessageEnvelopeResult,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct UserMessageEnvelopeProbe {
+        result: UserMessageEnvelopeResult,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct AfterToolResultsProbeExtension {
+        id: &'static str,
+        priority: i32,
+        result: AfterToolResultsResult,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct AfterToolResultsProbe {
+        result: AfterToolResultsResult,
+        calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait::async_trait]
     impl Extension for StateProbeExtension {
         fn id(&self) -> &str {
             "state-probe"
-        }
-
-        fn capabilities(&self) -> &[ExtensionCapability] {
-            if self.allowed {
-                &[ExtensionCapability::SessionState]
-            } else {
-                &[]
-            }
         }
 
         fn register(&self, reg: &mut Registrar) {
@@ -2165,7 +2317,6 @@ mod tests {
 
         fn register(&self, reg: &mut Registrar) {
             reg.on_continue_after_stop(
-                HookMode::Blocking,
                 0,
                 self.options,
                 Arc::new(ContinueAfterStopProbe {
@@ -2186,6 +2337,62 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl Extension for UserMessageEnvelopeProbeExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.on_user_message_envelope(
+                self.priority,
+                Arc::new(UserMessageEnvelopeProbe {
+                    result: self.result.clone(),
+                    calls: Arc::clone(&self.calls),
+                }),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UserMessageEnvelopeHandler for UserMessageEnvelopeProbe {
+        async fn handle(
+            &self,
+            _ctx: UserMessageEnvelopeContext,
+        ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.result.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for AfterToolResultsProbeExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.on_after_tool_results(
+                self.priority,
+                Arc::new(AfterToolResultsProbe {
+                    result: self.result.clone(),
+                    calls: Arc::clone(&self.calls),
+                }),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AfterToolResultsHandler for AfterToolResultsProbe {
+        async fn handle(
+            &self,
+            _ctx: AfterToolResultsContext,
+        ) -> Result<AfterToolResultsResult, ExtensionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.result.clone())
+        }
+    }
+
     fn continue_after_stop_ctx(continuations_this_turn: u32) -> ContinueAfterStopContext {
         ContinueAfterStopContext {
             session_id: "session".into(),
@@ -2194,6 +2401,33 @@ mod tests {
             assistant_text: "done".into(),
             finish_reason: "stop".into(),
             continuations_this_turn,
+        }
+    }
+
+    fn user_message_envelope_ctx(text: &str) -> UserMessageEnvelopeContext {
+        UserMessageEnvelopeContext {
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            working_dir: "D:/workspace".into(),
+            model: ModelSelection::simple("model"),
+            text: text.into(),
+            attachments: Vec::new(),
+            session_store_dir: None,
+        }
+    }
+
+    fn after_tool_results_ctx() -> AfterToolResultsContext {
+        AfterToolResultsContext {
+            session_id: "session".into(),
+            working_dir: "D:/workspace".into(),
+            model: ModelSelection::simple("model"),
+            tool_results: vec![AfterToolResult {
+                call_id: "call-1".into(),
+                tool_name: "probeTool".into(),
+                tool_input: json!({"value": 1}),
+                tool_result: ToolResult::text("ok".into(), false, Default::default()),
+            }],
+            session_store_dir: None,
         }
     }
 
@@ -2380,35 +2614,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_tool_receives_session_state_only_when_declared() {
-        for (allowed, expected) in [(false, "false"), (true, "true")] {
-            let runner = ExtensionRunner::new(Duration::from_secs(1));
-            runner
-                .register(Arc::new(StateProbeExtension { allowed }))
-                .await
-                .unwrap();
-            let tool = runner
-                .collect_tool_adapters_typed("D:/workspace")
-                .await
-                .into_iter()
-                .next()
-                .unwrap();
-            let ctx = ToolExecutionContext::new(
-                "session".into(),
-                "D:/workspace",
-                None,
-                None,
-                ToolCapabilities {
-                    paths: astrcode_core::tool::ToolSessionPaths {
-                        store_dir: Some("D:/session".into()),
-                    },
-                    ..Default::default()
+    async fn extension_tool_receives_session_state_by_default() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(StateProbeExtension))
+            .await
+            .unwrap();
+        let tool = runner
+            .collect_tool_adapters_typed("D:/workspace")
+            .await
+            .into_iter()
+            .next()
+            .unwrap();
+        let ctx = ToolExecutionContext::new(
+            "session".into(),
+            "D:/workspace",
+            None,
+            None,
+            ToolCapabilities {
+                paths: astrcode_core::tool::ToolSessionPaths {
+                    store_dir: Some("D:/session".into()),
                 },
-            );
+                ..Default::default()
+            },
+        );
 
-            let result = tool.execute(json!({}), &ctx).await.unwrap();
-            assert_eq!(result.content, expected);
-        }
+        let result = tool.execute(json!({}), &ctx).await.unwrap();
+        assert_eq!(result.content, "true");
     }
 
     #[tokio::test]
@@ -2623,10 +2855,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_message_envelope_folds_text_by_priority() {
+        let replace_calls = Arc::new(AtomicUsize::new(0));
+        let append_calls = Arc::new(AtomicUsize::new(0));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(UserMessageEnvelopeProbeExtension {
+                id: "replace-envelope",
+                priority: 10,
+                result: UserMessageEnvelopeResult::ReplaceText {
+                    text: "rewritten".into(),
+                },
+                calls: Arc::clone(&replace_calls),
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(UserMessageEnvelopeProbeExtension {
+                id: "append-envelope",
+                priority: 0,
+                result: UserMessageEnvelopeResult::AppendText {
+                    text: "tail".into(),
+                },
+                calls: Arc::clone(&append_calls),
+            }))
+            .await
+            .unwrap();
+
+        let result = runner
+            .emit_user_message_envelope(user_message_envelope_ctx("original"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            UserMessageEnvelopeResult::ReplaceText {
+                text: "rewritten\n\ntail".into()
+            }
+        );
+        assert_eq!(replace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(append_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn user_message_envelope_block_short_circuits_later_handlers() {
+        let block_calls = Arc::new(AtomicUsize::new(0));
+        let append_calls = Arc::new(AtomicUsize::new(0));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(UserMessageEnvelopeProbeExtension {
+                id: "block-envelope",
+                priority: 10,
+                result: UserMessageEnvelopeResult::Block {
+                    reason: "blocked".into(),
+                },
+                calls: Arc::clone(&block_calls),
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(UserMessageEnvelopeProbeExtension {
+                id: "append-after-block",
+                priority: 0,
+                result: UserMessageEnvelopeResult::AppendText {
+                    text: "unreachable".into(),
+                },
+                calls: Arc::clone(&append_calls),
+            }))
+            .await
+            .unwrap();
+
+        let result = runner
+            .emit_user_message_envelope(user_message_envelope_ctx("original"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            UserMessageEnvelopeResult::Block {
+                reason: "blocked".into()
+            }
+        );
+        assert_eq!(block_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(append_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn after_tool_results_end_turn_short_circuits_later_handlers() {
+        let end_calls = Arc::new(AtomicUsize::new(0));
+        let continue_calls = Arc::new(AtomicUsize::new(0));
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(AfterToolResultsProbeExtension {
+                id: "end-after-tools",
+                priority: 10,
+                result: AfterToolResultsResult::EndTurn {
+                    reason: "goal-complete".into(),
+                },
+                calls: Arc::clone(&end_calls),
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(AfterToolResultsProbeExtension {
+                id: "continue-after-end",
+                priority: 0,
+                result: AfterToolResultsResult::Continue,
+                calls: Arc::clone(&continue_calls),
+            }))
+            .await
+            .unwrap();
+
+        let result = runner
+            .emit_after_tool_results(after_tool_results_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            AfterToolResultsResult::EndTurn {
+                reason: "goal-complete".into()
+            }
+        );
+        assert_eq!(end_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(continue_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn registry_snapshot_exposes_registered_extension_declarations() {
         let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
-            .register(Arc::new(StateProbeExtension { allowed: true }))
+            .register(Arc::new(StateProbeExtension))
             .await
             .unwrap();
 
@@ -2637,10 +2996,7 @@ mod tests {
             .find(|extension| extension.id == "state-probe")
             .unwrap();
 
-        assert_eq!(
-            declaration.capabilities,
-            vec![ExtensionCapability::SessionState]
-        );
+        assert!(declaration.capabilities.is_empty());
         assert_eq!(declaration.tools.len(), 1);
         assert_eq!(declaration.tools[0].name, "stateProbe");
         assert!(!declaration.dynamic_tools);
@@ -2670,7 +3026,7 @@ mod tests {
         );
 
         runner
-            .register(Arc::new(StateProbeExtension { allowed: false }))
+            .register(Arc::new(StateProbeExtension))
             .await
             .unwrap();
         let default_tool = runner
