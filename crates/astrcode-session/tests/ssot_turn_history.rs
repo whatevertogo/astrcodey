@@ -194,13 +194,31 @@ async fn token_usage_is_persisted_as_durable_event() {
     assert!(result.output.is_ok(), "{:?}", result.output);
 
     let events = store.replay_events(&sid).await.unwrap();
-    let token_usage = events.iter().find_map(|event| match &event.payload {
+    let assistant_completed_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload,
+                EventPayload::AssistantMessageCompleted { .. }
+            )
+        })
+        .expect("expected AssistantMessageCompleted event");
+    let token_usage_index = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::TokenUsageRecorded { .. }))
+        .expect("expected TokenUsageRecorded event");
+    assert!(
+        token_usage_index > assistant_completed_index,
+        "TokenUsageRecorded should be written after AssistantMessageCompleted"
+    );
+
+    let token_usage = match &events[token_usage_index].payload {
         EventPayload::TokenUsageRecorded {
             usage,
             model_context_window,
         } => Some((usage, model_context_window)),
         _ => None,
-    });
+    };
 
     let Some((usage, model_context_window)) = token_usage else {
         panic!("expected TokenUsageRecorded event");

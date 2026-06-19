@@ -50,14 +50,6 @@ pub enum StreamOutcome {
     },
 }
 
-impl StreamOutcome {
-    pub fn usage(&self) -> Option<LlmTokenUsage> {
-        match self {
-            Self::Complete { usage, .. } | Self::ToolCalls { usage, .. } => usage.clone(),
-        }
-    }
-}
-
 /// 消费 LLM 事件流直到完成或积累工具调用。
 ///
 /// 返回 `StreamOutcome::Complete` 表示回复完成（无工具调用），

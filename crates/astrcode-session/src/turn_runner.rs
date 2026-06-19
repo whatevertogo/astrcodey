@@ -227,15 +227,6 @@ impl TurnLoop {
                 Err(error) => return Err(error),
             };
 
-            if let Some(usage) = outcome.usage() {
-                publisher
-                    .durable(EventPayload::TokenUsageRecorded {
-                        usage,
-                        model_context_window,
-                    })
-                    .await?;
-            }
-
             let mut hook_messages = request_messages;
             match &outcome {
                 StreamOutcome::Complete { text, .. } => {
@@ -274,7 +265,7 @@ impl TurnLoop {
                     finish_reason,
                     message_id,
                     message_started,
-                    usage: _,
+                    usage,
                 } => {
                     let reasoning_content = non_empty_reasoning_content(reasoning_content);
                     let assistant_text_for_continue = text.clone();
@@ -289,6 +280,14 @@ impl TurnLoop {
                                 })
                                 .await?;
                         }
+                    }
+                    if let Some(usage) = usage {
+                        publisher
+                            .durable(EventPayload::TokenUsageRecorded {
+                                usage,
+                                model_context_window,
+                            })
+                            .await?;
                     }
                     on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
 
@@ -330,7 +329,7 @@ impl TurnLoop {
                     tool_calls,
                     message_id,
                     message_started,
-                    usage: _,
+                    usage,
                 } => {
                     let reasoning_content = non_empty_reasoning_content(reasoning_content);
                     let visible_text = text.as_deref().unwrap_or_default();
@@ -350,6 +349,14 @@ impl TurnLoop {
                                 message_id,
                                 text: visible_text.to_string(),
                                 reasoning_content,
+                            })
+                            .await?;
+                    }
+                    if let Some(usage) = usage {
+                        publisher
+                            .durable(EventPayload::TokenUsageRecorded {
+                                usage,
+                                model_context_window,
                             })
                             .await?;
                     }
