@@ -74,6 +74,8 @@ function isNearBottom(container: HTMLDivElement) {
 }
 
 export default function MessageList({ blocks, sessionId }: MessageListProps) {
+  'use no memo'
+  // TanStack Virtual returns mutable functions, so this component opts out of React Compiler memoization.
   const listRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const shouldStickRef = useRef(true)
@@ -112,6 +114,8 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
 
   const totalItemCount = allItems.length
 
+  // TanStack Virtual returns mutable functions; React Compiler intentionally skips this component.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: totalItemCount,
     getScrollElement: () => listRef.current,

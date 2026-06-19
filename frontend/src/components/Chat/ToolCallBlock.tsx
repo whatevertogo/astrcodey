@@ -17,10 +17,8 @@ import {
   toolApprovalPending,
   type ToolUiContext,
 } from '../../tool-ui'
-import {
-  GateApprovalCard,
-  readGateApproval,
-} from '../../tool-ui/components/GateApprovalCard'
+import { GateApprovalCard } from '../../tool-ui/components/GateApprovalCard'
+import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
 import {
   chevronIcon,
   toolPanelPaddingX,
@@ -34,11 +32,8 @@ import {
   type ToolRendererContext,
 } from './tools/registry'
 import { compactLine, statusLabel, toolArgs, toolMeta } from './tools/helpers'
-import {
-  buildStreamingAgentSpec,
-  DefaultToolDetails,
-  StatusIndicatorDot,
-} from './tools/shared'
+import { DefaultToolDetails, StatusIndicatorDot } from './tools/shared'
+import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
 import { Icon } from '../ui/Icon'
 
