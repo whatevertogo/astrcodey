@@ -72,9 +72,7 @@ const TASK_GUIDELINES: &str =
      conveys.\n- For multi-step or multi-area work, use `todoWrite` when progress tracking helps. \
      Delegate to `agent` only for clear, non-trivial subtasks that benefit from isolation or \
      parallel investigation; handle simple lookups, known-path reads, and small direct edits \
-     yourself.\n\n## Background work\nWhen a `<background-shell-notification>` message arrives, \
-     treat it as the result of a command you previously started in the background: read the \
-     output, then continue or report based on that result.\n\n## Verification\n- Verify before \
+     yourself.\n\n## Background work\n\n## Verification\n- Verify before \
      claiming completion. If you cannot verify, say so explicitly — never manufacture passing \
      results.\n- Complete all edits before reporting success.\n\n## Risk judgment\nConsider the \
      reversibility and blast radius of actions. Freely take local, reversible actions like \

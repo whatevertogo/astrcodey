@@ -469,11 +469,22 @@ fn format_completion_notification(
         )
     };
     format!(
-        "<background-shell-notification>\n<shell-id>{shell_id}</shell-id>{tool_call_line}\\
-         n<output-file>{path}</output-file>\n<status>{status_word}</\
-         status>{exit_code_line}{output_section}\n<summary>Background command \"{description}\" \
-         {status_word}{exit_note}</summary>\n</background-shell-notification>",
+        concat!(
+            "<background-shell-notification>\n",
+            "<shell-id>{shell_id}</shell-id>{tool_call_line}\n",
+            "<output-file>{path}</output-file>\n",
+            "<status>{status_word}</status>{exit_code_line}{output_section}\n",
+            "<summary>Background command \"{description}\" {status_word}{exit_note}</summary>\n",
+            "</background-shell-notification>"
+        ),
+        shell_id = shell_id,
+        tool_call_line = tool_call_line,
         path = output_path.display(),
+        status_word = status_word,
+        exit_code_line = exit_code_line,
+        output_section = output_section,
+        description = description,
+        exit_note = exit_note,
     )
 }
 
@@ -728,6 +739,8 @@ mod tests {
         );
         assert!(msg.contains("<shell-id>shell-abc</shell-id>"));
         assert!(msg.contains("<tool-call-id>call-1</tool-call-id>"));
+        assert!(msg.contains("</tool-call-id>\n<output-file>"));
+        assert!(!msg.contains("n<output-file>"));
         assert!(msg.contains("<status>completed</status>"));
         assert!(msg.contains("<exit-code>0</exit-code>"));
         assert!(msg.contains("<output><![CDATA["));
@@ -752,6 +765,8 @@ mod tests {
         );
         assert!(msg.contains("<output-truncated>"));
         assert!(msg.contains("tail only"));
+        assert!(msg.contains("</shell-id>\n<output-file>"));
+        assert!(!msg.contains("n<output-file>"));
     }
 
     #[test]
