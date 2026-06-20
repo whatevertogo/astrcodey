@@ -477,6 +477,7 @@ pub(crate) struct MemorySessionStartHandler {
     pub pipeline: Arc<MemoryPipelineCoordinator>,
     pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub config: Arc<RwLock<MemoryConfig>>,
+    pub session_prefs: Arc<crate::turn_recall::SessionPrefsCache>,
 }
 
 #[async_trait::async_trait]
@@ -488,6 +489,24 @@ impl LifecycleHandler for MemorySessionStartHandler {
         };
         if tasks.shutdown().is_cancelled() {
             return Ok(HookResult::Allow);
+        }
+
+        // 把 user_prefs 锚定在 session 边界：session 内只读，`memory_save`
+        // 写入的新偏好不影响当前 session 的 system prompt（KV cache 稳定）。
+        // 预加载幂等，即使赶不上首次 PromptBuild，兜底加载仍保证一致。
+        // 预加载失败不阻塞——PromptBuild 的 lines_for_session 会兜底。
+        let store_pool = self.store_pool.clone();
+        let session_prefs = self.session_prefs.clone();
+        let working_dir = ctx.working_dir.clone();
+        let session_id = ctx.session_id.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            let scoped = store_pool.get_scoped(&working_dir)?;
+            session_prefs.preload_for_session(&session_id, || scoped.all_user_preference_lines())
+        })
+        .await
+        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        {
+            tracing::debug!(error = %e, "memory: user_prefs preload failed, will lazy-load on prompt build");
         }
 
         if !self.config.read().auto_extract {

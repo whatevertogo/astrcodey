@@ -4,7 +4,7 @@
 //! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/`
 //! - `memory_index.json`：结构化索引（BM25/子串搜索；相似条目 upsert）
 //! - **SessionStart** / **`memory_save` 后**：从有变化的 rollout 批量提取，更新 MEMORY.md
-//! - **PromptBuild**：全量用户偏好（按 session 缓存，新 session 才刷新）
+//! - **PromptBuild**：全量用户偏好（SessionStart 预加载快照，session 内只读）
 //! - **TurnEnd**：按当轮对话召回项目事实；下一 turn 首次 LLM 请求时注入
 //! - LLM 工具：`memory_save` / `memory_delete`
 
@@ -177,6 +177,7 @@ impl Extension for MemoryExtension {
                 pipeline: self.pipeline.clone(),
                 tasks: self.tasks.clone(),
                 config: self.config.clone(),
+                session_prefs: self.session_prefs.clone(),
             }),
         );
     }

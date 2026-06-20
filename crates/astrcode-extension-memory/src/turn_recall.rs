@@ -1,6 +1,6 @@
 //! Project memory: recall at turn end, deliver on the next turn's first LLM request.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
@@ -13,31 +13,55 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::{config::MemoryConfig, prompts, store::MemoryStorePool};
 
-/// User preferences loaded once per session for PromptBuild.
+/// 用户偏好的 per-session 只读快照。
+///
+/// `MemoryExtension` 是全局共享单例（runner 在 bootstrap 时创建一次，所有
+/// session 复用同一实例），所以这里按 `session_id` 隔离缓存。一个 session
+/// 首次加载后，整个 session 生命期内只返回同一份内容——`memory_save` 写入
+/// 新偏好不影响它，system prompt 指纹保持稳定，KV cache 不被破坏。只有下一
+/// 个 session 的 SessionStart 才重新加载最新值。
+///
+/// 缓存随活跃 session 增长，在 `stop()`（扩展卸载）时整体清空。进程重启后
+/// 内存清零，resume 的 session 会重新加载。
 #[derive(Default)]
 pub(crate) struct SessionPrefsCache {
-    state: Mutex<Option<(String, Vec<String>)>>,
+    state: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl SessionPrefsCache {
+    /// 返回 session 的 user_prefs；首次调用加载并缓存，之后同 session 只读。
     pub(crate) fn lines_for_session(
         &self,
         session_id: &str,
         load: impl FnOnce() -> std::io::Result<Vec<String>>,
     ) -> std::io::Result<Vec<String>> {
         let mut guard = self.state.lock();
-        if let Some((cached_id, lines)) = guard.as_ref() {
-            if cached_id == session_id {
-                return Ok(lines.clone());
-            }
+        if let Some(lines) = guard.get(session_id) {
+            return Ok(lines.clone());
         }
         let lines = load()?;
-        *guard = Some((session_id.to_string(), lines.clone()));
+        guard.insert(session_id.to_string(), lines.clone());
         Ok(lines)
     }
 
+    /// SessionStart 时主动预加载，把注入时机锚定在 session 边界。
+    /// 已缓存则跳过（幂等），避免覆盖 PromptBuild 的兜底加载值。
+    pub(crate) fn preload_for_session(
+        &self,
+        session_id: &str,
+        load: impl FnOnce() -> std::io::Result<Vec<String>>,
+    ) -> std::io::Result<()> {
+        let mut guard = self.state.lock();
+        if guard.contains_key(session_id) {
+            return Ok(());
+        }
+        let lines = load()?;
+        guard.insert(session_id.to_string(), lines);
+        Ok(())
+    }
+
     pub(crate) fn reset(&self) {
-        *self.state.lock() = None;
+        self.state.lock().clear();
     }
 }
 
@@ -247,5 +271,38 @@ mod tests {
             .unwrap();
         assert_eq!(a, b);
         assert_eq!(a, vec!["pref".to_string()]);
+    }
+
+    #[test]
+    fn session_prefs_cache_isolates_sessions() {
+        let cache = SessionPrefsCache::default();
+        cache
+            .lines_for_session("s1", || Ok(vec!["a".to_string()]))
+            .unwrap();
+        // s2 加载不应覆盖 s1（单槽缓存的旧 bug）
+        cache
+            .lines_for_session("s2", || Ok(vec!["b".to_string()]))
+            .unwrap();
+        let s1_again = cache
+            .lines_for_session("s1", || Ok(vec!["SHOULD_NOT_LOAD".to_string()]))
+            .unwrap();
+        assert_eq!(s1_again, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn preload_is_idempotent_and_does_not_clobber() {
+        let cache = SessionPrefsCache::default();
+        // PromptBuild 兜底先加载
+        let prompt_load = cache
+            .lines_for_session("s1", || Ok(vec!["from-prompt".to_string()]))
+            .unwrap();
+        // SessionStart 预加载幂等跳过，不覆盖 PromptBuild 的值
+        cache
+            .preload_for_session("s1", || Ok(vec!["from-session-start".to_string()]))
+            .unwrap();
+        let again = cache
+            .lines_for_session("s1", || Ok(vec!["never".to_string()]))
+            .unwrap();
+        assert_eq!(prompt_load, again);
     }
 }
