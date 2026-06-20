@@ -2,41 +2,29 @@ import React, { memo } from 'react'
 import type { ConversationBlock } from '../../services/types'
 import { assistantAvatar } from '../../lib/styles'
 import { MarkdownContent, StreamingMarkdown } from './MarkdownContent'
+import {
+  cachedThinkingExtraction,
+  extractThinkingBlocks,
+} from './thinkingExtraction'
 
 interface AssistantMessageProps {
   block: Extract<ConversationBlock, { kind: 'assistant' }>
   reasoningText?: string | null
 }
 
-function extractThinkingBlocks(text: string): {
-  visibleText: string
-  thinkingBlocks: string[]
-} {
-  if (typeof text !== 'string') return { visibleText: '', thinkingBlocks: [] }
-  const thinkingBlocks: string[] = []
-  const visibleText = text
-    .replace(
-      /<think-block>([\s\S]*?)<\/think-block>/gi,
-      (_match, content: string) => {
-        const normalized = content.trim()
-        if (normalized && !thinkingBlocks.includes(normalized)) {
-          thinkingBlocks.push(normalized)
-        }
-        return ''
-      }
-    )
-    .trim()
-  return { visibleText, thinkingBlocks }
-}
-
 function AssistantMessage({ block, reasoningText }: AssistantMessageProps) {
-  const { visibleText, thinkingBlocks } = React.useMemo(() => {
-    if (reasoningText) {
-      return { visibleText: block.text, thinkingBlocks: [reasoningText] }
-    }
-    return extractThinkingBlocks(block.text)
-  }, [block.text, reasoningText])
   const streaming = block.status === 'streaming'
+  const streamingParts =
+    streaming && !reasoningText
+      ? cachedThinkingExtraction(block.id, block.text)
+      : null
+  const staticParts = React.useMemo(() => {
+    if (reasoningText || streaming) return null
+    return extractThinkingBlocks(block.text)
+  }, [block.text, reasoningText, streaming])
+  const assistantParts = reasoningText
+    ? { visibleText: block.text, thinkingBlocks: [reasoningText] }
+    : (streamingParts ?? staticParts ?? { visibleText: '', thinkingBlocks: [] })
 
   return (
     <div className="flex items-start gap-[16px] animate-message-enter max-sm:gap-[12px] motion-reduce:animate-none">
@@ -63,7 +51,7 @@ function AssistantMessage({ block, reasoningText }: AssistantMessageProps) {
       </div>
       <div className="min-w-0 flex-1 pt-0.5">
         <div className="relative min-w-0 max-w-full overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
-          {thinkingBlocks.map((block, index) => (
+          {assistantParts.thinkingBlocks.map((thinkingBlock, index) => (
             <details
               key={`thinking-${index}`}
               className="mb-3.5 bg-transparent border-none rounded-0 overflow-visible group"
@@ -106,19 +94,25 @@ function AssistantMessage({ block, reasoningText }: AssistantMessageProps) {
               </summary>
               <div className="mb-3 ml-2 mt-2 border-l-2 border-border pl-4 overflow-wrap-anywhere text-[13.5px] leading-relaxed text-text-secondary/80 prose-chat">
                 {streaming ? (
-                  <StreamingMarkdown text={block} />
+                  <StreamingMarkdown
+                    text={thinkingBlock}
+                    cacheKey={`${block.id}:thinking:${index}`}
+                  />
                 ) : (
-                  <MarkdownContent text={block} />
+                  <MarkdownContent text={thinkingBlock} />
                 )}
               </div>
             </details>
           ))}
           {streaming ? (
-            visibleText ? (
-              <StreamingMarkdown text={visibleText} />
+            assistantParts.visibleText ? (
+              <StreamingMarkdown
+                text={assistantParts.visibleText}
+                cacheKey={`${block.id}:visible`}
+              />
             ) : null
-          ) : visibleText ? (
-            <MarkdownContent text={visibleText} />
+          ) : assistantParts.visibleText ? (
+            <MarkdownContent text={assistantParts.visibleText} />
           ) : null}
         </div>
       </div>

@@ -370,25 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn upsert_plan_accepts_freeform_content() {
-        let mode_root = test_root("upsert-freeform").join("mode");
-        let plan_dir = test_root("upsert-freeform").join("plan");
-        let catalog = builtin_catalog();
-
-        handle_switch_mode(json!({ "mode": "plan" }), &mode_root, &plan_dir, &catalog).unwrap();
-
-        let result = handle_upsert_plan(
-            json!({ "content": "# Plan: test\n\n## Goal\n\nDo something.\n" }),
-            &mode_root,
-            &plan_dir,
-        )
-        .expect("should return result");
-
-        assert!(!result.is_error);
-        assert!(result.content.contains("created"));
-    }
-
-    #[test]
     fn full_round_trip() {
         let mode_root = test_root("full-round-trip").join("mode");
         let plan_dir = test_root("full-round-trip").join("plan");

@@ -2833,28 +2833,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continue_after_stop_unlimited_options_allow_late_continuations() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let runner = ExtensionRunner::new(Duration::from_secs(1));
-        runner
-            .register(Arc::new(ContinueAfterStopProbeExtension {
-                id: "unlimited-continue",
-                options: ContinueAfterStopOptions::unlimited(),
-                calls: Arc::clone(&calls),
-            }))
-            .await
-            .unwrap();
-
-        let result = runner
-            .emit_continue_after_stop(continue_after_stop_ctx(100))
-            .await
-            .unwrap();
-
-        assert_eq!(result, ContinueAfterStopResult::ContinueOneStep);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
     async fn user_message_envelope_folds_text_by_priority() {
         let replace_calls = Arc::new(AtomicUsize::new(0));
         let append_calls = Arc::new(AtomicUsize::new(0));

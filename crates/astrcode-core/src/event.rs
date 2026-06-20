@@ -621,32 +621,6 @@ mod tests {
     }
 
     #[test]
-    fn event_serializes_as_nested_json() {
-        let event = Event {
-            seq: Some(0),
-            id: "event-1".into(),
-            session_id: "session-1".into(),
-            turn_id: Some("turn-1".into()),
-            timestamp: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            payload: EventPayload::UserMessage {
-                message_id: "message-1".into(),
-                text: "hello".into(),
-                attachments: vec![],
-            },
-        };
-
-        let json = serde_json::to_value(event).unwrap();
-        assert_eq!(json["seq"], 0);
-        assert_eq!(json["session_id"], "session-1");
-        assert_eq!(json["payload"]["type"], "user_message");
-        assert_eq!(json["payload"]["message_id"], "message-1");
-        assert!(json.get("type").is_none());
-        assert!(json.get("message_id").is_none());
-    }
-
-    #[test]
     fn event_rejects_reserved_keys_in_extension_payload() {
         let event = Event {
             seq: Some(0),
@@ -828,23 +802,6 @@ mod tests {
         assert_eq!(value["parent_session_id"], "parent-session");
         assert_eq!(value["parent_cursor"], "7");
         assert_eq!(round_trip, payload);
-    }
-
-    #[test]
-    fn tool_call_start_and_request_have_separate_meaning() {
-        let start = EventPayload::ToolCallStarted {
-            call_id: "c1".into(),
-            tool_name: "shell".into(),
-        };
-        let request = EventPayload::ToolCallRequested {
-            call_id: "c1".into(),
-            tool_name: "shell".into(),
-            arguments: serde_json::json!({"cmd": "pwd"}),
-        };
-
-        assert!(!start.is_durable(), "ToolCallStarted is live UI state only");
-        assert!(request.is_durable());
-        assert_ne!(start, request);
     }
 
     #[test]

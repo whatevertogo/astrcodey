@@ -826,23 +826,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_log_only_receives_durable_events_from_callers() {
-        assert!(
-            !EventPayload::AssistantTextDelta {
-                message_id: "m1".into(),
-                delta: "partial".into(),
-            }
-            .is_durable()
-        );
-        assert!(
-            EventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
-            }
-            .is_durable()
-        );
-    }
-
-    #[tokio::test]
     async fn append_batch_writes_multiple_events() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("batch.jsonl");

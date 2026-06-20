@@ -8,7 +8,7 @@ import {
   ghostIconButton,
 } from '../../lib/styles'
 import { cn } from '../../lib/utils'
-import { findStreamingCommitIndex } from './markdownStreaming'
+import { cachedStreamingMarkdownSplit } from './markdownStreaming'
 
 class MarkdownGuard extends Component<
   { fallback: string; children: React.ReactNode },
@@ -198,18 +198,19 @@ const StreamingCursor = () => (
 )
 
 /** Streaming 时：已稳定部分走 ReactMarkdown，未完成尾巴纯文本。 */
-export function StreamingMarkdown({ text }: { text: string }) {
-  const commitIndex = findStreamingCommitIndex(text)
-  const hasCommit = commitIndex !== -1
+export function StreamingMarkdown({
+  text,
+  cacheKey,
+}: {
+  text: string
+  cacheKey: string
+}) {
+  const split = cachedStreamingMarkdownSplit(cacheKey, text)
+  const hasCommit = split.commitIndex !== -1
 
-  const committed = hasCommit ? text.slice(0, commitIndex + 1) : ''
-  const tail = hasCommit ? text.slice(commitIndex + 1) : text
-
-  const committedLineCount = hasCommit ? committed.split('\n').length : 0
   const cachedCommitted = React.useMemo(
-    () => committed,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [committedLineCount]
+    () => split.committed,
+    [split.committed]
   )
 
   if (!hasCommit) {
@@ -224,8 +225,8 @@ export function StreamingMarkdown({ text }: { text: string }) {
   return (
     <>
       {cachedCommitted ? <MarkdownContent text={cachedCommitted} /> : null}
-      {tail ? (
-        <span className="whitespace-pre-wrap break-words">{tail}</span>
+      {split.tail ? (
+        <span className="whitespace-pre-wrap break-words">{split.tail}</span>
       ) : null}
       <StreamingCursor />
     </>

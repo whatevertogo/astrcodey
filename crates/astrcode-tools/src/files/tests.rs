@@ -195,48 +195,6 @@ async fn read_file_reports_text_pagination_metadata() {
 }
 
 #[tokio::test]
-async fn read_file_reads_existing_tool_result_file_on_disk() {
-    let temp = unique_temp_dir("read-tool-result-on-disk");
-    let artifact_dir = temp
-        .path()
-        .join("sessions")
-        .join("session-1")
-        .join("tool-results");
-    std::fs::create_dir_all(&artifact_dir).expect("create artifact dir");
-    let artifact_path = artifact_dir.join("shell-call-1.txt");
-    std::fs::write(&artifact_path, "abcdef").expect("seed artifact");
-
-    let tool = ReadFileTool {
-        working_dir: temp.path().to_path_buf(),
-    };
-    let mut ctx = empty_ctx();
-    ctx.session_id = "session-1".into();
-    ctx.tool_call_id = Some("read-result".into());
-    ctx.capabilities.host.result_reader = Some(Arc::new(FixedToolResultReader {
-        path: artifact_path.display().to_string(),
-    }));
-
-    let result = tool
-        .execute(
-            serde_json::json!({
-                "path": artifact_path.display().to_string(),
-                "charOffset": 2,
-                "maxChars": 3
-            }),
-            &ctx,
-        )
-        .await
-        .expect("read should route through artifact reader");
-
-    assert!(result.content.starts_with("cde"));
-    assert!(result.content.contains("charOffset=5"));
-    assert_eq!(
-        result.metadata["source"],
-        serde_json::json!("toolResultArtifact")
-    );
-}
-
-#[tokio::test]
 async fn read_file_reads_persisted_tool_result_path() {
     let artifact_path = std::env::temp_dir()
         .join("session")

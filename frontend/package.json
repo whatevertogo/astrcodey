@@ -20,7 +20,8 @@
     "format": "prettier --write .",
     "test:contract": "esbuild src/services/protocol.ts --bundle --format=esm --outfile=../target/frontend-contract/services/protocol.js && node scripts/protocol-contract.test.mjs",
     "test:dev-server": "node scripts/dev-server.test.mjs",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:contract"
+    "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:streaming-cache"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.25",

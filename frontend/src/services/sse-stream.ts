@@ -21,7 +21,6 @@ export async function consumeSseStream(
 ): Promise<'ended' | 'aborted'> {
   const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
   const url = `${getBaseUrl()}/api/sessions/${encodeURIComponent(sessionId)}/stream${params}`
-  console.debug('[sse] connecting', { url, cursor })
 
   let response: Response
   try {
@@ -40,8 +39,6 @@ export async function consumeSseStream(
     console.error('[sse] fetch failed', err)
     throw err
   }
-
-  console.debug('[sse] response', { status: response.status, ok: response.ok })
 
   if (!response.ok) {
     const text = await response.text().catch(() => '')
@@ -79,7 +76,6 @@ export async function consumeSseStream(
           console.warn('[sse] ignored malformed conversation event', payload)
           return
         }
-        console.debug('[sse] event', envelope.delta.kind, envelope.cursor)
         onEnvelope(envelope)
       } catch (err) {
         console.warn('[sse] parse error', err, payload)
