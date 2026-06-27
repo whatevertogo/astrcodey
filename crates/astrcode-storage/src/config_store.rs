@@ -123,6 +123,9 @@ impl ConfigStore for FileConfigStore {
         let overlay_path = PathBuf::from(working_dir)
             .join(".astrcode")
             .join("config.json");
+        if is_same_config_path(&self.path, &overlay_path) {
+            return Ok(None);
+        }
         tokio::task::spawn_blocking(move || {
             if !overlay_path.exists() {
                 return Ok(None);
@@ -200,4 +203,42 @@ fn to_camel_case(s: &str) -> String {
         }
     }
     result
+}
+
+fn is_same_config_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::config::ConfigStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn load_overlay_skips_global_config_when_working_dir_is_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join(".astrcode").join("config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{
+  "version": "1",
+  "activeProfile": "zhipu-coding",
+  "activeModel": "glm-5.2"
+}"#,
+        )
+        .unwrap();
+        let store = FileConfigStore::new(config_path);
+
+        let overlay = store
+            .load_overlay(temp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(overlay.is_none());
+    }
 }
