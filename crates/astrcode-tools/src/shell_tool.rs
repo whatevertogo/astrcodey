@@ -328,7 +328,7 @@ impl ShellTool {
 
         let mut output = render_shell_output(&stdout_capture.text, &stderr_capture.text);
 
-        let meta = foreground_shell_metadata(
+        let mut meta = foreground_shell_metadata(
             &args.command,
             args.intent.as_deref(),
             &shell,
@@ -343,7 +343,21 @@ impl ShellTool {
             output = "(no output)".into();
         }
 
-        let is_error = timed_out || exit != 0;
+        let diagnostic = detect_shell_output_diagnostic(&output);
+        if let Some(diagnostic) = diagnostic {
+            meta.insert("semanticError".into(), serde_json::json!(diagnostic.code()));
+            meta.insert(
+                "semanticErrorMessage".into(),
+                serde_json::json!(diagnostic.message()),
+            );
+            if output == "(no output)" {
+                output = diagnostic.message().to_string();
+            } else {
+                output = format!("{}\n\n{}", diagnostic.message(), output);
+            }
+        }
+
+        let is_error = timed_out || exit != 0 || diagnostic.is_some();
         let error = if timed_out {
             let timeout_msg = format!("shell command timed out after {timeout_secs}s");
             if output == "(no output)" {
@@ -353,6 +367,8 @@ impl ShellTool {
                 output.push_str(&timeout_msg);
             }
             Some(timeout_msg)
+        } else if let Some(diagnostic) = diagnostic {
+            Some(diagnostic.message().to_string())
         } else if exit == 0 {
             None
         } else {
@@ -576,10 +592,23 @@ async fn execute_background_shell_wait(
          inspect earlier output."
             .to_string()
     };
+    let diagnostic = if status.running {
+        None
+    } else {
+        detect_shell_output_diagnostic(&rendered_output)
+    };
     let content = if status.running {
         format!(
             "Shell {shell_id} is still running.\nOutput file: \
              {path}\n\n{output_label}:\n{rendered_output}"
+        )
+    } else if let Some(diagnostic) = diagnostic {
+        format!(
+            "{}\n\nShell {shell_id} finished (status: {}, exit_code: {:?}).\nOutput file: \
+             {path}\n\n{output_label}:\n{rendered_output}",
+            diagnostic.message(),
+            status.status,
+            status.exit_code
         )
     } else {
         format!(
@@ -588,7 +617,8 @@ async fn execute_background_shell_wait(
             status.status, status.exit_code
         )
     };
-    let is_error = matches!(status.status.as_str(), "failed" | "timed_out" | "killed");
+    let is_error =
+        matches!(status.status.as_str(), "failed" | "timed_out" | "killed") || diagnostic.is_some();
     let mut meta = BTreeMap::new();
     meta.insert("shellId".into(), serde_json::json!(shell_id));
     meta.insert("outputPath".into(), serde_json::json!(path));
@@ -618,11 +648,22 @@ async fn execute_background_shell_wait(
     if let Some(code) = status.exit_code {
         meta.insert("exitCode".into(), serde_json::json!(code));
     }
+    if let Some(diagnostic) = diagnostic {
+        meta.insert("semanticError".into(), serde_json::json!(diagnostic.code()));
+        meta.insert(
+            "semanticErrorMessage".into(),
+            serde_json::json!(diagnostic.message()),
+        );
+    }
     Ok(ToolResult {
         call_id: tool_call_id(ctx),
         content,
         is_error,
-        error: is_error.then(|| format!("background shell {}", status.status)),
+        error: if let Some(diagnostic) = diagnostic {
+            Some(diagnostic.message().to_string())
+        } else {
+            is_error.then(|| format!("background shell {}", status.status))
+        },
         metadata: meta,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
     })
@@ -669,6 +710,45 @@ fn stale_background_shell_result(
         metadata: meta,
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
     }
+}
+
+#[derive(Clone, Copy)]
+enum ShellOutputDiagnostic {
+    SudoAuthenticationRequired,
+}
+
+impl ShellOutputDiagnostic {
+    fn code(self) -> &'static str {
+        match self {
+            Self::SudoAuthenticationRequired => "sudo_authentication_required",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SudoAuthenticationRequired => {
+                "Command output indicates sudo authentication failed. Treat this command as failed \
+                 even if the shell exit code was zero, because a pipeline may have hidden the \
+                 original failure. Do not retry with sudo; report the missing privilege or \
+                 dependency as blocked."
+            },
+        }
+    }
+}
+
+fn detect_shell_output_diagnostic(output: &str) -> Option<ShellOutputDiagnostic> {
+    let lower = output.to_ascii_lowercase();
+    let sudo_auth_failed = [
+        "sudo: a terminal is required",
+        "sudo: a password is required",
+        "sudo: no tty present",
+        "sudo: sorry, you must have a tty",
+        "sudo: no askpass program specified",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+
+    sudo_auth_failed.then_some(ShellOutputDiagnostic::SudoAuthenticationRequired)
 }
 
 fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
@@ -1274,6 +1354,22 @@ mod tests {
         }
     }
 
+    fn command_with_sudo_auth_failure_output_and_zero_exit() -> String {
+        match resolve_shell().family {
+            ShellFamily::PowerShell => "Write-Output 'sudo: a terminal is required to read the \
+                                        password'; Write-Output 'sudo: a password is required'; \
+                                        exit 0"
+                .into(),
+            ShellFamily::Cmd => "echo sudo: a terminal is required to read the password & echo \
+                                 sudo: a password is required & exit /b 0"
+                .into(),
+            ShellFamily::Posix | ShellFamily::Wsl => "printf '%s\\n' 'sudo: a terminal is \
+                                                      required to read the password' 'sudo: a \
+                                                      password is required'; exit 0"
+                .into(),
+        }
+    }
+
     #[test]
     fn command_args_match_resolved_shell_family() {
         let command = "echo ok";
@@ -1466,6 +1562,39 @@ mod tests {
         assert_ne!(
             exit_code, 0,
             "exit code should be non-zero, got {exit_code}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_sudo_auth_failure_output_is_error_even_with_zero_exit() {
+        let tool = ShellTool {
+            working_dir: std::env::current_dir().expect("cwd should exist"),
+            timeout_secs: 30,
+        };
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": command_with_sudo_auth_failure_output_and_zero_exit()
+                }),
+                &empty_ctx(),
+            )
+            .await
+            .expect("shell should execute");
+
+        assert!(
+            result.is_error,
+            "sudo auth failure output should be treated as a semantic error: {result:?}"
+        );
+        assert_eq!(result.metadata["exitCode"], serde_json::json!(0));
+        assert_eq!(
+            result.metadata["semanticError"],
+            serde_json::json!("sudo_authentication_required")
+        );
+        assert!(
+            result.content.contains("pipeline may have hidden"),
+            "diagnostic should explain the hidden failure: {}",
+            result.content
         );
     }
 
