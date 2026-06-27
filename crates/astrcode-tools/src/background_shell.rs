@@ -80,9 +80,6 @@ pub async fn wait_background_shell(
     }
 
     let status = read_shell_status(shell_id, &record, max_output_tokens).await?;
-    if !status.running {
-        BackgroundShellRegistry::global().remove_if_same(shell_id, &record);
-    }
     Ok(status)
 }
 
@@ -284,16 +281,6 @@ impl BackgroundShellRegistry {
 
     fn get(&self, shell_id: &str) -> Option<Arc<BackgroundShellRecord>> {
         self.shells.lock().get(shell_id).cloned()
-    }
-
-    fn remove_if_same(&self, shell_id: &str, record: &Arc<BackgroundShellRecord>) {
-        let mut shells = self.shells.lock();
-        let should_remove = shells
-            .get(shell_id)
-            .is_some_and(|current| Arc::ptr_eq(current, record));
-        if should_remove {
-            shells.remove(shell_id);
-        }
     }
 
     fn cleanup_session(&self, session_id: &str) {
@@ -860,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_background_shell_consumes_terminal_record() {
+    async fn wait_background_shell_allows_repeated_terminal_poll_without_error() {
         let temp = tempfile::tempdir().unwrap();
         let shell = astrcode_support::shell::resolve_shell();
         let echo_cmd = match shell.family {
@@ -888,11 +875,14 @@ mod tests {
         assert_eq!(status.status, "completed");
         assert!(status.output.contains("done"));
 
-        let second = wait_background_shell(&spawned.shell_id, 0, None).await;
-        assert!(
-            matches!(&second, Err(ToolError::InvalidArguments(message)) if message.contains("unknown shell_id")),
-            "terminal background shell should be consumed after first completed read: {second:?}"
-        );
+        let second = wait_background_shell(&spawned.shell_id, 0, None)
+            .await
+            .expect("repeated terminal poll should be a status result, not an error");
+        assert!(!second.running);
+        assert_eq!(second.status, "completed");
+        assert_eq!(second.exit_code, Some(0));
+        assert_eq!(second.output, "");
+        assert_eq!(second.output_tokens, 0);
     }
 
     #[tokio::test]

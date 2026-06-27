@@ -84,6 +84,7 @@ impl S5rSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        configure_child_lifetime(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -279,6 +280,28 @@ impl Drop for S5rSession {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+fn configure_child_lifetime(command: &mut Command) {
+    // SAFETY: `pre_exec` runs in the child after fork and before exec. The closure only calls
+    // async-signal-safe libc functions and constructs `last_os_error` on failure as required by
+    // the `pre_exec` contract.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() == 1 {
+                libc::raise(libc::SIGTERM);
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_child_lifetime(_command: &mut Command) {}
 
 fn handle_initialize(
     init: InitializeMsg,

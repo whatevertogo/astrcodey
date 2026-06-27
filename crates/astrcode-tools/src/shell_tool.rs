@@ -546,7 +546,15 @@ async fn execute_background_shell_wait(
     started_at: Instant,
     ctx: &ToolExecutionContext,
 ) -> Result<ToolResult, ToolError> {
-    let status = wait_background_shell(shell_id, block_until_ms, max_output_tokens).await?;
+    let status = match wait_background_shell(shell_id, block_until_ms, max_output_tokens).await {
+        Ok(status) => status,
+        Err(ToolError::InvalidArguments(message)) if is_unknown_background_shell(&message) => {
+            return Ok(stale_background_shell_result(
+                shell_id, message, started_at, ctx,
+            ));
+        },
+        Err(error) => return Err(error),
+    };
     let path = status.output_path.display().to_string();
     let output_label = if status.running {
         "New output"
@@ -620,6 +628,49 @@ async fn execute_background_shell_wait(
     })
 }
 
+fn is_unknown_background_shell(message: &str) -> bool {
+    message.starts_with("unknown shell_id:")
+}
+
+fn stale_background_shell_result(
+    shell_id: &str,
+    message: String,
+    started_at: Instant,
+    ctx: &ToolExecutionContext,
+) -> ToolResult {
+    let content = format!(
+        "Shell {shell_id} is not active in this server process.\nStatus: \
+         unknown_stale_shell_id.\n\nThis usually means the shellId came from an older server \
+         process, an older session, or a session cleanup. The shell is not running here, and \
+         polling this shellId again will not produce output. Stop polling this shellId. If an \
+         earlier shell result showed an output file path, use `read` on that path only if you \
+         still need to inspect saved output."
+    );
+    let mut meta = BTreeMap::new();
+    meta.insert("shellId".into(), serde_json::json!(shell_id));
+    meta.insert("running".into(), serde_json::json!(false));
+    meta.insert("status".into(), serde_json::json!("unknown_stale_shell_id"));
+    meta.insert("hasNewOutput".into(), serde_json::json!(false));
+    meta.insert("outputTruncated".into(), serde_json::json!(false));
+    meta.insert("outputTokens".into(), serde_json::json!(0));
+    meta.insert("returnedOutputTokens".into(), serde_json::json!(0));
+    meta.insert("omittedOutputTokens".into(), serde_json::json!(0));
+    meta.insert(
+        "maxOutputTokens".into(),
+        serde_json::json!(DEFAULT_STATUS_OUTPUT_MAX_TOKENS),
+    );
+    meta.insert("staleShellId".into(), serde_json::json!(true));
+    meta.insert("diagnostic".into(), serde_json::json!(message));
+    ToolResult {
+        call_id: tool_call_id(ctx),
+        content,
+        is_error: false,
+        error: None,
+        metadata: meta,
+        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }
+}
+
 fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
     static DEFINITIONS: OnceLock<Mutex<HashMap<(String, u64), ToolDefinition>>> = OnceLock::new();
     let shell = resolve_shell();
@@ -657,9 +708,11 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "- Background-shell poll output is token-budgeted (default {default_poll_tokens} \
                  tokens, max {max_poll_tokens}); large increments are shown as head+tail previews \
                  with omitted-token counts.\n",
-                "- A completed background shell is returned once through `shellId`; after \
-                 terminal status is observed, use `read` on the output path for any further \
-                 inspection.\n",
+                "- A completed background shell remains queryable through `shellId`; repeated \
+                 polls return completed status with only newly written output, usually none. Stop \
+                 polling once completed unless you need to inspect the output file.\n",
+                "- If a `shellId` is reported as `unknown_stale_shell_id`, it belongs to an older \
+                 server process/session or was cleaned up; stop polling that id.\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
                 "- Set `cwd` instead of using `cd`. Use `stdin` to pipe data.\n",
                 "- Non-zero exit codes produce errors.\n",
@@ -1177,6 +1230,16 @@ mod tests {
         )
     }
 
+    fn ctx_with_session(session_id: &str) -> ToolExecutionContext {
+        ToolExecutionContext::new(
+            session_id.to_string().into(),
+            String::new(),
+            None,
+            None,
+            ToolCapabilities::default(),
+        )
+    }
+
     fn command_with_stderr() -> String {
         match resolve_shell().family {
             ShellFamily::PowerShell => "Write-Output out; [Console]::Error.WriteLine('err')".into(),
@@ -1497,6 +1560,124 @@ mod tests {
                 .await
                 .expect("status query");
         assert_eq!(status.metadata["running"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = format!("sess-repeat-terminal-{}", uuid::Uuid::new_v4());
+        let ctx = ctx_with_session(&session_id);
+        let tool = ShellTool {
+            working_dir: temp.path().to_path_buf(),
+            timeout_secs: 30,
+        };
+        let command: String = match resolve_shell().family {
+            ShellFamily::PowerShell => "Write-Output done".into(),
+            ShellFamily::Cmd => "echo done".into(),
+            ShellFamily::Posix | ShellFamily::Wsl => "echo done".into(),
+        };
+
+        let started = tool
+            .execute(
+                serde_json::json!({
+                    "command": command,
+                    "runInBackground": true,
+                    "intent": "Finish quickly in background"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("background shell should start");
+        let shell_id = started.metadata["shellId"]
+            .as_str()
+            .expect("shellId metadata");
+
+        let final_poll = tool
+            .execute(
+                serde_json::json!({
+                    "shellId": shell_id,
+                    "blockUntilMs": 5_000
+                }),
+                &ctx,
+            )
+            .await
+            .expect("first terminal poll should succeed");
+        assert!(!final_poll.is_error, "{final_poll:?}");
+        assert_eq!(final_poll.metadata["running"], serde_json::json!(false));
+        assert_eq!(
+            final_poll.metadata["status"],
+            serde_json::json!("completed")
+        );
+        assert!(
+            final_poll.content.contains("done"),
+            "first terminal poll should include final output: {}",
+            final_poll.content
+        );
+
+        let repeated_poll = tool
+            .execute(
+                serde_json::json!({
+                    "shellId": shell_id,
+                    "blockUntilMs": 0
+                }),
+                &ctx,
+            )
+            .await
+            .expect("repeated terminal poll should not become unknown shell_id");
+        assert!(!repeated_poll.is_error, "{repeated_poll:?}");
+        assert_eq!(repeated_poll.metadata["running"], serde_json::json!(false));
+        assert_eq!(
+            repeated_poll.metadata["hasNewOutput"],
+            serde_json::json!(false)
+        );
+        assert!(
+            repeated_poll
+                .content
+                .contains("No new output remained when the shell finished"),
+            "repeated poll should tell the model to stop polling: {}",
+            repeated_poll.content
+        );
+
+        crate::background_shell::cleanup_background_shells_for_session(&session_id);
+    }
+
+    #[tokio::test]
+    async fn stale_background_shell_id_returns_terminal_status_instead_of_tool_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = ShellTool {
+            working_dir: temp.path().to_path_buf(),
+            timeout_secs: 30,
+        };
+        let stale_shell_id = format!("stale-{}", uuid::Uuid::new_v4());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "shellId": stale_shell_id,
+                    "blockUntilMs": 0
+                }),
+                &ctx_with_session("sess-stale-shell-id"),
+            )
+            .await
+            .expect("stale shellId should be a terminal status result");
+
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(result.metadata["running"], serde_json::json!(false));
+        assert_eq!(
+            result.metadata["status"],
+            serde_json::json!("unknown_stale_shell_id")
+        );
+        assert_eq!(result.metadata["staleShellId"], serde_json::json!(true));
+        assert!(
+            result.content.contains("Stop polling this shellId"),
+            "stale shellId response must tell the model to stop: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Invalid arguments"),
+            "stale shellId should not be framed as a parameter error: {}",
+            result.content
+        );
     }
 
     #[tokio::test]

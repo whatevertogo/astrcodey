@@ -486,6 +486,7 @@ dependencies = [
  "astrcode-support",
  "async-trait",
  "dirs",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
