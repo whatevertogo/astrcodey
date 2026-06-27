@@ -23,8 +23,9 @@ use tokio::{
 
 use crate::{
     background_shell::{
-        AdoptBackgroundShellParams, BackgroundShellSpawnParams, adopt_running_shell,
-        append_shell_output, spawn_background_shell, wait_background_shell,
+        AdoptBackgroundShellParams, BackgroundShellSpawnParams, DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
+        MAX_STATUS_OUTPUT_MAX_TOKENS, adopt_running_shell, append_shell_output,
+        spawn_background_shell, wait_background_shell,
     },
     files::tool_call_id,
 };
@@ -65,7 +66,7 @@ struct ShellArgs {
     /// 通过 stdin 传入命令的输入数据。
     #[serde(default)]
     stdin: Option<String>,
-    /// 为 true 时在后台运行，立即返回 `shellId`；完成后通过会话注入通知 agent。
+    /// 为 true 时在后台运行，立即返回 `shellId`；之后通过 `shellId` 查询增量输出。
     #[serde(default)]
     run_in_background: Option<bool>,
     /// 已有后台 shell 的 id；提供时忽略 `command`，用于等待或查询状态。
@@ -74,6 +75,9 @@ struct ShellArgs {
     /// 与 `shellId` 联用：最多阻塞等待的毫秒数（0 表示立即返回当前状态）。
     #[serde(default, rename = "blockUntilMs")]
     block_until_ms: Option<u64>,
+    /// 与 `shellId` 联用：本次增量输出预览的 token 预算。
+    #[serde(default, rename = "maxOutputTokens")]
+    max_output_tokens: Option<usize>,
 }
 
 #[async_trait::async_trait]
@@ -129,10 +133,17 @@ impl Tool for ShellTool {
             return execute_background_shell_wait(
                 shell_id,
                 args.block_until_ms.unwrap_or(0),
+                args.max_output_tokens,
                 started_at,
                 ctx,
             )
             .await;
+        }
+
+        if args.max_output_tokens.is_some() {
+            return Err(ToolError::InvalidArguments(
+                "maxOutputTokens can only be used with shellId background-shell polling".into(),
+            ));
         }
 
         if args.run_in_background == Some(true) {
@@ -403,17 +414,9 @@ impl ShellTool {
         let adopted = match adopt_running_shell(
             AdoptBackgroundShellParams {
                 session_id: ctx.session_id.to_string(),
-                tool_call_id: ctx.tool_call_id.clone(),
-                command: command.to_string(),
-                intent: args.intent.clone(),
-                cwd: cwd.to_path_buf(),
-                shell: shell.clone(),
                 timeout_secs: remaining_timeout,
-                store_dir: ctx.capabilities.paths.store_dir.clone(),
-                session_ops: ctx.capabilities.session.ops.clone(),
                 shell_id: shell_id.clone(),
                 output_path: output_path.clone(),
-                description: description.clone(),
                 child: child
                     .take()
                     .ok_or_else(|| ToolError::Execution("child already taken".into()))?,
@@ -447,8 +450,8 @@ impl ShellTool {
         };
         let content = format!(
             "{reason_note}\nBackground shell started (shell_id: {}).\nOutput file: {path}\nYou \
-             will be notified when the command completes. Do not poll; use `read` on this path \
-             only if you need partial output before completion.",
+             can check it with `shellId` and optional `blockUntilMs`. Use `read` on this path \
+             only when you need more output than the status result returns.",
             adopted.shell_id
         );
         let mut meta = BTreeMap::new();
@@ -502,21 +505,19 @@ impl ShellTool {
         let command = preprocess_shell_command(&args.command, &shell);
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
             session_id: ctx.session_id.to_string(),
-            tool_call_id: ctx.tool_call_id.clone(),
             command,
             intent: args.intent.clone(),
             cwd,
             shell,
             timeout_secs,
             store_dir: ctx.capabilities.paths.store_dir.clone(),
-            session_ops: ctx.capabilities.session.ops.clone(),
         })
         .await?;
         let path = spawned.output_path.display().to_string();
         let content = format!(
             "Background shell started (shell_id: {}).\nOutput is being written to: {path}\nYou \
-             will be notified when the command completes. Do not poll; use `read` on this path \
-             only if you need partial output before completion.",
+             can check it with `shellId` and optional `blockUntilMs`. Use `read` on this path \
+             only when you need more output than the status result returns.",
             spawned.shell_id
         );
         let mut meta = BTreeMap::new();
@@ -541,21 +542,42 @@ impl ShellTool {
 async fn execute_background_shell_wait(
     shell_id: &str,
     block_until_ms: u64,
+    max_output_tokens: Option<usize>,
     started_at: Instant,
     ctx: &ToolExecutionContext,
 ) -> Result<ToolResult, ToolError> {
-    let status = wait_background_shell(shell_id, block_until_ms).await?;
+    let status = wait_background_shell(shell_id, block_until_ms, max_output_tokens).await?;
     let path = status.output_path.display().to_string();
+    let output_label = if status.running {
+        "New output"
+    } else {
+        "Final output"
+    };
+    let output = if status.output.trim().is_empty() {
+        "(no new output)".to_string()
+    } else {
+        status.output
+    };
+    let has_new_output = output != "(no new output)";
+    let rendered_output = if has_new_output {
+        output
+    } else if status.running {
+        "No new output since the previous background-shell poll.".to_string()
+    } else {
+        "No new output remained when the shell finished. Read the output file only if you need to \
+         inspect earlier output."
+            .to_string()
+    };
     let content = if status.running {
         format!(
-            "Shell {shell_id} is still running.\nOutput file: {path}\n\nRecent output:\n{}",
-            status.tail
+            "Shell {shell_id} is still running.\nOutput file: \
+             {path}\n\n{output_label}:\n{rendered_output}"
         )
     } else {
         format!(
             "Shell {shell_id} finished (status: {}, exit_code: {:?}).\nOutput file: \
-             {path}\n\nOutput tail:\n{}",
-            status.status, status.exit_code, status.tail
+             {path}\n\n{output_label}:\n{rendered_output}",
+            status.status, status.exit_code
         )
     };
     let is_error = matches!(status.status.as_str(), "failed" | "timed_out" | "killed");
@@ -563,6 +585,27 @@ async fn execute_background_shell_wait(
     meta.insert("shellId".into(), serde_json::json!(shell_id));
     meta.insert("outputPath".into(), serde_json::json!(path));
     meta.insert("running".into(), serde_json::json!(status.running));
+    meta.insert(
+        "outputTruncated".into(),
+        serde_json::json!(status.output_truncated),
+    );
+    meta.insert("hasNewOutput".into(), serde_json::json!(has_new_output));
+    meta.insert(
+        "outputTokens".into(),
+        serde_json::json!(status.output_tokens),
+    );
+    meta.insert(
+        "returnedOutputTokens".into(),
+        serde_json::json!(status.returned_output_tokens),
+    );
+    meta.insert(
+        "omittedOutputTokens".into(),
+        serde_json::json!(status.omitted_output_tokens),
+    );
+    meta.insert(
+        "maxOutputTokens".into(),
+        serde_json::json!(status.max_output_tokens),
+    );
     meta.insert("status".into(), serde_json::json!(status.status));
     if let Some(code) = status.exit_code {
         meta.insert("exitCode".into(), serde_json::json!(code));
@@ -604,15 +647,19 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                  for output.\n",
                 "- One-shot foreground timeout up to 600s (default {timeout_secs}s); background \
                  up to 600s.\n",
-                "- Long-running commands: `runInBackground` returns immediately; you are notified \
-                 on completion (do not poll). Output is written under session \
-                 background-shells/.\n",
+                "- Long-running commands: `runInBackground` returns immediately with a `shellId`. \
+                 Check it later with `shellId` and optional `blockUntilMs`; output is written \
+                 under session background-shells/.\n",
                 "- Foreground commands still running after ~30s may be auto-moved to background \
-                 (same as `runInBackground`); you are notified on completion.\n",
+                 (same as `runInBackground`) and can be checked with the returned `shellId`.\n",
                 "- Poll/wait on a background shell with `shellId` and optional `blockUntilMs` (0 \
-                 = status only).\n",
-                "- When you receive a `<background-shell-notification>`, the command output is in \
-                 `<output>`; use Read on `<output-file>` only if truncated or you need more.\n",
+                 = status only). Each poll returns only output written since the previous poll.\n",
+                "- Background-shell poll output is token-budgeted (default {default_poll_tokens} \
+                 tokens, max {max_poll_tokens}); large increments are shown as head+tail previews \
+                 with omitted-token counts.\n",
+                "- A completed background shell is returned once through `shellId`; after \
+                 terminal status is observed, use `read` on the output path for any further \
+                 inspection.\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
                 "- Set `cwd` instead of using `cd`. Use `stdin` to pipe data.\n",
                 "- Non-zero exit codes produce errors.\n",
@@ -623,6 +670,8 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
             ),
             shell = shell.name,
             timeout_secs = timeout_secs,
+            default_poll_tokens = DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
+            max_poll_tokens = MAX_STATUS_OUTPUT_MAX_TOKENS,
         ),
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
@@ -650,16 +699,22 @@ fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 },
                 "runInBackground": {
                     "type": "boolean",
-                    "description": "Run in background when the command may take more than ~30s (builds, scans, sleep). Returns shellId immediately; completion is delivered via session notification."
+                    "description": "Run in background when the command may take more than ~30s (builds, scans, sleep). Returns shellId immediately; use shellId to poll for incremental output and final status."
                 },
                 "shellId": {
                     "type": "string",
-                    "description": "Existing background shell id. Omit command; use with blockUntilMs to wait."
+                    "description": "Existing background shell id. Omit command; returns output written since the previous poll plus current status."
                 },
                 "blockUntilMs": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "With shellId: max ms to block waiting for completion (0 = immediate status)."
+                    "description": "With shellId: max ms to wait for new output or completion (0 = immediate status)."
+                },
+                "maxOutputTokens": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": MAX_STATUS_OUTPUT_MAX_TOKENS,
+                    "description": "With shellId only: token budget for this poll's incremental output preview. Defaults to 10000, matching Codex unified exec. Large increments return a head+tail preview with omittedOutputTokens metadata."
                 }
             },
             "required": [],
@@ -936,6 +991,7 @@ async fn capture_stream_with_background_transfer(
     let mut file_path: Option<PathBuf> = None;
     let mut file_kept = 0usize;
     let mut file_truncated = false;
+    let mut stderr_marker_written = false;
     let mut draining = false;
 
     loop {
@@ -948,10 +1004,11 @@ async fn capture_stream_with_background_transfer(
                     .clone()
             };
             if let Some(path) = activated_path {
-                if is_stderr {
-                    let _ = append_shell_output(&path, b"\n--- STDERR ---\n").await;
-                }
                 if !output.text.is_empty() {
+                    if is_stderr {
+                        let _ = append_shell_output(&path, b"\n--- STDERR ---\n").await;
+                        stderr_marker_written = true;
+                    }
                     let _ = append_shell_output(path.as_path(), output.text.as_bytes()).await;
                     file_kept += output.text.len();
                 }
@@ -997,6 +1054,15 @@ async fn capture_stream_with_background_transfer(
                 n
             };
             if take > 0 {
+                if is_stderr && !stderr_marker_written {
+                    if append_shell_output(path.as_path(), b"\n--- STDERR ---\n")
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    stderr_marker_written = true;
+                }
                 if append_shell_output(path.as_path(), &chunk[..take])
                     .await
                     .is_err()
@@ -1427,7 +1493,7 @@ mod tests {
         assert!(result.content.contains(shell_id));
 
         let status =
-            super::execute_background_shell_wait(shell_id, 0, Instant::now(), &empty_ctx())
+            super::execute_background_shell_wait(shell_id, 0, None, Instant::now(), &empty_ctx())
                 .await
                 .expect("status query");
         assert_eq!(status.metadata["running"], serde_json::json!(true));
@@ -1495,6 +1561,28 @@ mod tests {
         assert!(
             msg.contains("cannot specify both shellId and runInBackground"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_output_tokens_requires_shell_id() {
+        let tool = ShellTool {
+            working_dir: std::env::current_dir().expect("cwd should exist"),
+            timeout_secs: 30,
+        };
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "echo hi",
+                    "maxOutputTokens": 256,
+                }),
+                &empty_ctx(),
+            )
+            .await;
+        let err = result.expect_err("maxOutputTokens without shellId should fail");
+        assert!(
+            err.to_string().contains("maxOutputTokens can only be used"),
+            "unexpected error: {err}"
         );
     }
 }

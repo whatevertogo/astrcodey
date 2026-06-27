@@ -1,4 +1,4 @@
-//! 后台 shell 任务：长命令脱离当前 tool 调用，输出写入 session 目录，完成后注入通知。
+//! 后台 shell 任务：长命令脱离当前 tool 调用，输出写入 session 目录，由 shellId 查询状态。
 
 use std::{
     collections::HashMap,
@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use astrcode_core::tool::{SessionAccess, SessionOperations, ToolError};
+use astrcode_core::tool::ToolError;
 use astrcode_support::shell::ShellInfo;
 use parking_lot::Mutex;
 use tokio::{
@@ -24,8 +24,14 @@ use crate::shell_tool::{
 
 const BACKGROUND_SHELLS_DIR: &str = "background-shells";
 
-/// 完成通知内嵌的输出上限（字节）；更大文件仍可通过 `<output-file>` 用 read 分页读取。
-const NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+/// 单次状态查询默认返回的新输出 token 预算（粗略按 4 chars ≈ 1 token 估算）。
+///
+/// 与 Codex unified exec 的默认 `max_output_tokens` 对齐；完整输出仍写入
+/// `output_path`，需要更多上下文时用 read 分页读取。
+pub const DEFAULT_STATUS_OUTPUT_MAX_TOKENS: usize = 10_000;
+/// 防止单次后台 shell 查询挤爆上下文；完整输出可通过 output_path 用 read 分页读取。
+pub const MAX_STATUS_OUTPUT_MAX_TOKENS: usize = 20_000;
+const MIN_STATUS_OUTPUT_MAX_TOKENS: usize = 256;
 
 /// session 销毁时终止该 session 下所有后台 shell。
 pub fn cleanup_background_shells_for_session(session_id: &str) {
@@ -53,17 +59,9 @@ pub async fn adopt_running_shell(
 /// 收编已在运行的前台 shell 时的参数（输出文件与 header 由调用方预先写好）。
 pub struct AdoptBackgroundShellParams {
     pub session_id: String,
-    pub tool_call_id: Option<String>,
-    pub command: String,
-    pub intent: Option<String>,
-    pub cwd: PathBuf,
-    pub shell: ShellInfo,
     pub timeout_secs: u64,
-    pub store_dir: Option<PathBuf>,
-    pub session_ops: Option<Arc<dyn SessionOperations>>,
     pub shell_id: String,
     pub output_path: PathBuf,
-    pub description: String,
     pub child: Child,
 }
 
@@ -71,34 +69,62 @@ pub struct AdoptBackgroundShellParams {
 pub async fn wait_background_shell(
     shell_id: &str,
     block_until_ms: u64,
+    max_output_tokens: Option<usize>,
 ) -> Result<BackgroundShellStatus, ToolError> {
     let record = BackgroundShellRegistry::global()
         .get(shell_id)
         .ok_or_else(|| ToolError::InvalidArguments(format!("unknown shell_id: {shell_id}")))?;
 
     if *record.status.lock() == ShellRunStatus::Running && block_until_ms > 0 {
-        let notified = record.done.notified();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(block_until_ms.min(600_000)),
-            notified,
-        )
-        .await;
+        wait_for_output_or_completion(&record, block_until_ms.min(600_000)).await;
     }
 
-    read_shell_status(shell_id, &record).await
+    let status = read_shell_status(shell_id, &record, max_output_tokens).await?;
+    if !status.running {
+        BackgroundShellRegistry::global().remove_if_same(shell_id, &record);
+    }
+    Ok(status)
+}
+
+async fn wait_for_output_or_completion(record: &BackgroundShellRecord, block_until_ms: u64) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(block_until_ms);
+    loop {
+        if *record.status.lock() != ShellRunStatus::Running {
+            return;
+        }
+        if has_unread_output(record).await {
+            return;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let sleep_for = (deadline - now).min(std::time::Duration::from_millis(100));
+        let notified = record.done.notified();
+        tokio::select! {
+            _ = notified => return,
+            _ = tokio::time::sleep(sleep_for) => {}
+        }
+    }
+}
+
+async fn has_unread_output(record: &BackgroundShellRecord) -> bool {
+    let Ok(len) = file_len(&record.output_path).await else {
+        return false;
+    };
+    len > *record.read_offset.lock()
 }
 
 #[derive(Clone)]
 pub struct BackgroundShellSpawnParams {
     pub session_id: String,
-    pub tool_call_id: Option<String>,
     pub command: String,
     pub intent: Option<String>,
     pub cwd: PathBuf,
     pub shell: ShellInfo,
     pub timeout_secs: u64,
     pub store_dir: Option<PathBuf>,
-    pub session_ops: Option<Arc<dyn SessionOperations>>,
 }
 
 pub struct SpawnedBackgroundShell {
@@ -115,12 +141,18 @@ enum ShellRunStatus {
     Killed,
 }
 
+#[derive(Debug)]
 pub struct BackgroundShellStatus {
     pub shell_id: String,
     pub output_path: PathBuf,
     pub status: String,
     pub exit_code: Option<i32>,
-    pub tail: String,
+    pub output: String,
+    pub output_truncated: bool,
+    pub output_tokens: usize,
+    pub returned_output_tokens: usize,
+    pub omitted_output_tokens: usize,
+    pub max_output_tokens: usize,
     pub running: bool,
 }
 
@@ -128,11 +160,9 @@ struct BackgroundShellRecord {
     session_id: String,
     shell_id: String,
     output_path: PathBuf,
-    description: String,
-    tool_call_id: Option<String>,
-    session_ops: Option<Arc<dyn SessionOperations>>,
     status: Mutex<ShellRunStatus>,
     exit_code: Mutex<Option<i32>>,
+    read_offset: Mutex<u64>,
     child: Mutex<Option<Child>>,
     done: Notify,
 }
@@ -166,7 +196,7 @@ impl BackgroundShellRegistry {
             .cloned()
             .unwrap_or_else(|| truncate_command(&params.command));
 
-        write_file_header(&output_path, &params, &shell_id, &description).await?;
+        let read_offset = write_file_header(&output_path, &params, &shell_id, &description).await?;
 
         let command_args = command_args(&params.shell, &params.command);
         let mut command = Command::new(&params.shell.path);
@@ -196,11 +226,9 @@ impl BackgroundShellRegistry {
             session_id: params.session_id.clone(),
             shell_id: shell_id.clone(),
             output_path: output_path.clone(),
-            description,
-            tool_call_id: params.tool_call_id.clone(),
-            session_ops: params.session_ops.clone(),
             status: Mutex::new(ShellRunStatus::Running),
             exit_code: Mutex::new(None),
+            read_offset: Mutex::new(read_offset),
             child: Mutex::new(Some(child)),
             done: Notify::new(),
         });
@@ -227,15 +255,14 @@ impl BackgroundShellRegistry {
     ) -> Result<SpawnedBackgroundShell, ToolError> {
         let shell_id = params.shell_id;
         let output_path = params.output_path.clone();
+        let read_offset = file_len(&output_path).await.unwrap_or(0);
         let record = Arc::new(BackgroundShellRecord {
             session_id: params.session_id.clone(),
             shell_id: shell_id.clone(),
             output_path: output_path.clone(),
-            description: params.description.clone(),
-            tool_call_id: params.tool_call_id.clone(),
-            session_ops: params.session_ops.clone(),
             status: Mutex::new(ShellRunStatus::Running),
             exit_code: Mutex::new(None),
+            read_offset: Mutex::new(read_offset),
             child: Mutex::new(Some(params.child)),
             done: Notify::new(),
         });
@@ -257,6 +284,16 @@ impl BackgroundShellRegistry {
 
     fn get(&self, shell_id: &str) -> Option<Arc<BackgroundShellRecord>> {
         self.shells.lock().get(shell_id).cloned()
+    }
+
+    fn remove_if_same(&self, shell_id: &str, record: &Arc<BackgroundShellRecord>) {
+        let mut shells = self.shells.lock();
+        let should_remove = shells
+            .get(shell_id)
+            .is_some_and(|current| Arc::ptr_eq(current, record));
+        if should_remove {
+            shells.remove(shell_id);
+        }
     }
 
     fn cleanup_session(&self, session_id: &str) {
@@ -317,10 +354,6 @@ async fn run_background_shell(
     let _ = out_h.await;
     let _ = err_h.await;
 
-    *record.exit_code.lock() = exit_code;
-    *record.status.lock() = run_status;
-    record.done.notify_waiters();
-
     let footer = format_footer(run_status, exit_code);
     if let Err(e) = append_bytes(&record.output_path, footer.as_bytes()).await {
         tracing::warn!(
@@ -330,7 +363,7 @@ async fn run_background_shell(
         );
     }
 
-    notify_completion(&record, run_status, exit_code).await;
+    publish_completion(&record, run_status, exit_code);
 }
 
 async fn run_adopted_background_shell(
@@ -370,10 +403,6 @@ async fn run_adopted_background_shell(
     let _ = stdout_join.await;
     let _ = stderr_join.await;
 
-    *record.exit_code.lock() = exit_code;
-    *record.status.lock() = run_status;
-    record.done.notify_waiters();
-
     let footer = format_footer(run_status, exit_code);
     if let Err(e) = append_bytes(&record.output_path, footer.as_bytes()).await {
         tracing::warn!(
@@ -383,130 +412,17 @@ async fn run_adopted_background_shell(
         );
     }
 
-    notify_completion(&record, run_status, exit_code).await;
+    publish_completion(&record, run_status, exit_code);
 }
 
-async fn notify_completion(
+fn publish_completion(
     record: &BackgroundShellRecord,
-    status: ShellRunStatus,
+    run_status: ShellRunStatus,
     exit_code: Option<i32>,
 ) {
-    let Some(ops) = record.session_ops.as_ref() else {
-        return;
-    };
-    let access = SessionAccess::same(record.session_id.as_str());
-    let (output_body, output_truncated) = match read_notification_output(&record.output_path).await
-    {
-        Ok(v) => v,
-        Err(e) => (
-            format!("[failed to read background shell output: {e}]"),
-            false,
-        ),
-    };
-    let message = format_completion_notification(
-        &record.shell_id,
-        record.tool_call_id.as_deref(),
-        &record.output_path,
-        &record.description,
-        status,
-        exit_code,
-        &output_body,
-        output_truncated,
-    );
-    if let Err(e) = ops.inject_message(access, message).await {
-        tracing::warn!(
-            session_id = %record.session_id,
-            error = %e,
-            "failed to inject background shell completion notification"
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn format_completion_notification(
-    shell_id: &str,
-    tool_call_id: Option<&str>,
-    output_path: &Path,
-    description: &str,
-    status: ShellRunStatus,
-    exit_code: Option<i32>,
-    output_body: &str,
-    output_truncated: bool,
-) -> String {
-    let exit_note = match exit_code {
-        Some(code) => format!(" (exit code {code})"),
-        None if status == ShellRunStatus::TimedOut => " (timed out)".into(),
-        None => String::new(),
-    };
-    let status_word = match status {
-        ShellRunStatus::Completed => "completed",
-        ShellRunStatus::Failed => "failed",
-        ShellRunStatus::TimedOut => "timed out",
-        ShellRunStatus::Killed => "was stopped",
-        ShellRunStatus::Running => "running",
-    };
-    let exit_code_line = match exit_code {
-        Some(code) => format!("\n<exit-code>{code}</exit-code>"),
-        None => String::new(),
-    };
-    let tool_call_line = tool_call_id
-        .map(|id| format!("\n<tool-call-id>{id}</tool-call-id>"))
-        .unwrap_or_default();
-    let output_truncated_line = if output_truncated {
-        format!(
-            "\n<output-truncated>Showing last {NOTIFICATION_OUTPUT_MAX_BYTES} bytes; use Read on \
-             output-file for full content.</output-truncated>"
-        )
-    } else {
-        String::new()
-    };
-    let output_section = if output_body.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n<output>{cdata}</output>{output_truncated_line}",
-            cdata = wrap_output_cdata(output_body),
-        )
-    };
-    format!(
-        concat!(
-            "<background-shell-notification>\n",
-            "<shell-id>{shell_id}</shell-id>{tool_call_line}\n",
-            "<output-file>{path}</output-file>\n",
-            "<status>{status_word}</status>{exit_code_line}{output_section}\n",
-            "<summary>Background command \"{description}\" {status_word}{exit_note}</summary>\n",
-            "</background-shell-notification>"
-        ),
-        shell_id = shell_id,
-        tool_call_line = tool_call_line,
-        path = output_path.display(),
-        status_word = status_word,
-        exit_code_line = exit_code_line,
-        output_section = output_section,
-        description = description,
-        exit_note = exit_note,
-    )
-}
-
-async fn read_notification_output(path: &Path) -> Result<(String, bool), ToolError> {
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| ToolError::Execution(format!("read background shell output: {e}")))?;
-    let truncated = bytes.len() > NOTIFICATION_OUTPUT_MAX_BYTES;
-    let start = bytes.len().saturating_sub(NOTIFICATION_OUTPUT_MAX_BYTES);
-    Ok((
-        String::from_utf8_lossy(&bytes[start..]).into_owned(),
-        truncated,
-    ))
-}
-
-/// 将任意 shell 输出包进 CDATA，避免 `</output>` 或 `<` 破坏通知结构。
-fn wrap_output_cdata(text: &str) -> String {
-    if !text.contains("]]>") {
-        return format!("<![CDATA[\n{text}\n]]>");
-    }
-    let escaped = text.replace("]]>", "]]]]><![CDATA[>");
-    format!("<![CDATA[\n{escaped}\n]]>")
+    *record.exit_code.lock() = exit_code;
+    *record.status.lock() = run_status;
+    record.done.notify_waiters();
 }
 
 fn kill_record(record: &BackgroundShellRecord) {
@@ -552,7 +468,7 @@ async fn write_file_header(
     params: &BackgroundShellSpawnParams,
     shell_id: &str,
     description: &str,
-) -> Result<(), ToolError> {
+) -> Result<u64, ToolError> {
     let header = format!(
         "---\nshell_id: {shell_id}\ncommand: {}\ndescription: {}\ncwd: {}\nshell: {}\n---\n\n",
         params.command.replace('\n', " "),
@@ -562,7 +478,8 @@ async fn write_file_header(
     );
     tokio::fs::write(path, header.as_bytes())
         .await
-        .map_err(|e| ToolError::Execution(format!("write background shell header: {e}")))
+        .map_err(|e| ToolError::Execution(format!("write background shell header: {e}")))?;
+    Ok(header.len() as u64)
 }
 
 fn format_footer(status: ShellRunStatus, exit_code: Option<i32>) -> String {
@@ -580,15 +497,10 @@ fn format_footer(status: ShellRunStatus, exit_code: Option<i32>) -> String {
 }
 
 async fn stream_to_file(mut stream: impl AsyncRead + Unpin, path: PathBuf, is_stderr: bool) {
-    if is_stderr {
-        let marker = b"\n--- STDERR ---\n";
-        if append_bytes(&path, marker).await.is_err() {
-            return;
-        }
-    }
     let mut buf = [0u8; 8192];
     let mut kept = 0usize;
     let mut truncated = false;
+    let mut stderr_marker_written = false;
     while let Ok(n) = stream.read(&mut buf).await {
         if n == 0 {
             break;
@@ -603,6 +515,12 @@ async fn stream_to_file(mut stream: impl AsyncRead + Unpin, path: PathBuf, is_st
             n
         };
         if take > 0 {
+            if is_stderr && !stderr_marker_written {
+                if append_bytes(&path, b"\n--- STDERR ---\n").await.is_err() {
+                    break;
+                }
+                stderr_marker_written = true;
+            }
             if append_bytes(&path, &buf[..take]).await.is_err() {
                 break;
             }
@@ -631,9 +549,14 @@ async fn append_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+async fn file_len(path: &Path) -> std::io::Result<u64> {
+    Ok(tokio::fs::metadata(path).await?.len())
+}
+
 async fn read_shell_status(
     shell_id: &str,
     record: &BackgroundShellRecord,
+    max_output_tokens: Option<usize>,
 ) -> Result<BackgroundShellStatus, ToolError> {
     let status = *record.status.lock();
     let exit_code = *record.exit_code.lock();
@@ -644,23 +567,117 @@ async fn read_shell_status(
         ShellRunStatus::TimedOut => ("timed_out", false),
         ShellRunStatus::Killed => ("killed", false),
     };
-    let tail = tail_of_file(&record.output_path, 32 * 1024).await?;
+    let preview = read_new_output(record, max_output_tokens).await?;
     Ok(BackgroundShellStatus {
         shell_id: shell_id.to_string(),
         output_path: record.output_path.clone(),
         status: status_str.into(),
         exit_code,
-        tail,
+        output: preview.content,
+        output_truncated: preview.truncated,
+        output_tokens: preview.original_tokens,
+        returned_output_tokens: preview.returned_tokens,
+        omitted_output_tokens: preview.omitted_tokens,
+        max_output_tokens: preview.max_tokens,
         running,
     })
 }
 
-async fn tail_of_file(path: &Path, max_bytes: usize) -> Result<String, ToolError> {
-    let bytes = tokio::fs::read(path)
+struct OutputPreview {
+    content: String,
+    truncated: bool,
+    original_tokens: usize,
+    returned_tokens: usize,
+    omitted_tokens: usize,
+    max_tokens: usize,
+}
+
+async fn read_new_output(
+    record: &BackgroundShellRecord,
+    max_output_tokens: Option<usize>,
+) -> Result<OutputPreview, ToolError> {
+    let bytes = tokio::fs::read(&record.output_path)
         .await
         .map_err(|e| ToolError::Execution(format!("read background shell output: {e}")))?;
-    let start = bytes.len().saturating_sub(max_bytes);
-    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
+    let mut offset = record.read_offset.lock();
+    let start = (*offset as usize).min(bytes.len());
+    *offset = bytes.len() as u64;
+    drop(offset);
+
+    let unread = String::from_utf8_lossy(&bytes[start..]).into_owned();
+    Ok(preview_output_by_tokens(&unread, max_output_tokens))
+}
+
+fn preview_output_by_tokens(content: &str, max_output_tokens: Option<usize>) -> OutputPreview {
+    let max_tokens = normalize_status_output_max_tokens(max_output_tokens);
+    let original_tokens = estimate_text_tokens(content);
+    if original_tokens <= max_tokens {
+        return OutputPreview {
+            content: content.to_string(),
+            truncated: false,
+            original_tokens,
+            returned_tokens: original_tokens,
+            omitted_tokens: 0,
+            max_tokens,
+        };
+    }
+
+    let max_chars = max_tokens.saturating_mul(4);
+    let marker_reserve_chars = 512.min(max_chars / 3);
+    let content_budget_chars = max_chars.saturating_sub(marker_reserve_chars).max(64);
+    let head_chars = (content_budget_chars / 4).max(32);
+    let tail_chars = content_budget_chars.saturating_sub(head_chars).max(32);
+    let total_chars = content.chars().count();
+
+    let head = take_chars(content, head_chars);
+    let tail = take_last_chars(content, tail_chars);
+    let kept_chars = head.chars().count().saturating_add(tail.chars().count());
+    let omitted_chars = total_chars.saturating_sub(kept_chars);
+    let omitted_tokens = estimate_char_tokens(omitted_chars);
+    let marker = format!(
+        "\n\n[... background shell output truncated: omitted about {omitted_tokens} tokens from \
+         this poll; full output is available in the output file ...]\n\n"
+    );
+    let preview = format!("{head}{marker}{tail}");
+    let returned_tokens = estimate_text_tokens(&preview);
+
+    OutputPreview {
+        content: preview,
+        truncated: true,
+        original_tokens,
+        returned_tokens,
+        omitted_tokens,
+        max_tokens,
+    }
+}
+
+fn normalize_status_output_max_tokens(max_output_tokens: Option<usize>) -> usize {
+    max_output_tokens
+        .unwrap_or(DEFAULT_STATUS_OUTPUT_MAX_TOKENS)
+        .clamp(MIN_STATUS_OUTPUT_MAX_TOKENS, MAX_STATUS_OUTPUT_MAX_TOKENS)
+}
+
+fn estimate_text_tokens(text: &str) -> usize {
+    let chars = text.chars().count();
+    if chars == 0 {
+        0
+    } else {
+        estimate_char_tokens(chars)
+    }
+}
+
+fn estimate_char_tokens(chars: usize) -> usize {
+    chars.div_ceil(4)
+}
+
+fn take_chars(text: &str, count: usize) -> String {
+    text.chars().take(count).collect()
+}
+
+fn take_last_chars(text: &str, count: usize) -> String {
+    let mut chars: Vec<char> = text.chars().rev().take(count).collect();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -685,7 +702,6 @@ mod tests {
     fn resolve_output_dir_uses_store_dir_when_provided() {
         let params = BackgroundShellSpawnParams {
             session_id: "test".into(),
-            tool_call_id: None,
             command: "echo hi".into(),
             intent: None,
             cwd: PathBuf::from("/tmp"),
@@ -696,7 +712,6 @@ mod tests {
             },
             timeout_secs: 30,
             store_dir: Some(PathBuf::from("/data/sessions/abc")),
-            session_ops: None,
         };
         let dir = resolve_output_dir(&params).unwrap();
         assert_eq!(dir, PathBuf::from("/data/sessions/abc/background-shells"));
@@ -706,7 +721,6 @@ mod tests {
     fn resolve_output_dir_falls_back_to_cwd_astrcode() {
         let params = BackgroundShellSpawnParams {
             session_id: "test".into(),
-            tool_call_id: None,
             command: "echo hi".into(),
             intent: None,
             cwd: PathBuf::from("/tmp"),
@@ -717,62 +731,9 @@ mod tests {
             },
             timeout_secs: 30,
             store_dir: None,
-            session_ops: None,
         };
         let dir = resolve_output_dir(&params).unwrap();
         assert_eq!(dir, PathBuf::from("/tmp/.astrcode/background-shells"));
-    }
-
-    #[test]
-    fn format_completion_notification_includes_output() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("out.txt");
-        let msg = format_completion_notification(
-            "shell-abc",
-            Some("call-1"),
-            &path,
-            "demo",
-            ShellRunStatus::Completed,
-            Some(0),
-            "计数: 1\n完成！",
-            false,
-        );
-        assert!(msg.contains("<shell-id>shell-abc</shell-id>"));
-        assert!(msg.contains("<tool-call-id>call-1</tool-call-id>"));
-        assert!(msg.contains("</tool-call-id>\n<output-file>"));
-        assert!(!msg.contains("n<output-file>"));
-        assert!(msg.contains("<status>completed</status>"));
-        assert!(msg.contains("<exit-code>0</exit-code>"));
-        assert!(msg.contains("<output><![CDATA["));
-        assert!(msg.contains("计数: 1"));
-        assert!(msg.contains("完成！"));
-        assert!(!msg.contains("<output-truncated>"));
-    }
-
-    #[test]
-    fn format_completion_notification_marks_truncated_output() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("big.txt");
-        let msg = format_completion_notification(
-            "id",
-            None,
-            &path,
-            "long job",
-            ShellRunStatus::Completed,
-            Some(0),
-            "tail only",
-            true,
-        );
-        assert!(msg.contains("<output-truncated>"));
-        assert!(msg.contains("tail only"));
-        assert!(msg.contains("</shell-id>\n<output-file>"));
-        assert!(!msg.contains("n<output-file>"));
-    }
-
-    #[test]
-    fn wrap_output_cdata_escapes_embedded_cdata_end() {
-        let wrapped = wrap_output_cdata("a]]>b");
-        assert!(wrapped.contains("]]]]><![CDATA[>"));
     }
 
     #[test]
@@ -784,6 +745,45 @@ mod tests {
         let footer = format_footer(ShellRunStatus::TimedOut, None);
         assert!(footer.contains("timed_out"));
         assert!(!footer.contains("exit_code"));
+    }
+
+    #[test]
+    fn preview_output_by_tokens_keeps_small_output() {
+        let preview = preview_output_by_tokens("short output", Some(256));
+
+        assert_eq!(preview.content, "short output");
+        assert!(!preview.truncated);
+        assert_eq!(preview.omitted_tokens, 0);
+        assert_eq!(preview.max_tokens, 256);
+    }
+
+    #[test]
+    fn preview_output_by_tokens_uses_head_tail_when_large() {
+        let content = format!(
+            "{}{}{}",
+            "HEAD-".repeat(300),
+            "MIDDLE-".repeat(2_000),
+            "TAIL-".repeat(300)
+        );
+
+        let preview = preview_output_by_tokens(&content, Some(256));
+
+        assert!(preview.truncated);
+        assert!(preview.content.contains("HEAD-"));
+        assert!(preview.content.contains("TAIL-"));
+        assert!(preview.content.contains("omitted about"));
+        assert!(preview.content.contains("output file"));
+        assert!(preview.omitted_tokens > 0);
+        assert!(preview.returned_tokens <= preview.max_tokens + 64);
+    }
+
+    #[test]
+    fn normalize_status_output_max_tokens_clamps_bounds() {
+        assert_eq!(normalize_status_output_max_tokens(Some(1)), 256);
+        assert_eq!(
+            normalize_status_output_max_tokens(Some(MAX_STATUS_OUTPUT_MAX_TOKENS + 1)),
+            MAX_STATUS_OUTPUT_MAX_TOKENS
+        );
     }
 
     /// Registry cleanup removes entries for the target session and kills running shells.
@@ -805,14 +805,12 @@ mod tests {
         let spawned = registry
             .spawn(BackgroundShellSpawnParams {
                 session_id: "sess-1".into(),
-                tool_call_id: None,
                 command: echo_cmd,
                 intent: None,
                 cwd: temp.path().to_path_buf(),
                 shell,
                 timeout_secs: 10,
                 store_dir: None,
-                session_ops: None,
             })
             .await
             .expect("spawn should succeed");
@@ -845,14 +843,12 @@ mod tests {
 
         let params = BackgroundShellSpawnParams {
             session_id: "sess-other".into(),
-            tool_call_id: None,
             command: echo_cmd,
             intent: None,
             cwd: temp.path().to_path_buf(),
             shell,
             timeout_secs: 10,
             store_dir: None,
-            session_ops: None,
         };
 
         let _spawned = registry.spawn(params).await.expect("spawn should succeed");
@@ -861,5 +857,86 @@ mod tests {
         assert_eq!(registry.shells.lock().len(), 1);
         registry.cleanup_session("sess-different");
         assert_eq!(registry.shells.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_background_shell_consumes_terminal_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = astrcode_support::shell::resolve_shell();
+        let echo_cmd = match shell.family {
+            astrcode_support::shell::ShellFamily::PowerShell => "Write-Output done".into(),
+            astrcode_support::shell::ShellFamily::Cmd => "echo done".into(),
+            _ => "echo done".into(),
+        };
+
+        let spawned = spawn_background_shell(BackgroundShellSpawnParams {
+            session_id: "sess-consume".into(),
+            command: echo_cmd,
+            intent: None,
+            cwd: temp.path().to_path_buf(),
+            shell,
+            timeout_secs: 10,
+            store_dir: None,
+        })
+        .await
+        .expect("spawn should succeed");
+
+        let status = wait_background_shell(&spawned.shell_id, 5_000, None)
+            .await
+            .expect("first wait should return terminal status");
+        assert!(!status.running);
+        assert_eq!(status.status, "completed");
+        assert!(status.output.contains("done"));
+
+        let second = wait_background_shell(&spawned.shell_id, 0, None).await;
+        assert!(
+            matches!(&second, Err(ToolError::InvalidArguments(message)) if message.contains("unknown shell_id")),
+            "terminal background shell should be consumed after first completed read: {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_background_shell_returns_incremental_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let shell = astrcode_support::shell::resolve_shell();
+        let command = match shell.family {
+            astrcode_support::shell::ShellFamily::PowerShell => {
+                "Write-Output first; Start-Sleep -Seconds 2; Write-Output second".into()
+            },
+            astrcode_support::shell::ShellFamily::Cmd => "echo first & powershell -NoProfile \
+                                                          -Command \"Start-Sleep -Seconds 2\" & \
+                                                          echo second"
+                .into(),
+            _ => "echo first; sleep 2; echo second".into(),
+        };
+
+        let spawned = spawn_background_shell(BackgroundShellSpawnParams {
+            session_id: "sess-incremental".into(),
+            command,
+            intent: None,
+            cwd: temp.path().to_path_buf(),
+            shell,
+            timeout_secs: 10,
+            store_dir: None,
+        })
+        .await
+        .expect("spawn should succeed");
+
+        let first = wait_background_shell(&spawned.shell_id, 5_000, None)
+            .await
+            .expect("first poll should return first output");
+        assert!(first.running, "command should still be running: {first:?}");
+        assert!(first.output.contains("first"));
+        assert!(!first.output.contains("second"));
+        assert!(!first.output.contains("shell_id:"));
+        assert!(!first.output.contains("--- STDERR ---"));
+
+        let second = wait_background_shell(&spawned.shell_id, 5_000, None)
+            .await
+            .expect("second poll should return final output");
+        assert!(!second.running);
+        assert_eq!(second.status, "completed");
+        assert!(!second.output.contains("first"));
+        assert!(second.output.contains("second"));
     }
 }

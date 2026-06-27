@@ -287,7 +287,7 @@ async fn inject_message_when_idle_starts_turn() {
 
     ops.inject_message(
         SessionAccess::same(session_id.as_str()),
-        "<background-shell-notification>done</background-shell-notification>".into(),
+        "mid-turn injected user message".into(),
     )
     .await
     .unwrap();
@@ -300,7 +300,7 @@ async fn inject_message_when_idle_starts_turn() {
     }
     assert!(
         ops.scheduler.registry().has_active(&session_id),
-        "idle inject must start a turn (background shell completion path)"
+        "idle inject must start a turn"
     );
 }
 
@@ -341,7 +341,7 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
 
     ops.inject_message(
         SessionAccess::same(session_id.as_str()),
-        "<background-shell-notification>done</background-shell-notification>".into(),
+        "late injected user message".into(),
     )
     .await
     .unwrap();
@@ -352,7 +352,7 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
             matches!(
                 &event.payload,
                 EventPayload::UserMessage { text, .. }
-                    if text.contains("<background-shell-notification>")
+                    if text.contains("late injected user message")
             )
         });
         if injected.is_some_and(|event| event.turn_id.as_ref() != Some(&first_turn_id)) {
@@ -368,14 +368,14 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
             matches!(
                 &event.payload,
                 EventPayload::UserMessage { text, .. }
-                    if text.contains("<background-shell-notification>")
+                    if text.contains("late injected user message")
             )
         })
-        .expect("background shell notification should be written");
+        .expect("late injected user message should be written");
     assert_ne!(
         injected.turn_id.as_ref(),
         Some(&first_turn_id),
-        "late background notification must start a fresh turn, not attach to the completed one"
+        "late injected user message must start a fresh turn, not attach to the completed one"
     );
 }
 

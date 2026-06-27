@@ -50,3 +50,5 @@ Desktop.ini
 .agents/
 
 target/
+
+plugins/
