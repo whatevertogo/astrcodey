@@ -486,6 +486,14 @@ pub struct PendingToolInteractionView {
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
+/// 工具调用等待核心权限审批时的投影快照。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingToolApprovalView {
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_key: Option<String>,
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -514,6 +522,12 @@ pub struct SessionReadModel {
     pub system_prompt_fingerprint: Option<String>,
     /// 尚未完成的工具调用。
     pub pending_tool_calls: HashSet<ToolCallId>,
+    /// 等待核心权限审批的工具调用（call_id → 审批提示）。
+    ///
+    /// TODO: 也许需要一个更好的 tool 权限管理设计，把核心 gate、插件 approval UI、
+    /// session approval history 和前端呈现统一成一套显式状态机，而不是分别投影。
+    #[serde(default)]
+    pub pending_tool_approvals: BTreeMap<ToolCallId, PendingToolApprovalView>,
     /// 等待用户交互的工具调用（call_id → 交互态 text/metadata）。
     #[serde(default)]
     pub pending_tool_interactions: BTreeMap<ToolCallId, PendingToolInteractionView>,
@@ -559,6 +573,7 @@ impl SessionReadModel {
             extra_system_prompt: None,
             system_prompt_fingerprint: None,
             pending_tool_calls: HashSet::new(),
+            pending_tool_approvals: BTreeMap::new(),
             pending_tool_interactions: BTreeMap::new(),
             created_at: String::new(),
             updated_at: String::new(),

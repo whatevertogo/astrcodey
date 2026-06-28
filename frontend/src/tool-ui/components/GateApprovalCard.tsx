@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { cn } from '../../lib/utils'
 import { submitToolGateApproval } from '../../services/api'
+import { useAppStore } from '../../store/conversation'
 import {
   stringValue,
   type JsonRecord,
@@ -54,6 +55,9 @@ export function GateApprovalCard({
   args?: JsonRecord
 }) {
   const gate = readGateApproval(metadata)
+  const refreshConversationSnapshot = useAppStore(
+    (state) => state.refreshConversationSnapshot
+  )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -70,6 +74,7 @@ export function GateApprovalCard({
     setError(null)
     try {
       await submitToolGateApproval(sessionId, callId, decision)
+      await refreshConversationSnapshot()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

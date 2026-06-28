@@ -469,13 +469,52 @@ fn apply_pending_tool_interactions(
         };
         *text = interaction.content.clone();
         *status = ConversationBlockStatusDto::Streaming;
-        let merged = serde_json::to_value(&interaction.metadata)
+        let mut merged = metadata
+            .take()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        let interaction_metadata = serde_json::to_value(&interaction.metadata)
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        *metadata = if merged.as_object().is_some_and(|m| !m.is_empty()) {
-            Some(merged)
-        } else {
+        if let Some(interaction_metadata) = interaction_metadata.as_object() {
+            merged.extend(interaction_metadata.clone());
+        }
+        *metadata = if merged.is_empty() {
             None
+        } else {
+            Some(serde_json::Value::Object(merged))
         };
+    }
+}
+
+fn apply_pending_tool_approvals(
+    blocks: &mut [ConversationBlockDto],
+    pending: &std::collections::BTreeMap<
+        astrcode_core::types::ToolCallId,
+        astrcode_core::storage::PendingToolApprovalView,
+    >,
+) {
+    for block in blocks.iter_mut() {
+        let ConversationBlockDto::ToolCall { id, metadata, .. } = block else {
+            continue;
+        };
+        let Some(approval) = pending.get(&astrcode_core::types::ToolCallId::from(id.as_str()))
+        else {
+            continue;
+        };
+
+        let mut merged = metadata
+            .take()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        merged.insert(
+            "toolGateApproval".into(),
+            serde_json::json!({
+                "pending": true,
+                "prompt": &approval.prompt,
+                "ruleKey": &approval.rule_key,
+            }),
+        );
+        *metadata = Some(serde_json::Value::Object(merged));
     }
 }
 
@@ -493,6 +532,7 @@ fn conversation_to_dto(
         blocks.push(compact_summary_block(boundary));
     }
     blocks.extend(messages_to_blocks(&session.messages));
+    apply_pending_tool_approvals(&mut blocks, &session.pending_tool_approvals);
     apply_pending_tool_interactions(&mut blocks, &session.pending_tool_interactions);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
@@ -604,6 +644,61 @@ mod tests {
                 assert_eq!(arguments, "Cargo.toml");
                 assert_eq!(text, "file contents");
                 assert!(matches!(status, ConversationBlockStatusDto::Complete));
+            },
+            other => panic!("unexpected block: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conversation_snapshot_applies_pending_tool_approval_metadata() {
+        let mut session = SessionReadModel::empty("session-approval".into());
+        session.working_dir = "D:/work/project".into();
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![LlmContent::ToolCall {
+                        call_id: "tool-approval".into(),
+                        name: "shell".into(),
+                        arguments: serde_json::json!({ "command": "git push" }),
+                    }],
+                    name: None,
+                    reasoning_content: None,
+                },
+                updated_seq: 1,
+                source: None,
+            });
+        session.pending_tool_approvals.insert(
+            "tool-approval".into(),
+            astrcode_core::storage::PendingToolApprovalView {
+                prompt: "Run shell command?".into(),
+                rule_key: Some("shell:write".into()),
+            },
+        );
+
+        let dto = conversation_to_dto(session, None);
+
+        match &dto.blocks[0] {
+            ConversationBlockDto::ToolCall {
+                metadata: Some(metadata),
+                ..
+            } => {
+                let approval = metadata
+                    .get("toolGateApproval")
+                    .expect("toolGateApproval metadata");
+                assert_eq!(
+                    approval.get("pending").and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+                assert_eq!(
+                    approval.get("prompt").and_then(|v| v.as_str()),
+                    Some("Run shell command?")
+                );
+                assert_eq!(
+                    approval.get("ruleKey").and_then(|v| v.as_str()),
+                    Some("shell:write")
+                );
             },
             other => panic!("unexpected block: {other:?}"),
         }

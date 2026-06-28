@@ -6,8 +6,8 @@ use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     storage::{
-        AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, SequencedLlmMessage,
-        SessionReadModel,
+        AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
+        SequencedLlmMessage, SessionReadModel,
     },
     types::SessionId,
 };
@@ -60,6 +60,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.extra_system_prompt = None;
             model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
+            model.pending_tool_approvals.clear();
             model.pending_tool_interactions.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
@@ -147,6 +148,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::TurnCompleted { .. } => {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
+            model.pending_tool_approvals.clear();
             model.pending_tool_interactions.clear();
         },
         EventPayload::TurnAbortedContext => {
@@ -217,10 +219,24 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             }
             model.phase = Phase::CallingTool;
         },
-        EventPayload::ToolApprovalRequested { .. } => {
+        EventPayload::ToolApprovalRequested {
+            call_id,
+            prompt,
+            rule_key,
+            ..
+        } => {
             model.phase = Phase::CallingTool;
+            model.pending_tool_approvals.insert(
+                call_id.clone(),
+                PendingToolApprovalView {
+                    prompt: prompt.clone(),
+                    rule_key: rule_key.clone(),
+                },
+            );
         },
-        EventPayload::ToolApprovalResolved { .. } => {},
+        EventPayload::ToolApprovalResolved { call_id, .. } => {
+            model.pending_tool_approvals.remove(call_id);
+        },
         EventPayload::ToolCallInteractionPending {
             call_id,
             content,
@@ -242,6 +258,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             ..
         } => {
             model.pending_tool_calls.remove(call_id);
+            model.pending_tool_approvals.remove(call_id);
             model.pending_tool_interactions.remove(call_id);
 
             // 始终 push（不再 update-in-place）
@@ -414,6 +431,7 @@ mod tests {
         event::{Event, EventPayload},
         extension::CompactStrategy,
         llm::{LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
+        permission::{ApprovalDecision, ApprovalSource},
         types::{SessionId, new_message_id},
     };
 
@@ -648,5 +666,45 @@ mod tests {
                 .any(|message| message.joined_display_text("").contains("<turn_aborted>")),
             "provider history should include the marker"
         );
+    }
+
+    #[test]
+    fn replay_tracks_pending_tool_approvals_until_resolved() {
+        let session_id = SessionId::from("session-approval");
+        let call_id = astrcode_core::types::ToolCallId::from("call-approval");
+        let requested = vec![event(
+            1,
+            &session_id,
+            EventPayload::ToolApprovalRequested {
+                call_id: call_id.clone(),
+                tool_name: "shell".into(),
+                prompt: "Run shell command?".into(),
+                rule_key: Some("shell:write".into()),
+                source: ApprovalSource::Core,
+                arguments: serde_json::json!({ "command": "git push" }),
+            },
+        )];
+
+        let model = replay(session_id.clone(), &requested);
+        let approval = model
+            .pending_tool_approvals
+            .get(&call_id)
+            .expect("approval should be pending");
+        assert_eq!(approval.prompt, "Run shell command?");
+        assert_eq!(approval.rule_key.as_deref(), Some("shell:write"));
+
+        let mut resolved = requested;
+        resolved.push(event(
+            2,
+            &session_id,
+            EventPayload::ToolApprovalResolved {
+                call_id: call_id.clone(),
+                decision: ApprovalDecision::AllowOnce,
+                detail: None,
+            },
+        ));
+
+        let model = replay(session_id, &resolved);
+        assert!(!model.pending_tool_approvals.contains_key(&call_id));
     }
 }

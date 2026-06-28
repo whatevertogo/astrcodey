@@ -345,7 +345,7 @@ export async function submitToolUiRespond(
     }
   )
 
-  if (response.status === 404 || response.status === 501) {
+  if (response.status === 501) {
     throw new Error(
       'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
     )
@@ -353,6 +353,11 @@ export async function submitToolUiRespond(
 
   if (!response.ok) {
     const body = await response.text()
+    if (response.status === 404 && !body.trim()) {
+      throw new Error(
+        'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
+      )
+    }
     throw new Error(await formatRequestError(response, body))
   }
 

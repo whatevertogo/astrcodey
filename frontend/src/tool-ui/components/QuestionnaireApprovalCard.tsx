@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useReducer, useState } from 'react'
+import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import { submitToolApprovalRespond } from '../commands'
 import type { ToolUiContext } from '../types'
@@ -121,6 +122,9 @@ function CompletedAnswers({ answers }: { answers: Record<string, string> }) {
 /** 宿主内置 `approval.variant = questionnaire` 卡片（后端注册，非 askUser 硬编码）。 */
 export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
   const { block, sessionId } = ctx
+  const refreshConversationSnapshot = useAppStore(
+    (state) => state.refreshConversationSnapshot
+  )
   const input = useMemo(
     () => parseAskUserInput(block.argumentsJson ?? ctx.args),
     [block.argumentsJson, ctx.args]
@@ -138,6 +142,10 @@ export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
     byQuestion: {},
   })
   const [submitting, setSubmitting] = useState(false)
+  const [submittedAnswers, setSubmittedAnswers] = useState<Record<
+    string,
+    string
+  > | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   const questions = input?.questions ?? completed?.questions ?? []
@@ -173,20 +181,27 @@ export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
         toolName: block.name,
         answers,
       })
+      setSubmittedAnswers(answers)
+      await refreshConversationSnapshot()
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e))
     } finally {
       setSubmitting(false)
     }
-  }, [allAnswers, sessionId, block.id, block.name])
+  }, [allAnswers, sessionId, block.id, block.name, refreshConversationSnapshot])
 
-  if (completed?.answers && Object.keys(completed.answers).length > 0) {
+  const visibleCompletedAnswers = completed?.answers ?? submittedAnswers
+
+  if (
+    visibleCompletedAnswers &&
+    Object.keys(visibleCompletedAnswers).length > 0
+  ) {
     return (
       <div className="space-y-2">
         <p className="text-[12px] font-semibold uppercase tracking-wider text-text-muted">
-          用户回答
+          {completed?.answers ? '用户回答' : '已提交，等待继续'}
         </p>
-        <CompletedAnswers answers={completed.answers} />
+        <CompletedAnswers answers={visibleCompletedAnswers} />
       </div>
     )
   }
