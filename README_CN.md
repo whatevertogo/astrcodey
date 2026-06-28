@@ -8,7 +8,8 @@
 | 界面 | 预览 |
 |------|------|
 | **CLI（TUI）** | <img width="1210" height="924" alt="astrcode TUI screenshot" src="https://github.com/user-attachments/assets/55259723-9bd7-4a1a-a74e-1e799ece2eed" /> |
-| **Web / 桌面端** | <img width="1252" height="960" alt="astrcode web frontend screenshot" src="https://github.com/user-attachments/assets/af918c12-6fb7-4d72-b9ea-64133a2e2729" /> |
+| **Web / 桌面端** | <img width="1197" height="805" alt="image" src="https://github.com/user-attachments/assets/9c8d96e1-61df-4e3e-8139-34a8b1b3aaef" />
+|
 
 用 Rust 从零构建的 AI 编程助手平台。
 
