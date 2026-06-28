@@ -1,6 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useAppStore } from '../../store/conversation'
-import type { PendingMessage } from '../../store/types'
 import { cn } from '../../lib/utils'
 import { ghostIconButton } from '../../lib/styles'
 import { Icon } from '../ui/Icon'
@@ -9,10 +8,6 @@ import { IconButton } from '../ui/IconButton'
 interface PendingMessagesPanelProps {
   onEdit: (text: string) => void
   canInject: boolean
-}
-
-function pendingSummary(messages: PendingMessage[]): string {
-  return `${messages.length} queued`
 }
 
 export default function PendingMessagesPanel({
@@ -25,10 +20,7 @@ export default function PendingMessagesPanel({
   const restorePendingMessage = useAppStore((s) => s.restorePendingMessage)
   const [expanded, setExpanded] = useState(true)
 
-  const summary = useMemo(
-    () => pendingSummary(pendingMessages),
-    [pendingMessages]
-  )
+  const summary = `${pendingMessages.length} queued`
 
   if (pendingMessages.length === 0) {
     return null

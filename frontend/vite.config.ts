@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import react from '@vitejs/plugin-react'
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 
@@ -24,7 +25,11 @@ const host = devHost || '127.0.0.1'
 const runInfo = resolveRunInfo()
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+    tailwindcss(),
+  ],
   clearScreen: false,
   define: runInfo
     ? { 'import.meta.env.VITE_AUTH_TOKEN': JSON.stringify(runInfo.authToken) }

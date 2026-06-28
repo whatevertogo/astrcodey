@@ -208,11 +208,6 @@ export function StreamingMarkdown({
   const split = cachedStreamingMarkdownSplit(cacheKey, text)
   const hasCommit = split.commitIndex !== -1
 
-  const cachedCommitted = React.useMemo(
-    () => split.committed,
-    [split.committed]
-  )
-
   if (!hasCommit) {
     return (
       <>
@@ -224,7 +219,7 @@ export function StreamingMarkdown({
 
   return (
     <>
-      {cachedCommitted ? <MarkdownContent text={cachedCommitted} /> : null}
+      {split.committed ? <MarkdownContent text={split.committed} /> : null}
       {split.tail ? (
         <span className="whitespace-pre-wrap break-words">{split.tail}</span>
       ) : null}

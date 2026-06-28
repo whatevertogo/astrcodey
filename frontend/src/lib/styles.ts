@@ -6,16 +6,16 @@ export const pillSuccess = `${pillBase} text-success`
 export const pillDanger = `${pillBase} text-danger`
 
 export const ghostIconButton =
-  'inline-flex items-center justify-center rounded-md text-text-muted transition-colors duration-150 hover:bg-surface-muted hover:text-text-primary'
+  'inline-flex items-center justify-center rounded-lg text-text-muted transition-colors duration-150 hover:bg-surface-muted hover:text-text-primary'
 export const chevronIcon =
   'inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-text-muted transition-transform duration-150 ease-out group-open:rotate-90'
 
 export const composerShell =
-  'rounded-xl border border-border bg-surface transition-[border-color,box-shadow] duration-150 focus-within:border-border-strong focus-within:shadow-focus-accent'
+  'rounded-[22px] border border-border bg-surface shadow-composer-shell transition-[border-color,box-shadow] duration-150 focus-within:border-border-strong focus-within:shadow-focus-accent'
 export const composerSubmitButton =
-  'inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-btn-primary-bg text-btn-primary-fg transition-[opacity,transform] duration-150 hover:opacity-90 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 [&_svg]:h-3.5 [&_svg]:w-3.5'
+  'inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-btn-primary-bg text-btn-primary-fg transition-[opacity,transform] duration-150 hover:opacity-90 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 [&_svg]:h-4 [&_svg]:w-4'
 export const composerInterruptButton =
-  'h-8 flex-shrink-0 rounded-lg px-3 text-[12px] font-medium text-text-secondary transition-colors duration-150 hover:bg-surface-muted hover:text-text-primary'
+  'h-9 flex-shrink-0 rounded-full px-3 text-[12px] font-medium text-text-secondary transition-colors duration-150 hover:bg-surface-muted hover:text-text-primary'
 
 export const codeBlockShell =
   'group relative my-2 overflow-hidden rounded-lg border border-code-border bg-code-surface'
@@ -26,8 +26,7 @@ export const codeBlockContent =
 
 export const errorSurface =
   'self-stretch rounded-lg border border-danger/15 bg-danger-soft/50 px-4 py-3 text-danger'
-export const emptyStateSurface =
-  'rounded-lg px-6 py-8 text-center text-sm text-text-muted'
+export const emptyStateSurface = 'px-6 py-8 text-center text-sm text-text-muted'
 export const assistantAvatar =
   'inline-flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded bg-linear-to-b from-avatar-surface to-avatar-surface-strong text-avatar-text'
 export const expandableBody = 'mb-3 ml-2 mt-2 border-l-2 border-border pl-4'

@@ -1,16 +1,64 @@
 import { useState, useCallback, useMemo } from 'react'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
-import { PHASE_BG_CLASS } from '../../lib/styles'
 import { getHostBridge } from '../../lib/hostBridge'
-import ProjectGroup from './ProjectGroup'
 import NewProjectModal from './NewProjectModal'
-import SettingsModal from '../Settings/SettingsModal'
 import { Icon } from '../ui'
-import * as api from '../../services/api'
 import { groupSessionsByWorkingDir } from './projectFolderOrder'
+import type { MainView } from '../../App'
+import type { IconName } from '../ui/Icon'
+import type { SessionListItem } from '../../services/types'
 
-export default function Sidebar() {
+const NAV_ITEMS: Array<{
+  icon: IconName
+  label: string
+  disabled?: boolean
+}> = [
+  { icon: 'edit', label: '新对话' },
+  { icon: 'plug', label: '插件' },
+]
+
+function projectNameFromDir(workingDir: string): string {
+  return workingDir.split(/[\\/]/).filter(Boolean).pop() ?? workingDir
+}
+
+function formatSessionAge(updatedAt: string): string {
+  const updated = new Date(updatedAt).getTime()
+  if (!Number.isFinite(updated)) return ''
+
+  const diffMs = Date.now() - updated
+  const minute = 60 * 1000
+  const hour = 60 * minute
+  const day = 24 * hour
+
+  if (diffMs < hour) return '刚刚'
+  if (diffMs < day) return `${Math.max(1, Math.floor(diffMs / hour))} 小时`
+  return `${Math.max(1, Math.floor(diffMs / day))} 天`
+}
+
+function sortByUpdatedDesc(sessions: SessionListItem[]): SessionListItem[] {
+  return [...sessions].sort((left, right) => {
+    const leftTime = new Date(left.updatedAt).getTime()
+    const rightTime = new Date(right.updatedAt).getTime()
+    return rightTime - leftTime
+  })
+}
+
+interface SidebarProps {
+  activeView: MainView
+  onToggleSidebar: () => void
+  onOpenChat: () => void
+  onOpenPlugins: () => void
+  onOpenSettings: () => void
+}
+
+export default function Sidebar({
+  activeView,
+  onToggleSidebar,
+  onOpenChat,
+  onOpenPlugins,
+  onOpenSettings,
+}: SidebarProps) {
   const sessions = useAppStore((s) => s.sessions)
   const projectFolderOrder = useAppStore((s) => s.projectFolderOrder)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -18,20 +66,19 @@ export default function Sidebar() {
   const workingDir = useAppStore((s) => s.workingDir)
   const createSession = useAppStore((s) => s.createSession)
   const switchSession = useAppStore((s) => s.switchSession)
-  const deleteSession = useAppStore((s) => s.deleteSession)
-  const deleteProject = useAppStore((s) => s.deleteProject)
-  const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
-  const extensions = useAppStore((s) => s.extensions)
-  const refreshExtensionData = useAppStore((s) => s.refreshExtensionData)
 
   const [showNewProject, setShowNewProject] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
 
   const bridge = useMemo(() => getHostBridge(), [])
   const projectGroups = useMemo(
     () => groupSessionsByWorkingDir(sessions),
     [sessions]
   )
+  const activeWorkingDir =
+    workingDir ??
+    sessions.find((session) => session.sessionId === activeSessionId)
+      ?.workingDir ??
+    null
   const orderedWorkingDirs = useMemo(() => {
     const active = new Set(projectGroups.keys())
     const ordered = projectFolderOrder.filter((workingDir) =>
@@ -47,115 +94,188 @@ export default function Sidebar() {
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
+      onOpenChat()
       void switchSession(sessionId)
     },
-    [switchSession]
-  )
-
-  const handleDeleteSession = useCallback(
-    (sessionId: string) => {
-      void deleteSession(sessionId)
-    },
-    [deleteSession]
-  )
-
-  const handleDeleteProject = useCallback(
-    (wd: string) => {
-      void deleteProject(wd)
-    },
-    [deleteProject]
+    [onOpenChat, switchSession]
   )
 
   const handleNewProject = useCallback(
     async (workingDir: string) => {
       await createSession(workingDir)
+      onOpenChat()
       setShowNewProject(false)
     },
-    [createSession]
+    [createSession, onOpenChat]
   )
 
-  return (
-    <div className="w-full min-w-0 bg-sidebar-bg flex flex-col h-full min-h-0 overflow-hidden px-3 pt-[18px] pb-4">
-      <div className="flex items-center gap-2.5 px-2 shrink-0">
-        <span
-          className={cn(
-            'h-[9px] w-[9px] shrink-0 rounded-full shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
-            PHASE_BG_CLASS[phase] ?? PHASE_BG_CLASS.idle
-          )}
-          title={phase}
-        />
-        <span className="font-semibold text-[13px] tracking-[0.02em] text-text-primary flex-1">
-          AstrCode
-        </span>
-      </div>
+  const handleCreateConversation = useCallback(() => {
+    const recentSession = sortByUpdatedDesc(sessions)[0]
+    const currentWorkingDir =
+      activeWorkingDir ?? recentSession?.workingDir ?? null
+    if (currentWorkingDir) {
+      onOpenChat()
+      void createSession(currentWorkingDir)
+    } else {
+      setShowNewProject(true)
+    }
+  }, [activeWorkingDir, createSession, onOpenChat, sessions])
 
-      <div className="mt-4 px-1 flex-shrink-0">
+  return (
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-sidebar-bg text-text-secondary">
+      <div className="flex h-14 shrink-0 items-center gap-3 px-2">
         <button
           type="button"
-          onClick={() => {
-            const activeWorkingDir =
-              workingDir ??
-              sessions.find((session) => session.sessionId === activeSessionId)
-                ?.workingDir
-            if (activeWorkingDir) {
-              void createSession(activeWorkingDir)
-            } else {
-              setShowNewProject(true)
-            }
-          }}
-          className="flex min-h-[34px] w-full items-center gap-2 rounded-lg border-none bg-transparent px-2 text-text-primary outline-none transition-[background-color,color] duration-150 ease-out hover:bg-surface-muted"
+          className="inline-flex h-7 w-24 items-center justify-center rounded-full bg-[#6d58ff] text-white shadow-[0_8px_22px_rgba(109,88,255,0.25)] transition-transform duration-150 active:scale-[0.98]"
+          aria-label="AstrCode"
+          title={`AstrCode ${phase}`}
         >
-          <div className="flex h-4 w-4 shrink-0 items-center justify-center text-text-secondary">
-            <Icon name="edit" size={16} />
-          </div>
-          <span className="truncate text-[13px] font-medium">新会话</span>
+          <Icon name="monitor" size={18} />
+        </button>
+        <button
+          type="button"
+          className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+          onClick={onToggleSidebar}
+          aria-label="切换边栏"
+          title="边栏"
+        >
+          <Icon name="sidebar" size={17} />
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-1 pt-5 pb-4">
-        <div className="px-2 mb-2 text-[11px] font-semibold text-text-muted tracking-[0.05em]">
-          文件夹
+      <div className="shrink-0 px-3 pt-2">
+        <div className="space-y-1">
+          {NAV_ITEMS.map((item) => {
+            const isPlugins = item.label === '插件'
+            const isNewConversation = item.label === '新对话'
+            return (
+              <button
+                key={item.label}
+                type="button"
+                disabled={item.disabled}
+                className={cn(
+                  'flex min-h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-[15px] font-semibold outline-none transition-colors duration-150',
+                  isPlugins && activeView === 'plugins'
+                    ? 'bg-surface-muted text-text-primary'
+                    : 'text-text-primary hover:bg-surface-muted',
+                  item.disabled &&
+                    'cursor-default opacity-70 hover:bg-transparent'
+                )}
+                onClick={() => {
+                  if (isNewConversation) handleCreateConversation()
+                  if (isPlugins) onOpenPlugins()
+                }}
+                title={item.disabled ? '即将支持' : item.label}
+              >
+                <Icon
+                  name={item.icon}
+                  size={18}
+                  className={item.disabled ? 'text-text-muted' : undefined}
+                />
+                <span className="truncate">{item.label}</span>
+              </button>
+            )
+          })}
         </div>
-        {orderedWorkingDirs.map((workingDir) => {
-          const groupSessions = projectGroups.get(workingDir)
-          if (!groupSessions) return null
-          return (
-            <ProjectGroup
-              key={workingDir}
-              workingDir={workingDir}
-              sessions={groupSessions}
-              activeSessionId={activeSessionId}
-              onSelectSession={handleSelectSession}
-              onDeleteSession={handleDeleteSession}
-              onDeleteProject={handleDeleteProject}
-            />
-          )
-        })}
       </div>
 
-      <div className="px-1 pt-4 border-t border-border shrink-0">
-        <div className="flex items-center gap-2">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-8">
+        <div className="mb-3 flex items-center justify-between px-3">
+          <div className="text-[14px] font-semibold text-text-muted">项目</div>
           <button
             type="button"
-            className={cn(
-              'h-[38px] flex-1 rounded-xl border text-center text-sm font-semibold transition-all duration-150 ease-out hover:-translate-y-px active:translate-y-0 active:scale-[0.98] active:shadow-none',
-              showNewProject
-                ? 'bg-accent-soft border-accent-strong/20 text-accent-strong shadow-inner translate-y-0 scale-[0.98]'
-                : 'bg-surface border-border text-text-primary shadow-soft hover:border-border-strong hover:bg-surface-muted'
-            )}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
             onClick={() => setShowNewProject(true)}
+            aria-label="新项目"
+            title="新项目"
           >
-            + 新项目
+            <Icon name="plus" size={16} />
           </button>
+        </div>
+        <div className="space-y-1">
+          {orderedWorkingDirs.map((dir) => {
+            const groupSessions = projectGroups.get(dir)
+            const orderedSessions = groupSessions
+              ? sortByUpdatedDesc(groupSessions)
+              : []
+            const latestSession = orderedSessions[0]
+            const isActive = dir === activeWorkingDir
+            return (
+              <div key={dir} className="mb-2">
+                <button
+                  type="button"
+                  className={cn(
+                    'flex min-h-9 w-full items-center gap-3 rounded-lg px-3 text-left text-[15px] font-medium outline-none transition-colors duration-150',
+                    isActive && activeView === 'chat'
+                      ? 'bg-surface-muted text-text-primary'
+                      : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
+                  )}
+                  onClick={() => {
+                    if (latestSession)
+                      handleSelectSession(latestSession.sessionId)
+                  }}
+                  title={dir}
+                >
+                  <Icon name="project" size={16} className="shrink-0" />
+                  <span className="truncate">{projectNameFromDir(dir)}</span>
+                </button>
+
+                <div className="mt-1 space-y-0.5 pl-7">
+                  {orderedSessions.map((session) => {
+                    const isSessionActive =
+                      session.sessionId === activeSessionId
+                    return (
+                      <button
+                        key={session.sessionId}
+                        type="button"
+                        className={cn(
+                          'grid min-h-8 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2.5 text-left text-[14px] outline-none transition-colors duration-150',
+                          isSessionActive && activeView === 'chat'
+                            ? 'bg-surface-muted text-text-primary'
+                            : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
+                        )}
+                        onClick={() => handleSelectSession(session.sessionId)}
+                        title={
+                          session.title || session.firstUserMessage || '新对话'
+                        }
+                      >
+                        <span className="truncate font-medium">
+                          {session.firstUserMessage ||
+                            session.title ||
+                            '新对话'}
+                        </span>
+                        <span className="shrink-0 text-[12px] text-text-muted">
+                          {formatSessionAge(session.updatedAt)}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+          {orderedWorkingDirs.length === 0 && (
+            <div className="px-3 py-2 text-[13px] text-text-muted">
+              暂无项目
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="shrink-0 border-t border-border px-3 py-3">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <span className="truncate px-2 text-[13px] font-medium text-text-muted">
+            AstrCode
+          </span>
           <button
             type="button"
             className={cn(
-              'inline-flex h-[38px] w-[38px] items-center justify-center rounded-xl border transition-all duration-150 ease-out hover:-translate-y-px active:translate-y-0 active:scale-[0.98] active:shadow-none',
-              showSettings
-                ? 'bg-accent-soft border-accent-strong/20 text-accent-strong shadow-inner translate-y-0 scale-[0.98]'
-                : 'bg-surface border-border text-text-secondary shadow-soft hover:border-border-strong hover:bg-surface-muted hover:text-text-primary'
+              'inline-flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-surface-muted hover:text-text-primary',
+              activeView === 'settings'
+                ? 'bg-surface-muted text-text-primary'
+                : 'text-text-muted'
             )}
-            onClick={() => setShowSettings(true)}
+            onClick={onOpenSettings}
             aria-label="打开设置"
             title="设置"
           >
@@ -170,34 +290,6 @@ export default function Sidebar() {
           onCancel={() => setShowNewProject(false)}
           canBrowse={bridge.canSelectDirectory}
           onSelectDirectory={bridge.selectDirectory}
-        />
-      )}
-      {showSettings && (
-        <SettingsModal
-          onClose={() => setShowSettings(false)}
-          getConfig={api.getConfig}
-          reloadConfig={async () => {
-            await api.reloadConfig()
-          }}
-          saveActiveSelection={async (
-            profile,
-            model,
-            smallProfile,
-            smallModel,
-            approvalMode
-          ) => {
-            await api.updateActiveSelection(
-              profile,
-              model,
-              smallProfile,
-              smallModel,
-              approvalMode ?? 'manual'
-            )
-            bumpModelRefreshKey()
-          }}
-          testConnection={api.testModel}
-          extensions={extensions}
-          onRefreshExtensions={refreshExtensionData}
         />
       )}
     </div>

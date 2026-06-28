@@ -5,7 +5,9 @@ export type IconName =
   | 'send'
   | 'close'
   | 'chevron-right'
+  | 'plug'
   | 'folder'
+  | 'project'
   | 'edit'
   | 'settings'
   | 'users'
@@ -13,6 +15,11 @@ export type IconName =
   | 'retry'
   | 'chevron-down'
   | 'trash'
+  | 'plus'
+  | 'shield'
+  | 'monitor'
+  | 'branch'
+  | 'mic'
 
 type IconProps = SVGProps<SVGSVGElement> & {
   name: IconName
@@ -46,6 +53,14 @@ const icons: Record<
       <polyline points="9 18 15 12 9 6" strokeWidth="2" />
     </svg>
   ),
+  plug: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path d="M12 22v-5" strokeWidth="2" />
+      <path d="M9 8V2" strokeWidth="2" />
+      <path d="M15 8V2" strokeWidth="2" />
+      <path d="M6 8h12v3a6 6 0 0 1-12 0V8Z" strokeWidth="2" />
+    </svg>
+  ),
   folder: (props) => (
     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" {...props}>
       <path
@@ -53,6 +68,14 @@ const icons: Record<
         strokeLinejoin="round"
         strokeWidth="1.4"
       />
+    </svg>
+  ),
+  project: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <rect x="5" y="4" width="14" height="16" rx="2" strokeWidth="2" />
+      <path d="M9 8h6" strokeWidth="2" />
+      <path d="M9 12h6" strokeWidth="2" />
+      <path d="M9 16h4" strokeWidth="2" />
     </svg>
   ),
   edit: (props) => (
@@ -107,6 +130,43 @@ const icons: Record<
       <path d="M10 11v6" strokeWidth="2" />
       <path d="M14 11v6" strokeWidth="2" />
       <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" strokeWidth="2" />
+    </svg>
+  ),
+  plus: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path d="M12 5v14" strokeWidth="2" />
+      <path d="M5 12h14" strokeWidth="2" />
+    </svg>
+  ),
+  shield: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path
+        d="M12 3 19 6v5c0 4.5-2.8 8.4-7 10-4.2-1.6-7-5.5-7-10V6l7-3Z"
+        strokeWidth="2"
+      />
+      <path d="m9 12 2 2 4-4" strokeWidth="2" />
+    </svg>
+  ),
+  monitor: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <rect x="3" y="4" width="18" height="13" rx="2" strokeWidth="2" />
+      <path d="M8 21h8" strokeWidth="2" />
+      <path d="M12 17v4" strokeWidth="2" />
+    </svg>
+  ),
+  branch: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <circle cx="6" cy="18" r="3" strokeWidth="2" />
+      <circle cx="18" cy="6" r="3" strokeWidth="2" />
+      <path d="M6 15V5" strokeWidth="2" />
+      <path d="M6 5h6a6 6 0 0 1 6 6v-2" strokeWidth="2" />
+    </svg>
+  ),
+  mic: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <rect x="9" y="3" width="6" height="11" rx="3" strokeWidth="2" />
+      <path d="M5 11a7 7 0 0 0 14 0" strokeWidth="2" />
+      <path d="M12 18v3" strokeWidth="2" />
     </svg>
   ),
 }

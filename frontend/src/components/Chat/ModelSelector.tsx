@@ -109,10 +109,10 @@ export default function ModelSelector({
       <button
         type="button"
         className={cn(
-          'flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-all duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-60 border',
+          'flex h-9 items-center gap-1.5 rounded-full px-2.5 text-[13px] transition-colors duration-150 ease-out disabled:cursor-not-allowed disabled:opacity-60',
           open
-            ? 'bg-surface border-border shadow-soft text-accent-strong font-medium'
-            : 'border-transparent text-text-secondary hover:bg-surface-muted'
+            ? 'bg-surface-muted text-text-primary'
+            : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
         )}
         onClick={() => {
           if (!loading) {
@@ -125,7 +125,7 @@ export default function ModelSelector({
         disabled={loading}
         aria-label="选择模型"
       >
-        <span className="truncate max-w-[180px] text-text-primary font-medium">
+        <span className="max-w-[140px] truncate font-medium">
           {currentModel?.modelId ?? (loading ? '加载中...' : '未选择')}
         </span>
         <svg

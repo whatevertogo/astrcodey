@@ -52,22 +52,25 @@ export default function TopBar({
   return (
     <PageHeader>
       <div className="flex min-w-0 items-center gap-1.5">
-        <IconButton
-          icon="sidebar"
-          label={isSidebarOpen ? '收起侧边栏' : '展开侧边栏'}
-          onClick={onToggleSidebar}
-          className="-ml-1"
-        />
+        {!isSidebarOpen && (
+          <IconButton
+            icon="sidebar"
+            label="展开侧边栏"
+            onClick={onToggleSidebar}
+            className="-ml-1"
+          />
+        )}
         <span
           className={cn(
-            'h-[9px] w-[9px] shrink-0 rounded-full shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
+            'h-[9px] w-[9px] shrink-0 rounded-full opacity-70 shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
+            isSidebarOpen && 'sr-only',
             PHASE_BG_CLASS[phase] ?? PHASE_BG_CLASS.idle
           )}
           title={phase}
           aria-hidden="true"
         />
         <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
-          {activeSessionTitle || 'AstrCode'}
+          {isSidebarOpen ? '' : activeSessionTitle || 'AstrCode'}
         </span>
         {phase !== 'idle' && (
           <span className="shrink-0 text-xs text-text-secondary">

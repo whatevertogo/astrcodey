@@ -29,7 +29,15 @@ import * as api from '../../services/api'
 import type { SlashCommandInfo } from '../../services/types'
 import { canInjectMidTurn, isExecutionPhase } from '../../store/phaseHelpers'
 
-export default function InputBar() {
+interface InputBarProps {
+  presentation?: 'docked' | 'hero'
+}
+
+function projectNameFromDir(workingDir: string): string {
+  return workingDir.split(/[\\/]/).filter(Boolean).pop() ?? workingDir
+}
+
+export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const submitPrompt = useAppStore((s) => s.submitPrompt)
   const abortCurrentTurn = useAppStore((s) => s.abortCurrentTurn)
   const phase = useAppStore((s) => s.phase)
@@ -49,12 +57,17 @@ export default function InputBar() {
 
   const [value, setValue] = useState('')
   const [attachments, setAttachments] = useState<PromptAttachment[]>([])
+  const [approvalMode, setApprovalMode] = useState<'manual' | 'yolo' | null>(
+    null
+  )
   const attachmentsRef = useRef(attachments)
   useEffect(() => {
     attachmentsRef.current = attachments
   }, [attachments])
   const [isComposing, setIsComposing] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const isHero = presentation === 'hero'
   const isCompacting = phase === 'compacting' || compactSubmitting
   const isBusy = isExecutionPhase(phase, compactSubmitting)
   const canSubmit = !!activeSessionId && !isCompacting
@@ -81,6 +94,21 @@ export default function InputBar() {
   useEffect(() => {
     return () => revokeAttachmentPreviews(attachmentsRef.current)
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    api
+      .getConfig()
+      .then((config) => {
+        if (!cancelled) setApprovalMode(config.approvalMode)
+      })
+      .catch(() => {
+        if (!cancelled) setApprovalMode(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [modelRefreshKey])
 
   const closeSlashTrigger = useCallback(() => {
     setSlashTriggerVisible(false)
@@ -234,6 +262,15 @@ export default function InputBar() {
     })
   }, [])
 
+  const handleAttachFromPicker = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files ?? [])
+      addAttachments(readImageFiles(files))
+      event.target.value = ''
+    },
+    [addAttachments]
+  )
+
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
       const items = event.clipboardData?.items
@@ -325,9 +362,37 @@ export default function InputBar() {
     void flushPendingQueued()
   }, [isBusy, flushPendingQueued, pendingMessages.length])
 
+  const projectName = workingDir ? projectNameFromDir(workingDir) : null
+  const modeLabel = control?.currentModeId ?? '本地模式'
+  const approvalLabel =
+    approvalMode === 'yolo'
+      ? '完全访问'
+      : approvalMode === 'manual'
+        ? '手动确认'
+        : '权限模式'
+  const branchLabel =
+    statusItems['git-branch'] ?? statusItems.branch ?? statusItems.gitBranch
+  const extraStatusItems = Object.entries(statusItems).filter(
+    ([id, text]) => text && !['git-branch', 'branch', 'gitBranch'].includes(id)
+  )
+
   return (
-    <div className="shrink-0 bg-panel-bg px-[var(--layout-page-padding-x)] pb-4 pt-3">
-      <div className="mx-auto w-full max-w-[var(--layout-content-max-width)] translate-x-[var(--chat-assistant-center-shift)]">
+    <div
+      className={cn(
+        'shrink-0',
+        isHero
+          ? 'w-full max-w-[980px]'
+          : 'bg-panel-bg px-[var(--layout-page-padding-x)] pb-4 pt-3'
+      )}
+    >
+      <div
+        className={cn(
+          'w-full translate-x-[var(--chat-assistant-center-shift)]',
+          isHero
+            ? 'mx-auto max-w-[980px]'
+            : 'mx-auto max-w-[var(--layout-content-max-width)]'
+        )}
+      >
         <PendingMessagesPanel
           canInject={canInject}
           onEdit={(text) => {
@@ -343,26 +408,27 @@ export default function InputBar() {
         />
         <div className="relative w-full">
           <div className={composerShell}>
-            {workingDir && (
-              <div
-                className="flex items-center gap-2 border-b border-border px-4 py-2 text-text-muted"
-                title={workingDir}
-              >
-                <Icon name="folder" size={13} />
-                <div className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[11px]">
-                  {workingDir}
-                </div>
-              </div>
-            )}
-            <div className="relative px-[var(--chat-composer-shell-padding-x)] py-3">
+            <div
+              className={cn(
+                'relative',
+                isHero
+                  ? 'px-5 pb-3 pt-4'
+                  : 'px-[var(--chat-composer-shell-padding-x)] py-3'
+              )}
+            >
               <ComposerAttachments
                 attachments={attachments}
                 onRemove={removeAttachment}
               />
               <textarea
                 ref={textareaRef}
-                className="mb-2 max-h-60 min-h-10 w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[15px] leading-[1.6] text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
-                placeholder="向 AstrCode 提问..."
+                className={cn(
+                  'w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
+                  isHero
+                    ? 'mb-4 max-h-60 min-h-[72px] text-[17px] leading-[1.65]'
+                    : 'mb-3 max-h-60 min-h-10 text-[15px] leading-[1.6]'
+                )}
+                placeholder={isHero ? '随心输入' : '向 AstrCode 提问...'}
                 value={value}
                 rows={1}
                 onChange={handleInput}
@@ -374,8 +440,33 @@ export default function InputBar() {
                 onPaste={handlePaste}
                 disabled={!activeSessionId}
               />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={handleAttachFromPicker}
+              />
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 shrink items-center gap-2">
+                  <button
+                    type="button"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="添加图片"
+                    title="添加图片"
+                    disabled={!activeSessionId}
+                  >
+                    <Icon name="plus" size={22} />
+                  </button>
+                  <span className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold text-accent">
+                    <Icon name="shield" size={15} />
+                    {approvalLabel}
+                    <Icon name="chevron-down" size={13} />
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
                   <ModelSelector
                     refreshKey={modelRefreshKey}
                     getCurrentModel={api.getCurrentModel}
@@ -385,18 +476,15 @@ export default function InputBar() {
                       bumpModelRefreshKey()
                     }}
                   />
-                  {Object.entries(statusItems)
-                    .filter(([, v]) => v)
-                    .map(([id, text]) => (
-                      <span
-                        key={id}
-                        className="truncate text-[11px] text-text-muted"
-                      >
-                        {text}
-                      </span>
-                    ))}
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+                    aria-label="语音输入"
+                    title="语音输入"
+                    disabled
+                  >
+                    <Icon name="mic" size={17} />
+                  </button>
                   {isBusy && (
                     <button
                       type="button"
@@ -462,6 +550,38 @@ export default function InputBar() {
                 </div>
               </div>
             </div>
+            {(projectName || extraStatusItems.length > 0) && (
+              <div className="flex min-h-12 min-w-0 items-center gap-5 border-t border-border bg-surface-soft/35 px-5 text-[14px] text-text-muted">
+                {projectName && (
+                  <div
+                    className="flex min-w-0 items-center gap-2 text-text-secondary"
+                    title={workingDir ?? undefined}
+                  >
+                    <Icon name="project" size={16} />
+                    <span className="truncate font-semibold text-text-primary">
+                      {projectName}
+                    </span>
+                  </div>
+                )}
+                <div className="flex min-w-0 items-center gap-2">
+                  <Icon name="monitor" size={16} />
+                  <span className="truncate">{modeLabel}</span>
+                  <Icon name="chevron-down" size={14} />
+                </div>
+                {branchLabel && (
+                  <div className="flex min-w-0 items-center gap-2">
+                    <Icon name="branch" size={16} />
+                    <span className="truncate">{branchLabel}</span>
+                    <Icon name="chevron-down" size={14} />
+                  </div>
+                )}
+                {extraStatusItems.map(([id, text]) => (
+                  <span key={id} className="min-w-0 truncate">
+                    {text}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           {activeSessionId && slashTriggerVisible && (
             <CommandSelector
@@ -476,9 +596,11 @@ export default function InputBar() {
           )}
         </div>
       </div>
-      <p className="mx-auto mt-2 w-full max-w-[var(--layout-content-max-width)] text-center text-[11px] text-text-muted">
-        AI 可能会产生误导性信息，请核实重要内容
-      </p>
+      {!isHero && (
+        <p className="mx-auto mt-2 w-full max-w-[var(--layout-content-max-width)] text-center text-[11px] text-text-muted">
+          AI 可能会产生误导性信息，请核实重要内容
+        </p>
+      )}
     </div>
   )
 }
