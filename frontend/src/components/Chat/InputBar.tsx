@@ -23,7 +23,7 @@ import {
   readImageFiles,
   revokeAttachmentPreviews,
 } from '../../lib/composerAttachments'
-import type { PromptAttachment } from '../../services/types'
+import type { ConfigView, PromptAttachment } from '../../services/types'
 import { Icon } from '../ui'
 import * as api from '../../services/api'
 import type { SlashCommandInfo } from '../../services/types'
@@ -57,9 +57,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
 
   const [value, setValue] = useState('')
   const [attachments, setAttachments] = useState<PromptAttachment[]>([])
-  const [approvalMode, setApprovalMode] = useState<'manual' | 'yolo' | null>(
-    null
-  )
+  const [configView, setConfigView] = useState<ConfigView | null>(null)
+  const [approvalSaving, setApprovalSaving] = useState(false)
   const attachmentsRef = useRef(attachments)
   useEffect(() => {
     attachmentsRef.current = attachments
@@ -100,10 +99,10 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     api
       .getConfig()
       .then((config) => {
-        if (!cancelled) setApprovalMode(config.approvalMode)
+        if (!cancelled) setConfigView(config)
       })
       .catch(() => {
-        if (!cancelled) setApprovalMode(null)
+        if (!cancelled) setConfigView(null)
       })
     return () => {
       cancelled = true
@@ -271,6 +270,29 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     [addAttachments]
   )
 
+  const toggleApprovalMode = useCallback(async () => {
+    if (!configView || approvalSaving) return
+
+    const nextApprovalMode =
+      configView.approvalMode === 'yolo' ? 'manual' : 'yolo'
+    setApprovalSaving(true)
+    try {
+      await api.updateActiveSelection(
+        configView.activeProfile,
+        configView.activeModel,
+        configView.activeSmallProfile,
+        configView.activeSmallModel,
+        nextApprovalMode
+      )
+      setConfigView({ ...configView, approvalMode: nextApprovalMode })
+      bumpModelRefreshKey()
+    } catch (err) {
+      console.error('update approval mode failed:', err)
+    } finally {
+      setApprovalSaving(false)
+    }
+  }, [approvalSaving, bumpModelRefreshKey, configView])
+
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
       const items = event.clipboardData?.items
@@ -363,7 +385,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   }, [isBusy, flushPendingQueued, pendingMessages.length])
 
   const projectName = workingDir ? projectNameFromDir(workingDir) : null
-  const modeLabel = control?.currentModeId ?? '本地模式'
+  const approvalMode = configView?.approvalMode ?? null
   const approvalLabel =
     approvalMode === 'yolo'
       ? '完全访问'
@@ -460,11 +482,26 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                   >
                     <Icon name="plus" size={22} />
                   </button>
-                  <span className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold text-accent">
+                  <button
+                    type="button"
+                    className={cn(
+                      'inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60',
+                      approvalMode === 'yolo'
+                        ? 'text-accent'
+                        : 'text-text-secondary'
+                    )}
+                    onClick={() => void toggleApprovalMode()}
+                    disabled={!configView || approvalSaving}
+                    aria-label="切换工具权限模式"
+                    title={
+                      approvalMode === 'yolo'
+                        ? '当前为 YOLO / 完全访问，点击切换为手动确认'
+                        : '当前为手动确认，点击切换为 YOLO / 完全访问'
+                    }
+                  >
                     <Icon name="shield" size={15} />
                     {approvalLabel}
-                    <Icon name="chevron-down" size={13} />
-                  </span>
+                  </button>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <ModelSelector
@@ -472,19 +509,16 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                     getCurrentModel={api.getCurrentModel}
                     listAvailableModels={api.listModels}
                     setModel={async (profileName, model) => {
-                      await api.updateActiveSelection(profileName, model)
+                      await api.updateActiveSelection(
+                        profileName,
+                        model,
+                        configView?.activeSmallProfile,
+                        configView?.activeSmallModel,
+                        configView?.approvalMode ?? 'manual'
+                      )
                       bumpModelRefreshKey()
                     }}
                   />
-                  <button
-                    type="button"
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
-                    aria-label="语音输入"
-                    title="语音输入"
-                    disabled
-                  >
-                    <Icon name="mic" size={17} />
-                  </button>
                   {isBusy && (
                     <button
                       type="button"
@@ -563,11 +597,6 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                     </span>
                   </div>
                 )}
-                <div className="flex min-w-0 items-center gap-2">
-                  <Icon name="monitor" size={16} />
-                  <span className="truncate">{modeLabel}</span>
-                  <Icon name="chevron-down" size={14} />
-                </div>
                 {branchLabel && (
                   <div className="flex min-w-0 items-center gap-2">
                     <Icon name="branch" size={16} />

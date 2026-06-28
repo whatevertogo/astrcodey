@@ -19,7 +19,6 @@ export type IconName =
   | 'shield'
   | 'monitor'
   | 'branch'
-  | 'mic'
 
 type IconProps = SVGProps<SVGSVGElement> & {
   name: IconName
@@ -160,13 +159,6 @@ const icons: Record<
       <circle cx="18" cy="6" r="3" strokeWidth="2" />
       <path d="M6 15V5" strokeWidth="2" />
       <path d="M6 5h6a6 6 0 0 1 6 6v-2" strokeWidth="2" />
-    </svg>
-  ),
-  mic: (props) => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
-      <rect x="9" y="3" width="6" height="11" rx="3" strokeWidth="2" />
-      <path d="M5 11a7 7 0 0 0 14 0" strokeWidth="2" />
-      <path d="M12 18v3" strokeWidth="2" />
     </svg>
   ),
 }

@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import { getHostBridge } from '../../lib/hostBridge'
@@ -17,6 +17,20 @@ const NAV_ITEMS: Array<{
   { icon: 'edit', label: '新对话' },
   { icon: 'plug', label: '插件' },
 ]
+
+type SidebarContextMenu =
+  | {
+      kind: 'session'
+      id: string
+      x: number
+      y: number
+    }
+  | {
+      kind: 'project'
+      id: string
+      x: number
+      y: number
+    }
 
 function projectNameFromDir(workingDir: string): string {
   return workingDir.split(/[\\/]/).filter(Boolean).pop() ?? workingDir
@@ -66,8 +80,15 @@ export default function Sidebar({
   const workingDir = useAppStore((s) => s.workingDir)
   const createSession = useAppStore((s) => s.createSession)
   const switchSession = useAppStore((s) => s.switchSession)
+  const deleteSession = useAppStore((s) => s.deleteSession)
+  const deleteProject = useAppStore((s) => s.deleteProject)
 
   const [showNewProject, setShowNewProject] = useState(false)
+  const [contextMenu, setContextMenu] = useState<SidebarContextMenu | null>(
+    null
+  )
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   const bridge = useMemo(() => getHostBridge(), [])
   const projectGroups = useMemo(
@@ -99,6 +120,58 @@ export default function Sidebar({
     },
     [onOpenChat, switchSession]
   )
+
+  const handleSessionContextMenu = useCallback(
+    (event: React.MouseEvent, sessionId: string) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setConfirmDelete(false)
+      setContextMenu({
+        kind: 'session',
+        id: sessionId,
+        x: Math.min(event.clientX, window.innerWidth - 190),
+        y: Math.min(event.clientY, window.innerHeight - 96),
+      })
+    },
+    []
+  )
+
+  const handleProjectContextMenu = useCallback(
+    (event: React.MouseEvent, workingDir: string) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setConfirmDelete(false)
+      setContextMenu({
+        kind: 'project',
+        id: workingDir,
+        x: Math.min(event.clientX, window.innerWidth - 190),
+        y: Math.min(event.clientY, window.innerHeight - 96),
+      })
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (!contextMenu) return
+
+    const handleMouseDown = (event: MouseEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return
+      setContextMenu(null)
+      setConfirmDelete(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setContextMenu(null)
+      setConfirmDelete(false)
+    }
+
+    document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [contextMenu])
 
   const handleNewProject = useCallback(
     async (workingDir: string) => {
@@ -214,6 +287,9 @@ export default function Sidebar({
                     if (latestSession)
                       handleSelectSession(latestSession.sessionId)
                   }}
+                  onContextMenu={(event) =>
+                    handleProjectContextMenu(event, dir)
+                  }
                   title={dir}
                 >
                   <Icon name="project" size={16} className="shrink-0" />
@@ -235,6 +311,9 @@ export default function Sidebar({
                             : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
                         )}
                         onClick={() => handleSelectSession(session.sessionId)}
+                        onContextMenu={(event) =>
+                          handleSessionContextMenu(event, session.sessionId)
+                        }
                         title={
                           session.title || session.firstUserMessage || '新对话'
                         }
@@ -291,6 +370,60 @@ export default function Sidebar({
           canBrowse={bridge.canSelectDirectory}
           onSelectDirectory={bridge.selectDirectory}
         />
+      )}
+      {contextMenu && (
+        <div
+          ref={menuRef}
+          className="fixed z-[100] min-w-[176px] rounded-lg border border-border bg-surface py-1 shadow-surface-lg"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          {confirmDelete ? (
+            <div className="px-3 py-2">
+              <div className="mb-2 text-[12px] text-text-secondary">
+                {contextMenu.kind === 'project'
+                  ? '确认删除此项目及其所有会话？'
+                  : '确认删除此会话？'}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-lg border border-border bg-surface-soft px-2.5 py-1 text-[12px] font-semibold text-text-secondary hover:bg-surface-muted"
+                  onClick={() => {
+                    setContextMenu(null)
+                    setConfirmDelete(false)
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="rounded-lg border border-danger/20 bg-danger-soft px-2.5 py-1 text-[12px] font-semibold text-danger hover:brightness-98"
+                  onClick={() => {
+                    const target = contextMenu
+                    setContextMenu(null)
+                    setConfirmDelete(false)
+                    if (target.kind === 'project') {
+                      void deleteProject(target.id)
+                    } else {
+                      void deleteSession(target.id)
+                    }
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-text-secondary transition-colors duration-100 hover:bg-danger-soft hover:text-danger"
+              onClick={() => setConfirmDelete(true)}
+            >
+              <Icon name="trash" size={14} />
+              {contextMenu.kind === 'project' ? '删除项目' : '删除会话'}
+            </button>
+          )}
+        </div>
       )}
     </div>
   )
