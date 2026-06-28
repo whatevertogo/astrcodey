@@ -8,7 +8,8 @@
 | Interface | Preview |
 |-----------|---------|
 | **CLI (TUI)** | <img width="1210" height="924" alt="astrcode TUI screenshot" src="https://github.com/user-attachments/assets/55259723-9bd7-4a1a-a74e-1e799ece2eed" /> |
-| **Web / Desktop** | <img width="1252" height="960" alt="astrcode web frontend screenshot" src="https://github.com/user-attachments/assets/af918c12-6fb7-4d72-b9ea-64133a2e2729" /> |
+| **Web / Desktop** | <img width="1197" height="805" alt="image" src="https://github.com/user-attachments/assets/5ee17441-e478-476e-b8f5-f426e1ff1867" />
+|
 
 A Rust-built AI coding agent platform.
 
