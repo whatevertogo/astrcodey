@@ -44,6 +44,7 @@ LAYERS: dict[str, int] = {
     "astrcode-extensions": 2,
     "astrcode-client": 2,
     # L3 – Extensions
+    "astrcode-extension-goal": 3,
     "astrcode-extension-agent-tools": 3,
     "astrcode-extension-mcp": 3,
     "astrcode-extension-skill": 3,
@@ -75,6 +76,7 @@ ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
     # L3: bundled-extensions aggregates same-layer extension crates.
     (dep, ext)
     for ext in (
+        "astrcode-extension-goal",
         "astrcode-extension-agent-tools",
         "astrcode-extension-mcp",
         "astrcode-extension-skill",
