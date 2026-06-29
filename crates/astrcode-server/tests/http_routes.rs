@@ -552,8 +552,7 @@ async fn stream_ignores_events_from_other_sessions() {
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token, events) =
-        router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
