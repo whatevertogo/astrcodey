@@ -45,8 +45,7 @@ impl CommandHandler {
                             })
                             .collect();
                         self.event_bus
-                            .fanout()
-                            .send(ClientNotification::SessionList { sessions: items });
+                            .send_notification(ClientNotification::SessionList { sessions: items });
                     },
                     Err(e) => {
                         self.send_error(-32603, &e.to_string());
@@ -107,8 +106,7 @@ impl CommandHandler {
                     })
                     .collect();
                 self.event_bus
-                    .fanout()
-                    .send(ClientNotification::ExtensionCommandList {
+                    .send_notification(ClientNotification::ExtensionCommandList {
                         commands: infos,
                         keybindings,
                         status_items,

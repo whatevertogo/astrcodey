@@ -17,7 +17,6 @@ use agent_client_protocol::{
     },
 };
 use astrcode_core::{event::Event, types::SessionId};
-use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -25,6 +24,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::{
     bootstrap::ServerRuntime,
     handler::{CommandHandle, HandlerError, TurnCompletion},
+    server_event_bus::ServerEventBus,
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.
@@ -34,6 +34,7 @@ use crate::{
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
     let event_tx = Arc::new(EventFanout::new(1024));
     let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let event_bus = server_system.event_bus;
     let command_handle = server_system.handler;
 
     let result = Agent
@@ -79,12 +80,12 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         .on_receive_request(
             {
                 let command_handle = command_handle.clone();
-                let event_tx = Arc::clone(&event_tx);
+                let event_bus = Arc::clone(&event_bus);
 
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    match handle_prompt(req, &command_handle, &event_tx, &cx).await {
+                    match handle_prompt(req, &command_handle, &event_bus, &cx).await {
                         Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
                         Err(error) => responder.respond_with_error(error),
                     }
@@ -126,12 +127,12 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
 async fn handle_prompt(
     req: PromptRequest,
     command_handle: &CommandHandle,
-    event_tx: &Arc<EventFanout<ClientNotification>>,
+    event_bus: &Arc<ServerEventBus>,
     cx: &ConnectionTo<Client>,
 ) -> Result<StopReason, Error> {
     let session_id = SessionId::from(req.session_id.to_string());
     let text = prompt_to_text(&req.prompt)?;
-    let mut event_rx = event_tx.subscribe();
+    let mut event_rx = event_bus.subscribe_conversation_events(&session_id);
 
     let (turn_id, mut completion_rx) = command_handle
         .submit_prompt_with_completion(
@@ -149,7 +150,7 @@ async fn handle_prompt(
         tokio::select! {
             result = event_rx.recv() => {
                 match result {
-                    Some(ClientNotification::Event(event)) => {
+                    Some(event) => {
                         if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
                             if let astrcode_core::event::EventPayload::CompactBoundaryCreated { continued_session_id, .. } = &event.payload {
                                 accepted_sessions.insert(continued_session_id.clone());
@@ -157,7 +158,6 @@ async fn handle_prompt(
                             forward_event(&event, &acp_session_id, cx);
                         }
                     },
-                    Some(_) => {},
                     None => {
                         return Ok(StopReason::EndTurn);
                     },
@@ -190,29 +190,22 @@ async fn handle_prompt(
 /// Deterministic flush of queued events after completion signal.
 /// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
-    event_rx: &mut mpsc::Receiver<ClientNotification>,
+    event_rx: &mut mpsc::Receiver<Arc<Event>>,
     accepted_sessions: &mut HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,
     cx: &ConnectionTo<Client>,
 ) {
-    loop {
-        match event_rx.try_recv() {
-            Ok(ClientNotification::Event(event)) => {
-                if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
-                    if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
-                        continued_session_id,
-                        ..
-                    } = &event.payload
-                    {
-                        accepted_sessions.insert(continued_session_id.clone());
-                    }
-                    forward_event(&event, acp_session_id, cx);
-                }
-            },
-            Ok(_) => {},
-            Err(mpsc::error::TryRecvError::Empty)
-            | Err(mpsc::error::TryRecvError::Disconnected) => break,
+    while let Ok(event) = event_rx.try_recv() {
+        if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
+            if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
+                continued_session_id,
+                ..
+            } = &event.payload
+            {
+                accepted_sessions.insert(continued_session_id.clone());
+            }
+            forward_event(&event, acp_session_id, cx);
         }
     }
 }

@@ -168,7 +168,7 @@ impl Session {
         self.store.session_store_dir(&self.id).await.ok().flatten()
     }
 
-    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<astrcode_core::event::Event> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Arc<Event>> {
         self.runtime.subscribe()
     }
 

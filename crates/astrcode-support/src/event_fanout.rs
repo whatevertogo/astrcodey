@@ -162,4 +162,18 @@ mod tests {
         assert_eq!(fanout.stats().dropped_subscribers_full, 1);
         assert_eq!(fanout.stats().max_queue_depth, 2);
     }
+
+    #[tokio::test]
+    async fn subscriber_receives_events_in_send_order() {
+        let fanout = EventFanout::new(8);
+        let mut rx = fanout.subscribe();
+
+        for i in 0..4 {
+            fanout.send(i);
+        }
+
+        for expected in 0..4 {
+            assert_eq!(rx.recv().await, Some(expected));
+        }
+    }
 }

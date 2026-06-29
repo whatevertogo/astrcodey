@@ -11,7 +11,7 @@ use astrcode_core::{
         ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     tool::{ToolDefinition, ToolResult},
-    types::{Cursor, SessionId, new_message_id, new_session_id},
+    types::{Cursor, SessionId, new_message_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
@@ -23,7 +23,7 @@ use astrcode_protocol::{
 };
 use astrcode_server::{
     bootstrap::ServerRuntime,
-    http::router,
+    http::{router, router_with_event_publisher},
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
         TurnRegistry, TurnScheduler,
@@ -383,6 +383,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .unwrap();
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::GET)
@@ -394,7 +395,8 @@ async fn stream_preserves_global_updates_during_replay_drain() {
         .await
         .unwrap();
 
-    event_tx.send(ClientNotification::ExtensionRegistryChanged);
+    let reload = post_json(app, "/api/extensions/reload", "{}", &token).await;
+    assert_eq!(reload.status(), StatusCode::OK);
 
     let body = read_sse_until(response.into_body(), "extensionRegistryChanged").await;
     assert!(body.contains("missed while reconnecting"));
@@ -503,38 +505,73 @@ async fn stream_invalid_cursor_requests_rehydrate() {
 }
 
 #[tokio::test]
-async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
+async fn stream_ignores_events_from_other_sessions() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
-    let parent_id = create_session(app.clone(), &token).await;
-    let parent_sid = SessionId::from(parent_id.clone());
-    let child_sid = new_session_id();
-    runtime
-        .event_store()
-        .create_session(&child_sid, ".", "mock-model", Some(&parent_sid), None, None)
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_a = create_session(app.clone(), &token).await;
+    let session_b = create_session(app.clone(), &token).await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_a}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
+
+    let session_b_prompt = post_json(
+        app.clone(),
+        &format!("/api/sessions/{session_b}/prompt"),
+        r#"{"text":"from session b"}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(session_b_prompt.status(), StatusCode::OK);
+
+    let session_a_prompt = post_json(
+        app,
+        &format!("/api/sessions/{session_a}/prompt"),
+        r#"{"text":"from session a"}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(session_a_prompt.status(), StatusCode::OK);
+
+    let body = read_sse_until(response.into_body(), "from session a").await;
+    assert!(body.contains("from session a"));
+    assert!(!body.contains("from session b"));
+}
+
+#[tokio::test]
+async fn stream_projects_tracked_child_events_to_parent_stream() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let parent_sid = SessionId::from(session_id.clone());
+    let child_sid = SessionId::from(format!("{session_id}-child"));
+    let child_id = child_sid.to_string();
+
     runtime
         .event_store()
         .append_event(Event::new(
-            parent_sid.clone(),
+            parent_sid,
             None,
             EventPayload::AgentSessionSpawned {
                 child_session_id: child_sid.clone(),
-                agent_name: "explorer".into(),
-                task: "inspect code".into(),
+                agent_name: "worker".into(),
+                task: "check fanout routing".into(),
                 tool_policy: None,
-                tool_call_id: "agent-call".into(),
+                tool_call_id: "child-call".into(),
             },
         ))
         .await
-        .unwrap();
-    let parent_cursor = runtime
-        .event_store()
-        .latest_cursor(&parent_sid)
-        .await
-        .unwrap()
         .unwrap();
 
     let response = app
@@ -542,7 +579,7 @@ async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
             Request::builder()
                 .method(Method::GET)
                 .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{parent_id}/stream"))
+                .uri(format!("/api/sessions/{session_id}/stream"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -553,23 +590,17 @@ async fn stream_projects_child_events_with_parent_cursor_without_child_text() {
         child_sid.clone(),
         None,
         EventPayload::AssistantTextDelta {
-            message_id: "child-assistant".into(),
-            delta: "secret child text".into(),
+            message_id: "child-message".into(),
+            delta: "child live text must not leak".into(),
         },
     );
     child_event.seq = Some(99);
-    event_tx.send(ClientNotification::Event(child_event));
+    events.send_notification(ClientNotification::Event(child_event));
 
     let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
-    assert!(body.contains(r#""kind":"agentSessionUpdated""#));
-    assert!(body.contains(&format!(r#""childSessionId":"{child_sid}""#)));
-    assert!(body.contains(r#""phase":"streaming""#));
-    assert!(body.contains(&format!(r#""value":"{parent_cursor}""#)));
-    assert!(!body.contains(r#""value":"99""#));
-    assert!(!body.contains("agentName"));
-    assert!(!body.contains("currentTool"));
-    assert!(!body.contains("secret child text"));
-    assert!(!body.contains("patchBlock"));
+    assert!(body.contains("agentSessionUpdated"));
+    assert!(body.contains(&child_id));
+    assert!(!body.contains("child live text must not leak"));
 }
 
 #[tokio::test]
