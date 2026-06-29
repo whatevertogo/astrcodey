@@ -72,7 +72,7 @@ struct LiveStreamState {
 
 enum LiveInput {
     Event(Arc<Event>),
-    Notification(ClientNotification),
+    Notification(Box<ClientNotification>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,7 +288,9 @@ pub(in crate::http) async fn session_stream(
 async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
     tokio::select! {
         event = state.event_rx.recv() => event.map(LiveInput::Event),
-        notification = state.notification_rx.recv() => notification.map(LiveInput::Notification),
+        notification = state.notification_rx.recv() => {
+            notification.map(|notification| LiveInput::Notification(Box::new(notification)))
+        },
     }
 }
 
@@ -330,7 +332,9 @@ async fn drain_pending_live_inputs(
         }
         while let Ok(notification) = state.notification_rx.try_recv() {
             drained = true;
-            let more = live_input_to_sse_items(state, LiveInput::Notification(notification)).await;
+            let more =
+                live_input_to_sse_items(state, LiveInput::Notification(Box::new(notification)))
+                    .await;
             items.extend(more);
         }
         if !drained {
@@ -368,7 +372,7 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
             ClientNotification::StatusItemUpdate { .. }
             | ClientNotification::ExtensionRegistryChanged
             | ClientNotification::ExtensionCommandResult { .. } => {
-                buffered.push(LiveInput::Notification(notification));
+                buffered.push(LiveInput::Notification(Box::new(notification)));
             },
             ClientNotification::Event(_) => {},
             _ => {},
@@ -384,7 +388,7 @@ async fn live_input_to_sse_items(state: &mut LiveStreamState, input: LiveInput) 
     match input {
         LiveInput::Event(event) => event_to_sse_items(state, event).await,
         LiveInput::Notification(notification) => {
-            notification_to_sse_items(state, notification).await
+            notification_to_sse_items(state, *notification).await
         },
     }
 }
@@ -399,17 +403,17 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
             {
                 return Vec::new();
             }
-            if event_adds_message(&event) {
+            if event_adds_message(event) {
                 state.has_messages = true;
             }
-            update_child_tracking_from_parent_event(state, &event);
+            update_child_tracking_from_parent_event(state, event);
 
             // 更新缓存的 cursor（如果有 seq）
             if let Some(seq) = event.seq {
                 state.cached_cursor = Some(seq.to_string());
             }
 
-            let deltas = event_to_deltas(&event, state.has_messages);
+            let deltas = event_to_deltas(event, state.has_messages);
             if deltas.is_empty() {
                 return Vec::new();
             }
@@ -435,7 +439,7 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
                 .collect()
         },
         event => {
-            let Some(delta) = child_event_to_agent_update(state, &event) else {
+            let Some(delta) = child_event_to_agent_update(state, event) else {
                 return Vec::new();
             };
             // 子事件的 seq 属于子会话，不能用来更新父会话的 cursor

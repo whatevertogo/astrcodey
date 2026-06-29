@@ -196,22 +196,16 @@ fn flush_queued_events(
     acp_session_id: &SessionId,
     cx: &ConnectionTo<Client>,
 ) {
-    loop {
-        match event_rx.try_recv() {
-            Ok(event) => {
-                if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
-                    if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
-                        continued_session_id,
-                        ..
-                    } = &event.payload
-                    {
-                        accepted_sessions.insert(continued_session_id.clone());
-                    }
-                    forward_event(&event, acp_session_id, cx);
-                }
-            },
-            Err(mpsc::error::TryRecvError::Empty)
-            | Err(mpsc::error::TryRecvError::Disconnected) => break,
+    while let Ok(event) = event_rx.try_recv() {
+        if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
+            if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
+                continued_session_id,
+                ..
+            } = &event.payload
+            {
+                accepted_sessions.insert(continued_session_id.clone());
+            }
+            forward_event(&event, acp_session_id, cx);
         }
     }
 }
