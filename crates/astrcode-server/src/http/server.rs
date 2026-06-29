@@ -18,7 +18,22 @@ use super::{
     routes::{config, extensions, lifecycle, models, sessions},
     stream,
 };
-use crate::bootstrap::ServerRuntime;
+use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
+
+type RouterParts = (Router, String, Arc<ServerEventBus>);
+
+#[cfg(feature = "testing")]
+#[derive(Clone)]
+pub struct TestEventPublisher {
+    event_bus: Arc<ServerEventBus>,
+}
+
+#[cfg(feature = "testing")]
+impl TestEventPublisher {
+    pub fn send_notification(&self, notification: ClientNotification) {
+        self.event_bus.send_notification(notification);
+    }
+}
 
 /// HTTP server startup and runtime errors.
 #[derive(Debug, thiserror::Error)]
@@ -36,8 +51,26 @@ pub fn router(
     runtime: Arc<ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Result<(Router, String), HttpServerError> {
+    let (app, auth_token, _) = router_parts(runtime, event_tx)?;
+    Ok((app, auth_token))
+}
+
+#[cfg(feature = "testing")]
+pub fn router_with_event_publisher(
+    runtime: Arc<ServerRuntime>,
+    event_tx: Arc<EventFanout<ClientNotification>>,
+) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
+    let (app, auth_token, event_bus) = router_parts(runtime, event_tx)?;
+    Ok((app, auth_token, TestEventPublisher { event_bus }))
+}
+
+fn router_parts(
+    runtime: Arc<ServerRuntime>,
+    event_tx: Arc<EventFanout<ClientNotification>>,
+) -> Result<RouterParts, HttpServerError> {
     let auth_token = configured_auth_token();
     let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let event_bus = Arc::clone(&server_system.event_bus);
     let state = HttpState {
         runtime,
         handler: server_system.handler,
@@ -116,7 +149,7 @@ pub fn router(
         .layer(cors)
         .with_state(state);
 
-    Ok((app, auth_token))
+    Ok((app, auth_token, event_bus))
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.

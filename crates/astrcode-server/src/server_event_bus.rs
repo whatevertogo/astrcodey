@@ -59,6 +59,25 @@ impl ServerEventBus {
         self.conversation_fanout(session_id).subscribe()
     }
 
+    pub(crate) fn register_conversation_children(
+        &self,
+        conversation_session_id: &SessionId,
+        child_sessions: &HashMap<SessionId, SessionId>,
+    ) {
+        if child_sessions.is_empty() {
+            return;
+        }
+
+        let mut roots = self.session_roots.lock();
+        roots
+            .entry(conversation_session_id.clone())
+            .or_insert_with(|| conversation_session_id.clone());
+        for (initial_child_id, leaf_child_id) in child_sessions {
+            roots.insert(initial_child_id.clone(), conversation_session_id.clone());
+            roots.insert(leaf_child_id.clone(), conversation_session_id.clone());
+        }
+    }
+
     pub fn send_notification(&self, notification: ClientNotification) {
         match notification {
             ClientNotification::Event(event) => self.publish_event(Arc::new(event)),
@@ -70,13 +89,22 @@ impl ServerEventBus {
     }
 
     pub fn publish_event(&self, event: Arc<Event>) {
+        let session_deleted = matches!(event.payload, EventPayload::SessionDeleted);
         let root_session_id = self.conversation_root_for_event(&event);
         self.remember_event_routes(&event, &root_session_id);
         self.update_streaming_snapshot(&event);
-        self.conversation_fanout(&root_session_id)
+        self.conversation_fanout(&event.session_id)
             .send(Arc::clone(&event));
+        if root_session_id != event.session_id {
+            self.conversation_fanout(&root_session_id)
+                .send(Arc::clone(&event));
+        }
         self.legacy_tx
             .send(ClientNotification::Event((*event).clone()));
+        if session_deleted {
+            self.attached.lock().remove(&event.session_id);
+            self.forget_session_routes(&event.session_id);
+        }
     }
 
     pub fn attach(self: &Arc<Self>, session: &Session) {
@@ -99,6 +127,10 @@ impl ServerEventBus {
 
     pub fn detach(&self, session_id: &SessionId) {
         self.attached.lock().remove(session_id);
+        self.forget_session_routes(session_id);
+    }
+
+    fn forget_session_routes(&self, session_id: &SessionId) {
         self.streaming.lock().remove(session_id);
         self.conversation_events.lock().remove(session_id);
         self.session_roots

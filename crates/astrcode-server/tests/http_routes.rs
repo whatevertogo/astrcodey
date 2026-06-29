@@ -14,13 +14,16 @@ use astrcode_core::{
     types::{Cursor, SessionId, new_message_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_protocol::http::{
-    CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
-    PromptSubmitResponse, SlashCommandListResponseDto,
+use astrcode_protocol::{
+    events::ClientNotification,
+    http::{
+        CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
+        PromptSubmitResponse, SlashCommandListResponseDto,
+    },
 };
 use astrcode_server::{
     bootstrap::ServerRuntime,
-    http::router,
+    http::{router, router_with_event_publisher},
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
         TurnRegistry, TurnScheduler,
@@ -543,6 +546,62 @@ async fn stream_ignores_events_from_other_sessions() {
     let body = read_sse_until(response.into_body(), "from session a").await;
     assert!(body.contains("from session a"));
     assert!(!body.contains("from session b"));
+}
+
+#[tokio::test]
+async fn stream_projects_tracked_child_events_to_parent_stream() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token, events) =
+        router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let parent_sid = SessionId::from(session_id.clone());
+    let child_sid = SessionId::from(format!("{session_id}-child"));
+    let child_id = child_sid.to_string();
+
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            parent_sid,
+            None,
+            EventPayload::AgentSessionSpawned {
+                child_session_id: child_sid.clone(),
+                agent_name: "worker".into(),
+                task: "check fanout routing".into(),
+                tool_policy: None,
+                tool_call_id: "child-call".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut child_event = Event::new(
+        child_sid.clone(),
+        None,
+        EventPayload::AssistantTextDelta {
+            message_id: "child-message".into(),
+            delta: "child live text must not leak".into(),
+        },
+    );
+    child_event.seq = Some(99);
+    events.send_notification(ClientNotification::Event(child_event));
+
+    let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
+    assert!(body.contains("agentSessionUpdated"));
+    assert!(body.contains(&child_id));
+    assert!(!body.contains("child live text must not leak"));
 }
 
 #[tokio::test]

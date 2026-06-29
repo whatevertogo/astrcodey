@@ -22,6 +22,8 @@ mod stream;
 
 pub use auth::ASTRCODE_HTTP_TOKEN_ENV;
 pub use server::{HttpServerError, remove_run_info, router, run_http_server, write_run_info};
+#[cfg(feature = "testing")]
+pub use server::router_with_event_publisher;
 
 /// HTTP router shared state.
 #[derive(Clone)]

@@ -141,6 +141,9 @@ pub(in crate::http) async fn session_stream(
         })
         .collect();
 
+    http_state
+        .event_bus
+        .register_conversation_children(&session_id, &child_sessions);
     let event_rx = http_state
         .event_bus
         .subscribe_conversation_events(&session_id);
@@ -286,6 +289,9 @@ pub(in crate::http) async fn session_stream(
 }
 
 async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
+    // Conversation events and global notifications are intentionally separate
+    // channels. We preserve ordering inside each channel, but do not promise a
+    // total order across them.
     tokio::select! {
         event = state.event_rx.recv() => event.map(LiveInput::Event),
         notification = state.notification_rx.recv() => {
