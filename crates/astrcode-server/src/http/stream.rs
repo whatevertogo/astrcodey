@@ -3,8 +3,7 @@
 //! 三段流串联：
 //! 1. `replay_error_stream`：cursor 解析或重放失败时推一条 `RehydrateRequired`。
 //! 2. `replay_stream`：从 `EventStore` 拉历史事件转 deltas（按 cursor 起点）。
-//! 3. `live_stream`：订阅 `ServerEventBus` 的 broadcast，过滤 sid，推增量。 Lagged 时自发一条
-//!    `RehydrateRequired` 让客户端重新拉快照。
+//! 3. `live_stream`：订阅当前 conversation 的 scoped event fanout 与全局非事件通知。
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -46,7 +45,8 @@ type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
 ///
 /// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
 struct LiveStreamState {
-    rx: mpsc::Receiver<ClientNotification>,
+    event_rx: mpsc::Receiver<Arc<Event>>,
+    notification_rx: mpsc::Receiver<ClientNotification>,
     runtime: Arc<ServerRuntime>,
     session_id: SessionId,
     /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
@@ -68,6 +68,11 @@ struct LiveStreamState {
     last_child_phase: HashMap<SessionId, Phase>,
     /// 缓存的最新 cursor，用于 live-only 事件（避免每次查询存储）。
     cached_cursor: Option<String>,
+}
+
+enum LiveInput {
+    Event(Arc<Event>),
+    Notification(ClientNotification),
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,7 +141,10 @@ pub(in crate::http) async fn session_stream(
         })
         .collect();
 
-    let rx = http_state.event_bus.fanout().subscribe();
+    let event_rx = http_state
+        .event_bus
+        .subscribe_conversation_events(&session_id);
+    let notification_rx = http_state.event_bus.subscribe_global_notifications();
     let (missed_events, replay_error) = match query.cursor.as_ref() {
         Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
         Some(cursor) => match http_state
@@ -214,7 +222,8 @@ pub(in crate::http) async fn session_stream(
     let live_runtime = Arc::clone(&http_state.runtime);
     let live_stream = stream::unfold(
         LiveStreamState {
-            rx,
+            event_rx,
+            notification_rx,
             runtime: live_runtime,
             session_id,
             replay_max_seq,
@@ -247,16 +256,14 @@ pub(in crate::http) async fn session_stream(
             }
 
             loop {
-                match state.rx.recv().await {
-                    Some(notification) => {
+                match recv_live_input(&mut state).await {
+                    Some(input) => {
                         let mut items: std::collections::VecDeque<_> =
-                            notification_to_sse_items(&mut state, notification)
-                                .await
-                                .into();
+                            live_input_to_sse_items(&mut state, input).await.into();
                         // Non-blocking drain: if more notifications are already
                         // buffered in the channel, process them now so they are
                         // sent in the same HTTP chunk as the first one.
-                        drain_pending_notifications(&mut state, &mut items).await;
+                        drain_pending_live_inputs(&mut state, &mut items).await;
 
                         if items.is_empty() {
                             continue;
@@ -276,6 +283,13 @@ pub(in crate::http) async fn session_stream(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
+    tokio::select! {
+        event = state.event_rx.recv() => event.map(LiveInput::Event),
+        notification = state.notification_rx.recv() => notification.map(LiveInput::Notification),
+    }
 }
 
 async fn event_cursor(runtime: &ServerRuntime, event: &Event) -> String {
@@ -301,15 +315,27 @@ async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String
     }
 }
 
-/// Non-blocking drain: if more notifications are already buffered in the
+/// Non-blocking drain: if more live inputs are already buffered in the
 /// channel, process them now so they are batched into the same HTTP chunk.
-async fn drain_pending_notifications(
+async fn drain_pending_live_inputs(
     state: &mut LiveStreamState,
     items: &mut std::collections::VecDeque<SseItem>,
 ) {
-    while let Ok(notification) = state.rx.try_recv() {
-        let more = notification_to_sse_items(state, notification).await;
-        items.extend(more);
+    loop {
+        let mut drained = false;
+        while let Ok(event) = state.event_rx.try_recv() {
+            drained = true;
+            let more = live_input_to_sse_items(state, LiveInput::Event(event)).await;
+            items.extend(more);
+        }
+        while let Ok(notification) = state.notification_rx.try_recv() {
+            drained = true;
+            let more = live_input_to_sse_items(state, LiveInput::Notification(notification)).await;
+            items.extend(more);
+        }
+        if !drained {
+            break;
+        }
     }
 }
 
@@ -322,44 +348,50 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
         return;
     };
     let mut buffered = Vec::new();
-    loop {
-        match state.rx.try_recv() {
-            Ok(ClientNotification::Event(event)) if event.session_id == state.session_id => {
-                // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
-                let Some(seq) = event.seq else {
-                    continue;
-                };
-                // 已被 replay 覆盖的 durable 事件也丢弃。
-                if seq <= replay_max {
-                    continue;
-                }
-                buffered.push(ClientNotification::Event(event));
-            },
-            Ok(ClientNotification::Event(event)) if is_tracked_child_event(state, &event) => {
-                buffered.push(ClientNotification::Event(event));
-            },
-            Ok(notification @ ClientNotification::StatusItemUpdate { .. })
-            | Ok(notification @ ClientNotification::ExtensionRegistryChanged)
-            | Ok(notification @ ClientNotification::ExtensionCommandResult { .. }) => {
-                buffered.push(notification);
-            },
-            // 非目标 session 事件和其它全局通知不属于 conversation stream。
-            Ok(_) => continue,
-            Err(_) => break,
+    while let Ok(event) = state.event_rx.try_recv() {
+        if event.session_id == state.session_id {
+            // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
+            let Some(seq) = event.seq else {
+                continue;
+            };
+            // 已被 replay 覆盖的 durable 事件也丢弃。
+            if seq <= replay_max {
+                continue;
+            }
+            buffered.push(LiveInput::Event(event));
+        } else if is_tracked_child_event(state, &event) {
+            buffered.push(LiveInput::Event(event));
         }
     }
-    for notification in buffered {
-        let items = notification_to_sse_items(state, notification).await;
+    while let Ok(notification) = state.notification_rx.try_recv() {
+        match notification {
+            ClientNotification::StatusItemUpdate { .. }
+            | ClientNotification::ExtensionRegistryChanged
+            | ClientNotification::ExtensionCommandResult { .. } => {
+                buffered.push(LiveInput::Notification(notification));
+            },
+            ClientNotification::Event(_) => {},
+            _ => {},
+        }
+    }
+    for input in buffered {
+        let items = live_input_to_sse_items(state, input).await;
         state.pending.extend(items);
     }
 }
 
-async fn notification_to_sse_items(
-    state: &mut LiveStreamState,
-    notification: ClientNotification,
-) -> Vec<SseItem> {
-    match notification {
-        ClientNotification::Event(event) if event.session_id == state.session_id => {
+async fn live_input_to_sse_items(state: &mut LiveStreamState, input: LiveInput) -> Vec<SseItem> {
+    match input {
+        LiveInput::Event(event) => event_to_sse_items(state, event).await,
+        LiveInput::Notification(notification) => {
+            notification_to_sse_items(state, notification).await
+        },
+    }
+}
+
+async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> Vec<SseItem> {
+    match event.as_ref() {
+        event if event.session_id == state.session_id => {
             if state
                 .replay_max_seq
                 .zip(event.seq)
@@ -402,7 +434,7 @@ async fn notification_to_sse_items(
                 })
                 .collect()
         },
-        ClientNotification::Event(event) => {
+        event => {
             let Some(delta) = child_event_to_agent_update(state, &event) else {
                 return Vec::new();
             };
@@ -414,6 +446,15 @@ async fn notification_to_sse_items(
                 delta,
             }))]
         },
+    }
+}
+
+async fn notification_to_sse_items(
+    state: &mut LiveStreamState,
+    notification: ClientNotification,
+) -> Vec<SseItem> {
+    match notification {
+        ClientNotification::Event(_) => Vec::new(),
         ClientNotification::StatusItemUpdate { id, text } => {
             let cursor = get_or_fetch_cursor(state).await;
             vec![Ok(sse_event(&ConversationStreamEnvelopeDto {

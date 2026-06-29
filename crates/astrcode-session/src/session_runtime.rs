@@ -118,7 +118,7 @@ pub struct SessionRuntimeState {
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
-    event_out: Arc<EventFanout<Event>>,
+    event_out: Arc<EventFanout<Arc<Event>>>,
     /// 会话级 AllowAlways / DenyAlways 审批记忆。
     approval_history: Arc<ApprovalHistoryStore>,
     /// 挂起中的工具审批（call_id → oneshot sender）。
@@ -234,13 +234,13 @@ impl SessionRuntimeState {
     }
 
     /// 订阅本 session 的事件流。
-    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Event> {
+    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Arc<Event>> {
         self.event_out.subscribe()
     }
 
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
-        self.event_out.send(event);
+        self.event_out.send(Arc::new(event));
     }
 
     pub fn approval_history(&self) -> Arc<ApprovalHistoryStore> {
