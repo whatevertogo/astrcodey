@@ -400,7 +400,6 @@ pub(crate) fn spawn_memory_pipeline(
 
     let services = services.get().cloned();
     let shutdown = tasks.shutdown();
-    let pipeline = pipeline.clone();
 
     tasks.spawn("memory-pipeline", async move {
         let Some(services) = services else {

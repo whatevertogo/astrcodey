@@ -26,7 +26,7 @@ pub(crate) struct StreamingSnapshot {
 type StreamingState = parking_lot::Mutex<Option<(MessageId, String, String)>>;
 
 pub struct ServerEventBus {
-    legacy_tx: Arc<EventFanout<ClientNotification>>,
+    legacy_tx: Option<Arc<EventFanout<ClientNotification>>>,
     global_notifications: Arc<EventFanout<ClientNotification>>,
     conversation_events: Mutex<HashMap<SessionId, Arc<EventFanout<Arc<Event>>>>>,
     session_roots: Mutex<HashMap<SessionId, SessionId>>,
@@ -37,7 +37,15 @@ pub struct ServerEventBus {
 impl ServerEventBus {
     const EVENT_FANOUT_CAPACITY: usize = 1024;
 
-    pub fn new(legacy_tx: Arc<EventFanout<ClientNotification>>) -> Self {
+    pub fn new() -> Self {
+        Self::new_with_legacy_tx(None)
+    }
+
+    pub fn with_legacy_tx(legacy_tx: Arc<EventFanout<ClientNotification>>) -> Self {
+        Self::new_with_legacy_tx(Some(legacy_tx))
+    }
+
+    fn new_with_legacy_tx(legacy_tx: Option<Arc<EventFanout<ClientNotification>>>) -> Self {
         Self {
             legacy_tx,
             global_notifications: Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY)),
@@ -83,7 +91,9 @@ impl ServerEventBus {
             ClientNotification::Event(event) => self.publish_event(Arc::new(event)),
             notification => {
                 self.global_notifications.send(notification.clone());
-                self.legacy_tx.send(notification);
+                if let Some(legacy_tx) = &self.legacy_tx {
+                    legacy_tx.send(notification);
+                }
             },
         }
     }
@@ -93,14 +103,13 @@ impl ServerEventBus {
         let root_session_id = self.conversation_root_for_event(&event);
         self.remember_event_routes(&event, &root_session_id);
         self.update_streaming_snapshot(&event);
-        self.conversation_fanout(&event.session_id)
-            .send(Arc::clone(&event));
+        self.send_to_existing_conversation_fanout(&event.session_id, Arc::clone(&event));
         if root_session_id != event.session_id {
-            self.conversation_fanout(&root_session_id)
-                .send(Arc::clone(&event));
+            self.send_to_existing_conversation_fanout(&root_session_id, Arc::clone(&event));
         }
-        self.legacy_tx
-            .send(ClientNotification::Event((*event).clone()));
+        if let Some(legacy_tx) = &self.legacy_tx {
+            legacy_tx.send(ClientNotification::Event((*event).clone()));
+        }
         if session_deleted {
             self.attached.lock().remove(&event.session_id);
             self.forget_session_routes(&event.session_id);
@@ -113,7 +122,7 @@ impl ServerEventBus {
 
     fn attach_client_fanout(self: &Arc<Self>, session: &Session) {
         let session_id = session.id().clone();
-        if !self.attached.lock().insert(session_id.clone()) {
+        if !self.attached.lock().insert(session_id) {
             return;
         }
         let mut rx = session.subscribe();
@@ -162,6 +171,22 @@ impl ServerEventBus {
                 .entry(session_id.clone())
                 .or_insert_with(|| Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY))),
         )
+    }
+
+    fn existing_conversation_fanout(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Arc<EventFanout<Arc<Event>>>> {
+        self.conversation_events
+            .lock()
+            .get(session_id)
+            .map(Arc::clone)
+    }
+
+    fn send_to_existing_conversation_fanout(&self, session_id: &SessionId, event: Arc<Event>) {
+        if let Some(fanout) = self.existing_conversation_fanout(session_id) {
+            fanout.send(event);
+        }
     }
 
     fn conversation_root_for_event(&self, event: &Event) -> SessionId {
@@ -244,5 +269,57 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
             *guard = None;
         },
         _ => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{event::EventPayload, types::SessionId};
+
+    use super::*;
+
+    fn turn_started(session_id: &SessionId) -> Arc<Event> {
+        Arc::new(Event::session(
+            session_id.clone(),
+            EventPayload::TurnStarted,
+        ))
+    }
+
+    #[test]
+    fn publish_without_subscriber_does_not_create_conversation_fanout() {
+        let bus = ServerEventBus::new();
+        let session_id = SessionId::new("session-1");
+
+        bus.publish_event(turn_started(&session_id));
+
+        assert!(bus.existing_conversation_fanout(&session_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribed_conversation_receives_published_event() {
+        let bus = ServerEventBus::new();
+        let session_id = SessionId::new("session-1");
+        let mut rx = bus.subscribe_conversation_events(&session_id);
+
+        bus.publish_event(turn_started(&session_id));
+
+        let event = rx.recv().await.expect("conversation event");
+        assert_eq!(event.session_id, session_id);
+    }
+
+    #[tokio::test]
+    async fn legacy_event_broadcast_is_only_sent_when_enabled() {
+        let legacy_tx = Arc::new(EventFanout::new(8));
+        let bus = ServerEventBus::with_legacy_tx(Arc::clone(&legacy_tx));
+        let session_id = SessionId::new("session-1");
+        let mut legacy_rx = legacy_tx.subscribe();
+
+        bus.publish_event(turn_started(&session_id));
+
+        let notification = legacy_rx.recv().await.expect("legacy event");
+        match notification {
+            ClientNotification::Event(event) => assert_eq!(event.session_id, session_id),
+            other => panic!("expected event notification, got {other:?}"),
+        }
     }
 }

@@ -58,12 +58,7 @@ impl Extension for SkillExtension {
         reg.command_discovery(Arc::new(SkillCommandDiscovery {
             shared: shared.clone(),
         }));
-        reg.on_prompt_build(
-            0,
-            Arc::new(SkillPromptBuildHandler {
-                shared: shared.clone(),
-            }),
-        );
+        reg.on_prompt_build(0, Arc::new(SkillPromptBuildHandler { shared }));
     }
 }
 

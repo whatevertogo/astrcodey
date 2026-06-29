@@ -726,7 +726,7 @@ fn test_runtime_with_settings(
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
         Duration::from_secs(1),
     ));
-    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings.clone()));
+    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
         llm_provider.clone(),
@@ -830,7 +830,9 @@ fn test_event_bus(
     runtime: &Arc<crate::bootstrap::ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Arc<crate::server_event_bus::ServerEventBus> {
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::new(event_tx));
+    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::with_legacy_tx(
+        event_tx,
+    ));
     runtime
         .session_manager()
         .bind_event_bus(Arc::clone(&event_bus));
@@ -2084,7 +2086,7 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
     let user_messages: Vec<_> = captured
         .iter()
         .filter(|message| message.role == LlmRole::User)
-        .map(|message| message_to_dto(message).content.clone())
+        .map(|message| message_to_dto(message).content)
         .collect();
     assert!(
         user_messages
