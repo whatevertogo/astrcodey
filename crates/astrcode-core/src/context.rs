@@ -21,6 +21,8 @@ pub struct ContextPrepareInput<'a> {
     pub system_prompt: Option<&'a str>,
     /// 当前 provider/model 的上下文限制。
     pub model_limits: ModelLimits,
+    /// provider 返回的 input token 统计；缺失时 context 层回退本地估算。
+    pub provider_input_tokens: Option<usize>,
     /// 插件提供的 compact 指令，追加到 compact summary 中。
     pub custom_instructions: Vec<String>,
 }

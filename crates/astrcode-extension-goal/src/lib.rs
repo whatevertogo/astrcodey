@@ -1080,9 +1080,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: Some(10),
             cached_input_tokens: Some(5),
+            cache_creation_input_tokens: None,
             output_tokens: Some(7),
             reasoning_output_tokens: Some(3),
             total_tokens: Some(20),
+            source: None,
         };
 
         // 主口径：non-cached input (10-5=5) + output (7) = 12，排除 reasoning。
@@ -1094,9 +1096,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: None,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: None,
             reasoning_output_tokens: Some(3),
             total_tokens: Some(20),
+            source: None,
         };
 
         // 缺分项回退到 total_tokens，并扣除 reasoning 保持口径一致：20-3=17。
@@ -1108,9 +1112,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: Some(10),
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: None,
             reasoning_output_tokens: Some(2),
             total_tokens: Some(30),
+            source: None,
         };
 
         // output 缺失，整体回退：30-2=28，而不是只计 input(10)。
@@ -1122,9 +1128,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: None,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: Some(8),
             reasoning_output_tokens: None,
             total_tokens: Some(25),
+            source: None,
         };
 
         assert_eq!(goal_token_count(&usage), Some(25));
@@ -1135,9 +1143,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: None,
             cached_input_tokens: None,
+            cache_creation_input_tokens: None,
             output_tokens: None,
             reasoning_output_tokens: None,
             total_tokens: None,
+            source: None,
         };
 
         assert_eq!(goal_token_count(&usage), None);
@@ -1148,9 +1158,11 @@ mod tests {
         let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
             input_tokens: Some(10),
             cached_input_tokens: Some(10),
+            cache_creation_input_tokens: None,
             output_tokens: Some(5),
             reasoning_output_tokens: Some(99),
             total_tokens: Some(200),
+            source: None,
         };
 
         // input 全部命中缓存，只剩 output：0 + 5 = 5。

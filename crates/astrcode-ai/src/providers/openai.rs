@@ -472,14 +472,15 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         }
     }
 
-    fn is_official_openai(&self) -> bool {
-        reqwest::Url::parse(&self.config.base_url)
-            .ok()
-            .and_then(|url| {
-                url.host_str()
-                    .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
-            })
-            .unwrap_or(false)
+    fn input_tokens_endpoint(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
+        if base.ends_with("/responses/input_tokens") {
+            base.to_string()
+        } else if base.ends_with("/responses") {
+            format!("{base}/input_tokens")
+        } else {
+            format!("{base}/responses/input_tokens")
+        }
     }
 
     fn build_request_body(
@@ -507,7 +508,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             "max_tokens": self.model_limits_val.max_output_tokens,
             "stream": true,
         });
-        if self.is_official_openai() {
+        if self.config.supports_stream_usage() {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
 
@@ -560,6 +561,20 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         }
         self.apply_prompt_cache_fields(&mut body, messages, tools);
 
+        body
+    }
+
+    fn build_responses_count_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let mut body = self.build_responses_request_body(messages, tools);
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("max_output_tokens");
+            obj.remove("stream");
+            obj.remove("parallel_tool_calls");
+        }
         body
     }
 
@@ -727,6 +742,45 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
         });
 
         Ok(rx)
+    }
+
+    async fn count_input_tokens(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        if self.api_mode != OpenAiApiMode::Responses {
+            return Err(LlmError::Unsupported(
+                "OpenAI Chat Completions does not expose provider-side input token counting".into(),
+            ));
+        }
+
+        let mut headers: Vec<(String, String)> =
+            self.config.extra_headers.clone().into_iter().collect();
+        headers.push((
+            "Authorization".into(),
+            format!("Bearer {}", self.config.api_key),
+        ));
+        let value = HttpPostRequest {
+            client: self.client.clone(),
+            endpoint: self.input_tokens_endpoint(),
+            headers,
+            body: self.build_responses_count_body(&messages, &tools),
+            retry: retry_policy_from_config(&self.config),
+        }
+        .json()
+        .await?;
+        let input_tokens = value
+            .get("input_tokens")
+            .or_else(|| value.get("inputTokens"))
+            .or_else(|| value.get("total_tokens"))
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                LlmError::StreamParse(format!(
+                    "OpenAI input token count response missing input_tokens: {value}"
+                ))
+            })?;
+        Ok(ProviderInputTokenCount::provider_count(input_tokens))
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -900,9 +954,11 @@ fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
     let usage = LlmTokenUsage {
         input_tokens,
         cached_input_tokens,
+        cache_creation_input_tokens: None,
         output_tokens,
         reasoning_output_tokens,
         total_tokens,
+        source: Some(LlmTokenUsageSource::ProviderUsage),
     };
     if token_usage_has_value(&usage) {
         Some(usage)
@@ -914,6 +970,7 @@ fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
 fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
     usage.input_tokens.is_some()
         || usage.cached_input_tokens.is_some()
+        || usage.cache_creation_input_tokens.is_some()
         || usage.output_tokens.is_some()
         || usage.reasoning_output_tokens.is_some()
         || usage.total_tokens.is_some()
@@ -952,6 +1009,7 @@ mod tests {
             api_key: "sk-test".into(),
             extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
                 supports_prompt_cache_key: supports_cache_key,
+                supports_stream_usage: true,
                 prompt_cache_retention: supports_cache_key
                     .then_some(PromptCacheRetention::TwentyFourHours),
                 thinking_level,
@@ -988,6 +1046,34 @@ mod tests {
                 .is_some_and(|k| k.starts_with("astrcode-"))
         );
         assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn chat_request_includes_stream_usage_when_supported() {
+        let p = provider(OpenAiApiMode::ChatCompletions, false, None);
+        let body = p.build_request_body(&[LlmMessage::user("hi")], &[]);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn responses_count_body_keeps_provider_visible_input_and_tools() {
+        let p = provider(OpenAiApiMode::Responses, true, Some(ThinkingLevel::Medium));
+        let body = p.build_responses_count_body(
+            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[sample_tool()],
+        );
+
+        assert_eq!(
+            p.input_tokens_endpoint(),
+            "https://api.test/v1/responses/input_tokens"
+        );
+        assert_eq!(body["model"], "gpt-test");
+        assert_eq!(body["instructions"], "s");
+        assert!(body["input"].is_array());
+        assert!(body["tools"].is_array());
+        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert!(body.get("stream").is_none());
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]
@@ -1053,6 +1139,7 @@ mod tests {
                     && usage.output_tokens == Some(20)
                     && usage.reasoning_output_tokens == Some(5)
                     && usage.total_tokens == Some(120)
+                    && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
         ));
     }
 
@@ -1090,6 +1177,7 @@ mod tests {
                 && usage.cached_input_tokens == Some(64)
                 && usage.output_tokens == Some(20)
                 && usage.total_tokens == Some(120)
+                && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
                 && finish_reason == "stop"
         ));
         assert!(acc.done_sent());
@@ -1137,6 +1225,7 @@ mod tests {
                     && usage.output_tokens == Some(10)
                     && usage.reasoning_output_tokens == Some(3)
                     && usage.total_tokens == Some(60)
+                    && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
         )));
         assert!(
             events

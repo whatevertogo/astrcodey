@@ -85,6 +85,7 @@ fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
         max_retries: 0,
         retry_base_delay_ms: 250,
         supports_prompt_cache_key: false,
+        supports_stream_usage: false,
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,

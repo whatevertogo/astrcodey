@@ -12,7 +12,10 @@ use astrcode_core::{
         AfterToolResultsContext, AfterToolResultsResult, ContinueAfterStopContext,
         ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
     },
-    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, provider_visible_messages},
+    llm::{
+        LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
+        provider_visible_messages,
+    },
     storage::SessionReadModel,
     tool::ToolDefinition,
     types::*,
@@ -415,9 +418,10 @@ impl TurnLoop {
 
         let model = publisher.snapshot_model().await?;
         let llm = Arc::clone(host.llm);
+        let visible_tools = state.visible_tools();
         let compaction_request = self
             .compaction
-            .build_auto_compaction_request(&host, &model)
+            .build_auto_compaction_request(&host, &model, &visible_tools)
             .await?;
 
         let PreparedContextMessages {
@@ -446,14 +450,120 @@ impl TurnLoop {
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
     ) -> Result<StreamOutcome, TurnError> {
+        let request_messages = prepared.messages.clone();
         let rx = self
             .start_provider_stream(&prepared.llm, prepared.messages, tools, publisher)
             .await?;
         let message_id = new_message_id();
         match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
-            Ok(outcome) => Ok(outcome),
+            Ok(outcome) => Ok(self
+                .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
+                .await),
             Err(e @ TurnError::Llm(LlmError::PromptTooLong(_))) => Err(e),
             Err(error) => end_turn_with_error_typed(error),
+        }
+    }
+
+    async fn with_usage_fallback(
+        &self,
+        outcome: StreamOutcome,
+        llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
+        request_messages: Vec<LlmMessage>,
+        tools: &[ToolDefinition],
+    ) -> StreamOutcome {
+        let needs_usage = match &outcome {
+            StreamOutcome::Complete { usage, .. } | StreamOutcome::ToolCalls { usage, .. } => {
+                usage.is_none()
+            },
+        };
+        if !needs_usage {
+            return outcome;
+        }
+
+        let usage = self
+            .fallback_token_usage(llm, request_messages, tools)
+            .await;
+        match outcome {
+            StreamOutcome::Complete {
+                text,
+                reasoning_content,
+                finish_reason,
+                message_id,
+                message_started,
+                usage: _,
+            } => StreamOutcome::Complete {
+                text,
+                reasoning_content,
+                finish_reason,
+                message_id,
+                message_started,
+                usage,
+            },
+            StreamOutcome::ToolCalls {
+                text,
+                reasoning_content,
+                tool_calls,
+                message_id,
+                message_started,
+                usage: _,
+            } => StreamOutcome::ToolCalls {
+                text,
+                reasoning_content,
+                tool_calls,
+                message_id,
+                message_started,
+                usage,
+            },
+        }
+    }
+
+    async fn fallback_token_usage(
+        &self,
+        llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
+        request_messages: Vec<LlmMessage>,
+        tools: &[ToolDefinition],
+    ) -> Option<LlmTokenUsage> {
+        let effective = self.session.caps().read_effective();
+        match llm
+            .count_input_tokens(request_messages.clone(), tools.to_vec())
+            .await
+        {
+            Ok(count) => {
+                tracing::warn!(
+                    provider = %effective.llm.provider_kind,
+                    model = %effective.llm.model_id,
+                    stage = "turn_usage",
+                    "provider stream did not include usage; recording provider count fallback"
+                );
+                Some(LlmTokenUsage {
+                    input_tokens: Some(count.input_tokens),
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    output_tokens: None,
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                    source: Some(LlmTokenUsageSource::ProviderCountFallback),
+                })
+            },
+            Err(error) => {
+                tracing::warn!(
+                    provider = %effective.llm.provider_kind,
+                    model = %effective.llm.model_id,
+                    stage = "turn_usage",
+                    error = %error,
+                    "provider stream did not include usage and provider count failed; recording \
+                     local estimate fallback"
+                );
+                Some(LlmTokenUsage {
+                    input_tokens: Some(local_estimate_request_tokens(&request_messages) as u64),
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    output_tokens: None,
+                    reasoning_output_tokens: None,
+                    total_tokens: None,
+                    source: Some(LlmTokenUsageSource::LocalEstimateFallback),
+                })
+            },
         }
     }
 
@@ -749,6 +859,47 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+fn local_estimate_request_tokens(messages: &[LlmMessage]) -> usize {
+    // Last-resort fallback only: keep this lightweight heuristic aligned with
+    // astrcode-context token budgeting without adding a session -> context dependency.
+    let raw_total = messages
+        .iter()
+        .map(|message| {
+            6 + message
+                .content
+                .iter()
+                .map(local_estimate_content_tokens)
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    raw_total.saturating_mul(4).div_ceil(3)
+}
+
+fn local_estimate_content_tokens(content: &LlmContent) -> usize {
+    match content {
+        LlmContent::Text { text } => local_estimate_text_tokens(text),
+        LlmContent::Image { base64, .. } => local_estimate_text_tokens(base64),
+        LlmContent::ToolCall {
+            call_id,
+            name,
+            arguments,
+        } => {
+            12 + local_estimate_text_tokens(call_id)
+                + local_estimate_text_tokens(name)
+                + local_estimate_text_tokens(&arguments.to_string())
+        },
+        LlmContent::ToolResult {
+            tool_call_id,
+            content,
+            ..
+        } => local_estimate_text_tokens(tool_call_id) + local_estimate_text_tokens(content),
+    }
+}
+
+fn local_estimate_text_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4).max(1)
 }
 
 enum ToolStageDecision {

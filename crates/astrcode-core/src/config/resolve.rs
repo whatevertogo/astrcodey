@@ -183,6 +183,9 @@ fn resolve_llm_settings(
         supports_prompt_cache_key: openai_capabilities
             .and_then(|c| c.supports_prompt_cache_key)
             .unwrap_or(false),
+        supports_stream_usage: openai_capabilities
+            .and_then(|c| c.supports_stream_usage)
+            .unwrap_or(false),
         prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
         reasoning,
         thinking_level,

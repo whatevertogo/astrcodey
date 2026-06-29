@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        SharedStreamSink, StreamEventSink, build_client, retry_policy_from_config, send_event,
-        stream_with_retry,
+        HttpPostRequest, SharedStreamSink, StreamEventSink, build_client, retry_policy_from_config,
+        send_event, stream_with_retry,
     },
     serialization::ContentMapper,
     tool_result_wire::gemini_tool_result_parts,
@@ -48,6 +48,22 @@ impl GeminiProvider {
             return base.to_string();
         }
         format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+    }
+
+    fn count_tokens_endpoint(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
+        let base = base.split('?').next().unwrap_or(base);
+        let model = &self.model_id;
+        if base.contains(":countTokens") {
+            return base.to_string();
+        }
+        if let Some(prefix) = base.strip_suffix(":streamGenerateContent") {
+            return format!("{prefix}:countTokens");
+        }
+        if let Some(prefix) = base.strip_suffix(":generateContent") {
+            return format!("{prefix}:countTokens");
+        }
+        format!("{base}/models/{model}:countTokens")
     }
 
     fn build_request_body(
@@ -107,6 +123,29 @@ impl GeminiProvider {
         }
         body
     }
+
+    fn build_count_tokens_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let mut body = self.build_request_body(messages, tools);
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("generationConfig");
+        }
+        body
+    }
+
+    fn headers(&self) -> Vec<(String, String)> {
+        let mut headers: Vec<(String, String)> = self
+            .config
+            .extra_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        headers.push(("x-goog-api-key".into(), self.config.api_key.clone()));
+        headers
+    }
 }
 
 #[async_trait::async_trait]
@@ -120,13 +159,7 @@ impl LlmProvider for GeminiProvider {
         let body = self.build_request_body(&messages, &tools);
 
         let endpoint = self.endpoint();
-        let mut headers: Vec<(String, String)> = self
-            .config
-            .extra_headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        headers.push(("x-goog-api-key".into(), self.config.api_key.clone()));
+        let headers = self.headers();
         let client = self.client.clone();
         let retry = retry_policy_from_config(&self.config);
 
@@ -146,6 +179,32 @@ impl LlmProvider for GeminiProvider {
         });
 
         Ok(rx)
+    }
+
+    async fn count_input_tokens(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        let value = HttpPostRequest {
+            client: self.client.clone(),
+            endpoint: self.count_tokens_endpoint(),
+            headers: self.headers(),
+            body: self.build_count_tokens_body(&messages, &tools),
+            retry: retry_policy_from_config(&self.config),
+        }
+        .json()
+        .await?;
+        let input_tokens = value
+            .get("totalTokens")
+            .or_else(|| value.get("total_tokens"))
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                LlmError::StreamParse(format!(
+                    "Gemini countTokens response missing totalTokens: {value}"
+                ))
+            })?;
+        Ok(ProviderInputTokenCount::provider_count(input_tokens))
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -234,9 +293,11 @@ fn extract_gemini_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage
         cached_input_tokens: usage
             .get("cachedContentTokenCount")
             .and_then(|v| v.as_u64()),
+        cache_creation_input_tokens: None,
         output_tokens: usage.get("candidatesTokenCount").and_then(|v| v.as_u64()),
         reasoning_output_tokens: usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()),
         total_tokens: usage.get("totalTokenCount").and_then(|v| v.as_u64()),
+        source: Some(LlmTokenUsageSource::ProviderUsage),
     };
     token_usage_has_value(&token_usage).then_some(token_usage)
 }
@@ -244,6 +305,7 @@ fn extract_gemini_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage
 fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
     usage.input_tokens.is_some()
         || usage.cached_input_tokens.is_some()
+        || usage.cache_creation_input_tokens.is_some()
         || usage.output_tokens.is_some()
         || usage.reasoning_output_tokens.is_some()
         || usage.total_tokens.is_some()
@@ -405,6 +467,38 @@ mod tests {
     }
 
     #[test]
+    fn count_tokens_request_reuses_generate_content_shape_without_generation_config() {
+        let provider = GeminiProvider::new(
+            LlmClientConfig {
+                base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+                ..LlmClientConfig::default()
+            },
+            "gemini-test".into(),
+            Some(1024),
+            Some(8192),
+        )
+        .unwrap();
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: astrcode_core::tool::ToolOrigin::Builtin,
+            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
+        }];
+        let body = provider
+            .build_count_tokens_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &tools);
+
+        assert_eq!(
+            provider.count_tokens_endpoint(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:countTokens"
+        );
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "s");
+        assert!(body["contents"].is_array());
+        assert!(body["tools"].is_array());
+        assert!(body.get("generationConfig").is_none());
+    }
+
+    #[test]
     fn endpoint_includes_model_and_key() {
         let provider = GeminiProvider::new(
             LlmClientConfig {
@@ -468,6 +562,7 @@ mod tests {
                     && usage.output_tokens == Some(20)
                     && usage.reasoning_output_tokens == Some(5)
                     && usage.total_tokens == Some(120)
+                    && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
         ));
         assert!(sink.usage_reported());
     }

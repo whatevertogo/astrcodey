@@ -13,8 +13,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        StreamEventSink, build_client, report_stream_error, retry_policy_from_config, send_event,
-        stream_text_delta, stream_with_event_type,
+        HttpPostRequest, StreamEventSink, build_client, report_stream_error,
+        retry_policy_from_config, send_event, stream_text_delta, stream_with_event_type,
     },
     serialization::ContentMapper,
     tool_result_wire::anthropic_tool_result_content,
@@ -54,6 +54,15 @@ impl AnthropicProvider {
             format!("{base}/messages")
         } else {
             format!("{base}/v1/messages")
+        }
+    }
+
+    fn count_tokens_endpoint(&self) -> String {
+        let endpoint = self.endpoint();
+        if endpoint.ends_with("/count_tokens") {
+            endpoint
+        } else {
+            format!("{endpoint}/count_tokens")
         }
     }
 
@@ -132,31 +141,44 @@ impl AnthropicProvider {
 
         (system, api_messages)
     }
-}
 
-#[async_trait::async_trait]
-impl LlmProvider for AnthropicProvider {
-    async fn generate(
+    fn build_request_body(
         &self,
-        messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (system, api_messages) = self.convert_messages(&messages);
-
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+        stream: bool,
+    ) -> serde_json::Value {
+        let (system, api_messages) = self.convert_messages(messages);
         let mut request_body = serde_json::json!({
             "model": self.model_id,
             "messages": api_messages,
             "max_tokens": self.model_limits_val.max_output_tokens,
-            "stream": true,
         });
+        if stream {
+            request_body["stream"] = serde_json::json!(true);
+        }
         if let Some(sys) = system {
             request_body["system"] = sys;
         }
         if !tools.is_empty() {
-            request_body["tools"] = convert_tools(&tools);
+            request_body["tools"] = convert_tools(tools);
         }
-        let endpoint = self.endpoint();
+        request_body
+    }
+
+    fn build_count_tokens_body(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
+        let mut body = self.build_request_body(messages, tools, false);
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("max_tokens");
+        }
+        body
+    }
+
+    fn headers(&self) -> Vec<(String, String)> {
         let headers = vec![
             ("x-api-key".into(), self.config.api_key.clone()),
             ("anthropic-version".into(), "2023-06-01".into()),
@@ -167,7 +189,21 @@ impl LlmProvider for AnthropicProvider {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let headers = [headers, extra].concat();
+        [headers, extra].concat()
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for AnthropicProvider {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let request_body = self.build_request_body(&messages, &tools, true);
+        let endpoint = self.endpoint();
+        let headers = self.headers();
         let client = self.client.clone();
         let retry = retry_policy_from_config(&self.config);
 
@@ -200,6 +236,31 @@ impl LlmProvider for AnthropicProvider {
         });
 
         Ok(rx)
+    }
+
+    async fn count_input_tokens(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        let value = HttpPostRequest {
+            client: self.client.clone(),
+            endpoint: self.count_tokens_endpoint(),
+            headers: self.headers(),
+            body: self.build_count_tokens_body(&messages, &tools),
+            retry: retry_policy_from_config(&self.config),
+        }
+        .json()
+        .await?;
+        let input_tokens = value
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                LlmError::StreamParse(format!(
+                    "Anthropic count_tokens response missing input_tokens: {value}"
+                ))
+            })?;
+        Ok(ProviderInputTokenCount::provider_count(input_tokens))
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -414,15 +475,18 @@ fn handle_anthropic_event(
 
 fn extract_anthropic_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
     let usage = event.get("usage")?;
-    // TODO: model cache_creation_input_tokens separately if callers need write-cache cost details.
     let token_usage = LlmTokenUsage {
         input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()),
         cached_input_tokens: usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64()),
+        cache_creation_input_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64()),
         output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()),
         reasoning_output_tokens: None,
         total_tokens: None,
+        source: Some(LlmTokenUsageSource::ProviderUsage),
     };
     token_usage_has_value(&token_usage).then_some(token_usage)
 }
@@ -430,6 +494,7 @@ fn extract_anthropic_token_usage(event: &serde_json::Value) -> Option<LlmTokenUs
 fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
     usage.input_tokens.is_some()
         || usage.cached_input_tokens.is_some()
+        || usage.cache_creation_input_tokens.is_some()
         || usage.output_tokens.is_some()
         || usage.reasoning_output_tokens.is_some()
         || usage.total_tokens.is_some()
@@ -678,6 +743,40 @@ mod tests {
     }
 
     #[test]
+    fn count_tokens_request_reuses_messages_system_and_tools() {
+        let provider = AnthropicProvider::new(
+            LlmClientConfig {
+                base_url: "https://api.anthropic.com/v1".into(),
+                ..LlmClientConfig::default()
+            },
+            "claude-test".into(),
+            Some(1024),
+            Some(200_000),
+        )
+        .unwrap();
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: astrcode_core::tool::ToolOrigin::Builtin,
+            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
+        }];
+        let body = provider
+            .build_count_tokens_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &tools);
+
+        assert_eq!(
+            provider.count_tokens_endpoint(),
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        );
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["system"][0]["text"], "s");
+        assert!(body["messages"].is_array());
+        assert!(body["tools"].is_array());
+        assert!(body.get("stream").is_none());
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
     fn convert_messages_extracts_system() {
         let provider = AnthropicProvider::new(
             LlmClientConfig::default(),
@@ -752,9 +851,11 @@ mod tests {
                 LlmEvent::Done { finish_reason }
             ] if usage.input_tokens == Some(100)
                 && usage.cached_input_tokens == Some(40)
+                && usage.cache_creation_input_tokens == Some(7)
                 && usage.output_tokens == Some(20)
                 && usage.reasoning_output_tokens.is_none()
                 && usage.total_tokens.is_none()
+                && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
                 && finish_reason == "end_turn"
         ));
     }

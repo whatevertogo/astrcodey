@@ -116,6 +116,7 @@ impl LlmContextAssembler {
             &input.messages,
             input.system_prompt,
             input.model_limits.clone(),
+            input.provider_input_tokens,
         );
         let threshold_met = should_compact(snapshot)
             || (self.settings.predictive_compact_enabled
@@ -179,6 +180,7 @@ impl LlmContextAssembler {
             &input.messages,
             input.system_prompt,
             input.model_limits.clone(),
+            input.provider_input_tokens,
         )
     }
 
@@ -201,13 +203,18 @@ impl LlmContextAssembler {
         messages: &[LlmMessage],
         system_prompt: Option<&str>,
         model_limits: ModelLimits,
+        provider_input_tokens: Option<usize>,
     ) -> crate::token_budget::PromptTokenSnapshot {
-        build_prompt_snapshot(
+        let mut snapshot = build_prompt_snapshot(
             messages,
             system_prompt,
             model_limits,
             self.settings.compact_threshold_percent,
-        )
+        );
+        if let Some(context_tokens) = provider_input_tokens {
+            snapshot.context_tokens = context_tokens;
+        }
+        snapshot
     }
 }
 
@@ -274,6 +281,7 @@ mod tests {
                         max_input_tokens: 200_000,
                         max_output_tokens: 1024,
                     },
+                    provider_input_tokens: None,
                     custom_instructions: Vec::new(),
                 },
                 PrepareMessagesOptions {
@@ -298,6 +306,7 @@ mod tests {
                         max_input_tokens: 100,
                         max_output_tokens: 1024,
                     },
+                    provider_input_tokens: None,
                     custom_instructions: Vec::new(),
                 },
                 PrepareMessagesOptions {
@@ -323,6 +332,23 @@ mod tests {
                     .iter()
                     .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("<compact_summary>")))
         }));
+    }
+
+    #[test]
+    fn prompt_snapshot_uses_provider_input_tokens_when_available() {
+        let assembler = LlmContextAssembler::new(ContextSettings::default());
+        let snapshot = assembler.prompt_snapshot(&ContextPrepareInput {
+            messages: vec![LlmMessage::user("short")],
+            system_prompt: None,
+            model_limits: ModelLimits {
+                max_input_tokens: 10_000,
+                max_output_tokens: 1024,
+            },
+            provider_input_tokens: Some(4_200),
+            custom_instructions: Vec::new(),
+        });
+
+        assert_eq!(snapshot.context_tokens, 4_200);
     }
 
     #[tokio::test]

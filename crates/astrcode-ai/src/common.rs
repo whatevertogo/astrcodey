@@ -294,6 +294,62 @@ impl HttpPostRequest {
         }
     }
 
+    /// 发起带重试的 JSON POST 请求，返回 JSON 响应体。
+    pub async fn json(&self) -> Result<serde_json::Value, LlmError> {
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+            let response = match self.send_once().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if self.retry.should_retry_transport(attempt) {
+                        let delay = self.retry.delay(attempt);
+                        tracing::warn!(
+                            "LLM JSON request failed with transport error (attempt {attempt}/{}), \
+                             retrying after {}ms: {error}",
+                            self.retry.max_transport_retries,
+                            delay.as_millis(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(error);
+                },
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                let endpoint = response.url().to_string();
+                let text = response
+                    .text()
+                    .await
+                    .map_err(|error| transport_error("read JSON response", &endpoint, error))?;
+                return serde_json::from_str(&text).map_err(|error| {
+                    LlmError::StreamParse(format!(
+                        "failed to parse LLM JSON response from {}: {error}",
+                        redacted_endpoint(&endpoint)
+                    ))
+                });
+            }
+
+            if self.retry.should_retry(attempt, status.as_u16()) {
+                let delay = self.retry.delay(attempt);
+                tracing::warn!(
+                    "LLM JSON request failed with {status}, retrying (attempt {attempt}/{}) after \
+                     {}ms",
+                    self.retry.max_retries,
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+
+            let text = read_http_error_body(response, &self.endpoint).await;
+            return Err(classify_error(status.as_u16(), text));
+        }
+    }
+
     /// 发起带重试的 SSE `data:` 行流式请求。
     ///
     /// `on_data` 在每条成功解析为 JSON 的 `data:` 行到达时被调用，参数为
