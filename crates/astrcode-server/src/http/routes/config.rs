@@ -57,7 +57,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         active_profile: raw.active_profile.clone(),
         active_model: raw.active_model.clone(),
         active_small_profile: raw.active_small_profile.clone(),
-        active_small_model: raw.active_small_model.clone(),
+        active_small_model: raw.active_small_model,
         extension_states: state
             .runtime
             .config_manager

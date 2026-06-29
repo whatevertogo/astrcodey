@@ -17,7 +17,7 @@ pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -
     let raw = state.runtime.config_manager().raw_config_snapshot();
     let eff = state.runtime.config_manager().read_effective();
     Json(CurrentModelResponseDto {
-        profile_name: raw.active_profile.clone(),
+        profile_name: raw.active_profile,
         model_id: eff.llm.model_id.clone(),
         provider_kind: eff.llm.provider_kind.clone(),
     })

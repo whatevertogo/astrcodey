@@ -46,7 +46,7 @@ impl TurnToolContext {
             session_id: session.id().clone(),
             working_dir: session_state.working_dir.clone(),
             model_id: session_state.model_id.clone(),
-            session_store_dir: session_store_dir.clone(),
+            session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
             is_child_session: session_state.parent_session_id.is_some(),

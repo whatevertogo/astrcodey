@@ -41,7 +41,7 @@ impl CommandHandler {
                                 parent_session_id: summary
                                     .parent_session_id
                                     .map(SessionId::into_string),
-                                title: summary.first_user_message.clone(),
+                                title: summary.first_user_message,
                             })
                             .collect();
                         self.event_bus

@@ -872,7 +872,7 @@ impl ToolCalls {
             "persistedToolResult".into(),
             serde_json::json!({
                 "bytes": reference.bytes,
-                "path": reference.path.clone(),
+                "path": &reference.path,
             }),
         );
         result.content = persisted_tool_result_summary(&reference, &preview);

@@ -31,6 +31,13 @@
 优先最小相关检查：`cargo fmt --check` → `cargo test -p <crate> <test_name>` → `cargo clippy -p <crate> --all-targets -- -D warnings`。然后再跑`cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --all-features`
 大范围改动：`cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --all-features`。
 
+修改代码后，在合适的收尾点必须跑一遍对应验证和验收：
+- 普通代码改动：至少跑 `cargo fmt --check`、相关 crate/test 的最小测试、相关 crate 的 clippy。
+- 大范围/跨 crate/并发/协议/持久化/发布相关改动：跑完整 `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --all-features`。
+- push、创建 PR、合并 PR、发 release 前：必须先确认本地或 CI 的对应验证已通过；如果只是等待 CI，也要明确说明哪些检查仍在跑。
+- 如果因为环境缺失、耗时不可接受、用户明确要求跳过等原因无法执行验证，必须在回复中写清楚未跑哪些命令、原因和剩余风险。
+- 不要把“能编译/能合并”当作验收；需要根据改动性质补必要的行为测试或手动验收说明。
+
 ## 回复要求
 
 每次完成修改后，回复末尾必须附带：

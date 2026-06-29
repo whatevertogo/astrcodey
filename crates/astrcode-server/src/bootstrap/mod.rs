@@ -21,7 +21,7 @@ use astrcode_storage::config_store::FileConfigStore;
 mod config_resolve;
 mod server_system;
 
-pub use server_system::{ServerSystem, spawn_server_system};
+pub use server_system::{ServerSystem, spawn_server_system, spawn_server_system_without_legacy};
 
 fn approval_mode_wire(mode: astrcode_core::permission::ApprovalMode) -> String {
     match mode {

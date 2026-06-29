@@ -66,10 +66,10 @@ pub fn router_with_event_publisher(
 
 fn router_parts(
     runtime: Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
+    _event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Result<RouterParts, HttpServerError> {
     let auth_token = configured_auth_token();
-    let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
     let event_bus = Arc::clone(&server_system.event_bus);
     let state = HttpState {
         runtime,

@@ -117,13 +117,7 @@ impl StandardAccumulator {
                 );
                 if !partial.pending_arguments.is_empty() {
                     let delta = std::mem::take(&mut partial.pending_arguments);
-                    send_event(
-                        tx,
-                        LlmEvent::ToolCallDelta {
-                            call_id: call_id.clone(),
-                            delta,
-                        },
-                    );
+                    send_event(tx, LlmEvent::ToolCallDelta { call_id, delta });
                 }
             }
         }

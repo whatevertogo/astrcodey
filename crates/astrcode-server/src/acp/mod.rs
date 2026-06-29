@@ -17,7 +17,6 @@ use agent_client_protocol::{
     },
 };
 use astrcode_core::{event::Event, types::SessionId};
-use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -32,8 +31,7 @@ use crate::{
 /// This function blocks until the connection is closed or an unrecoverable
 /// error occurs.
 pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let server_system = crate::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
     let event_bus = server_system.event_bus;
     let command_handle = server_system.handler;
 
@@ -392,7 +390,7 @@ mod tests {
 
         // Parent session event passes
         let parent_event = Event::new(
-            parent_session.clone(),
+            parent_session,
             Some(turn_id.clone()),
             EventPayload::AssistantTextDelta {
                 message_id: "msg-1".into(),
@@ -413,7 +411,7 @@ mod tests {
         assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
 
         // After learning compact boundary, child events pass
-        accepted.insert(child_session.clone());
+        accepted.insert(child_session);
         assert!(event_belongs_to_prompt(&child_event, &accepted, &turn_id));
     }
 

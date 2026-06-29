@@ -56,12 +56,7 @@ impl Extension for AgentToolsExtension {
             }),
         );
         reg.tool_metadata(agent_tool_metadata());
-        reg.on_prompt_build(
-            0,
-            Arc::new(AgentPromptBuildHandler {
-                shared: shared.clone(),
-            }),
-        );
+        reg.on_prompt_build(0, Arc::new(AgentPromptBuildHandler { shared }));
     }
 }
 

@@ -315,7 +315,7 @@ fn create_at_path(
         WriterState {
             writer,
             next_seq: 1,
-            path: path.clone(),
+            path,
             dirty: false,
         },
         initial_event,

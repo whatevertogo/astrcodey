@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub struct ServerSystem {
-    pub event_tx: Arc<EventFanout<ClientNotification>>,
+    pub event_tx: Option<Arc<EventFanout<ClientNotification>>>,
     pub event_bus: Arc<ServerEventBus>,
     pub handler: CommandHandle,
     pub scheduler: Arc<TurnScheduler>,
@@ -21,9 +21,23 @@ pub fn spawn_server_system(
     runtime: &Arc<ServerRuntime>,
     event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> ServerSystem {
+    spawn_server_system_with_legacy(runtime, Some(event_tx))
+}
+
+pub fn spawn_server_system_without_legacy(runtime: &Arc<ServerRuntime>) -> ServerSystem {
+    spawn_server_system_with_legacy(runtime, None)
+}
+
+fn spawn_server_system_with_legacy(
+    runtime: &Arc<ServerRuntime>,
+    event_tx: Option<Arc<EventFanout<ClientNotification>>>,
+) -> ServerSystem {
     let scheduler = Arc::clone(runtime.scheduler());
 
-    let event_bus = Arc::new(ServerEventBus::new(Arc::clone(&event_tx)));
+    let event_bus = match &event_tx {
+        Some(event_tx) => Arc::new(ServerEventBus::with_legacy_tx(Arc::clone(event_tx))),
+        None => Arc::new(ServerEventBus::new()),
+    };
 
     runtime
         .session_manager()
