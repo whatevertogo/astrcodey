@@ -249,6 +249,12 @@ impl ServerEventBus {
     }
 }
 
+impl Default for ServerEventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn update_streaming(state: &StreamingState, payload: &EventPayload) {
     let mut guard = state.lock();
     match payload {
