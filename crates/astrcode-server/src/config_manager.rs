@@ -51,6 +51,7 @@ fn build_provider_from_settings(
         reasoning: settings.reasoning,
         extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
             supports_prompt_cache_key: settings.supports_prompt_cache_key,
+            supports_stream_usage: settings.supports_stream_usage,
             prompt_cache_retention: settings.prompt_cache_retention,
             thinking_level: settings.thinking_level,
         }),

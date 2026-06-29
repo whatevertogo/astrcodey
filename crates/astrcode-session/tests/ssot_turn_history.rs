@@ -12,7 +12,7 @@ use astrcode_core::{
     event::EventPayload,
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage,
-        ModelLimits,
+        LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
     },
     storage::EventStore,
     tool::ToolDefinition,
@@ -162,9 +162,11 @@ impl LlmProvider for UsageLlm {
             usage: LlmTokenUsage {
                 input_tokens: Some(100),
                 cached_input_tokens: Some(64),
+                cache_creation_input_tokens: None,
                 output_tokens: Some(20),
                 reasoning_output_tokens: Some(5),
                 total_tokens: Some(120),
+                source: None,
             },
         });
         let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
@@ -229,6 +231,69 @@ async fn token_usage_is_persisted_as_durable_event() {
     assert_eq!(usage.output_tokens, Some(20));
     assert_eq!(usage.reasoning_output_tokens, Some(5));
     assert_eq!(usage.total_tokens, Some(120));
+}
+
+struct NoUsageCountingLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for NoUsageCountingLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    async fn count_input_tokens(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        Ok(ProviderInputTokenCount::provider_count(321))
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 12345,
+            max_output_tokens: 4096,
+        }
+    }
+}
+
+#[tokio::test]
+async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
+    let (session, store, sid) = spawn_session_with_store(Arc::new(NoUsageCountingLlm)).await;
+    let turn_id = new_turn_id();
+    let handle = session
+        .submit("record fallback usage".into(), vec![], turn_id)
+        .await
+        .unwrap();
+    let result = handle.wait().await.unwrap();
+    assert!(result.output.is_ok(), "{:?}", result.output);
+
+    let events = store.replay_events(&sid).await.unwrap();
+    let usage = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            EventPayload::TokenUsageRecorded { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .expect("expected fallback TokenUsageRecorded event");
+
+    assert_eq!(usage.input_tokens, Some(321));
+    assert_eq!(usage.cached_input_tokens, None);
+    assert_eq!(usage.cache_creation_input_tokens, None);
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(
+        usage.source,
+        Some(LlmTokenUsageSource::ProviderCountFallback)
+    );
 }
 
 struct ThinkingToolsLlm {

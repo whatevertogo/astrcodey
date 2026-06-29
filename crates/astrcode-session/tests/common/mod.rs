@@ -99,6 +99,7 @@ fn effective_config(context: ContextSettings) -> EffectiveConfig {
         max_retries: 0,
         retry_base_delay_ms: 0,
         supports_prompt_cache_key: false,
+        supports_stream_usage: false,
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,

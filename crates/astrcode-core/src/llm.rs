@@ -395,11 +395,41 @@ pub struct LlmTokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<LlmTokenUsageSource>,
+}
+
+/// token usage 的来源，用于区分 provider 原生统计与 fallback 估算。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmTokenUsageSource {
+    ProviderUsage,
+    ProviderCount,
+    ProviderCountFallback,
+    LocalEstimateFallback,
+}
+
+/// provider 预请求 input token 统计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderInputTokenCount {
+    pub input_tokens: u64,
+    pub source: LlmTokenUsageSource,
+}
+
+impl ProviderInputTokenCount {
+    pub fn provider_count(input_tokens: u64) -> Self {
+        Self {
+            input_tokens,
+            source: LlmTokenUsageSource::ProviderCount,
+        }
+    }
 }
 
 /// LLM 流式输出过程中的事件。
@@ -477,6 +507,9 @@ pub enum LlmError {
     /// 流式响应解析错误。
     #[error("Stream parse error: {0}")]
     StreamParse(String),
+    /// 当前 provider 不支持该操作。
+    #[error("Unsupported LLM operation: {0}")]
+    Unsupported(String),
 }
 
 /// OpenAI prompt cache retention 声明。
@@ -525,6 +558,8 @@ impl ThinkingLevel {
 pub struct OpenAiProviderExtras {
     /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
     pub supports_prompt_cache_key: bool,
+    /// 当前 provider 是否支持流式 usage 统计。
+    pub supports_stream_usage: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// 可选的推理强度（用于 OpenAI Responses `reasoning.effort`）。
@@ -576,6 +611,11 @@ impl LlmClientConfig {
             .is_some_and(|e| e.supports_prompt_cache_key)
     }
 
+    pub fn supports_stream_usage(&self) -> bool {
+        self.openai_extras()
+            .is_some_and(|e| e.supports_stream_usage)
+    }
+
     pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
         self.openai_extras().and_then(|e| e.prompt_cache_retention)
     }
@@ -616,6 +656,17 @@ pub trait LlmProvider: Send + Sync {
         messages: Vec<LlmMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
+
+    /// 统计一次 provider request 的 input token。
+    async fn count_input_tokens(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        Err(LlmError::Unsupported(
+            "input token counting is not supported by this provider".into(),
+        ))
+    }
 
     /// 返回模型的上下文窗口限制。
     fn model_limits(&self) -> ModelLimits;

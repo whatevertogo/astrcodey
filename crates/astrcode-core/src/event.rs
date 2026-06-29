@@ -850,9 +850,11 @@ mod tests {
             usage: LlmTokenUsage {
                 input_tokens: Some(100),
                 cached_input_tokens: Some(64),
+                cache_creation_input_tokens: None,
                 output_tokens: Some(20),
                 reasoning_output_tokens: Some(5),
                 total_tokens: Some(120),
+                source: None,
             },
             model_context_window: 8192,
         };
@@ -942,9 +944,11 @@ mod tests {
                 usage: LlmTokenUsage {
                     input_tokens: Some(1),
                     cached_input_tokens: Some(1),
+                    cache_creation_input_tokens: None,
                     output_tokens: Some(1),
                     reasoning_output_tokens: Some(1),
                     total_tokens: Some(2),
+                    source: None,
                 },
                 model_context_window: 1024,
             },

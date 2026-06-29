@@ -9,8 +9,9 @@ use astrcode_core::{
     },
     event::EventPayload,
     extension::{CompactStrategy, CompactTrigger},
-    llm::LlmMessage,
+    llm::{LlmMessage, LlmProvider},
     storage::SessionReadModel,
+    tool::ToolDefinition,
     types::TurnId,
 };
 use astrcode_kernel::ExtensionRuntime;
@@ -22,7 +23,7 @@ use crate::{
         make_compact_request_fn, persist_compact_result,
     },
     deferred_tools::append_deferred_tools_reminder,
-    llm_request_history::visible_messages_for_assembler,
+    llm_request_history::{build_llm_request_messages, visible_messages_for_assembler},
     session::Session,
     turn_context::{SharedTurnContext, TurnError},
     turn_publish::TurnEvents,
@@ -62,6 +63,29 @@ pub(crate) struct CompactionHost<'a> {
     pub llm: &'a Arc<dyn astrcode_core::llm::LlmProvider>,
     pub shared: &'a SharedTurnContext,
     pub extension_runner: &'a dyn ExtensionRuntime,
+}
+
+async fn try_provider_input_tokens(
+    session: &Session,
+    llm: &Arc<dyn LlmProvider>,
+    messages: Vec<LlmMessage>,
+    tools: &[ToolDefinition],
+    stage: &'static str,
+) -> Option<usize> {
+    match llm.count_input_tokens(messages, tools.to_vec()).await {
+        Ok(count) => usize::try_from(count.input_tokens).ok(),
+        Err(error) => {
+            let effective = session.caps().read_effective();
+            tracing::warn!(
+                provider = %effective.llm.provider_kind,
+                model = %effective.llm.model_id,
+                stage,
+                error = %error,
+                "provider input token count unavailable; falling back to local estimate"
+            );
+            None
+        },
+    }
 }
 
 /// Turn 内 compaction 编排：system prompt 快照、assembler 调用与 persist。
@@ -106,15 +130,26 @@ impl Compaction {
         &self,
         host: &CompactionHost<'_>,
         model: &SessionReadModel,
+        tools: &[ToolDefinition],
     ) -> Result<CompactionRequest, TurnError> {
         let context_assembler = host.session.caps().context_assembler_arc();
         let custom_instructions = self
             .compact_instructions(host, model, CompactTrigger::AutoThreshold)
             .await;
+        let visible_messages = visible_messages_for_assembler(model);
+        let provider_input_tokens = try_provider_input_tokens(
+            host.session,
+            host.llm,
+            build_llm_request_messages(self.system_prompt(), visible_messages.clone()),
+            tools,
+            "compact_gate",
+        )
+        .await;
         let probe_input = ContextPrepareInput {
-            messages: visible_messages_for_assembler(model),
+            messages: visible_messages,
             system_prompt: Some(self.system_prompt()),
             model_limits: host.llm.model_limits(),
+            provider_input_tokens,
             custom_instructions,
         };
         let threshold_met = context_assembler.should_auto_compact(&probe_input);
@@ -155,6 +190,7 @@ impl Compaction {
             messages: messages_before_compact.clone(),
             system_prompt: Some(self.system_prompt()),
             model_limits: host.llm.model_limits(),
+            provider_input_tokens: None,
             custom_instructions: custom_instructions.clone(),
         };
         let request_fn = make_compact_request_fn(Arc::clone(host.llm));
@@ -189,6 +225,32 @@ impl Compaction {
                 compaction,
             } => {
                 let mut compaction_result = compaction.result;
+                let visible_tools = state.visible_tools();
+                if let Some(pre_tokens) = try_provider_input_tokens(
+                    host.session,
+                    host.llm,
+                    build_llm_request_messages(
+                        self.system_prompt(),
+                        messages_before_compact.clone(),
+                    ),
+                    &visible_tools,
+                    "compact_pre_tokens",
+                )
+                .await
+                {
+                    compaction_result.pre_tokens = pre_tokens;
+                }
+                if let Some(post_tokens) = try_provider_input_tokens(
+                    host.session,
+                    host.llm,
+                    build_llm_request_messages(self.system_prompt(), messages.clone()),
+                    &visible_tools,
+                    "compact_post_tokens",
+                )
+                .await
+                {
+                    compaction_result.post_tokens = post_tokens;
+                }
                 let persisted = Self::handle_compaction_stage(
                     host,
                     self.system_prompt(),
