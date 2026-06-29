@@ -73,7 +73,21 @@ async fn try_provider_input_tokens(
     stage: &'static str,
 ) -> Option<usize> {
     match llm.count_input_tokens(messages, tools.to_vec()).await {
-        Ok(count) => usize::try_from(count.input_tokens).ok(),
+        Ok(count) => match usize::try_from(count.input_tokens) {
+            Ok(tokens) => Some(tokens),
+            Err(_) => {
+                let effective = session.caps().read_effective();
+                tracing::warn!(
+                    provider = %effective.llm.provider_kind,
+                    model = %effective.llm.model_id,
+                    stage,
+                    input_tokens = count.input_tokens,
+                    max_tokens = usize::MAX,
+                    "provider input token count exceeds local usize range; clamping to usize::MAX"
+                );
+                Some(usize::MAX)
+            },
+        },
         Err(error) => {
             let effective = session.caps().read_effective();
             tracing::warn!(

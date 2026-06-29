@@ -862,6 +862,8 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
 }
 
 fn local_estimate_request_tokens(messages: &[LlmMessage]) -> usize {
+    // Last-resort fallback only: keep this lightweight heuristic aligned with
+    // astrcode-context token budgeting without adding a session -> context dependency.
     let raw_total = messages
         .iter()
         .map(|message| {
