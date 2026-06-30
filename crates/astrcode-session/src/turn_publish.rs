@@ -33,7 +33,7 @@ pub(crate) struct TurnEvents {
     session: Session,
     turn_id: TurnId,
     live_tx: Option<TurnEventTx>,
-    emitted_error: Arc<AtomicBool>,
+    emitted_durable_error: Arc<AtomicBool>,
     model_cache: Mutex<Option<SessionReadModel>>,
 }
 
@@ -43,13 +43,13 @@ impl TurnEvents {
             session,
             turn_id,
             live_tx,
-            emitted_error: Arc::new(AtomicBool::new(false)),
+            emitted_durable_error: Arc::new(AtomicBool::new(false)),
             model_cache: Mutex::new(None),
         }
     }
 
     pub(crate) fn emitted_error(&self) -> bool {
-        self.emitted_error.load(Ordering::Relaxed)
+        self.emitted_durable_error.load(Ordering::Relaxed)
     }
 
     /// 丢弃 turn 内缓存（每轮 agent step 开始时调用，以吸收 mid-turn inject 等外部 durable）。
@@ -140,9 +140,26 @@ impl TurnEvents {
         }
     }
 
-    /// 发送 live 错误事件，并标记 `emitted_error`（供 `drive_agent` 避免重复持久化）。
+    /// 持久化错误事件，并标记 `emitted_error`（供 `drive_agent` 避免重复持久化）。
+    pub(crate) async fn durable_error(
+        &self,
+        code: i32,
+        message: String,
+        recoverable: bool,
+    ) -> Result<(), TurnError> {
+        self.durable(EventPayload::ErrorOccurred {
+            code,
+            message,
+            recoverable,
+        })
+        .await?;
+        self.emitted_durable_error.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// 发送 live 错误事件。live 事件不会出现在后续 conversation snapshot 中，因此不能
+    /// 标记 `emitted_error`，否则 turn finalizer 会跳过 durable ErrorOccurred。
     pub(crate) async fn live_error(&self, code: i32, message: String, recoverable: bool) {
-        self.emitted_error.store(true, Ordering::Relaxed);
         self.live(EventPayload::ErrorOccurred {
             code,
             message,

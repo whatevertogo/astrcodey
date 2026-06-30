@@ -150,6 +150,53 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
 
 struct UsageLlm;
 
+struct FailingGenerateLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for FailingGenerateLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        Err(LlmError::ClientError {
+            status: 429,
+            message: "Too Many Requests".into(),
+        })
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
+            max_output_tokens: 4096,
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_start_error_is_persisted_as_durable_error() {
+    let (session, store, sid) = spawn_session_with_store(Arc::new(FailingGenerateLlm)).await;
+    let turn_id = new_turn_id();
+    let handle = session
+        .submit("trigger provider error".into(), vec![], turn_id)
+        .await
+        .unwrap();
+
+    let result = handle.wait().await.unwrap();
+    assert!(result.output.is_err(), "{:?}", result.output);
+
+    let events = store.replay_events(&sid).await.unwrap();
+    let errors = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            EventPayload::ErrorOccurred { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "expected one durable ErrorOccurred");
+    assert!(errors[0].contains("Too Many Requests"));
+}
+
 #[async_trait::async_trait]
 impl LlmProvider for UsageLlm {
     async fn generate(

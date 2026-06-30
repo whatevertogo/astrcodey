@@ -219,11 +219,7 @@ pub async fn consume_llm_stream(
                     return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
                 }
                 publisher
-                    .durable(EventPayload::ErrorOccurred {
-                        code: -32603,
-                        message: message.clone(),
-                        recoverable: false,
-                    })
+                    .durable_error(-32603, message.clone(), false)
                     .await?;
                 return Err(TurnError::Llm(LlmError::StreamParse(message)));
             },

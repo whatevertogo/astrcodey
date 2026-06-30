@@ -721,7 +721,9 @@ impl TurnLoop {
                 Err(TurnError::Llm(LlmError::PromptTooLong(message)))
             },
             Err(e) => {
-                publisher.live_error(-32603, e.to_string(), false).await;
+                publisher
+                    .durable_error(-32603, e.to_string(), false)
+                    .await?;
                 end_turn_with_error_typed(e)
             },
         }
