@@ -63,7 +63,39 @@ export interface SlashCommandInfo {
   name: string
   description: string
   needsArgument: boolean
+  requiresIdle: boolean
+  argumentCompletions: boolean
+  priority: number
   source: 'builtin' | 'plugin' | 'skill' | string
+}
+
+export type CommandInvokeResponse =
+  | {
+      kind: 'display'
+      sessionId: string
+      content: string
+      isError: boolean
+    }
+  | {
+      kind: 'handled'
+      sessionId: string
+      message: string
+    }
+  | {
+      kind: 'started'
+      sessionId: string
+      turnId: string
+    }
+
+export interface CommandCompletionItem {
+  label: string
+  insertText: string
+  detail?: string
+}
+
+export interface CommandCompletionResponse {
+  items: CommandCompletionItem[]
+  truncated: boolean
 }
 
 export interface KeybindingInfo {
@@ -81,8 +113,18 @@ export interface StatusItemInfo {
 
 export interface SlashCommandListResponse {
   commands: SlashCommandInfo[]
+  shadowedCommands: ShadowedSlashCommandInfo[]
   keybindings: KeybindingInfo[]
   statusItems: StatusItemInfo[]
+}
+
+export interface ShadowedSlashCommandInfo {
+  name: string
+  activeSource: string
+  activePriority: number
+  shadowedSource: string
+  shadowedPriority: number
+  shadowedExtensionId: string
 }
 
 // ── Session List ──

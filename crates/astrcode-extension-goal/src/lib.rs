@@ -209,6 +209,9 @@ impl Extension for GoalExtension {
                 name: "goal".into(),
                 description: "Show or manage the current session goal.".into(),
                 args_schema: None,
+                requires_idle: false,
+                argument_completions: false,
+                priority: 0,
             },
             Arc::new(GoalSlashCommandHandler { runtime }),
         );

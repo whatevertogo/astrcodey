@@ -128,6 +128,9 @@ pub struct ExtensionCommandInfo {
     pub name: String,
     pub description: String,
     pub needs_argument: bool,
+    pub requires_idle: bool,
+    pub argument_completions: bool,
+    pub priority: i32,
     /// 命令来源：`builtin`、`extension` 或 `skill`。
     pub source: String,
 }

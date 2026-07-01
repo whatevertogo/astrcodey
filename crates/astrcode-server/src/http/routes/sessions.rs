@@ -7,12 +7,14 @@ use astrcode_core::{
 use astrcode_protocol::{
     commands::ClientCommand,
     http::{
-        AgentSessionLinkDto, CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
+        AgentSessionLinkDto, CommandCompletionItemDto, CommandCompletionRequest,
+        CommandCompletionResponse, CommandInvokeRequest, CommandInvokeResponse,
+        CompactSessionRequest, CompactSessionResponse, ConversationBlockDto,
         ConversationBlockStatusDto, ConversationCursorDto, ConversationSnapshotResponseDto,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto,
-        ExecuteExtensionCommandRequest, PromptRequest, PromptSubmitResponse, SessionListItemDto,
-        SessionListResponseDto, SlashCommandListResponseDto, ToolApprovalRequest,
-        ToolUiRespondRequest, ToolUiRespondResponse,
+        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
+        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
+        SlashCommandListResponseDto, ToolApprovalRequest, ToolUiRespondRequest,
+        ToolUiRespondResponse,
     },
 };
 use axum::{
@@ -31,7 +33,7 @@ use super::super::{
     },
 };
 use crate::{
-    handler::{HandlerError, ManualCompactOutcome, PromptSubmission},
+    handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission},
     server_event_bus::StreamingSnapshot,
 };
 
@@ -252,41 +254,33 @@ pub(in crate::http) async fn submit_prompt(
     }
 }
 
-pub(in crate::http) async fn execute_extension_command(
+pub(in crate::http) async fn invoke_command(
     State(state): State<HttpState>,
-    Path(session_id): Path<String>,
-    Json(request): Json<ExecuteExtensionCommandRequest>,
+    Path((session_id, name)): Path<(String, String)>,
+    Json(request): Json<CommandInvokeRequest>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    let command_name = request.command.trim().to_ascii_lowercase();
-    if command_name.is_empty() {
-        return handler_error_response(
-            HandlerError::InvalidRequest("command must not be empty".into()),
-            "command_execute_failed",
-        );
-    }
-    let visible_text = if request.arguments.trim().is_empty() {
-        format!("/{command_name}")
-    } else {
-        format!("/{command_name} {}", request.arguments.trim())
-    };
     match state
         .handler
-        .submit_input_for_session(
-            session_id.clone(),
-            crate::turn_scheduler::PromptInput::text_only(visible_text),
-        )
+        .invoke_command_for_session(session_id.clone(), name, request.arguments)
         .await
     {
-        Ok(PromptSubmission::Handled { message }) => Json(PromptSubmitResponse::Handled {
+        Ok(CommandInvocation::Display { content, is_error }) => {
+            Json(CommandInvokeResponse::Display {
+                session_id: session_id.into_string(),
+                content,
+                is_error,
+            })
+            .into_response()
+        },
+        Ok(CommandInvocation::Handled { message }) => Json(CommandInvokeResponse::Handled {
             session_id: session_id.into_string(),
             message,
         })
         .into_response(),
-        Ok(PromptSubmission::Accepted { turn_id }) => Json(PromptSubmitResponse::Accepted {
+        Ok(CommandInvocation::Started { turn_id }) => Json(CommandInvokeResponse::Started {
             session_id: session_id.into_string(),
             turn_id: turn_id.into_string(),
-            branched_from_session_id: None,
         })
         .into_response(),
         Err(HandlerError::UnknownCommand(cmd)) => {
@@ -296,13 +290,41 @@ pub(in crate::http) async fn execute_extension_command(
     }
 }
 
+pub(in crate::http) async fn complete_command(
+    State(state): State<HttpState>,
+    Path((session_id, name)): Path<(String, String)>,
+    Json(request): Json<CommandCompletionRequest>,
+) -> Response {
+    let session_id = SessionId::from(session_id);
+    match state
+        .handler
+        .complete_command_for_session(session_id, name, request.argument, request.cursor)
+        .await
+    {
+        Ok(completions) => Json(CommandCompletionResponse {
+            items: completions
+                .items
+                .into_iter()
+                .map(|item| CommandCompletionItemDto {
+                    label: item.label,
+                    insert_text: item.insert_text,
+                    detail: item.detail,
+                })
+                .collect(),
+            truncated: completions.truncated,
+        })
+        .into_response(),
+        Err(error) => handler_error_response(error, "command_complete_failed"),
+    }
+}
+
 pub(in crate::http) async fn list_commands(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.handler.command_infos_for_session(session_id).await {
-        Ok(commands) => {
+    match state.handler.command_list_for_session(session_id).await {
+        Ok(command_list) => {
             use astrcode_protocol::http::{KeybindingDto, StatusItemDto};
             let keybindings: Vec<KeybindingDto> = state
                 .runtime
@@ -328,7 +350,8 @@ pub(in crate::http) async fn list_commands(
                 })
                 .collect();
             Json(SlashCommandListResponseDto {
-                commands: commands.into_iter().map(Into::into).collect(),
+                commands: command_list.commands.into_iter().map(Into::into).collect(),
+                shadowed_commands: command_list.shadowed_commands,
                 keybindings,
                 status_items,
             })

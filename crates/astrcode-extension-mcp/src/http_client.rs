@@ -189,6 +189,16 @@ fn parse_response(
     if matches!(kind, ResponseKind::Notification) && status == reqwest::StatusCode::ACCEPTED {
         return Ok(Value::Null);
     }
+    if matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::REQUEST_TIMEOUT
+    ) {
+        return Err(McpPoolError::HttpSessionExpired {
+            status: status.as_u16(),
+            url: url.to_string(),
+            body: body.to_string(),
+        });
+    }
     if !status.is_success() {
         return Err(McpPoolError::Http {
             message: format!("HTTP {status} from {url}; body: {body}"),

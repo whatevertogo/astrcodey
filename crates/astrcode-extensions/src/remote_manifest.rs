@@ -60,6 +60,9 @@ pub fn build_commands(reg: &ExtensionRegistration) -> Vec<SlashCommand> {
             name: c.name.clone(),
             description: c.description.clone(),
             args_schema: None,
+            requires_idle: false,
+            argument_completions: false,
+            priority: 0,
         })
         .collect()
 }

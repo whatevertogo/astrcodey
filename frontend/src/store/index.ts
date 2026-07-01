@@ -243,7 +243,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         argumentsText
       )
       if (
-        response.kind === 'handled' &&
+        (response.kind === 'handled' || response.kind === 'display') &&
         get().activeSessionId !== response.sessionId
       ) {
         return true

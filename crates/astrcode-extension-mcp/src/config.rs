@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -16,7 +17,7 @@ fn project_config_path(workspace: &str) -> PathBuf {
     PathBuf::from(workspace).join(".astrcode").join("mcp.json")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum McpTransport {
     Stdio,
     Http,
@@ -26,9 +27,10 @@ pub(crate) enum McpTransport {
 pub(crate) struct McpConfig {
     pub(crate) servers: Vec<McpServerConfig>,
     pub(crate) diagnostics: Vec<String>,
+    pub(crate) fingerprint: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct McpServerConfig {
     pub(crate) name: String,
     pub(crate) transport: McpTransport,
@@ -82,9 +84,12 @@ pub(crate) fn load_global_only() -> McpConfig {
         &mut merged,
         &mut diagnostics,
     );
+    let servers = merged.into_values().collect::<Vec<_>>();
+    let fingerprint = config_fingerprint(&servers, &diagnostics);
     McpConfig {
-        servers: merged.into_values().collect(),
+        servers,
         diagnostics,
+        fingerprint,
     }
 }
 
@@ -128,10 +133,20 @@ pub(crate) fn load_config_from_paths(
         }
     }
 
+    let servers = merged.into_values().collect::<Vec<_>>();
+    let fingerprint = config_fingerprint(&servers, &diagnostics);
     McpConfig {
-        servers: merged.into_values().collect(),
+        servers,
         diagnostics,
+        fingerprint,
     }
+}
+
+fn config_fingerprint(servers: &[McpServerConfig], diagnostics: &[String]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    servers.hash(&mut hasher);
+    diagnostics.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -321,6 +336,29 @@ mod tests {
         assert_eq!(config.servers.len(), 1);
         assert_eq!(config.servers[0].command, "project");
         assert_eq!(config.servers[0].args, vec!["b"]);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_config_content_changes() {
+        let root = unique_temp_dir("fingerprint");
+        fs::create_dir_all(&root).unwrap();
+        let global = root.join("global.json");
+        let project = root.join("project.json");
+        fs::write(
+            &global,
+            r#"{"mcpServers":{"same":{"command":"first","args":["a"]}}}"#,
+        )
+        .unwrap();
+        let first = load_config_from_paths(&global, &project, &root.to_string_lossy(), false);
+
+        fs::write(
+            &global,
+            r#"{"mcpServers":{"same":{"command":"second","args":["b"]}}}"#,
+        )
+        .unwrap();
+        let second = load_config_from_paths(&global, &project, &root.to_string_lossy(), false);
+
+        assert_ne!(first.fingerprint, second.fingerprint);
     }
 
     #[test]

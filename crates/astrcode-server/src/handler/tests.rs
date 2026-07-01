@@ -336,6 +336,9 @@ impl Extension for StaticCommandExtension {
                 name: command_name.into(),
                 description: "Static test command".into(),
                 args_schema: None,
+                requires_idle: false,
+                argument_completions: false,
+                priority: 0,
             },
             Arc::new(StaticCommandHandler {
                 command_name: command_name.to_string(),
@@ -2015,6 +2018,21 @@ async fn unknown_slash_command_falls_through_as_regular_prompt() {
 }
 
 #[tokio::test]
+async fn empty_slash_falls_through_as_regular_prompt() {
+    let runtime = test_runtime();
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
+    let sid = handler.create_session(".".into()).await.unwrap();
+
+    let result = handler.submit_input_for_session(sid, "/".into()).await;
+
+    assert!(
+        matches!(&result, Ok(PromptSubmission::Accepted { .. })),
+        "expected Accepted, got {result:?}"
+    );
+}
+
+#[tokio::test]
 async fn extension_display_slash_command_returns_content_in_handled_message() {
     let runtime = test_runtime();
     runtime
@@ -2040,6 +2058,35 @@ async fn extension_display_slash_command_returns_content_in_handled_message() {
             PromptSubmission::Handled { message } if message == "extension command"
         ),
         "expected display content in Handled message, got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn invoke_command_normalizes_name_at_session_boundary() {
+    let runtime = test_runtime();
+    runtime
+        .extension_runner
+        .register(Arc::new(StaticCommandExtension {
+            id: "test-extension",
+            command_name: "demo-cmd",
+        }))
+        .await
+        .unwrap();
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
+    let sid = handler.create_session(".".into()).await.unwrap();
+
+    let result = handler
+        .invoke_command_for_session(sid, " /DEMO-CMD ".into(), String::new())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            &result,
+            CommandInvocation::Display { content, is_error: false } if content == "extension command"
+        ),
+        "expected normalized command invoke, got {result:?}"
     );
 }
 
@@ -2149,7 +2196,11 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         .await
         .unwrap();
 
-    let commands = handler.command_infos_for_session(sid).await.unwrap();
+    let commands = handler
+        .command_list_for_session(sid)
+        .await
+        .unwrap()
+        .commands;
 
     let compact_commands = commands
         .iter()

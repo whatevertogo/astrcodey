@@ -28,6 +28,7 @@ mod notifications;
 mod prompt;
 mod recap;
 mod router;
+mod session_command;
 mod session_lifecycle;
 pub(crate) mod slash;
 pub(crate) mod snapshot;
@@ -44,6 +45,13 @@ use snapshot::session_snapshot;
 pub enum PromptSubmission {
     Accepted { turn_id: TurnId },
     Handled { message: String },
+}
+
+#[derive(Debug)]
+pub enum CommandInvocation {
+    Display { content: String, is_error: bool },
+    Handled { message: String },
+    Started { turn_id: TurnId },
 }
 
 /// Handler 错误类型，替代原来的字符串匹配。

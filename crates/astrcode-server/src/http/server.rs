@@ -110,8 +110,12 @@ fn router_parts(
         )
         .route("/api/sessions/{id}/commands", get(sessions::list_commands))
         .route(
-            "/api/sessions/{id}/commands/execute",
-            post(sessions::execute_extension_command),
+            "/api/sessions/{id}/commands/{name}/complete",
+            post(sessions::complete_command),
+        )
+        .route(
+            "/api/sessions/{id}/commands/{name}",
+            post(sessions::invoke_command),
         )
         .route(
             "/api/sessions/{id}/compact",

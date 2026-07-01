@@ -89,11 +89,10 @@ impl CommandHandler {
         input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
         validate_prompt_attachments(&input.attachments)?;
-        if let Some(command) = slash::parse_slash_command(&input.text) {
-            match self
-                .execute_slash_command_for_session(sid.clone(), command, input.text.clone())
-                .await
-            {
+        if let Some(command) =
+            slash::parse_slash_command(&input.text).filter(|command| command.has_name())
+        {
+            match self.execute_command_for_session(sid.clone(), command).await {
                 Err(HandlerError::UnknownCommand(_)) => {},
                 other => return other,
             }
@@ -102,18 +101,5 @@ impl CommandHandler {
         self.start_turn_for_session(sid, input.text, input.attachments, None)
             .await
             .map(|turn_id| PromptSubmission::Accepted { turn_id })
-    }
-
-    pub async fn command_infos_for_session(
-        &self,
-        sid: &SessionId,
-    ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
-        let state = self
-            .runtime
-            .session_manager()
-            .read_model(sid)
-            .await
-            .map_err(HandlerError::SessionManager)?;
-        Ok(self.command_infos_for_working_dir(&state.working_dir).await)
     }
 }

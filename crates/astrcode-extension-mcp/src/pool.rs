@@ -6,7 +6,7 @@
 //! overhead from turn and session paths.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{
         Arc,
@@ -84,6 +84,12 @@ mod error {
         Http { message: String },
         #[error("HTTP request to {url} timed out")]
         HttpTimeout { url: String },
+        #[error("HTTP MCP session expired with status {status} from {url}; body: {body}")]
+        HttpSessionExpired {
+            status: u16,
+            url: String,
+            body: String,
+        },
         #[error("MCP server '{server}' not found in pool")]
         ServerNotFound { server: String },
         #[error("a pooled MCP stdio server process is no longer running")]
@@ -187,26 +193,28 @@ impl McpProcessPool {
         &self,
         server: &McpServerConfig,
     ) -> Result<Vec<McpTool>, McpPoolError> {
-        self.ensure_pooled(server).await?;
-        let id = ServerId::from_config(server);
-        let entry = {
-            let pool = self.pool.lock().await;
-            pool.entries.get(&id).cloned()
-        };
-        let entry = entry.ok_or_else(|| McpPoolError::ServerNotFound {
-            server: server.name.clone(),
-        })?;
-
-        match entry.as_ref() {
-            PooledClient::Stdio(client) => {
-                let _request = client.request_lock.lock().await;
-                let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
-                let result =
-                    request_result_stdio(client, protocol::list_tools_request(next_id), next_id)
-                        .await?;
-                protocol::parse_list_tools(result).map_err(McpPoolError::Result)
+        let (id, entry) = self.pooled_entry(server).await?;
+        match list_tools_from_entry(&entry).await {
+            Ok(tools) => Ok(tools),
+            Err(error) if should_retry_after_reconnect(&error) => {
+                self.evict_entry_if_current(&id, &entry).await;
+                let (retry_id, retry_entry) = self.pooled_entry(server).await?;
+                match list_tools_from_entry(&retry_entry).await {
+                    Ok(tools) => Ok(tools),
+                    Err(retry_error) => {
+                        if error_invalidates_client(&retry_error) {
+                            self.evict_entry_if_current(&retry_id, &retry_entry).await;
+                        }
+                        Err(retry_error)
+                    },
+                }
             },
-            PooledClient::Http(client) => client.list_tools().await,
+            Err(error) => {
+                if error_invalidates_client(&error) {
+                    self.evict_entry_if_current(&id, &entry).await;
+                }
+                Err(error)
+            },
         }
     }
 
@@ -217,6 +225,35 @@ impl McpProcessPool {
         tool_name: &str,
         arguments: Value,
     ) -> Result<CallToolResult, McpPoolError> {
+        let (id, entry) = self.pooled_entry(server).await?;
+        match call_tool_from_entry(&entry, tool_name, arguments.clone()).await {
+            Ok(result) => Ok(result),
+            Err(error) if should_retry_call_after_reconnect(&error) => {
+                self.evict_entry_if_current(&id, &entry).await;
+                let (retry_id, retry_entry) = self.pooled_entry(server).await?;
+                match call_tool_from_entry(&retry_entry, tool_name, arguments).await {
+                    Ok(result) => Ok(result),
+                    Err(retry_error) => {
+                        if error_invalidates_client(&retry_error) {
+                            self.evict_entry_if_current(&retry_id, &retry_entry).await;
+                        }
+                        Err(retry_error)
+                    },
+                }
+            },
+            Err(error) => {
+                if error_invalidates_client(&error) {
+                    self.evict_entry_if_current(&id, &entry).await;
+                }
+                Err(error)
+            },
+        }
+    }
+
+    async fn pooled_entry(
+        &self,
+        server: &McpServerConfig,
+    ) -> Result<(ServerId, Arc<PooledClient>), McpPoolError> {
         self.ensure_pooled(server).await?;
         let id = ServerId::from_config(server);
         let entry = {
@@ -226,21 +263,7 @@ impl McpProcessPool {
         let entry = entry.ok_or_else(|| McpPoolError::ServerNotFound {
             server: server.name.clone(),
         })?;
-
-        match entry.as_ref() {
-            PooledClient::Stdio(client) => {
-                let _request = client.request_lock.lock().await;
-                let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
-                let result = request_result_stdio(
-                    client,
-                    protocol::call_tool_request(next_id, tool_name, arguments),
-                    next_id,
-                )
-                .await?;
-                protocol::parse_call_tool(result).map_err(McpPoolError::Result)
-            },
-            PooledClient::Http(client) => client.call_tool(tool_name, arguments).await,
-        }
+        Ok((id, entry))
     }
 
     /// Probe initialized MCP connections without silently respawning them.
@@ -275,74 +298,160 @@ impl McpProcessPool {
 
     /// Shut down all pooled processes gracefully (stdin close → wait → kill).
     pub(crate) async fn shutdown(&self) {
-        let mut pool = self.pool.lock().await;
-        for (_, entry) in pool.entries.drain() {
-            match Arc::try_unwrap(entry) {
-                Ok(PooledClient::Stdio(client)) => shutdown_stdio(*client).await,
-                Ok(PooledClient::Http(_)) => {},
-                Err(arc) => {
-                    if let PooledClient::Stdio(ref client) = arc.as_ref() {
-                        shutdown_stdio_ref(client).await;
-                    }
-                },
-            }
+        let entries = {
+            let mut pool = self.pool.lock().await;
+            pool.entries
+                .drain()
+                .map(|(_, entry)| entry)
+                .collect::<Vec<_>>()
+        };
+        for entry in entries {
+            shutdown_pooled(entry).await;
+        }
+    }
+
+    /// Drop pooled clients that are no longer referenced by any warm cache.
+    pub(crate) async fn retain_servers(&self, servers: &[McpServerConfig]) {
+        let active = servers
+            .iter()
+            .map(ServerId::from_config)
+            .collect::<HashSet<_>>();
+        let stale = {
+            let mut pool = self.pool.lock().await;
+            let stale_ids = pool
+                .entries
+                .keys()
+                .filter(|id| !active.contains(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            stale_ids
+                .into_iter()
+                .filter_map(|id| pool.entries.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for client in stale {
+            shutdown_pooled(client).await;
+        }
+    }
+
+    async fn evict_entry_if_current(&self, id: &ServerId, expected: &Arc<PooledClient>) {
+        let removed = {
+            let mut pool = self.pool.lock().await;
+            let is_current = pool
+                .entries
+                .get(id)
+                .is_some_and(|entry| Arc::ptr_eq(entry, expected));
+            is_current.then(|| pool.entries.remove(id)).flatten()
+        };
+        if let Some(entry) = removed {
+            shutdown_pooled(entry).await;
         }
     }
 
     /// Ensure a server has a live pooled client. If the current one is dead,
     /// respawn and reinitialize.
     async fn ensure_pooled(&self, server: &McpServerConfig) -> Result<(), McpPoolError> {
-        let mut pool = self.pool.lock().await;
         let id = ServerId::from_config(server);
-
-        // Check if existing entry is still alive
-        let needs_respawn = if let Some(entry) = pool.entries.get(&id) {
-            if let PooledClient::Stdio(ref client) = entry.as_ref() {
-                !client_healthy(client)
-            } else {
-                // HTTP — always healthy (stateless)
-                return Ok(());
-            }
-        } else {
-            true // not in pool at all
-        };
-
-        if needs_respawn {
-            // Remove dead entry (if any) and shut it down
-            if let Some(removed) = pool.entries.remove(&id) {
-                if let PooledClient::Stdio(ref client) = removed.as_ref() {
-                    shutdown_stdio_ref(client).await;
-                }
-            }
-            // Drop lock before spawning
-            drop(pool);
-
-            let candidate = match server.transport {
-                crate::config::McpTransport::Stdio => {
-                    let client = spawn_stdio(server, self.timeout).await?;
-                    Arc::new(PooledClient::Stdio(Box::new(client)))
-                },
-                crate::config::McpTransport::Http => {
-                    let client = HttpPooledClient::initialize(server, self.timeout).await?;
-                    Arc::new(PooledClient::Http(Box::new(client)))
-                },
-            };
-            let discarded = {
-                let mut pool = self.pool.lock().await;
-                match pool.entries.entry(id) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(candidate);
-                        None
+        let removed = {
+            let mut pool = self.pool.lock().await;
+            match pool.entries.get(&id) {
+                Some(entry) => match entry.as_ref() {
+                    PooledClient::Stdio(client) if client_healthy(client) => return Ok(()),
+                    PooledClient::Stdio(_) => pool.entries.remove(&id),
+                    PooledClient::Http(_) => {
+                        // HTTP health is validated by requests; session-expired responses
+                        // evict the entry and force a fresh initialize on retry.
+                        return Ok(());
                     },
-                    std::collections::hash_map::Entry::Occupied(_) => Some(candidate),
-                }
-            };
-            if let Some(discarded) = discarded {
-                shutdown_pooled(discarded).await;
+                },
+                None => None,
             }
+        };
+        if let Some(removed) = removed {
+            shutdown_pooled(removed).await;
+        }
+
+        let candidate = match server.transport {
+            crate::config::McpTransport::Stdio => {
+                let client = spawn_stdio(server, self.timeout).await?;
+                Arc::new(PooledClient::Stdio(Box::new(client)))
+            },
+            crate::config::McpTransport::Http => {
+                let client = HttpPooledClient::initialize(server, self.timeout).await?;
+                Arc::new(PooledClient::Http(Box::new(client)))
+            },
+        };
+        let discarded = {
+            let mut pool = self.pool.lock().await;
+            match pool.entries.entry(id) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate);
+                    None
+                },
+                std::collections::hash_map::Entry::Occupied(_) => Some(candidate),
+            }
+        };
+        if let Some(discarded) = discarded {
+            shutdown_pooled(discarded).await;
         }
         Ok(())
     }
+}
+
+async fn list_tools_from_entry(entry: &PooledClient) -> Result<Vec<McpTool>, McpPoolError> {
+    match entry {
+        PooledClient::Stdio(client) => {
+            let _request = client.request_lock.lock().await;
+            let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
+            let result =
+                request_result_stdio(client, protocol::list_tools_request(next_id), next_id)
+                    .await?;
+            protocol::parse_list_tools(result).map_err(McpPoolError::Result)
+        },
+        PooledClient::Http(client) => client.list_tools().await,
+    }
+}
+
+async fn call_tool_from_entry(
+    entry: &PooledClient,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<CallToolResult, McpPoolError> {
+    match entry {
+        PooledClient::Stdio(client) => {
+            let _request = client.request_lock.lock().await;
+            let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
+            let result = request_result_stdio(
+                client,
+                protocol::call_tool_request(next_id, tool_name, arguments),
+                next_id,
+            )
+            .await?;
+            protocol::parse_call_tool(result).map_err(McpPoolError::Result)
+        },
+        PooledClient::Http(client) => client.call_tool(tool_name, arguments).await,
+    }
+}
+
+fn should_retry_after_reconnect(error: &McpPoolError) -> bool {
+    error_invalidates_client(error)
+}
+
+fn should_retry_call_after_reconnect(error: &McpPoolError) -> bool {
+    matches!(error, McpPoolError::HttpSessionExpired { .. })
+}
+
+fn error_invalidates_client(error: &McpPoolError) -> bool {
+    matches!(
+        error,
+        McpPoolError::Write(_)
+            | McpPoolError::Stdout(_)
+            | McpPoolError::ParseResponse { .. }
+            | McpPoolError::Timeout { .. }
+            | McpPoolError::Closed { .. }
+            | McpPoolError::MismatchedResponse { .. }
+            | McpPoolError::HttpSessionExpired { .. }
+    )
 }
 
 // ─── Stdio helpers ─────────────────────────────────────────────────────
@@ -438,8 +547,7 @@ async fn spawn_stdio(
         _stderr_task: stderr_task,
     };
 
-    // Run initialize handshake
-    initialize_stdio(&client, timeout).await?;
+    initialize_stdio(&client).await?;
 
     Ok(client)
 }
@@ -454,10 +562,7 @@ fn client_healthy(client: &StdioPooledClient) -> bool {
     }
 }
 
-async fn initialize_stdio(
-    client: &StdioPooledClient,
-    _timeout: Duration,
-) -> Result<(), McpPoolError> {
+async fn initialize_stdio(client: &StdioPooledClient) -> Result<(), McpPoolError> {
     request_result_stdio(client, protocol::initialize_request(1), 1).await?;
     send_stdio(client, protocol::initialized_notification()).await
 }
@@ -769,6 +874,101 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reconnects_http_session_after_expired_response() {
+        let server = TestHttpServer::start(vec![
+            TestResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2025-06-18"}
+            }))
+            .header("Mcp-Session-Id", "session-1"),
+            TestResponse::accepted(),
+            TestResponse::status(reqwest::StatusCode::NOT_FOUND, "expired"),
+            TestResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2025-06-18"}
+            }))
+            .header("Mcp-Session-Id", "session-2"),
+            TestResponse::accepted(),
+            TestResponse::json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": [{"name": "echo"}]}
+            })),
+        ])
+        .await;
+        let config = McpServerConfig {
+            name: "http-fake".into(),
+            transport: McpTransport::Http,
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: Some(server.url()),
+            headers: BTreeMap::new(),
+        };
+        let pool = McpProcessPool::new(Duration::from_secs(5));
+
+        assert!(
+            pool.pre_warm(std::slice::from_ref(&config)).await[0]
+                .1
+                .is_ok()
+        );
+        assert_eq!(pool.list_tools(&config).await.unwrap()[0].name, "echo");
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 6);
+        assert!(requests[2].body.contains("\"method\":\"tools/list\""));
+        assert_eq!(
+            requests[2]
+                .headers
+                .get("mcp-session-id")
+                .map(String::as_str),
+            Some("session-1")
+        );
+        assert!(requests[3].body.contains("\"method\":\"initialize\""));
+        assert!(requests[5].body.contains("\"method\":\"tools/list\""));
+        assert_eq!(
+            requests[5]
+                .headers
+                .get("mcp-session-id")
+                .map(String::as_str),
+            Some("session-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn recovers_after_stdio_process_exits_during_call() {
+        let server = fake_stdio_server_with_env(BTreeMap::from([(
+            "ASTRCODE_FAKE_MCP_EXIT_ON_CALL".into(),
+            "1".into(),
+        )]));
+        let pool = McpProcessPool::new(Duration::from_secs(5));
+
+        assert!(
+            pool.pre_warm(std::slice::from_ref(&server.config)).await[0]
+                .1
+                .is_ok()
+        );
+        let error = pool
+            .call_tool(&server.config, "echo", json!({"text": "hello"}))
+            .await
+            .expect_err("server exits before call response");
+        assert!(matches!(error, McpPoolError::Closed { .. }));
+
+        assert_eq!(
+            pool.list_tools(&server.config).await.unwrap()[0].name,
+            "echo"
+        );
+        assert_eq!(
+            fs::read_to_string(&server.marker).unwrap().lines().count(),
+            2
+        );
+        pool.shutdown().await;
+    }
+
     struct FakeStdioServer {
         _temp: TempDir,
         marker: PathBuf,
@@ -840,6 +1040,14 @@ mod tests {
             }
         }
 
+        fn status(status: reqwest::StatusCode, body: &str) -> Self {
+            Self {
+                status,
+                headers: BTreeMap::new(),
+                body: body.into(),
+            }
+        }
+
         fn header(mut self, key: &str, value: &str) -> Self {
             self.headers.insert(key.into(), value.into());
             self
@@ -899,22 +1107,28 @@ mod tests {
     }
 
     fn fake_stdio_server() -> FakeStdioServer {
+        fake_stdio_server_with_env(BTreeMap::new())
+    }
+
+    fn fake_stdio_server_with_env(extra_env: BTreeMap<String, String>) -> FakeStdioServer {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("fake_mcp_server.rs");
         fs::write(&source, FAKE_SERVER_SOURCE).unwrap();
         let exe = temp.path().join(exe_name("fake_mcp_server"));
         compile_fake_server(&source, &exe);
         let marker = temp.path().join("initializes.txt");
+        let mut env = BTreeMap::from([(
+            "ASTRCODE_FAKE_MCP_MARKER".into(),
+            marker.to_string_lossy().to_string(),
+        )]);
+        env.extend(extra_env);
         FakeStdioServer {
             config: McpServerConfig {
                 name: "fake".into(),
                 transport: McpTransport::Stdio,
                 command: exe.to_string_lossy().to_string(),
                 args: Vec::new(),
-                env: BTreeMap::from([(
-                    "ASTRCODE_FAKE_MCP_MARKER".into(),
-                    marker.to_string_lossy().to_string(),
-                )]),
+                env,
                 cwd: None,
                 url: None,
                 headers: BTreeMap::new(),
@@ -952,6 +1166,7 @@ mod tests {
 use std::{
     fs::OpenOptions,
     io::{self, BufRead, Write},
+    process,
 };
 
 fn main() {
@@ -978,6 +1193,9 @@ fn main() {
                 id
             ).unwrap();
         } else if line.contains("\"method\":\"tools/call\"") {
+            if std::env::var("ASTRCODE_FAKE_MCP_EXIT_ON_CALL").ok().as_deref() == Some("1") {
+                process::exit(0);
+            }
             writeln!(
                 stdout,
                 "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"called\"}}],\"isError\":false}}}}",

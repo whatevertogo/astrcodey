@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     path::Path,
     sync::{Arc, RwLock as StdRwLock},
     time::Duration,
@@ -68,6 +69,33 @@ struct ExtensionRecord {
 pub struct RegisteredSlashCommand {
     pub extension_id: String,
     pub command: astrcode_extension_sdk::extension::SlashCommand,
+}
+
+#[derive(Clone)]
+pub struct ResolvedSlashCommand {
+    pub extension_id: String,
+    pub command: astrcode_extension_sdk::extension::SlashCommand,
+    pub source: String,
+    pub shadowed: Vec<ShadowedSlashCommand>,
+    handler: Arc<dyn CommandHandler>,
+}
+
+impl fmt::Debug for ResolvedSlashCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedSlashCommand")
+            .field("extension_id", &self.extension_id)
+            .field("command", &self.command)
+            .field("source", &self.source)
+            .field("shadowed", &self.shadowed)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ShadowedSlashCommand {
+    pub extension_id: String,
+    pub source: String,
+    pub priority: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1748,6 +1776,61 @@ impl ExtensionRunner {
         cmds
     }
 
+    /// Resolve visible slash commands and report commands hidden by the
+    /// explicit source/priority policy.
+    pub async fn resolve_commands_for_typed(&self, working_dir: &str) -> Vec<ResolvedSlashCommand> {
+        let mut commands = self.collect_commands_for_typed(working_dir).await;
+        commands.sort_by(compare_command_registration);
+
+        let mut resolved = Vec::<ResolvedSlashCommand>::new();
+        for (extension_id, command, handler) in commands {
+            let source = command_source(&extension_id).to_string();
+            if let Some(active) = resolved
+                .iter_mut()
+                .find(|resolved| resolved.command.name == command.name)
+            {
+                tracing::warn!(
+                    command = %command.name,
+                    extension_id = %extension_id,
+                    source = %source,
+                    priority = command.priority,
+                    active_extension_id = %active.extension_id,
+                    active_source = %active.source,
+                    active_priority = active.command.priority,
+                    "slash command shadowed by higher priority command"
+                );
+                active.shadowed.push(ShadowedSlashCommand {
+                    extension_id,
+                    source,
+                    priority: command.priority,
+                });
+                continue;
+            }
+            resolved.push(ResolvedSlashCommand {
+                extension_id,
+                command,
+                source,
+                shadowed: Vec::new(),
+                handler,
+            });
+        }
+        resolved
+    }
+
+    /// Execute an already-resolved slash command without re-reading the command registry.
+    pub async fn invoke_resolved_command_typed(
+        &self,
+        resolved: &ResolvedSlashCommand,
+        arguments: &str,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        resolved
+            .handler
+            .execute(&resolved.command.name, arguments, working_dir, ctx)
+            .await
+    }
+
     /// 命令派发。
     pub async fn dispatch_command_typed(
         &self,
@@ -1756,12 +1839,13 @@ impl ExtensionRunner {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let cmds = self.collect_commands_for_typed(working_dir).await;
-        let mut matched: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = cmds
+        let mut matched: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = self
+            .collect_commands_for_typed(working_dir)
+            .await
             .into_iter()
             .filter(|(_, cmd, _)| cmd.name == command_name)
             .collect();
-        matched.sort_by_key(|a| std::cmp::Reverse(command_dispatch_priority(&a.0)));
+        matched.sort_by(compare_command_registration);
 
         if let Some((_, _, handler)) = matched.into_iter().next() {
             handler
@@ -1770,6 +1854,47 @@ impl ExtensionRunner {
         } else {
             Err(ExtensionError::NotFound(command_name.into()))
         }
+    }
+
+    /// 命令参数补全派发。
+    pub async fn complete_command_typed(
+        &self,
+        command_name: &str,
+        argument: &str,
+        cursor: usize,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        let mut matched: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = self
+            .collect_commands_for_typed(working_dir)
+            .await
+            .into_iter()
+            .filter(|(_, cmd, _)| cmd.name == command_name)
+            .collect();
+        matched.sort_by(compare_command_registration);
+
+        if let Some((_, _, handler)) = matched.into_iter().next() {
+            handler
+                .complete(command_name, argument, cursor, working_dir, ctx)
+                .await
+        } else {
+            Err(ExtensionError::NotFound(command_name.into()))
+        }
+    }
+
+    /// Complete arguments for an already-resolved slash command without re-reading the registry.
+    pub async fn complete_resolved_command_typed(
+        &self,
+        resolved: &ResolvedSlashCommand,
+        argument: &str,
+        cursor: usize,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        resolved
+            .handler
+            .complete(&resolved.command.name, argument, cursor, working_dir, ctx)
+            .await
     }
 
     /// 判断是否有任何扩展注册了类型化能力。
@@ -1867,13 +1992,31 @@ impl ExtensionRuntime for ExtensionRunner {
     }
 }
 
-/// Lower value = higher dispatch priority.
-fn command_dispatch_priority(extension_id: &str) -> u8 {
+fn command_source(extension_id: &str) -> &'static str {
     if extension_id == "astrcode-skill" {
-        0
+        "skill"
     } else {
-        1
+        "extension"
     }
+}
+
+fn command_source_precedence(extension_id: &str) -> u8 {
+    match command_source(extension_id) {
+        "extension" => 2,
+        "skill" => 1,
+        _ => 0,
+    }
+}
+
+fn compare_command_registration(
+    left: &(String, SlashCommand, Arc<dyn CommandHandler>),
+    right: &(String, SlashCommand, Arc<dyn CommandHandler>),
+) -> std::cmp::Ordering {
+    command_source_precedence(&right.0)
+        .cmp(&command_source_precedence(&left.0))
+        .then_with(|| right.1.priority.cmp(&left.1.priority))
+        .then_with(|| left.0.cmp(&right.0))
+        .then_with(|| left.1.name.cmp(&right.1.name))
 }
 
 fn provider_hook_name(event: ProviderEvent) -> &'static str {
@@ -2065,12 +2208,13 @@ mod tests {
     use astrcode_extension_sdk::{
         extension::{
             AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
-            AfterToolResultsResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+            AfterToolResultsResult, CommandCompletionItem, CommandCompletions, CommandContext,
+            CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
             ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-            ExtensionCtx, ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler,
-            PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-            Registrar, StopReason, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
-            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            ExtensionCommandResult, ExtensionCtx, ExtensionError, HookMode, PreToolUseContext,
+            PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+            ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler, ToolHookTarget,
+            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
         tool::{
             ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
@@ -2156,6 +2300,18 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    struct CommandProbeExtension {
+        id: &'static str,
+        command_name: &'static str,
+        priority: i32,
+        argument_completions: bool,
+    }
+
+    struct CommandProbe {
+        label: &'static str,
+        argument_completions: bool,
+    }
+
     #[async_trait::async_trait]
     impl Extension for StateProbeExtension {
         fn id(&self) -> &str {
@@ -2190,6 +2346,64 @@ mod tests {
                 false,
                 Default::default(),
             ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for CommandProbeExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn register(&self, reg: &mut Registrar) {
+            reg.command(
+                SlashCommand {
+                    name: self.command_name.into(),
+                    description: format!("{} command", self.id),
+                    args_schema: None,
+                    requires_idle: false,
+                    argument_completions: self.argument_completions,
+                    priority: self.priority,
+                },
+                Arc::new(CommandProbe {
+                    label: self.id,
+                    argument_completions: self.argument_completions,
+                }),
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CommandHandler for CommandProbe {
+        async fn execute(
+            &self,
+            _command_name: &str,
+            _args: &str,
+            _working_dir: &str,
+            _ctx: &CommandContext,
+        ) -> Result<ExtensionCommandResult, ExtensionError> {
+            Ok(ExtensionCommandResult::handled(self.label))
+        }
+
+        async fn complete(
+            &self,
+            _command_name: &str,
+            argument: &str,
+            cursor: usize,
+            _working_dir: &str,
+            _ctx: &CommandContext,
+        ) -> Result<CommandCompletions, ExtensionError> {
+            if !self.argument_completions {
+                return Ok(CommandCompletions::default());
+            }
+            Ok(CommandCompletions {
+                items: vec![CommandCompletionItem {
+                    label: format!("{}:{argument}:{cursor}", self.label),
+                    insert_text: self.label.into(),
+                    detail: Some("probe".into()),
+                }],
+                truncated: false,
+            })
         }
     }
 
@@ -2981,6 +3195,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_resolution_uses_source_priority_then_declared_priority() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(CommandProbeExtension {
+                id: "astrcode-skill",
+                command_name: "demo",
+                priority: 100,
+                argument_completions: false,
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(CommandProbeExtension {
+                id: "normal-low",
+                command_name: "demo",
+                priority: 1,
+                argument_completions: false,
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(CommandProbeExtension {
+                id: "normal-high",
+                command_name: "demo",
+                priority: 5,
+                argument_completions: false,
+            }))
+            .await
+            .unwrap();
+
+        let resolved = runner.resolve_commands_for_typed(".").await;
+        let demo = resolved
+            .iter()
+            .find(|command| command.command.name == "demo")
+            .expect("demo command");
+
+        assert_eq!(demo.extension_id, "normal-high");
+        assert_eq!(demo.source, "extension");
+        assert_eq!(demo.shadowed.len(), 2);
+        assert!(demo.shadowed.iter().any(|command| {
+            command.extension_id == "astrcode-skill" && command.source == "skill"
+        }));
+    }
+
+    #[tokio::test]
+    async fn command_completion_dispatches_to_resolved_handler() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(CommandProbeExtension {
+                id: "complete-low",
+                command_name: "pick",
+                priority: 0,
+                argument_completions: true,
+            }))
+            .await
+            .unwrap();
+        runner
+            .register(Arc::new(CommandProbeExtension {
+                id: "complete-high",
+                command_name: "pick",
+                priority: 10,
+                argument_completions: true,
+            }))
+            .await
+            .unwrap();
+
+        let completions = runner
+            .complete_command_typed("pick", "de", 2, ".", &command_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(completions.items.len(), 1);
+        assert_eq!(completions.items[0].label, "complete-high:de:2");
+        assert_eq!(completions.items[0].insert_text, "complete-high");
+    }
+
+    #[tokio::test]
     async fn session_control_tools_declare_no_resource_conflicts() {
         let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
@@ -3019,5 +3310,14 @@ mod tests {
                 .unwrap(),
             vec![ResourceAccess::all()]
         );
+    }
+
+    fn command_ctx() -> CommandContext {
+        CommandContext {
+            session_id: "session".into(),
+            working_dir: ".".into(),
+            model: ModelSelection::simple("mock"),
+            session_store_dir: None,
+        }
     }
 }

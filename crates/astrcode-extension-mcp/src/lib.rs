@@ -89,7 +89,7 @@ impl Extension for McpExtension {
 
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
         self.shared.pool.shutdown().await;
-        self.shared.clear();
+        self.shared.clear().await;
         Ok(())
     }
 
@@ -175,6 +175,8 @@ struct McpShared {
 }
 
 struct McpCacheEntry {
+    config_fingerprint: u64,
+    servers: Vec<McpServerConfig>,
     /// normalized tool name -> (server config, original tool name)
     tool_lookup: HashMap<String, (McpServerConfig, String)>,
     /// search candidates for tool_search_tool
@@ -200,6 +202,10 @@ impl McpShared {
             .clone()
     }
 
+    async fn get_warm_gate(&self, working_dir: &str) -> Option<Arc<WarmGate>> {
+        self.warm_gates.lock().await.get(working_dir).cloned()
+    }
+
     async fn mark_warm_complete(&self, working_dir: &str) {
         self.warm_gate(working_dir).await.mark_done();
     }
@@ -209,7 +215,9 @@ impl McpShared {
         if self.get_entry(working_dir).is_some() {
             return;
         }
-        let gate = self.warm_gate(working_dir).await;
+        let Some(gate) = self.get_warm_gate(working_dir).await else {
+            return;
+        };
         if gate.is_done() {
             return;
         }
@@ -249,24 +257,30 @@ impl McpShared {
             .insert(working_dir.to_string(), Arc::new(entry));
     }
 
-    fn clear(&self) {
+    async fn clear(&self) {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.refresh_locks.lock().await.clear();
+        self.warm_gates.lock().await.clear();
     }
 
     async fn refresh_global(&self) {
-        self.refresh_if_missing("", config::load_global_only).await;
+        self.refresh_if_stale("", config::load_global_only).await;
     }
 
     async fn refresh_workspace(&self, working_dir: &str) {
-        self.refresh_if_missing(working_dir, || config::load_config(working_dir))
+        self.refresh_if_stale(working_dir, || config::load_config(working_dir))
             .await;
     }
 
-    async fn refresh_if_missing<F>(&self, working_dir: &str, load_config: F)
+    async fn refresh_if_stale<F>(&self, working_dir: &str, load_config: F)
     where
         F: FnOnce() -> McpConfig + Send,
     {
-        if self.get_entry(working_dir).is_some() {
+        // TODO(optional): measure how often tool discovery reaches this load_config
+        // path. If it becomes a hot path, add an mtime cache for config files;
+        // the current disk-read cost is acceptable.
+        let config = load_config();
+        if self.entry_is_current(working_dir, config.fingerprint) {
             self.mark_warm_complete(working_dir).await;
             return;
         }
@@ -278,9 +292,14 @@ impl McpShared {
                 .clone()
         };
         let _refresh = refresh_lock.lock().await;
-        if self.get_entry(working_dir).is_none() {
-            self.refresh(working_dir, load_config()).await;
+        if !self.entry_is_current(working_dir, config.fingerprint) {
+            self.refresh(working_dir, config).await;
         }
+    }
+
+    fn entry_is_current(&self, working_dir: &str, fingerprint: u64) -> bool {
+        self.get_entry(working_dir)
+            .is_some_and(|entry| entry.config_fingerprint == fingerprint)
     }
 
     async fn refresh(&self, working_dir: &str, config: McpConfig) {
@@ -291,8 +310,25 @@ impl McpShared {
             }
         }
         let discovered = discover_from_pool(&self.pool, &config).await;
+        let active_servers = self.active_servers_after_refresh(working_dir, &discovered.servers);
+        self.pool.retain_servers(&active_servers).await;
         self.store(working_dir, discovered.build_cache_entry());
         self.mark_warm_complete(working_dir).await;
+    }
+
+    fn active_servers_after_refresh(
+        &self,
+        working_dir: &str,
+        refreshed_servers: &[McpServerConfig],
+    ) -> Vec<McpServerConfig> {
+        let mut servers = refreshed_servers.to_vec();
+        let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        for (cached_working_dir, entry) in cache.iter() {
+            if cached_working_dir != working_dir {
+                servers.extend(entry.servers.iter().cloned());
+            }
+        }
+        servers
     }
 }
 
@@ -305,11 +341,9 @@ struct McpToolDiscovery {
 #[async_trait::async_trait]
 impl ToolDiscoveryHandler for McpToolDiscovery {
     async fn discover(&self, working_dir: &str) -> Vec<DiscoveredTool> {
-        if let Some(entry) = self.shared.get_entry(working_dir) {
-            return self.build_discovered_tools(&entry);
-        }
         self.shared.await_initial_warm(working_dir).await;
-        // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整。
+        // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
+        // 已有缓存时会按配置 fingerprint 快速判断是否仍然有效。
         self.shared.refresh_workspace(working_dir).await;
         match self.shared.get_entry(working_dir) {
             Some(entry) => self.build_discovered_tools(&entry),
@@ -482,6 +516,7 @@ struct DiscoveredMcpTools {
     tools: Vec<SearchCandidate>,
     servers: Vec<McpServerConfig>,
     diagnostics: Vec<String>,
+    config_fingerprint: u64,
 }
 
 impl DiscoveredMcpTools {
@@ -498,6 +533,8 @@ impl DiscoveredMcpTools {
             }
         }
         McpCacheEntry {
+            config_fingerprint: self.config_fingerprint,
+            servers: self.servers,
             tool_lookup,
             candidates: self.tools,
             diagnostics: self.diagnostics,
@@ -560,6 +597,7 @@ async fn discover_from_pool(pool: &McpProcessPool, config: &McpConfig) -> Discov
         tools: candidates,
         servers,
         diagnostics,
+        config_fingerprint: config.fingerprint,
     }
 }
 
@@ -668,6 +706,39 @@ fn warn_diagnostics(diagnostics: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn clear_drops_cache_refresh_locks_and_warm_gates() {
+        let shared = McpShared::new(McpProcessPool::new(Duration::from_secs(1)));
+        let working_dir = "/workspace";
+
+        shared.store(
+            working_dir,
+            McpCacheEntry {
+                config_fingerprint: 1,
+                servers: Vec::new(),
+                tool_lookup: HashMap::new(),
+                candidates: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+        );
+        shared
+            .refresh_locks
+            .lock()
+            .await
+            .insert(working_dir.into(), Arc::new(AsyncMutex::new(())));
+        shared
+            .warm_gates
+            .lock()
+            .await
+            .insert(working_dir.into(), Arc::new(WarmGate::new()));
+
+        shared.clear().await;
+
+        assert!(shared.get_entry(working_dir).is_none());
+        assert!(shared.refresh_locks.lock().await.is_empty());
+        assert!(shared.warm_gates.lock().await.is_empty());
+    }
 
     #[test]
     fn converts_mcp_tool_to_bundled_tool_definition() {

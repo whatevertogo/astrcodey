@@ -6,7 +6,7 @@ use astrcode_protocol::{
     events::{ClientNotification, SessionListItem},
 };
 
-use super::{CommandHandler, HandlerError, slash};
+use super::{CommandHandler, CommandInvocation, HandlerError, slash};
 
 impl CommandHandler {
     /// 处理客户端命令，路由到对应处理方法。
@@ -92,7 +92,10 @@ impl CommandHandler {
                         return Ok(());
                     },
                 };
-                let infos = self.command_infos_for_working_dir(&working_dir).await;
+                let infos = self
+                    .command_list_for_working_dir(&working_dir)
+                    .await
+                    .commands;
                 let keybindings = self.runtime.extension_runner().collect_keybindings();
                 let status_items: Vec<astrcode_protocol::events::StatusItemInfoDto> = self
                     .runtime
@@ -118,23 +121,22 @@ impl CommandHandler {
                 arguments,
             } => {
                 let sid = self.ensure_session().await?;
-                let visible_text = if arguments.trim().is_empty() {
-                    format!("/{command_name}")
-                } else {
-                    format!("/{command_name} {}", arguments.trim())
-                };
-                if let Err(error) = self
-                    .execute_slash_command_for_session(
+                match self
+                    .invoke_command_for_session(
                         sid,
                         slash::ParsedSlashCommand {
                             name: command_name,
                             arguments,
                         },
-                        visible_text,
                     )
                     .await
                 {
-                    self.send_error(slash::command_error_code(&error), &error.to_string());
+                    Ok(CommandInvocation::Display { .. })
+                    | Ok(CommandInvocation::Handled { .. })
+                    | Ok(CommandInvocation::Started { .. }) => {},
+                    Err(error) => {
+                        self.send_error(slash::command_error_code(&error), &error.to_string());
+                    },
                 }
             },
 

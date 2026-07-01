@@ -723,6 +723,33 @@ pub struct SlashCommand {
     pub description: String,
     /// 参数的 JSON Schema 定义。
     pub args_schema: Option<serde_json::Value>,
+    /// 是否要求当前 session 空闲。
+    #[serde(default)]
+    pub requires_idle: bool,
+    /// 是否提供参数补全。
+    #[serde(default)]
+    pub argument_completions: bool,
+    /// 同来源命令冲突时的优先级，数值越高优先级越高。
+    #[serde(default)]
+    pub priority: i32,
+}
+
+/// 斜杠命令参数补全项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandCompletionItem {
+    pub label: String,
+    pub insert_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// 斜杠命令参数补全结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandCompletions {
+    #[serde(default)]
+    pub items: Vec<CommandCompletionItem>,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// 扩展斜杠命令的执行结果。
@@ -1366,6 +1393,17 @@ pub trait CommandHandler: Send + Sync {
         working_dir: &str,
         ctx: &CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError>;
+
+    async fn complete(
+        &self,
+        _command_name: &str,
+        _argument: &str,
+        _cursor: usize,
+        _working_dir: &str,
+        _ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        Ok(CommandCompletions::default())
+    }
 }
 
 /// 动态工具发现处理器。

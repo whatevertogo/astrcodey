@@ -103,14 +103,63 @@ pub struct CompactSessionResponse {
     pub message: String,
 }
 
-/// 执行扩展斜杠命令请求（与 CLI `ExecuteExtensionCommand` 对齐）。
+/// 执行会话斜杠命令请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExecuteExtensionCommandRequest {
-    /// 命令名（不含 `/`），如 `mode`。
-    pub command: String,
+pub struct CommandInvokeRequest {
     #[serde(default)]
     pub arguments: String,
+}
+
+/// 执行会话斜杠命令响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum CommandInvokeResponse {
+    Display {
+        session_id: String,
+        content: String,
+        is_error: bool,
+    },
+    Handled {
+        session_id: String,
+        message: String,
+    },
+    Started {
+        session_id: String,
+        turn_id: String,
+    },
+}
+
+/// 斜杠命令参数补全请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandCompletionRequest {
+    #[serde(default)]
+    pub argument: String,
+    #[serde(default)]
+    pub cursor: Option<usize>,
+}
+
+/// 斜杠命令参数补全响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandCompletionResponse {
+    pub items: Vec<CommandCompletionItemDto>,
+    pub truncated: bool,
+}
+
+/// 斜杠命令参数补全项。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandCompletionItemDto {
+    pub label: String,
+    pub insert_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// 斜杠命令列表响应。
@@ -118,6 +167,9 @@ pub struct ExecuteExtensionCommandRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandListResponseDto {
     pub commands: Vec<SlashCommandInfoDto>,
+    /// 被更高优先级命令遮蔽的同名命令诊断。
+    #[serde(default)]
+    pub shadowed_commands: Vec<ShadowedSlashCommandDto>,
     /// 插件注册的快捷键绑定。
     #[serde(default)]
     pub keybindings: Vec<KeybindingDto>,
@@ -162,6 +214,9 @@ pub struct SlashCommandInfoDto {
     pub name: String,
     pub description: String,
     pub needs_argument: bool,
+    pub requires_idle: bool,
+    pub argument_completions: bool,
+    pub priority: i32,
     /// 命令来源：`builtin`、`extension` 或 `skill`。
     pub source: String,
 }
@@ -172,9 +227,24 @@ impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
             name: cmd.name,
             description: cmd.description,
             needs_argument: cmd.needs_argument,
+            requires_idle: cmd.requires_idle,
+            argument_completions: cmd.argument_completions,
+            priority: cmd.priority,
             source: cmd.source,
         }
     }
+}
+
+/// 被遮蔽的命令诊断。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowedSlashCommandDto {
+    pub name: String,
+    pub active_source: String,
+    pub active_priority: i32,
+    pub shadowed_source: String,
+    pub shadowed_priority: i32,
+    pub shadowed_extension_id: String,
 }
 
 /// fork 请求的冻结线缆形状。v1 route 返回 501。

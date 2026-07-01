@@ -164,6 +164,9 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
                     name: skill.id.clone(),
                     description,
                     args_schema: None,
+                    requires_idle: false,
+                    argument_completions: false,
+                    priority: 0,
                 };
                 (
                     cmd,

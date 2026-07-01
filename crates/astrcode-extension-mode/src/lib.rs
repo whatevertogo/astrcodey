@@ -126,6 +126,9 @@ impl Extension for ModeExtension {
                 name: "mode".into(),
                 description: "Toggle or set working mode (plan/code). Shift+Tab to toggle.".into(),
                 args_schema: None,
+                requires_idle: false,
+                argument_completions: false,
+                priority: 0,
             },
             Arc::new(ModeSlashCommandHandler {
                 catalog: Arc::clone(&catalog),

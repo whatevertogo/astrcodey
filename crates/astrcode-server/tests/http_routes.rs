@@ -17,8 +17,9 @@ use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
-        CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
-        PromptSubmitResponse, SlashCommandListResponseDto,
+        CommandCompletionResponse, CommandInvokeResponse, CompactSessionResponse,
+        ConversationSnapshotResponseDto, CreateSessionResponseDto, PromptSubmitResponse,
+        SlashCommandListResponseDto,
     },
 };
 use astrcode_server::{
@@ -624,6 +625,9 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .expect("compact command");
     assert_eq!(compact.source, "builtin");
     assert!(!compact.needs_argument);
+    assert!(compact.requires_idle);
+    assert!(!compact.argument_completions);
+    assert!(body.shadowed_commands.is_empty());
 
     let mode_cmd = body
         .commands
@@ -641,7 +645,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 }
 
 #[tokio::test]
-async fn execute_extension_command_route_toggles_mode() {
+async fn invoke_command_route_toggles_mode() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
@@ -649,21 +653,43 @@ async fn execute_extension_command_route_toggles_mode() {
 
     let http_response = post_json(
         app,
-        &format!("/api/sessions/{session_id}/commands/execute"),
-        r#"{"command":"mode","arguments":""}"#,
+        &format!("/api/sessions/{session_id}/commands/mode"),
+        r#"{"arguments":""}"#,
         &token,
     )
     .await;
     assert_eq!(http_response.status(), StatusCode::OK);
-    let response: PromptSubmitResponse =
+    let response: CommandInvokeResponse =
         serde_json::from_slice(&body_bytes(http_response).await).unwrap();
 
     match response {
-        PromptSubmitResponse::Handled { message, .. } => {
-            assert!(message.contains("plan") || message.contains("Switched"));
+        CommandInvokeResponse::Display { content, .. } => {
+            assert!(content.contains("plan") || content.contains("Switched"));
         },
-        other => panic!("expected handled mode toggle, got {other:?}"),
+        other => panic!("expected display mode toggle, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn command_completion_route_returns_empty_for_commands_without_completion() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+
+    let http_response = post_json(
+        app,
+        &format!("/api/sessions/{session_id}/commands/mode/complete"),
+        r#"{"argument":"","cursor":0}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(http_response.status(), StatusCode::OK);
+    let response: CommandCompletionResponse =
+        serde_json::from_slice(&body_bytes(http_response).await).unwrap();
+
+    assert!(response.items.is_empty());
+    assert!(!response.truncated);
 }
 
 #[tokio::test]

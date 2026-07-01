@@ -5,11 +5,17 @@
 
 use std::sync::Arc;
 
-use astrcode_core::types::{SessionId, TurnId};
+use astrcode_core::{
+    extension::CommandCompletions,
+    types::{SessionId, TurnId},
+};
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{CommandHandler, HandlerError, ManualCompactOutcome, PromptSubmission, TurnCompletion};
+use super::{
+    CommandHandler, CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
+    TurnCompletion, session_command::CommandList,
+};
 use crate::{
     bootstrap::ServerRuntime,
     turn_scheduler::{DeliveryOutcome, InputDelivery, PromptInput, TurnScheduler},
@@ -132,14 +138,52 @@ impl CommandHandle {
         Self::recv(rx).await?
     }
 
-    /// 获取指定会话的可用命令列表。
-    pub async fn command_infos_for_session(
+    /// 获取指定会话的完整命令列表与诊断。
+    pub async fn command_list_for_session(
         &self,
         session_id: SessionId,
-    ) -> Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError> {
+    ) -> Result<CommandList, HandlerError> {
         let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::ListCommandsForSession { session_id, reply })
+        self.post(CommandMessage::ListCommandCatalogForSession { session_id, reply })
             .await?;
+        Self::recv(rx).await?
+    }
+
+    /// 执行指定会话的一等 command。
+    pub async fn invoke_command_for_session(
+        &self,
+        session_id: SessionId,
+        command_name: String,
+        arguments: String,
+    ) -> Result<CommandInvocation, HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.post(CommandMessage::InvokeCommandForSession {
+            session_id,
+            command_name,
+            arguments,
+            reply,
+        })
+        .await?;
+        Self::recv(rx).await?
+    }
+
+    /// 请求指定 command 的参数补全。
+    pub async fn complete_command_for_session(
+        &self,
+        session_id: SessionId,
+        command_name: String,
+        argument: String,
+        cursor: Option<usize>,
+    ) -> Result<CommandCompletions, HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.post(CommandMessage::CompleteCommandForSession {
+            session_id,
+            command_name,
+            argument,
+            cursor,
+            reply,
+        })
+        .await?;
         Self::recv(rx).await?
     }
 
@@ -222,12 +266,25 @@ pub(in crate::handler) enum CommandMessage {
         session_id: SessionId,
         reply: oneshot::Sender<Result<(), HandlerError>>,
     },
-    /// 列出命令
-    ListCommandsForSession {
+    /// 列出命令及诊断
+    ListCommandCatalogForSession {
         session_id: SessionId,
-        reply: oneshot::Sender<
-            Result<Vec<astrcode_protocol::events::ExtensionCommandInfo>, HandlerError>,
-        >,
+        reply: oneshot::Sender<Result<CommandList, HandlerError>>,
+    },
+    /// 执行一等 command
+    InvokeCommandForSession {
+        session_id: SessionId,
+        command_name: String,
+        arguments: String,
+        reply: oneshot::Sender<Result<CommandInvocation, HandlerError>>,
+    },
+    /// command 参数补全
+    CompleteCommandForSession {
+        session_id: SessionId,
+        command_name: String,
+        argument: String,
+        cursor: Option<usize>,
+        reply: oneshot::Sender<Result<CommandCompletions, HandlerError>>,
     },
     /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）。
     ///
@@ -441,8 +498,32 @@ impl CommandHandler {
                 let result = self.abort_session(&session_id).await;
                 let _ = reply.send(result);
             },
-            CommandMessage::ListCommandsForSession { session_id, reply } => {
-                let _ = reply.send(self.command_infos_for_session(&session_id).await);
+            CommandMessage::ListCommandCatalogForSession { session_id, reply } => {
+                let _ = reply.send(self.command_list_for_session(&session_id).await);
+            },
+            CommandMessage::InvokeCommandForSession {
+                session_id,
+                command_name,
+                arguments,
+                reply,
+            } => {
+                let command = super::slash::ParsedSlashCommand {
+                    name: command_name,
+                    arguments,
+                };
+                let _ = reply.send(self.invoke_command_for_session(session_id, command).await);
+            },
+            CommandMessage::CompleteCommandForSession {
+                session_id,
+                command_name,
+                argument,
+                cursor,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.complete_command_for_session(session_id, command_name, argument, cursor)
+                        .await,
+                );
             },
             // Agent Turn 清理（终态事件已由 turn task 直接广播）
             CommandMessage::AgentTurnCleanup {

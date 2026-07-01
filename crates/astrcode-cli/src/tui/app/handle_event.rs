@@ -684,6 +684,10 @@ fn apply_extension_command_list(
             usage: format!("/{}", info.name),
             description: info.description.clone(),
             needs_argument: info.needs_argument,
+            requires_idle: info.requires_idle,
+            argument_completions: info.argument_completions,
+            priority: info.priority,
+            source: info.source.clone(),
         })
         .collect();
     app.extension_command_names = app

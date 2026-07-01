@@ -3,6 +3,8 @@ import { isTauriEnvironment } from '../lib/tauri'
 import {
   decodeActiveSelectionResponse,
   decodeAvailableModels,
+  decodeCommandCompletionResponse,
+  decodeCommandInvokeResponse,
   decodeConfigReloadResponse,
   decodeConfigView,
   decodeConversationSnapshot,
@@ -19,6 +21,8 @@ import {
 } from './protocol'
 import type {
   CreateSessionResponse,
+  CommandCompletionResponse,
+  CommandInvokeResponse,
   PromptAttachmentWire,
   PromptSubmitResponse,
   SessionListResponse,
@@ -197,13 +201,30 @@ export async function executeExtensionCommand(
   sessionId: string,
   command: string,
   argumentsText = ''
-): Promise<PromptSubmitResponse> {
-  return decodePromptSubmitResponse(
+): Promise<CommandInvokeResponse> {
+  return decodeCommandInvokeResponse(
     await request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/commands/execute`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}`,
       {
         method: 'POST',
-        body: JSON.stringify({ command, arguments: argumentsText }),
+        body: JSON.stringify({ arguments: argumentsText }),
+      }
+    )
+  )
+}
+
+export async function completeExtensionCommand(
+  sessionId: string,
+  command: string,
+  argument = '',
+  cursor?: number
+): Promise<CommandCompletionResponse> {
+  return decodeCommandCompletionResponse(
+    await request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}/complete`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ argument, cursor }),
       }
     )
   )

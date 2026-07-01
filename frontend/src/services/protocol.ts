@@ -3,6 +3,8 @@ import type {
   AgentSessionStatus,
   AvailableModel,
   CompactSessionResponse,
+  CommandCompletionResponse,
+  CommandInvokeResponse,
   ConfigView,
   ConversationBlock,
   ConversationControlState,
@@ -23,6 +25,7 @@ import type {
   SlashCommandListResponse,
   KeybindingInfo,
   StatusItemInfo,
+  ShadowedSlashCommandInfo,
   SessionListItem,
   SessionListResponse,
   ToolOutputStream,
@@ -440,7 +443,24 @@ function decodeSlashCommandInfo(value: unknown): SlashCommandInfo {
     name: requiredString(object, 'name'),
     description: requiredString(object, 'description'),
     needsArgument: requiredBoolean(object, 'needsArgument'),
+    requiresIdle: requiredBoolean(object, 'requiresIdle'),
+    argumentCompletions: requiredBoolean(object, 'argumentCompletions'),
+    priority: optionalNumber(object, 'priority') ?? 0,
     source: requiredString(object, 'source'),
+  }
+}
+
+function decodeShadowedSlashCommandInfo(
+  value: unknown
+): ShadowedSlashCommandInfo {
+  const object = decodeObject(value, 'shadowed slash command info')
+  return {
+    name: requiredString(object, 'name'),
+    activeSource: requiredString(object, 'activeSource'),
+    activePriority: optionalNumber(object, 'activePriority') ?? 0,
+    shadowedSource: requiredString(object, 'shadowedSource'),
+    shadowedPriority: optionalNumber(object, 'shadowedPriority') ?? 0,
+    shadowedExtensionId: requiredString(object, 'shadowedExtensionId'),
   }
 }
 
@@ -469,12 +489,62 @@ export function decodeSlashCommandListResponse(
   const object = decodeObject(value, 'slash command list response')
   return {
     commands: arrayField(object, 'commands').map(decodeSlashCommandInfo),
+    shadowedCommands: optionalArrayField(object, 'shadowedCommands').map(
+      decodeShadowedSlashCommandInfo
+    ),
     keybindings: ((object.keybindings as unknown[]) ?? []).map(
       decodeKeybindingInfo
     ),
     statusItems: ((object.statusItems as unknown[]) ?? []).map(
       decodeStatusItemInfo
     ),
+  }
+}
+
+export function decodeCommandInvokeResponse(
+  value: unknown
+): CommandInvokeResponse {
+  const object = decodeObject(value, 'command invoke response')
+  const kind = requiredString(object, 'kind')
+  switch (kind) {
+    case 'display':
+      return {
+        kind,
+        sessionId: requiredString(object, 'sessionId'),
+        content: requiredString(object, 'content'),
+        isError: requiredBoolean(object, 'isError'),
+      }
+    case 'handled':
+      return {
+        kind,
+        sessionId: requiredString(object, 'sessionId'),
+        message: requiredString(object, 'message'),
+      }
+    case 'started':
+      return {
+        kind,
+        sessionId: requiredString(object, 'sessionId'),
+        turnId: requiredString(object, 'turnId'),
+      }
+    default:
+      throw new ProtocolDecodeError(`invalid command response kind ${kind}`)
+  }
+}
+
+export function decodeCommandCompletionResponse(
+  value: unknown
+): CommandCompletionResponse {
+  const object = decodeObject(value, 'command completion response')
+  return {
+    items: arrayField(object, 'items').map((item) => {
+      const itemObject = decodeObject(item, 'command completion item')
+      return {
+        label: requiredString(itemObject, 'label'),
+        insertText: requiredString(itemObject, 'insertText'),
+        detail: optionalString(itemObject, 'detail'),
+      }
+    }),
+    truncated: requiredBoolean(object, 'truncated'),
   }
 }
 
