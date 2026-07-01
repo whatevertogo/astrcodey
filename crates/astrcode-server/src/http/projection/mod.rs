@@ -5,8 +5,10 @@
 //! - `blocks`: payload/message → ConversationBlockDto。
 //! - `live`: 实时 event → ConversationDeltaDto。
 //! - `replay`: 历史 event → ConversationDeltaDto。
+//! - `snapshot`: session read model → ConversationSnapshotResponseDto。
 
 pub(in crate::http) mod args;
 pub(in crate::http) mod blocks;
 pub(in crate::http) mod live;
 pub(in crate::http) mod replay;
+pub(in crate::http) mod snapshot;
