@@ -88,7 +88,6 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     (behavior: ScrollBehavior = 'auto') => {
       const container = listRef.current
       if (!container) return
-      virtualizerRef.current.measure()
       ignoreScrollRef.current = true
       const itemCount = prevItemCountRef.current
       if (itemCount > 0) {
@@ -211,14 +210,6 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     return null
   }, [blocks])
 
-  const streamingContentLength = useMemo(() => {
-    const last = blocks[blocks.length - 1]
-    if (last?.kind === 'assistant' && last.status === 'streaming') {
-      return last.text.length + (last.reasoningContent?.length ?? 0)
-    }
-    return 0
-  }, [blocks])
-
   // New block / queued message: scroll only when the list grows and user is following.
   useEffect(() => {
     const itemCount = totalItemCount
@@ -237,32 +228,9 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     return () => cancelAnimationFrame(frame)
   }, [totalItemCount, followLatest])
 
-  // Streaming text mutates the height of the last virtual item without changing
-  // item count. Measure first, then scroll on the next frame so "bottom" uses
-  // the latest virtualized content size.
-  useEffect(() => {
-    if (!streamingBlockId || streamingContentLength === 0) return
-    if (!shouldStickRef.current) return
-
-    let measureFrame = 0
-    let scrollFrame = 0
-    measureFrame = requestAnimationFrame(() => {
-      if (!shouldStickRef.current) return
-      virtualizerRef.current.measure()
-      scrollFrame = requestAnimationFrame(() => {
-        if (!shouldStickRef.current) return
-        followLatest()
-      })
-    })
-    return () => {
-      cancelAnimationFrame(measureFrame)
-      cancelAnimationFrame(scrollFrame)
-    }
-  }, [streamingBlockId, streamingContentLength, followLatest])
-
   // Streaming: single ResizeObserver for the duration of streaming.
   // Created once when streaming starts, kept alive until streaming ends.
-  // Handles async layout changes such as markdown blocks expanding after render.
+  // Fires scroll-to-bottom on content size change (text growth) — no per-delta teardown.
   useEffect(() => {
     if (!streamingBlockId) return
     const content = contentRef.current
