@@ -19,7 +19,7 @@ use crate::{
 ///
 /// 每个提供商可以实现自己的累积策略（标准 OpenAI、Kimi 内联令牌等），
 /// HTTP/SSE 基础设施通过此 trait 做静态分发。
-pub trait ChatAccumulator: Default + Send + Sync + 'static {
+pub(crate) trait ChatAccumulator: Default + Send + Sync + 'static {
     fn ingest_chat_completion(
         &mut self,
         event: &serde_json::Value,
@@ -57,7 +57,7 @@ struct ResponseToolCallPartial {
 
 /// 标准 OpenAI 格式的流累积器。
 #[derive(Default)]
-pub struct StandardAccumulator {
+pub(crate) struct StandardAccumulator {
     text: String,
     tool_calls: BTreeMap<u64, ToolCallPartial>,
     response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
@@ -69,6 +69,7 @@ pub struct StandardAccumulator {
 }
 
 impl StandardAccumulator {
+    #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
     }

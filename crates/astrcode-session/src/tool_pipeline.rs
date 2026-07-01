@@ -1,7 +1,12 @@
 //! Tool execution pipeline — preprocessing, parallel read scheduling,
 //! result commit, and persistence.
 
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use astrcode_core::{
     event::EventPayload,
@@ -26,9 +31,9 @@ use super::{
     tool_exec::{ToolCallRuntimeContext, TurnToolContext, execute_tool_call},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
-        AnnouncedToolCalls, CommitToolResults, CommittedToolResults, ExecutableToolCall,
-        ExecuteToolCalls, PendingCommittedToolResult, PendingToolCall, PreparedToolCall,
-        PreparedToolOutcome, ToolCallPlan,
+        CommittedToolResults, DeclaredToolBatch, ExecutableToolInvocation,
+        ExecuteDeclaredToolBatch, PreparedToolBatch, PreparedToolInvocation,
+        PreparedToolInvocationOutcome, StreamedToolCall,
     },
     turn_context::{SharedTurnContext, TurnError},
     turn_publish::TurnEvents,
@@ -122,11 +127,11 @@ impl ToolCalls {
     /// 提取为独立方法以支持流式工具调用场景中 per-tool 增量准备。
     pub(crate) async fn prepare_single_tool_call(
         &self,
-        tc: &PendingToolCall,
+        tc: &StreamedToolCall,
         index: usize,
         tools: &[ToolDefinition],
         deduplicator: &mut ToolCallDeduplicator,
-    ) -> Result<PreparedToolCall, TurnError> {
+    ) -> Result<PreparedToolInvocation, TurnError> {
         let args: serde_json::Value = parse_and_repair_json(&tc.arguments, &tc.name);
 
         if !tool_is_visible(tools, &tc.name) {
@@ -140,13 +145,13 @@ impl ToolCalls {
                 metadata: Default::default(),
                 duration_ms: None,
             };
-            return Ok(PreparedToolCall {
+            return Ok(PreparedToolInvocation {
                 index,
                 call_id: tc.call_id.clone(),
                 name: tc.name.clone(),
                 tool_input: args,
                 mode: ExecutionMode::Sequential,
-                outcome: PreparedToolOutcome::Blocked(blocked_result),
+                outcome: PreparedToolInvocationOutcome::Blocked(blocked_result),
             });
         }
 
@@ -168,17 +173,17 @@ impl ToolCalls {
         let (tool_input, mut outcome) = match pre_hook_result {
             PreToolUseResult::Ask { prompt, rule_key } => (
                 args,
-                PreparedToolOutcome::NeedsApproval {
+                PreparedToolInvocationOutcome::NeedsApproval {
                     prompt,
                     rule_key,
                     source: ApprovalSource::Extension,
                 },
             ),
             PreToolUseResult::ModifyInput { tool_input } => {
-                (tool_input, PreparedToolOutcome::Ready)
+                (tool_input, PreparedToolInvocationOutcome::Ready)
             },
             PreToolUseResult::Block { reason } => {
-                let outcome = PreparedToolOutcome::Blocked(ToolResult {
+                let outcome = PreparedToolInvocationOutcome::Blocked(ToolResult {
                     call_id: tc.call_id.clone(),
                     content: format!("Tool execution blocked by hook: {reason}"),
                     is_error: true,
@@ -188,32 +193,39 @@ impl ToolCalls {
                 });
                 (args, outcome)
             },
-            PreToolUseResult::Allow => (args, PreparedToolOutcome::Ready),
+            PreToolUseResult::Allow => (args, PreparedToolInvocationOutcome::Ready),
         };
 
-        if matches!(outcome, PreparedToolOutcome::Ready) {
+        if matches!(outcome, PreparedToolInvocationOutcome::Ready) {
             outcome = self.evaluate_permission_chain(&tc.call_id, &tc.name, &tool_input);
         }
 
         let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
         outcome = match (outcome, same_step) {
-            (_, SameStepCheck::Duplicate) => PreparedToolOutcome::DuplicateSameStep,
-            (PreparedToolOutcome::Ready, SameStepCheck::Primary) => PreparedToolOutcome::Ready,
-            (blocked @ PreparedToolOutcome::Blocked(_), SameStepCheck::Primary) => blocked,
-            (needs @ PreparedToolOutcome::NeedsApproval { .. }, SameStepCheck::Primary) => needs,
-            (PreparedToolOutcome::DuplicateSameStep, SameStepCheck::Primary) => {
-                PreparedToolOutcome::DuplicateSameStep
+            (_, SameStepCheck::Duplicate) => PreparedToolInvocationOutcome::DuplicateSameStep,
+            (PreparedToolInvocationOutcome::Ready, SameStepCheck::Primary) => {
+                PreparedToolInvocationOutcome::Ready
+            },
+            (blocked @ PreparedToolInvocationOutcome::Blocked(_), SameStepCheck::Primary) => {
+                blocked
+            },
+            (
+                needs @ PreparedToolInvocationOutcome::NeedsApproval { .. },
+                SameStepCheck::Primary,
+            ) => needs,
+            (PreparedToolInvocationOutcome::DuplicateSameStep, SameStepCheck::Primary) => {
+                PreparedToolInvocationOutcome::DuplicateSameStep
             },
         };
 
         let mode = match &outcome {
-            PreparedToolOutcome::Ready => self.tool_registry.execution_mode(&tc.name),
-            PreparedToolOutcome::Blocked(_)
-            | PreparedToolOutcome::DuplicateSameStep
-            | PreparedToolOutcome::NeedsApproval { .. } => ExecutionMode::Sequential,
+            PreparedToolInvocationOutcome::Ready => self.tool_registry.execution_mode(&tc.name),
+            PreparedToolInvocationOutcome::Blocked(_)
+            | PreparedToolInvocationOutcome::DuplicateSameStep
+            | PreparedToolInvocationOutcome::NeedsApproval { .. } => ExecutionMode::Sequential,
         };
 
-        Ok(PreparedToolCall {
+        Ok(PreparedToolInvocation {
             index,
             call_id: tc.call_id.clone(),
             name: tc.name.clone(),
@@ -223,13 +235,13 @@ impl ToolCalls {
         })
     }
 
-    pub(crate) async fn prepare_tool_call_plan(
+    pub(crate) async fn prepare_tool_batch(
         &self,
-        tool_calls: &[PendingToolCall],
+        tool_calls: &[StreamedToolCall],
         early_results: Vec<EarlyExecutionEntry>,
         visible_tools: &[ToolDefinition],
         state: &mut TurnState,
-    ) -> Result<ToolCallPlan, TurnError> {
+    ) -> Result<PreparedToolBatch, TurnError> {
         let mut pre_executed: HashMap<usize, ToolResult> = HashMap::new();
         let mut early_entries: HashMap<usize, _> = early_results
             .into_iter()
@@ -257,7 +269,10 @@ impl ToolCalls {
             prepared.push(prepared_call);
         }
 
-        Ok(ToolCallPlan::new(prepared, pre_executed))
+        Ok(PreparedToolBatch {
+            prepared,
+            pre_executed,
+        })
     }
 
     /// Persist provider tool requests after the assistant message has been durably recorded.
@@ -265,15 +280,12 @@ impl ToolCalls {
     /// Streaming early execution may prepare and even execute tools before the provider stream is
     /// fully drained, but the durable transcript must preserve the provider protocol order:
     /// assistant(tool_calls) -> tool results.
-    pub(crate) async fn announce_tool_calls(
+    pub(crate) async fn declare_tool_batch(
         &self,
-        plan: ToolCallPlan,
+        batch: PreparedToolBatch,
         publisher: &TurnEvents,
-    ) -> Result<AnnouncedToolCalls, TurnError> {
-        for call in plan.prepared() {
-            send_tool_requested(publisher, call).await?;
-        }
-        Ok(plan.into_announced())
+    ) -> Result<DeclaredToolBatch, TurnError> {
+        declare_tool_batch(publisher, batch).await
     }
 
     fn evaluate_permission_chain(
@@ -281,7 +293,7 @@ impl ToolCalls {
         call_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> PreparedToolOutcome {
+    ) -> PreparedToolInvocationOutcome {
         let accesses = self
             .tool_registry
             .resource_accesses(
@@ -308,22 +320,24 @@ impl ToolCalls {
             child_tool_policy: self.turn.shared.child_tool_policy.as_ref(),
         };
         match self.turn.shared.permission_chain.decide(&ctx) {
-            PermissionDecision::Allow => PreparedToolOutcome::Ready,
-            PermissionDecision::Deny { reason } => PreparedToolOutcome::Blocked(ToolResult {
-                call_id: call_id.to_string(),
-                content: reason.clone(),
-                is_error: true,
-                error: Some(reason),
-                metadata: Default::default(),
-                duration_ms: None,
-            }),
+            PermissionDecision::Allow => PreparedToolInvocationOutcome::Ready,
+            PermissionDecision::Deny { reason } => {
+                PreparedToolInvocationOutcome::Blocked(ToolResult {
+                    call_id: call_id.to_string(),
+                    content: reason.clone(),
+                    is_error: true,
+                    error: Some(reason),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                })
+            },
             PermissionDecision::Ask { prompt, rule_key } => {
                 if let Some(key) = rule_key.as_deref() {
                     if self.turn.shared.approval_history.is_allowed_always(key) {
-                        return PreparedToolOutcome::Ready;
+                        return PreparedToolInvocationOutcome::Ready;
                     }
                     if self.turn.shared.approval_history.is_denied_always(key) {
-                        return PreparedToolOutcome::Blocked(ToolResult {
+                        return PreparedToolInvocationOutcome::Blocked(ToolResult {
                             call_id: call_id.to_string(),
                             content: format!("Denied by session approval memory ({key})"),
                             is_error: true,
@@ -333,13 +347,13 @@ impl ToolCalls {
                         });
                     }
                 }
-                PreparedToolOutcome::NeedsApproval {
+                PreparedToolInvocationOutcome::NeedsApproval {
                     prompt,
                     rule_key,
                     source: ApprovalSource::Core,
                 }
             },
-            PermissionDecision::Pass => PreparedToolOutcome::Blocked(ToolResult {
+            PermissionDecision::Pass => PreparedToolInvocationOutcome::Blocked(ToolResult {
                 call_id: call_id.to_string(),
                 content: "permission chain returned Pass without resolution".into(),
                 is_error: true,
@@ -356,40 +370,68 @@ impl ToolCalls {
     /// 只读批次，再按原始顺序串行处理。
     pub async fn execute_and_commit(
         &self,
-        mut input: ExecuteToolCalls<'_>,
+        mut input: ExecuteDeclaredToolBatch<'_>,
+    ) -> Result<CommittedToolResults, TurnError> {
+        let mut pending_declared = input
+            .declared
+            .prepared
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect::<HashSet<_>>();
+        let result = self
+            .execute_declared_batch(&mut input, &mut pending_declared)
+            .await;
+        if let Err(error) = &result {
+            self.complete_pending_declared_as_failed(&mut input, &mut pending_declared, error)
+                .await;
+        }
+        result
+    }
+
+    async fn execute_declared_batch(
+        &self,
+        input: &mut ExecuteDeclaredToolBatch<'_>,
+        pending_declared: &mut HashSet<String>,
     ) -> Result<CommittedToolResults, TurnError> {
         let mut committed = CommittedToolResults::default();
         let tools = Arc::from(input.tools);
         let mut parallel_batch = Vec::new();
         let mut parallel_batch_start = None;
 
-        for position in 0..input.announced.prepared.len() {
+        for position in 0..input.declared.prepared.len() {
             if self.cancellation_token.is_cancelled() {
                 return Err(TurnError::Aborted);
             }
-            let call = input.announced.prepared[position].clone();
+            let call = input.declared.prepared[position].clone();
             match &call.outcome {
-                PreparedToolOutcome::Blocked(result) => {
+                PreparedToolInvocationOutcome::Blocked(result) => {
                     committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
-                            &mut input,
+                            input,
+                            pending_declared,
                             Arc::clone(&tools),
                         )
                         .await?,
                     );
                     committed.extend(
-                        self.commit_single_result(&mut input, position, result.clone())
-                            .await?,
+                        self.commit_single_result(
+                            input,
+                            pending_declared,
+                            position,
+                            result.clone(),
+                        )
+                        .await?,
                     );
                 },
-                PreparedToolOutcome::DuplicateSameStep => {
+                PreparedToolInvocationOutcome::DuplicateSameStep => {
                     committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
-                            &mut input,
+                            input,
+                            pending_declared,
                             Arc::clone(&tools),
                         )
                         .await?,
@@ -397,14 +439,14 @@ impl ToolCalls {
                     let result = input
                         .state
                         .tool_deduplicator()
-                        .await_same_step_result(&input.announced.prepared[position].call_id)
+                        .await_same_step_result(&input.declared.prepared[position].call_id)
                         .await;
                     committed.extend(
-                        self.commit_single_result(&mut input, position, result)
+                        self.commit_single_result(input, pending_declared, position, result)
                             .await?,
                     );
                 },
-                PreparedToolOutcome::NeedsApproval {
+                PreparedToolInvocationOutcome::NeedsApproval {
                     prompt,
                     rule_key,
                     source,
@@ -413,14 +455,15 @@ impl ToolCalls {
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
-                            &mut input,
+                            input,
+                            pending_declared,
                             Arc::clone(&tools),
                         )
                         .await?,
                     );
                     let result = self
                         .request_approval_and_resolve(
-                            &input,
+                            input,
                             position,
                             prompt.clone(),
                             rule_key.clone(),
@@ -429,23 +472,24 @@ impl ToolCalls {
                         )
                         .await?;
                     committed.extend(
-                        self.commit_single_result(&mut input, position, result)
+                        self.commit_single_result(input, pending_declared, position, result)
                             .await?,
                     );
                 },
-                PreparedToolOutcome::Ready if call.mode == ExecutionMode::Parallel => {
-                    if let Some(result) = input.announced.pre_executed.remove(&call.index) {
+                PreparedToolInvocationOutcome::Ready if call.mode == ExecutionMode::Parallel => {
+                    if let Some(result) = input.declared.pre_executed.remove(&call.index) {
                         committed.extend(
                             self.flush_and_commit_parallel_batch(
                                 &mut parallel_batch,
                                 &mut parallel_batch_start,
-                                &mut input,
+                                input,
+                                pending_declared,
                                 Arc::clone(&tools),
                             )
                             .await?,
                         );
                         committed.extend(
-                            self.commit_single_result(&mut input, position, result)
+                            self.commit_single_result(input, pending_declared, position, result)
                                 .await?,
                         );
                     } else {
@@ -455,24 +499,25 @@ impl ToolCalls {
                         parallel_batch.push(call.to_executable());
                     }
                 },
-                PreparedToolOutcome::Ready => {
+                PreparedToolInvocationOutcome::Ready => {
                     committed.extend(
                         self.flush_and_commit_parallel_batch(
                             &mut parallel_batch,
                             &mut parallel_batch_start,
-                            &mut input,
+                            input,
+                            pending_declared,
                             Arc::clone(&tools),
                         )
                         .await?,
                     );
-                    let result = if let Some(r) = input.announced.pre_executed.remove(&call.index) {
+                    let result = if let Some(r) = input.declared.pre_executed.remove(&call.index) {
                         r
                     } else {
                         self.execute_single_tool(call.to_executable(), Arc::clone(&tools))
                             .await?
                     };
                     committed.extend(
-                        self.commit_single_result(&mut input, position, result)
+                        self.commit_single_result(input, pending_declared, position, result)
                             .await?,
                     );
                 },
@@ -483,7 +528,8 @@ impl ToolCalls {
             self.flush_and_commit_parallel_batch(
                 &mut parallel_batch,
                 &mut parallel_batch_start,
-                &mut input,
+                input,
+                pending_declared,
                 tools,
             )
             .await?,
@@ -492,16 +538,62 @@ impl ToolCalls {
         Ok(committed)
     }
 
+    async fn complete_pending_declared_as_failed(
+        &self,
+        input: &mut ExecuteDeclaredToolBatch<'_>,
+        pending_declared: &mut HashSet<String>,
+        error: &TurnError,
+    ) {
+        if pending_declared.is_empty() {
+            return;
+        }
+        let message = match error {
+            TurnError::Aborted => "Tool execution cancelled before completion".to_string(),
+            other => format!("Tool execution failed before completion: {other}"),
+        };
+        for call in &input.declared.prepared {
+            if !pending_declared.remove(&call.call_id) {
+                continue;
+            }
+            let result = ToolResult {
+                call_id: call.call_id.clone(),
+                content: message.clone(),
+                is_error: true,
+                error: Some(message.clone()),
+                metadata: Default::default(),
+                duration_ms: None,
+            };
+            if let Err(commit_error) = complete_tool_call(
+                &input.publisher,
+                &call.call_id,
+                call.name.clone(),
+                result.clone(),
+                call.tool_input.to_string(),
+                Some(call.tool_input.clone()),
+            )
+            .await
+            {
+                tracing::warn!(
+                    call_id = %call.call_id,
+                    error = %commit_error,
+                    "failed to complete pending declared tool call after turn error"
+                );
+                continue;
+            }
+            input.state.record_tool_result(result);
+        }
+    }
+
     async fn request_approval_and_resolve(
         &self,
-        input: &ExecuteToolCalls<'_>,
+        input: &ExecuteDeclaredToolBatch<'_>,
         position: usize,
         prompt: String,
         rule_key: Option<String>,
         source: ApprovalSource,
         tools: Arc<[ToolDefinition]>,
     ) -> Result<ToolResult, TurnError> {
-        let call = &input.announced.prepared[position];
+        let call = &input.declared.prepared[position];
         let (tx, rx) = oneshot::channel();
         let runtime = self.session.runtime();
         let _pending_approval =
@@ -573,9 +665,10 @@ impl ToolCalls {
 
     async fn flush_and_commit_parallel_batch(
         &self,
-        parallel_batch: &mut Vec<ExecutableToolCall>,
+        parallel_batch: &mut Vec<ExecutableToolInvocation>,
         parallel_batch_start: &mut Option<usize>,
-        input: &mut ExecuteToolCalls<'_>,
+        input: &mut ExecuteDeclaredToolBatch<'_>,
+        pending_declared: &mut HashSet<String>,
         tools: Arc<[ToolDefinition]>,
     ) -> Result<CommittedToolResults, TurnError> {
         let Some(batch_start) = parallel_batch_start.take() else {
@@ -588,18 +681,19 @@ impl ToolCalls {
         self.flush_parallel_batch(parallel_batch, tools, &mut results)
             .await?;
 
-        self.commit_tool_results(CommitToolResults {
-            prepared: &input.announced.prepared[batch_start..batch_end],
+        self.commit_tool_results(
+            &input.declared.prepared[batch_start..batch_end],
             results,
-            state: input.state,
-            publisher: Arc::clone(&input.publisher),
-        })
+            pending_declared,
+            input.state,
+            Arc::clone(&input.publisher),
+        )
         .await
     }
 
     async fn flush_parallel_batch(
         &self,
-        batch: &mut Vec<ExecutableToolCall>,
+        batch: &mut Vec<ExecutableToolInvocation>,
         tools: Arc<[ToolDefinition]>,
         results: &mut HashMap<usize, ToolResult>,
     ) -> Result<(), TurnError> {
@@ -645,7 +739,7 @@ impl ToolCalls {
     fn spawn_tool_call(
         &self,
         join_set: &mut JoinSet<(usize, ToolResult)>,
-        call: ExecutableToolCall,
+        call: ExecutableToolInvocation,
         tools: Arc<[ToolDefinition]>,
     ) {
         let tool_registry = Arc::clone(&self.tool_registry);
@@ -655,7 +749,7 @@ impl ToolCalls {
 
     async fn execute_single_tool(
         &self,
-        call: ExecutableToolCall,
+        call: ExecutableToolInvocation,
         tools: Arc<[ToolDefinition]>,
     ) -> Result<ToolResult, TurnError> {
         let (_index, result) = execute_tool_call(
@@ -669,14 +763,15 @@ impl ToolCalls {
 
     async fn commit_single_result(
         &self,
-        input: &mut ExecuteToolCalls<'_>,
+        input: &mut ExecuteDeclaredToolBatch<'_>,
+        pending_declared: &mut HashSet<String>,
         position: usize,
         mut result: ToolResult,
     ) -> Result<CommittedToolResults, TurnError> {
         if is_awaiting_user_input_content(&result.content) {
             result = self
                 .await_tool_ui_response(
-                    &input.announced.prepared[position],
+                    &input.declared.prepared[position],
                     result,
                     Arc::clone(&input.publisher),
                 )
@@ -684,19 +779,20 @@ impl ToolCalls {
         }
 
         let mut results = HashMap::new();
-        results.insert(input.announced.prepared[position].index, result);
-        self.commit_tool_results(CommitToolResults {
-            prepared: &input.announced.prepared[position..position + 1],
+        results.insert(input.declared.prepared[position].index, result);
+        self.commit_tool_results(
+            &input.declared.prepared[position..position + 1],
             results,
-            state: input.state,
-            publisher: Arc::clone(&input.publisher),
-        })
+            pending_declared,
+            input.state,
+            Arc::clone(&input.publisher),
+        )
         .await
     }
 
     async fn await_tool_ui_response(
         &self,
-        call: &super::tool_types::PreparedToolCall,
+        call: &super::tool_types::PreparedToolInvocation,
         mut result: ToolResult,
         publisher: Arc<TurnEvents>,
     ) -> Result<ToolResult, TurnError> {
@@ -759,16 +855,19 @@ impl ToolCalls {
     /// 3. 将工具结果写入 turn 输出聚合（projection 为 LLM 历史 SSOT）。
     pub async fn commit_tool_results(
         &self,
-        mut input: CommitToolResults<'_>,
+        prepared: &[PreparedToolInvocation],
+        mut results: HashMap<usize, ToolResult>,
+        pending_declared: &mut HashSet<String>,
+        state: &mut TurnState,
+        publisher: Arc<TurnEvents>,
     ) -> Result<CommittedToolResults, TurnError> {
-        let mut pending_results = Vec::with_capacity(input.prepared.len());
-        for call in input.prepared {
-            let mut result = input
-                .results
+        let mut pending_results = Vec::with_capacity(prepared.len());
+        for call in prepared {
+            let mut result = results
                 .remove(&call.index)
                 .unwrap_or_else(|| missing_tool_result(call));
 
-            if matches!(&call.outcome, PreparedToolOutcome::Ready) {
+            if matches!(&call.outcome, PreparedToolInvocationOutcome::Ready) {
                 if result.is_error && result.error.is_none() {
                     result.error = Some(result.content.clone());
                 }
@@ -820,32 +919,30 @@ impl ToolCalls {
                 }
             }
 
-            if !matches!(&call.outcome, PreparedToolOutcome::DuplicateSameStep) {
-                input
-                    .state
+            if !matches!(
+                &call.outcome,
+                PreparedToolInvocationOutcome::DuplicateSameStep
+            ) {
+                state
                     .tool_deduplicator_mut()
                     .finalize_result(&call.call_id, &result);
             }
 
-            pending_results.push(PendingCommittedToolResult {
-                call_id: call.call_id.clone(),
+            pending_results.push(AfterToolResult {
+                call_id: call.call_id.clone().into(),
                 tool_name: call.name.clone(),
-                result,
-                arguments: call.tool_input.to_string(),
-                arguments_json: call.tool_input.clone(),
+                tool_input: call.tool_input.clone(),
+                tool_result: result,
             });
         }
 
         for pending in &mut pending_results {
             // 对于超过 inline 限制的工具结果，先持久化到磁盘并替换为摘要引用，再继续后续处理。
-            self.persist_large_tool_result(
-                &pending.tool_name,
-                &pending.call_id,
-                &mut pending.result,
-            )
-            .await?;
+            let call_id = pending.call_id.to_string();
+            self.persist_large_tool_result(&pending.tool_name, &call_id, &mut pending.tool_result)
+                .await?;
         }
-        let model = input.publisher.snapshot_model().await?;
+        let model = publisher.snapshot_model().await?;
         let committed_tool_result_chars = committed_tool_result_content_len(&model);
         // 当累计工具结果超过消息字符预算时，按体积从大到小持久化，直到总量回到预算内。
         self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending_results)
@@ -853,33 +950,33 @@ impl ToolCalls {
 
         let mut committed = CommittedToolResults::default();
         for pending in pending_results {
-            let PendingCommittedToolResult {
+            let AfterToolResult {
                 call_id,
                 tool_name,
-                result,
-                arguments,
-                arguments_json,
+                tool_input,
+                tool_result,
             } = pending;
             committed
                 .discovered_tools
-                .extend(discovered_deferred_tool_names(&result));
+                .extend(discovered_deferred_tool_names(&tool_result));
             committed.tool_results.push(AfterToolResult {
-                call_id: call_id.clone().into(),
+                call_id: call_id.clone(),
                 tool_name: tool_name.clone(),
-                tool_input: arguments_json.clone(),
-                tool_result: result.clone(),
+                tool_input: tool_input.clone(),
+                tool_result: tool_result.clone(),
             });
-            input
-                .publisher
-                .durable(EventPayload::ToolCallCompleted {
-                    call_id: call_id.into(),
-                    tool_name,
-                    result: result.clone(),
-                    arguments,
-                    arguments_json: Some(arguments_json),
-                })
-                .await?;
-            input.state.push_tool_result(result);
+            let arguments = tool_input.to_string();
+            complete_tool_call(
+                &publisher,
+                call_id.as_str(),
+                tool_name.clone(),
+                tool_result.clone(),
+                arguments,
+                Some(tool_input),
+            )
+            .await?;
+            pending_declared.remove(call_id.as_str());
+            state.record_tool_result(tool_result);
         }
 
         Ok(committed)
@@ -956,12 +1053,12 @@ impl ToolCalls {
     async fn enforce_tool_result_message_budget(
         &self,
         committed_tool_result_chars: usize,
-        pending_results: &mut [PendingCommittedToolResult],
+        pending_results: &mut [AfterToolResult],
     ) -> Result<(), TurnError> {
         let mut total: usize = committed_tool_result_chars
             + pending_results
                 .iter()
-                .map(|pending| pending.result.content.len())
+                .map(|pending| pending.tool_result.content.len())
                 .sum::<usize>();
         if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
             return Ok(());
@@ -973,12 +1070,15 @@ impl ToolCalls {
             .filter_map(|(index, pending)| {
                 let can_persist =
                     tool_result_inline_limit(&pending.tool_name).is_some_and(|limit| {
-                        should_persist_tool_result(&pending.result.content, limit)
-                    }) && !pending.result.metadata.contains_key("persistedToolResult")
-                        && !is_artifact_read(&pending.result)
-                        && !is_persisted_tool_result_summary(&pending.result.content)
+                        should_persist_tool_result(&pending.tool_result.content, limit)
+                    }) && !pending
+                        .tool_result
+                        .metadata
+                        .contains_key("persistedToolResult")
+                        && !is_artifact_read(&pending.tool_result)
+                        && !is_persisted_tool_result_summary(&pending.tool_result.content)
                         && !pending
-                            .result
+                            .tool_result
                             .metadata
                             .get("path")
                             .and_then(|value| value.as_str())
@@ -988,10 +1088,10 @@ impl ToolCalls {
             .collect();
         candidates.sort_by(|left, right| {
             pending_results[*right]
-                .result
+                .tool_result
                 .content
                 .len()
-                .cmp(&pending_results[*left].result.content.len())
+                .cmp(&pending_results[*left].tool_result.content.len())
         });
 
         for index in candidates {
@@ -999,10 +1099,14 @@ impl ToolCalls {
                 break;
             }
             let pending = &mut pending_results[index];
-            let before = pending.result.content.len();
-            self.persist_tool_result(&pending.tool_name, &pending.call_id, &mut pending.result)
-                .await?;
-            let after = pending.result.content.len();
+            let before = pending.tool_result.content.len();
+            self.persist_tool_result(
+                &pending.tool_name,
+                pending.call_id.as_str(),
+                &mut pending.tool_result,
+            )
+            .await?;
+            let after = pending.tool_result.content.len();
             total = total.saturating_sub(before).saturating_add(after);
         }
 
@@ -1016,9 +1120,22 @@ fn is_artifact_read(result: &ToolResult) -> bool {
 
 // ─── Tool event & message helpers ────────────────────────────────────────
 
-async fn send_tool_requested(
+async fn declare_tool_batch(
     publisher: &TurnEvents,
-    call: &PreparedToolCall,
+    batch: PreparedToolBatch,
+) -> Result<DeclaredToolBatch, TurnError> {
+    for call in &batch.prepared {
+        declare_tool_call(publisher, call).await?;
+    }
+    Ok(DeclaredToolBatch {
+        prepared: batch.prepared,
+        pre_executed: batch.pre_executed,
+    })
+}
+
+async fn declare_tool_call(
+    publisher: &TurnEvents,
+    call: &PreparedToolInvocation,
 ) -> Result<(), TurnError> {
     publisher
         .durable(EventPayload::ToolCallRequested {
@@ -1029,7 +1146,26 @@ async fn send_tool_requested(
         .await
 }
 
-fn missing_tool_result(call: &PreparedToolCall) -> ToolResult {
+async fn complete_tool_call(
+    publisher: &TurnEvents,
+    call_id: &str,
+    tool_name: String,
+    result: ToolResult,
+    arguments: String,
+    arguments_json: Option<serde_json::Value>,
+) -> Result<(), TurnError> {
+    publisher
+        .durable(EventPayload::ToolCallCompleted {
+            call_id: call_id.into(),
+            tool_name,
+            result,
+            arguments,
+            arguments_json,
+        })
+        .await
+}
+
+fn missing_tool_result(call: &PreparedToolInvocation) -> ToolResult {
     let message = format!("Tool '{}' did not produce a result", call.name);
     ToolResult {
         call_id: call.call_id.clone(),

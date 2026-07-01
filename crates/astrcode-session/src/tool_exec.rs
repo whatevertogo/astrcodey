@@ -13,7 +13,9 @@ use astrcode_kernel::ToolRegistry;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use super::{deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolCall};
+use super::{
+    deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolInvocation,
+};
 
 // ─── Runtime context types ──────────────────────────────────────────────
 
@@ -206,7 +208,7 @@ pub fn interrupted_tool_result(
 pub async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
-    call: ExecutableToolCall,
+    call: ExecutableToolInvocation,
 ) -> (usize, ToolResult) {
     if runtime.cancellation_token.is_cancelled() {
         return (
@@ -255,7 +257,7 @@ fn tool_capabilities_from_runtime(
 async fn execute_tool_call_blocking(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
-    call: ExecutableToolCall,
+    call: ExecutableToolInvocation,
 ) -> (usize, ToolResult) {
     let started_at = Instant::now();
     let tool_name = call.name;

@@ -13,93 +13,55 @@ use astrcode_core::{
 use super::turn_publish::TurnEvents;
 use crate::turn_stages::TurnState;
 
-/// 等待执行的工具调用，在 LLM 流式响应中逐步积累参数。
-pub struct PendingToolCall {
-    /// 工具调用的唯一标识
-    pub call_id: String,
-    /// 工具名称
-    pub name: String,
-    /// 工具调用的 JSON 参数（可能跨多个 delta 事件拼接）
-    pub arguments: String,
+/// Provider stream 中解析出的工具调用草稿，参数可能仍是逐段拼接的原始 JSON 字符串。
+pub(crate) struct StreamedToolCall {
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) arguments: String,
 }
 
 #[derive(Clone)]
-pub struct PreparedToolCall {
-    pub index: usize,
-    pub call_id: String,
-    pub name: String,
-    pub tool_input: serde_json::Value,
-    pub mode: ExecutionMode,
-    pub outcome: PreparedToolOutcome,
+pub(crate) struct PreparedToolInvocation {
+    pub(crate) index: usize,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) tool_input: serde_json::Value,
+    pub(crate) mode: ExecutionMode,
+    pub(crate) outcome: PreparedToolInvocationOutcome,
 }
 
-pub struct ToolCallPlan {
-    prepared: Vec<PreparedToolCall>,
-    pre_executed: HashMap<usize, ToolResult>,
+pub(crate) struct PreparedToolBatch {
+    pub(crate) prepared: Vec<PreparedToolInvocation>,
+    pub(crate) pre_executed: HashMap<usize, ToolResult>,
 }
 
-impl ToolCallPlan {
-    pub fn new(prepared: Vec<PreparedToolCall>, pre_executed: HashMap<usize, ToolResult>) -> Self {
-        Self {
-            prepared,
-            pre_executed,
-        }
-    }
-
-    pub fn prepared(&self) -> &[PreparedToolCall] {
-        &self.prepared
-    }
-
-    pub fn into_announced(self) -> AnnouncedToolCalls {
-        AnnouncedToolCalls {
-            prepared: self.prepared,
-            pre_executed: self.pre_executed,
-        }
-    }
+pub(crate) struct DeclaredToolBatch {
+    pub(crate) prepared: Vec<PreparedToolInvocation>,
+    pub(crate) pre_executed: HashMap<usize, ToolResult>,
 }
 
-pub struct AnnouncedToolCalls {
-    pub prepared: Vec<PreparedToolCall>,
-    pub pre_executed: HashMap<usize, ToolResult>,
-}
-
-pub struct ExecuteToolCalls<'a> {
-    pub announced: AnnouncedToolCalls,
-    pub tools: &'a [ToolDefinition],
-    pub state: &'a mut TurnState,
-    pub publisher: std::sync::Arc<TurnEvents>,
-}
-
-pub struct CommitToolResults<'a> {
-    pub prepared: &'a [PreparedToolCall],
-    pub results: HashMap<usize, ToolResult>,
-    pub state: &'a mut TurnState,
-    pub publisher: std::sync::Arc<TurnEvents>,
-}
-
-pub struct PendingCommittedToolResult {
-    pub call_id: String,
-    pub tool_name: String,
-    pub result: ToolResult,
-    pub arguments: String,
-    pub arguments_json: serde_json::Value,
+pub(crate) struct ExecuteDeclaredToolBatch<'a> {
+    pub(crate) declared: DeclaredToolBatch,
+    pub(crate) tools: &'a [ToolDefinition],
+    pub(crate) state: &'a mut TurnState,
+    pub(crate) publisher: std::sync::Arc<TurnEvents>,
 }
 
 #[derive(Default)]
-pub struct CommittedToolResults {
-    pub discovered_tools: Vec<String>,
-    pub tool_results: Vec<AfterToolResult>,
+pub(crate) struct CommittedToolResults {
+    pub(crate) discovered_tools: Vec<String>,
+    pub(crate) tool_results: Vec<AfterToolResult>,
 }
 
 impl CommittedToolResults {
-    pub fn extend(&mut self, other: Self) {
+    pub(crate) fn extend(&mut self, other: Self) {
         self.discovered_tools.extend(other.discovered_tools);
         self.tool_results.extend(other.tool_results);
     }
 }
 
 #[derive(Clone)]
-pub enum PreparedToolOutcome {
+pub(crate) enum PreparedToolInvocationOutcome {
     Ready,
     Blocked(ToolResult),
     /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
@@ -113,17 +75,17 @@ pub enum PreparedToolOutcome {
 }
 
 #[derive(Clone)]
-pub struct ExecutableToolCall {
-    pub index: usize,
-    pub call_id: String,
-    pub name: String,
-    pub tool_input: serde_json::Value,
+pub(crate) struct ExecutableToolInvocation {
+    pub(crate) index: usize,
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    pub(crate) tool_input: serde_json::Value,
 }
 
-impl PreparedToolCall {
+impl PreparedToolInvocation {
     /// 将预处理后的工具调用转换为可执行任务输入。
-    pub fn to_executable(&self) -> ExecutableToolCall {
-        ExecutableToolCall {
+    pub(crate) fn to_executable(&self) -> ExecutableToolInvocation {
+        ExecutableToolInvocation {
             index: self.index,
             call_id: self.call_id.clone(),
             name: self.name.clone(),

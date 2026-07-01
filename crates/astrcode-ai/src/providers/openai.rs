@@ -1,34 +1,34 @@
 //! OpenAI 兼容的 Chat Completions / Responses 提供商。
 //!
-//! 泛型参数 `A` 为内容累积器，允许子提供商（如 Kimi）替换流解析逻辑，
-//! 同时复用 HTTP 请求构造、SSE 传输、重试等基础设施。
+//! 厂商 wire DTO 和流累积器都封装在 `wire::openai` 内部，本模块只暴露标准 provider。
 
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 #[cfg(test)]
+use crate::wire::openai::parser::ChatAccumulator;
+#[cfg(test)]
 use crate::wire::openai::parser::process_sse_line;
-pub use crate::wire::openai::parser::{ChatAccumulator, StandardAccumulator};
 use crate::{
     common::{
         HttpPostRequest, apply_auth_header, build_client, report_stream_error,
         retry_policy_from_config,
     },
-    wire::openai as openai_wire,
+    wire::{openai as openai_wire, openai::parser::StandardAccumulator},
 };
 
-// ─── OpenAiProvider ─────────────────────────────────────────────────────
+// ─── StandardProvider ───────────────────────────────────────────────────
 
-pub struct OpenAiProvider<A: ChatAccumulator = StandardAccumulator> {
+/// 标准 OpenAI 兼容 provider。厂商 stream accumulator 固定在 wire 层内部。
+pub struct StandardProvider {
     config: LlmClientConfig,
     api_mode: OpenAiApiMode,
     model_id: String,
     model_limits_val: ModelLimits,
     client: reqwest::Client,
-    _phantom: std::marker::PhantomData<A>,
 }
 
-impl<A: ChatAccumulator> OpenAiProvider<A> {
+impl StandardProvider {
     pub fn new(
         config: LlmClientConfig,
         api_mode: OpenAiApiMode,
@@ -41,7 +41,6 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
             config,
             api_mode,
             model_id,
-            _phantom: std::marker::PhantomData,
             model_limits_val: ModelLimits {
                 max_input_tokens: context_limit.unwrap_or(65536),
                 max_output_tokens: max_tokens.unwrap_or(8192) as usize,
@@ -90,7 +89,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
 // ─── LlmProvider impl ──────────────────────────────────────────────────
 
 #[async_trait::async_trait]
-impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
+impl LlmProvider for StandardProvider {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
@@ -108,7 +107,7 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
-            let result = openai_wire::transport::stream_request::<A>(
+            let result = openai_wire::transport::stream_request::<StandardAccumulator>(
                 client,
                 endpoint,
                 api_key,
@@ -166,11 +165,6 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
         self.model_limits_val.clone()
     }
 }
-
-// ─── 便捷类型别名 ──────────────────────────────────────────────────────
-
-/// 标准 OpenAI 提供商。
-pub type StandardProvider = OpenAiProvider<StandardAccumulator>;
 
 #[cfg(test)]
 mod tests {

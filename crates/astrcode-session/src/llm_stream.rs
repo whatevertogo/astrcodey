@@ -15,7 +15,7 @@ use crate::{
     early_tool_scheduler::{EarlyExecutionEntry, EarlyToolScheduler},
     tool_deduplicator::ToolCallDeduplicator,
     tool_pipeline::ToolCalls,
-    tool_types::PendingToolCall,
+    tool_types::StreamedToolCall,
     turn_context::TurnError,
     turn_publish::TurnEvents,
 };
@@ -52,7 +52,7 @@ pub enum StreamOutcome {
     ToolCalls {
         text: Option<String>,
         reasoning_content: String,
-        tool_calls: Vec<PendingToolCall>,
+        tool_calls: Vec<StreamedToolCall>,
         /// 流式执行阶段的结果（已准备 + 已执行的工具）。
         /// 为空表示未启用流式执行，tools_stage 需走完整 prepare + execute 路径。
         early_results: Vec<EarlyExecutionEntry>,
@@ -89,7 +89,7 @@ pub async fn consume_llm_stream(
 ) -> Result<StreamOutcome, TurnError> {
     let mut current_text = String::new();
     let mut reasoning_content = String::new();
-    let mut tool_calls: Vec<PendingToolCall> = Vec::new();
+    let mut tool_calls: Vec<StreamedToolCall> = Vec::new();
     let mut message_started = false;
     let mut pending: Option<LlmEvent> = None;
     let mut captured_usage: Option<LlmTokenUsage> = None;
@@ -212,7 +212,7 @@ pub async fn consume_llm_stream(
                             })
                             .await;
                     }
-                    tool_calls.push(PendingToolCall {
+                    tool_calls.push(StreamedToolCall {
                         call_id,
                         name,
                         arguments,

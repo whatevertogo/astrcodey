@@ -2,7 +2,7 @@
 //!
 //! 支持 OpenAI 兼容、Anthropic、Google Gemini 的 API 客户端。
 //! 提供 SSE 流式响应、指数退避重试、多字节安全 UTF-8 解码，
-//! 以及可替换的内容累积器 trait（[`ChatAccumulator`]）。
+//! 以及将厂商 wire stream 规范化为 [`astrcode_core::llm::LlmEvent`] 的 provider。
 
 mod common;
 mod provider_catalog;
@@ -21,9 +21,7 @@ use astrcode_core::{
     llm::{LlmClientConfig, LlmError, LlmProvider},
 };
 pub use providers::{
-    anthropic::AnthropicProvider,
-    google_genai::GeminiProvider,
-    openai::{ChatAccumulator, StandardAccumulator, StandardProvider},
+    anthropic::AnthropicProvider, google_genai::GeminiProvider, openai::StandardProvider,
 };
 pub use retry::RetryPolicy;
 

@@ -17,13 +17,13 @@ use tokio::task::JoinSet;
 
 use crate::{
     tool_exec::{ToolCallRuntimeContext, execute_tool_call},
-    tool_types::PreparedToolCall,
+    tool_types::PreparedToolInvocation,
     turn_context::TurnError,
 };
 
 /// 一个已准备好的工具调用的执行槽位。
 struct EarlyExecutionSlot {
-    prepared: PreparedToolCall,
+    prepared: PreparedToolInvocation,
     /// 执行结果。`None` 表示尚未执行或执行未完成。
     result: Option<ToolResult>,
 }
@@ -65,11 +65,11 @@ impl EarlyToolScheduler {
     /// 调用后自动尝试启动队列中的就绪任务。
     ///
     /// 只有 `Ready` 的工具会被实际执行；其它结果延迟到 tools_stage 按原顺序处理。
-    pub(crate) fn schedule(&mut self, prepared: PreparedToolCall) -> usize {
+    pub(crate) fn schedule(&mut self, prepared: PreparedToolInvocation) -> usize {
         let index = self.slots.len();
         let should_execute = matches!(
             prepared.outcome,
-            crate::tool_types::PreparedToolOutcome::Ready
+            crate::tool_types::PreparedToolInvocationOutcome::Ready
         );
         let result = None;
         self.slots.push(EarlyExecutionSlot { prepared, result });
@@ -187,7 +187,7 @@ impl EarlyToolScheduler {
 #[allow(dead_code)]
 pub(crate) struct EarlyExecutionEntry {
     /// 已准备好的工具调用。
-    pub prepared: PreparedToolCall,
+    pub prepared: PreparedToolInvocation,
     /// 执行结果。`None` 表示该工具未在调度器中执行。
     pub result: Option<ToolResult>,
 }
@@ -206,13 +206,13 @@ mod tests {
         result: Option<ToolResult>,
     ) -> EarlyExecutionSlot {
         EarlyExecutionSlot {
-            prepared: PreparedToolCall {
+            prepared: PreparedToolInvocation {
                 index: 0,
                 call_id: call_id.to_string(),
                 name: call_id.to_string(),
                 tool_input: serde_json::json!({}),
                 mode,
-                outcome: crate::tool_types::PreparedToolOutcome::Ready,
+                outcome: crate::tool_types::PreparedToolInvocationOutcome::Ready,
             },
             result,
         }

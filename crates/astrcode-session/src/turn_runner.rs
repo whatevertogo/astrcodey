@@ -32,7 +32,7 @@ use crate::{
     tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
-    tool_types::ExecuteToolCalls,
+    tool_types::ExecuteDeclaredToolBatch,
     turn_context::{
         SharedTurnContext, TurnError, end_turn_with_error_typed, on_step_end_best_effort,
     },
@@ -252,37 +252,6 @@ impl TurnLoop {
                 Err(error) => return Err(error),
             };
 
-            let mut hook_messages = request_messages;
-            match &outcome {
-                StreamOutcome::Complete { text, .. } => {
-                    hook_messages.push(LlmMessage::assistant(text));
-                },
-                StreamOutcome::ToolCalls {
-                    text, tool_calls, ..
-                } => {
-                    let mut content: Vec<LlmContent> = Vec::new();
-                    if let Some(t) = text {
-                        if !t.is_empty() {
-                            content.push(LlmContent::Text { text: t.clone() });
-                        }
-                    }
-                    for tc in tool_calls {
-                        content.push(LlmContent::ToolCall {
-                            call_id: tc.call_id.clone(),
-                            name: tc.name.clone(),
-                            arguments: serde_json::from_str(&tc.arguments)
-                                .unwrap_or(serde_json::Value::Null),
-                        });
-                    }
-                    hook_messages.push(LlmMessage {
-                        role: LlmRole::Assistant,
-                        content,
-                        name: None,
-                        reasoning_content: None,
-                    });
-                },
-            }
-
             match outcome {
                 StreamOutcome::Complete {
                     text,
@@ -294,17 +263,15 @@ impl TurnLoop {
                 } => {
                     let reasoning_content = non_empty_reasoning_content(reasoning_content);
                     let assistant_text_for_continue = text.clone();
-                    if !text.is_empty() || reasoning_content.is_some() {
-                        state.append_final_text(&text);
-                        if message_started {
-                            publisher
-                                .durable(EventPayload::AssistantMessageCompleted {
-                                    message_id,
-                                    text,
-                                    reasoning_content,
-                                })
-                                .await?;
-                        }
+                    state.record_assistant_text(&text, reasoning_content.clone());
+                    if (!text.is_empty() || reasoning_content.is_some()) && message_started {
+                        publisher
+                            .durable(EventPayload::AssistantMessageCompleted {
+                                message_id,
+                                text,
+                                reasoning_content,
+                            })
+                            .await?;
                     }
                     if let Some(usage) = usage {
                         publisher
@@ -338,6 +305,7 @@ impl TurnLoop {
                         continue;
                     }
 
+                    let hook_messages = state.provider_response_messages(request_messages);
                     return self
                         .postprocess_complete_stage(
                             extension_runner.as_ref(),
@@ -359,9 +327,11 @@ impl TurnLoop {
                 } => {
                     let reasoning_content = non_empty_reasoning_content(reasoning_content);
                     let visible_text = text.as_deref().unwrap_or_default();
-                    if !visible_text.is_empty() {
-                        state.append_final_text(visible_text);
-                    }
+                    state.record_assistant_tool_calls(
+                        visible_text,
+                        reasoning_content.clone(),
+                        &tool_calls,
+                    );
                     if !tool_calls.is_empty() || message_started {
                         if !message_started {
                             publisher
@@ -387,6 +357,7 @@ impl TurnLoop {
                             .await?;
                     }
 
+                    let hook_messages = state.provider_response_messages(request_messages);
                     let tool_decision = self
                         .tools_stage(
                             extension_runner.as_ref(),
@@ -619,7 +590,7 @@ impl TurnLoop {
         &self,
         extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         state: &mut TurnState,
-        tool_calls: &[crate::tool_types::PendingToolCall],
+        tool_calls: &[crate::tool_types::StreamedToolCall],
         early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
@@ -631,14 +602,14 @@ impl TurnLoop {
 
         let plan = self
             .tools
-            .prepare_tool_call_plan(tool_calls, early_results, &visible_tools, state)
+            .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
             .await?;
-        let announced = self.tools.announce_tool_calls(plan, publisher).await?;
+        let declared = self.tools.declare_tool_batch(plan, publisher).await?;
 
         let committed = match self
             .tools
-            .execute_and_commit(ExecuteToolCalls {
-                announced,
+            .execute_and_commit(ExecuteDeclaredToolBatch {
+                declared,
                 tools: &visible_tools,
                 state,
                 publisher: Arc::clone(publisher),
