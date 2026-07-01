@@ -4,7 +4,9 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+    config::{
+        EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
+    },
     event::EventPayload,
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{AgentSessionStatus, EventStore},
@@ -110,7 +112,8 @@ fn build_test_ops_with_llm(
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock".into(),
             max_tokens: 1024,
             context_limit: 1024,
@@ -128,7 +131,8 @@ fn build_test_ops_with_llm(
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock".into(),
             max_tokens: 1024,
             context_limit: 1024,

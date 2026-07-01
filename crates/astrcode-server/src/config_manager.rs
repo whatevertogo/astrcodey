@@ -41,26 +41,32 @@ pub struct ConfigManager {
 fn build_provider_from_settings(
     settings: &LlmSettings,
 ) -> Result<Arc<dyn LlmProvider>, astrcode_core::llm::LlmError> {
+    let extras = if settings.wire_format.is_openai_compatible() {
+        ProviderExtras::OpenAi(OpenAiProviderExtras {
+            supports_prompt_cache_key: settings.supports_prompt_cache_key,
+            supports_stream_usage: settings.supports_stream_usage,
+            prompt_cache_retention: settings.prompt_cache_retention,
+            thinking_level: settings.thinking_level,
+        })
+    } else {
+        ProviderExtras::None
+    };
     let llm_config = LlmClientConfig {
         base_url: settings.base_url.clone(),
         api_key: settings.api_key.clone(),
+        auth_scheme: settings.auth_scheme,
         connect_timeout_secs: settings.connect_timeout_secs,
         read_timeout_secs: settings.read_timeout_secs,
         max_retries: settings.max_retries,
         retry_base_delay_ms: settings.retry_base_delay_ms,
         reasoning: settings.reasoning,
-        extras: ProviderExtras::OpenAi(OpenAiProviderExtras {
-            supports_prompt_cache_key: settings.supports_prompt_cache_key,
-            supports_stream_usage: settings.supports_stream_usage,
-            prompt_cache_retention: settings.prompt_cache_retention,
-            thinking_level: settings.thinking_level,
-        }),
+        extras,
         extra_headers: Default::default(),
     };
     create_provider(
         &settings.provider_kind,
+        settings.wire_format,
         llm_config,
-        settings.api_mode,
         settings.model_id.clone(),
         Some(settings.max_tokens),
         Some(settings.context_limit),

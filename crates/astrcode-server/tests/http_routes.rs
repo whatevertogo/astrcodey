@@ -2,7 +2,9 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
 use astrcode_core::{
-    config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+    config::{
+        EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
+    },
     event::{Event, EventPayload},
     extension::ChildToolPolicy,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
@@ -17,9 +19,9 @@ use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
-        CommandCompletionResponse, CommandInvokeResponse, CompactSessionResponse,
-        ConversationSnapshotResponseDto, CreateSessionResponseDto, PromptSubmitResponse,
-        SlashCommandListResponseDto,
+        ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
+        CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
+        PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
     },
 };
 use astrcode_server::{
@@ -174,6 +176,84 @@ async fn http_routes_require_bearer_token() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn provider_catalog_route_returns_endpoint_presets() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    let catalog =
+        get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog", &token).await;
+
+    let qwen = catalog
+        .providers
+        .iter()
+        .find(|provider| provider.id == "qwen")
+        .expect("qwen preset exists");
+    assert_eq!(qwen.provider_kind, "qwen");
+    assert_eq!(qwen.wire_format, ProviderWireFormat::OpenAiChatCompletions);
+    assert!(
+        qwen.endpoints
+            .iter()
+            .any(|endpoint| endpoint.base_url.as_deref()
+                == Some("https://dashscope.aliyuncs.com/compatible-mode/v1"))
+    );
+
+    let ark = catalog
+        .providers
+        .iter()
+        .find(|provider| provider.id == "ark")
+        .expect("ark preset exists");
+    assert_eq!(ark.auth_scheme, ProviderAuthScheme::Bearer);
+    assert!(
+        ark.endpoints
+            .iter()
+            .any(|endpoint| endpoint.base_url.as_deref()
+                == Some("https://ark.cn-beijing.volces.com/api/v3"))
+    );
+}
+
+#[tokio::test]
+async fn provider_preset_apply_persists_profile_from_catalog() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let body = serde_json::json!({
+        "providerId": "qwen",
+        "endpointId": "dashscope-compatible",
+        "profileName": "qwen-test",
+        "activate": false
+    })
+    .to_string();
+
+    let response = post_json_owned(app, "/api/config/provider-preset/apply", body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied: ApplyProviderPresetResponseDto =
+        serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(applied.profile_name, "qwen-test");
+    assert_eq!(applied.model_id, "qwen3-coder-plus");
+    assert!(!applied.activated);
+
+    let saved = fs::read_to_string(runtime.config_manager().config_store().path()).unwrap();
+    let config: astrcode_core::config::Config = serde_json::from_str(&saved).unwrap();
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "qwen-test")
+        .expect("qwen profile was persisted");
+    assert_eq!(profile.provider_kind, "qwen");
+    assert_eq!(
+        profile.wire_format,
+        ProviderWireFormat::OpenAiChatCompletions
+    );
+    assert_eq!(
+        profile.base_url,
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    );
+    assert_eq!(profile.api_key.as_deref(), Some("env:DASHSCOPE_API_KEY"));
 }
 
 #[tokio::test]
@@ -1130,7 +1210,8 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 1024,
@@ -1148,7 +1229,8 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 1024,

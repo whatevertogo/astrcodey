@@ -5,22 +5,20 @@
 //! 以及可替换的内容累积器 trait（[`ChatAccumulator`]）。
 
 mod common;
+mod provider_catalog;
 mod retry;
 mod serialization;
 mod stream_decoder;
 mod tool_result_wire;
+mod wire;
 
 pub mod providers;
 
 use std::sync::Arc;
 
 use astrcode_core::{
-    config::OpenAiApiMode,
+    config::ProviderWireFormat,
     llm::{LlmClientConfig, LlmError, LlmProvider},
-};
-use providers::{
-    anthropic::AnthropicProvider as Anthropic, google_genai::GeminiProvider as Gemini,
-    openai::StandardProvider as OpenAiStandardProvider,
 };
 pub use providers::{
     anthropic::AnthropicProvider,
@@ -29,29 +27,22 @@ pub use providers::{
 };
 pub use retry::RetryPolicy;
 
-/// 根据 `provider_kind`、`base_url` 和 `model_id` 创建 LLM provider。
-///
-/// 未知 `provider_kind` 默认走 OpenAI 兼容路径。
+/// 根据显式 wire format、连接配置和模型创建 LLM provider。
 pub fn create_provider(
     provider_kind: &str,
+    wire_format: ProviderWireFormat,
     config: LlmClientConfig,
-    api_mode: OpenAiApiMode,
     model_id: String,
     max_tokens: Option<u32>,
     context_limit: Option<usize>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let provider: Arc<dyn LlmProvider> = match provider_kind {
-        "anthropic" => Arc::new(Anthropic::new(config, model_id, max_tokens, context_limit)?),
-        "google_genai" | "gemini" => {
-            Arc::new(Gemini::new(config, model_id, max_tokens, context_limit)?)
-        },
-        _ => Arc::new(OpenAiStandardProvider::new(
-            config,
-            api_mode,
-            model_id,
-            max_tokens,
-            context_limit,
-        )?),
-    };
-    Ok(provider)
+    let instance = provider_catalog::ProviderInstance::resolve(
+        provider_kind,
+        wire_format,
+        config,
+        model_id,
+        max_tokens,
+        context_limit,
+    );
+    provider_catalog::build_provider(instance)
 }

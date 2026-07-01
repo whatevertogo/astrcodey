@@ -70,13 +70,14 @@ fn fallback_default_effective() -> EffectiveConfig {
 }
 
 fn dummy_llm_settings() -> astrcode_core::config::LlmSettings {
-    use astrcode_core::config::{LlmSettings, raw::OpenAiApiMode};
+    use astrcode_core::config::{LlmSettings, ProviderAuthScheme, ProviderWireFormat};
 
     LlmSettings {
         provider_kind: "openai".into(),
         base_url: String::new(),
         api_key: String::new(),
-        api_mode: OpenAiApiMode::ChatCompletions,
+        wire_format: ProviderWireFormat::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
         model_id: "fallback".into(),
         max_tokens: 1024,
         context_limit: 4096,

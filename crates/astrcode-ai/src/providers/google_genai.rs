@@ -8,11 +8,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        HttpPostRequest, SharedStreamSink, StreamEventSink, build_client, retry_policy_from_config,
-        send_event, stream_with_retry,
+        HttpPostRequest, SharedStreamSink, StreamEventSink, apply_auth_header, build_client,
+        ensure_header, retry_policy_from_config, send_event, stream_with_retry,
     },
-    serialization::ContentMapper,
-    tool_result_wire::gemini_tool_result_parts,
+    wire::google_genai as google_wire,
 };
 
 pub struct GeminiProvider {
@@ -42,28 +41,17 @@ impl GeminiProvider {
     }
 
     fn endpoint(&self) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        let model = &self.model_id;
-        if base.contains("generateContent") || base.contains("streamGenerateContent") {
-            return base.to_string();
-        }
-        format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+        google_wire::endpoint_url(&self.config.base_url, &self.model_id)
     }
 
     fn count_tokens_endpoint(&self) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        let base = base.split('?').next().unwrap_or(base);
-        let model = &self.model_id;
-        if base.contains(":countTokens") {
-            return base.to_string();
+        google_wire::count_tokens_endpoint(&self.config.base_url, &self.model_id)
+    }
+
+    fn wire_config(&self) -> google_wire::GoogleGenAiRequestConfig {
+        google_wire::GoogleGenAiRequestConfig {
+            max_output_tokens: self.model_limits_val.max_output_tokens,
         }
-        if let Some(prefix) = base.strip_suffix(":streamGenerateContent") {
-            return format!("{prefix}:countTokens");
-        }
-        if let Some(prefix) = base.strip_suffix(":generateContent") {
-            return format!("{prefix}:countTokens");
-        }
-        format!("{base}/models/{model}:countTokens")
     }
 
     fn build_request_body(
@@ -71,57 +59,7 @@ impl GeminiProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        let mut system_texts: Vec<String> = Vec::new();
-        let mut contents: Vec<serde_json::Value> = Vec::new();
-        let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
-
-        for msg in messages {
-            match msg.role {
-                LlmRole::System => {
-                    let text: String = msg
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            LlmContent::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !text.trim().is_empty() {
-                        system_texts.push(text);
-                    }
-                },
-                LlmRole::Assistant => {
-                    flush_tool_results(&mut pending_tool_results, &mut contents);
-                    contents.push(GeminiMapper::map_assistant(msg));
-                },
-                LlmRole::User => {
-                    flush_tool_results(&mut pending_tool_results, &mut contents);
-                    contents.push(GeminiMapper::map_user(msg));
-                },
-                LlmRole::Tool => {
-                    pending_tool_results.extend(convert_tool_result_to_gemini(msg));
-                },
-            }
-        }
-        flush_tool_results(&mut pending_tool_results, &mut contents);
-
-        let mut body = serde_json::json!({
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": self.model_limits_val.max_output_tokens,
-            }
-        });
-
-        if !system_texts.is_empty() {
-            body["systemInstruction"] = serde_json::json!({
-                "parts": [{"text": system_texts.join("\n\n")}]
-            });
-        }
-        if !tools.is_empty() {
-            body["tools"] = convert_tools_to_gemini(tools);
-        }
-        body
+        google_wire::build_request_body(self.wire_config(), messages, tools)
     }
 
     fn build_count_tokens_body(
@@ -129,11 +67,7 @@ impl GeminiProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        let mut body = self.build_request_body(messages, tools);
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("generationConfig");
-        }
-        body
+        google_wire::build_count_tokens_body(self.wire_config(), messages, tools)
     }
 
     fn headers(&self) -> Vec<(String, String)> {
@@ -143,7 +77,7 @@ impl GeminiProvider {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        headers.push(("x-goog-api-key".into(), self.config.api_key.clone()));
+        apply_auth_header(&mut headers, self.config.auth_scheme, &self.config.api_key);
         headers
     }
 }
@@ -159,7 +93,8 @@ impl LlmProvider for GeminiProvider {
         let body = self.build_request_body(&messages, &tools);
 
         let endpoint = self.endpoint();
-        let headers = self.headers();
+        let mut headers = self.headers();
+        ensure_header(&mut headers, "Accept", "text/event-stream");
         let client = self.client.clone();
         let retry = retry_policy_from_config(&self.config);
 
@@ -266,11 +201,14 @@ fn process_gemini_chunk(
                 if !send_event(
                     tx,
                     LlmEvent::ToolCallStart {
-                        call_id,
+                        call_id: call_id.clone(),
                         name: name.to_string(),
                         arguments: arguments_str,
                     },
                 ) {
+                    return false;
+                }
+                if !send_event(tx, LlmEvent::ToolCallCompleted { call_id }) {
                     return false;
                 }
             }
@@ -311,136 +249,9 @@ fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
         || usage.total_tokens.is_some()
 }
 
-// ─── Message conversion ──────────────────────────────────────────────────
-
-struct GeminiMapper;
-
-impl ContentMapper for GeminiMapper {
-    fn text(text: &str) -> serde_json::Value {
-        serde_json::json!({"text": text})
-    }
-
-    fn image(base64: &str, media_type: &str) -> serde_json::Value {
-        serde_json::json!({
-            "inlineData": {"mimeType": media_type, "data": base64}
-        })
-    }
-
-    fn tool_call(_call_id: &str, name: &str, arguments: &serde_json::Value) -> serde_json::Value {
-        let args = match arguments {
-            serde_json::Value::String(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::json!({}))
-            },
-            other => other.clone(),
-        };
-        serde_json::json!({"functionCall": {"name": name, "args": args}})
-    }
-
-    fn tool_result(_: &str, _: &str, _: bool) -> Option<serde_json::Value> {
-        None
-    }
-
-    fn empty() -> serde_json::Value {
-        serde_json::json!({"text": ""})
-    }
-
-    fn wrap_user(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "user", "parts": parts})
-    }
-
-    fn wrap_assistant(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "model", "parts": parts})
-    }
-}
-
-fn convert_tool_result_to_gemini(msg: &LlmMessage) -> Vec<serde_json::Value> {
-    let mut name = String::new();
-    let mut result_text = String::new();
-    let mut is_error = false;
-    for content in &msg.content {
-        if let LlmContent::ToolResult {
-            tool_call_id,
-            content: text,
-            is_error: err,
-        } = content
-        {
-            name = msg.name.clone().unwrap_or_else(|| tool_call_id.clone());
-            result_text = text.clone();
-            is_error = *err;
-        }
-    }
-    gemini_tool_result_parts(&name, &result_text, is_error)
-}
-
-fn flush_tool_results(pending: &mut Vec<serde_json::Value>, contents: &mut Vec<serde_json::Value>) {
-    if pending.is_empty() {
-        return;
-    }
-    let parts = std::mem::take(pending);
-    contents.push(serde_json::json!({"role": "user", "parts": parts}));
-}
-
-fn convert_tools_to_gemini(tools: &[ToolDefinition]) -> serde_json::Value {
-    serde_json::json!([{
-        "functionDeclarations": tools.iter().map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            })
-        }).collect::<Vec<_>>()
-    }])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gemini_maps_assistant_to_model_role() {
-        let msg = LlmMessage::assistant("hi");
-        let json = GeminiMapper::map_assistant(&msg);
-        assert_eq!(json["role"], "model");
-        assert_eq!(json["parts"][0]["text"], "hi");
-    }
-
-    #[test]
-    fn gemini_tool_call_uses_function_call() {
-        let msg = LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
-        };
-        let json = GeminiMapper::map_assistant(&msg);
-        let fc = &json["parts"][0]["functionCall"];
-        assert_eq!(fc["name"], "read");
-        assert_eq!(fc["args"]["path"], "foo.rs");
-    }
-
-    #[test]
-    fn gemini_tool_results_pack_into_single_user_turn() {
-        let mut contents: Vec<serde_json::Value> = Vec::new();
-        let mut pending: Vec<serde_json::Value> = Vec::new();
-        contents.push(GeminiMapper::map_assistant(&LlmMessage::assistant(
-            "checking",
-        )));
-        pending.extend(convert_tool_result_to_gemini(&LlmMessage::tool(
-            "read", "call_1", "content", false,
-        )));
-        pending.extend(convert_tool_result_to_gemini(&LlmMessage::tool(
-            "grep", "call_2", "match", false,
-        )));
-        flush_tool_results(&mut pending, &mut contents);
-        assert_eq!(contents.len(), 2);
-        assert_eq!(contents[1]["role"], "user");
-        let parts = contents[1]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 2);
-    }
 
     #[test]
     fn request_body_preserves_multiple_system_messages() {

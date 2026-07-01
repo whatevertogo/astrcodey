@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"reasoning_content":"先看上下文。"}}]}
+
+data: {"choices":[{"delta":{"content":"可以这样做。"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

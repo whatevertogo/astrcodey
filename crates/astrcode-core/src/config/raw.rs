@@ -81,8 +81,12 @@ impl Default for Config {
 pub struct Profile {
     /// 配置文件名称（如 "deepseek"、"openai"）。
     pub name: String,
-    /// 提供者类型（如 "openai"）。
+    /// 提供者家族，用于展示和环境变量兜底，不决定协议形状。
     pub provider_kind: String,
+    /// 与上游服务通信的协议格式。
+    pub wire_format: ProviderWireFormat,
+    /// API key 的鉴权方式。
+    pub auth_scheme: ProviderAuthScheme,
     /// API 端点的基础 URL。
     pub base_url: String,
     /// API 密钥，支持 `env:VAR_NAME` 前缀引用环境变量。
@@ -90,14 +94,57 @@ pub struct Profile {
     /// 此配置文件下可用的模型列表。
     #[serde(default)]
     pub models: Vec<ModelConfig>,
-    /// OpenAI API 调用模式。
+    /// Provider 能力声明。
     #[serde(default)]
-    pub api_mode: Option<OpenAiApiMode>,
-    /// OpenAI 特有的能力声明。
-    pub openai_capabilities: Option<OpenAiProfileCapabilities>,
+    pub capabilities: ProviderCapabilities,
 }
 
-/// OpenAI API 的调用模式。
+/// Provider wire 协议格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderWireFormat {
+    /// OpenAI Chat Completions wire format.
+    #[serde(rename = "openai_chat_completions")]
+    OpenAiChatCompletions,
+    /// OpenAI Responses wire format.
+    #[serde(rename = "openai_responses")]
+    OpenAiResponses,
+    /// Anthropic Messages wire format.
+    #[serde(rename = "anthropic_messages")]
+    AnthropicMessages,
+    /// Google Generative Language API wire format.
+    #[serde(rename = "google_genai")]
+    GoogleGenAi,
+}
+
+impl ProviderWireFormat {
+    pub fn is_openai_compatible(self) -> bool {
+        matches!(self, Self::OpenAiChatCompletions | Self::OpenAiResponses)
+    }
+
+    pub fn openai_api_mode(self) -> Option<OpenAiApiMode> {
+        match self {
+            Self::OpenAiChatCompletions => Some(OpenAiApiMode::ChatCompletions),
+            Self::OpenAiResponses => Some(OpenAiApiMode::Responses),
+            Self::AnthropicMessages | Self::GoogleGenAi => None,
+        }
+    }
+}
+
+/// Provider API key 鉴权方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthScheme {
+    /// 不自动添加鉴权头。
+    None,
+    /// `Authorization: Bearer <key>`.
+    Bearer,
+    /// `x-api-key: <key>`.
+    XApiKey,
+    /// `x-goog-api-key: <key>`.
+    XGoogApiKey,
+}
+
+/// OpenAI wire format 的内部模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiApiMode {
@@ -107,10 +154,10 @@ pub enum OpenAiApiMode {
     Responses,
 }
 
-/// OpenAI 配置文件的能力声明。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenAiProfileCapabilities {
+/// Provider 能力声明。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCapabilities {
     /// 是否支持 prompt cache key。
     pub supports_prompt_cache_key: Option<bool>,
     /// 可选的 prompt cache retention。
@@ -277,10 +324,11 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
         Profile {
             name: "deepseek".into(),
             provider_kind: "openai".into(),
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             base_url: "https://api.deepseek.com".into(),
             api_key: Some("env:DEEPSEEK_API_KEY".into()),
-            api_mode: Some(OpenAiApiMode::ChatCompletions),
-            openai_capabilities: None,
+            capabilities: ProviderCapabilities::default(),
             models: vec![
                 ModelConfig {
                     id: "deepseek-v4-pro".into(),
@@ -305,14 +353,15 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
         Profile {
             name: "openai".into(),
             provider_kind: "openai".into(),
+            wire_format: ProviderWireFormat::OpenAiResponses,
+            auth_scheme: ProviderAuthScheme::Bearer,
             base_url: "https://api.openai.com/v1".into(),
             api_key: Some("env:OPENAI_API_KEY".into()),
-            api_mode: Some(OpenAiApiMode::Responses),
-            openai_capabilities: Some(OpenAiProfileCapabilities {
+            capabilities: ProviderCapabilities {
                 supports_prompt_cache_key: Some(true),
                 prompt_cache_retention: None,
                 supports_stream_usage: Some(true),
-            }),
+            },
             models: vec![ModelConfig {
                 id: "gpt-4.1".into(),
                 max_tokens: Some(16384),
@@ -323,10 +372,11 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
         Profile {
             name: "anthropic".into(),
             provider_kind: "anthropic".into(),
+            wire_format: ProviderWireFormat::AnthropicMessages,
+            auth_scheme: ProviderAuthScheme::XApiKey,
             base_url: "https://api.anthropic.com/v1".into(),
             api_key: Some("env:ANTHROPIC_API_KEY".into()),
-            api_mode: None,
-            openai_capabilities: None,
+            capabilities: ProviderCapabilities::default(),
             models: vec![
                 ModelConfig {
                     id: "claude-sonnet-4-6".into(),
@@ -345,10 +395,11 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
         Profile {
             name: "gemini".into(),
             provider_kind: "google_genai".into(),
+            wire_format: ProviderWireFormat::GoogleGenAi,
+            auth_scheme: ProviderAuthScheme::XGoogApiKey,
             base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
             api_key: Some("env:GOOGLE_API_KEY".into()),
-            api_mode: None,
-            openai_capabilities: None,
+            capabilities: ProviderCapabilities::default(),
             models: vec![
                 ModelConfig {
                     id: "gemini-2.5-pro".into(),
@@ -365,4 +416,33 @@ pub(crate) fn raw_default_profiles() -> Vec<Profile> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_wire_format_uses_documented_wire_names() {
+        let cases = [
+            (
+                ProviderWireFormat::OpenAiChatCompletions,
+                "\"openai_chat_completions\"",
+            ),
+            (ProviderWireFormat::OpenAiResponses, "\"openai_responses\""),
+            (
+                ProviderWireFormat::AnthropicMessages,
+                "\"anthropic_messages\"",
+            ),
+            (ProviderWireFormat::GoogleGenAi, "\"google_genai\""),
+        ];
+
+        for (format, expected_json) in cases {
+            assert_eq!(serde_json::to_string(&format).unwrap(), expected_json);
+            assert_eq!(
+                serde_json::from_str::<ProviderWireFormat>(expected_json).unwrap(),
+                format
+            );
+        }
+    }
 }

@@ -20,6 +20,7 @@ pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -
         profile_name: raw.active_profile,
         model_id: eff.llm.model_id.clone(),
         provider_kind: eff.llm.provider_kind.clone(),
+        wire_format: eff.llm.wire_format,
     })
     .into_response()
 }
@@ -34,6 +35,7 @@ pub(in crate::http) async fn list_models(State(state): State<HttpState>) -> Resp
                 profile_name: p.name.clone(),
                 model_id: m.id.clone(),
                 provider_kind: p.provider_kind.clone(),
+                wire_format: p.wire_format,
             })
         })
         .collect();
@@ -77,6 +79,7 @@ pub(in crate::http) async fn get_small_current_model(State(state): State<HttpSta
         profile_name,
         model_id: model.model_id.clone(),
         provider_kind: model.provider_kind.clone(),
+        wire_format: model.wire_format,
     })
     .into_response()
 }

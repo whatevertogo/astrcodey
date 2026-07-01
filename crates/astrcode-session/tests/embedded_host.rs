@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use astrcode_core::{
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-        OpenAiApiMode,
+        ProviderAuthScheme, ProviderWireFormat,
     },
     context::{
         CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
@@ -197,7 +197,8 @@ fn effective_config() -> EffectiveConfig {
         provider_kind: "embedded".into(),
         base_url: String::new(),
         api_key: String::new(),
-        api_mode: OpenAiApiMode::ChatCompletions,
+        wire_format: ProviderWireFormat::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
         model_id: "embedded-model".into(),
         max_tokens: 512,
         context_limit: 4096,

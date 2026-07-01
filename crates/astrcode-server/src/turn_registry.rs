@@ -170,7 +170,9 @@ impl Default for TurnRegistry {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        config::{EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+        config::{
+            EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
+        },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         storage::EventStore,
         tool::ToolDefinition,
@@ -212,7 +214,8 @@ mod tests {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                api_mode: OpenAiApiMode::ChatCompletions,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
                 model_id: "mock".into(),
                 max_tokens: 1024,
                 context_limit: 1024,
@@ -230,7 +233,8 @@ mod tests {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                api_mode: OpenAiApiMode::ChatCompletions,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
                 model_id: "mock".into(),
                 max_tokens: 1024,
                 context_limit: 1024,

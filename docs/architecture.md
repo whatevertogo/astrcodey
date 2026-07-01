@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~88.2k 行（Rust ~79.5k + TypeScript ~8.6k），`crates/` 下 23 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~111k 行（Rust ~100k + TypeScript ~11.4k），`crates/` 下 26 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 

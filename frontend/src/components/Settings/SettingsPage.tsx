@@ -10,6 +10,9 @@ import type {
   ConfigView,
   ModelTestResult,
   ProfileView,
+  ProviderAuthScheme,
+  ProviderSpecView,
+  ProviderWireFormat,
 } from '../../services/types'
 
 type SettingsSection = 'model' | 'appearance'
@@ -38,6 +41,40 @@ function pickModel(
   return profile.models[0]?.id ?? ''
 }
 
+function wireFormatLabel(wireFormat: ProviderWireFormat): string {
+  switch (wireFormat) {
+    case 'openai_chat_completions':
+      return 'OpenAI Chat'
+    case 'openai_responses':
+      return 'OpenAI Responses'
+    case 'anthropic_messages':
+      return 'Anthropic Messages'
+    case 'google_genai':
+      return 'Google GenAI'
+  }
+}
+
+function wireLabel(profile: ProfileView | undefined): string {
+  return profile ? wireFormatLabel(profile.wireFormat) : ''
+}
+
+function authSchemeLabel(authScheme: ProviderAuthScheme): string {
+  switch (authScheme) {
+    case 'none':
+      return 'No auth'
+    case 'bearer':
+      return 'Bearer'
+    case 'x_api_key':
+      return 'x-api-key'
+    case 'x_goog_api_key':
+      return 'x-goog-api-key'
+  }
+}
+
+function authLabel(profile: ProfileView | undefined): string {
+  return profile ? authSchemeLabel(profile.authScheme) : ''
+}
+
 export default function SettingsPage({
   isSidebarOpen,
   onToggleSidebar,
@@ -46,6 +83,7 @@ export default function SettingsPage({
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
   const [section, setSection] = useState<SettingsSection>('model')
   const [configView, setConfigView] = useState<ConfigView | null>(null)
+  const [providerCatalog, setProviderCatalog] = useState<ProviderSpecView[]>([])
   const [selectedProfile, setSelectedProfile] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedSmallProfile, setSelectedSmallProfile] = useState('')
@@ -60,6 +98,12 @@ export default function SettingsPage({
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [applyingProviderId, setApplyingProviderId] = useState<string | null>(
+    null
+  )
+  const [customBaseUrls, setCustomBaseUrls] = useState<Record<string, string>>(
+    {}
+  )
 
   const applyConfig = useCallback((config: ConfigView) => {
     setConfigView(config)
@@ -72,11 +116,11 @@ export default function SettingsPage({
 
   useEffect(() => {
     let cancelled = false
-    api
-      .getConfig()
-      .then((config) => {
+    Promise.all([api.getConfig(), api.getProviderCatalog()])
+      .then(([config, catalog]) => {
         if (cancelled) return
         applyConfig(config)
+        setProviderCatalog(catalog.providers)
       })
       .catch((err) => {
         if (!cancelled) setErrorMessage(String(err))
@@ -90,6 +134,7 @@ export default function SettingsPage({
   }, [applyConfig])
 
   const profiles = useMemo(() => configView?.profiles ?? [], [configView])
+  const catalogProviders = useMemo(() => providerCatalog, [providerCatalog])
   const currentProfile = useMemo(
     () => profiles.find((profile) => profile.name === selectedProfile),
     [profiles, selectedProfile]
@@ -159,6 +204,42 @@ export default function SettingsPage({
       setTesting(false)
     }
   }, [])
+
+  const handleApplyProviderPreset = useCallback(
+    async (provider: ProviderSpecView) => {
+      const defaultEndpoint = provider.endpoints.find(
+        (endpoint) => endpoint.isDefault
+      )
+      const customBaseUrl = (customBaseUrls[provider.id] ?? '').trim()
+      if (!defaultEndpoint?.baseUrl && !customBaseUrl) return
+
+      setApplyingProviderId(provider.id)
+      setStatusMessage(null)
+      setErrorMessage(null)
+      setTestResult(null)
+      try {
+        const response = await api.applyProviderPreset({
+          providerId: provider.id,
+          endpointId: defaultEndpoint?.id,
+          baseUrl: defaultEndpoint?.baseUrl ? undefined : customBaseUrl,
+          activate: true,
+        })
+        applyConfig(await api.getConfig())
+        setStatusMessage(
+          response.warning
+            ? `已保存 ${response.profileName}；${response.warning}`
+            : response.activated
+              ? `已应用 ${response.profileName}`
+              : `已保存 ${response.profileName}`
+        )
+      } catch (err) {
+        setErrorMessage(String(err))
+      } finally {
+        setApplyingProviderId(null)
+      }
+    },
+    [applyConfig, customBaseUrls]
+  )
 
   const handleThemeChange = useCallback((preference: ThemePreference) => {
     setThemePreference(preference)
@@ -263,10 +344,16 @@ export default function SettingsPage({
                     >
                       {profiles.map((profile) => (
                         <option key={profile.name} value={profile.name}>
-                          {profile.name}
+                          {profile.name} · {wireLabel(profile)}
                         </option>
                       ))}
                     </select>
+                    {currentProfile && (
+                      <div className="mt-2 text-[12px] text-text-tertiary">
+                        {wireLabel(currentProfile)} ·{' '}
+                        {authLabel(currentProfile)}
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -320,10 +407,16 @@ export default function SettingsPage({
                       <option value="">不使用</option>
                       {profiles.map((profile) => (
                         <option key={profile.name} value={profile.name}>
-                          {profile.name}
+                          {profile.name} · {wireLabel(profile)}
                         </option>
                       ))}
                     </select>
+                    {currentSmallProfile && (
+                      <div className="mt-2 text-[12px] text-text-tertiary">
+                        {wireLabel(currentSmallProfile)} ·{' '}
+                        {authLabel(currentSmallProfile)}
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -395,6 +488,139 @@ export default function SettingsPage({
                     </span>
                   </div>
                 </div>
+
+                {catalogProviders.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <h2 className="text-[13px] font-semibold text-text-secondary">
+                        Provider Catalog
+                      </h2>
+                      <span className="text-[12px] text-text-tertiary">
+                        {catalogProviders.length} presets
+                      </span>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {catalogProviders.map((provider) => {
+                        const defaultEndpoint = provider.endpoints.find(
+                          (endpoint) => endpoint.isDefault
+                        )
+                        const needsCustomBaseUrl = !defaultEndpoint?.baseUrl
+                        const customBaseUrl =
+                          customBaseUrls[provider.id]?.trim() ?? ''
+                        const canApply =
+                          !applyingProviderId &&
+                          !saving &&
+                          !reloading &&
+                          !testing &&
+                          (!needsCustomBaseUrl || customBaseUrl.length > 0)
+                        const capabilityLabels = [
+                          provider.capabilities.promptCacheKey
+                            ? 'Cache key'
+                            : null,
+                          provider.capabilities.streamUsage
+                            ? 'Stream usage'
+                            : null,
+                          provider.capabilities.reasoningEffort
+                            ? 'Reasoning'
+                            : null,
+                        ].filter((label): label is string => Boolean(label))
+                        return (
+                          <div
+                            key={provider.id}
+                            className="min-w-0 rounded-lg border border-border bg-surface-soft px-4 py-3"
+                          >
+                            <div className="flex min-w-0 items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-[14px] font-semibold text-text-primary">
+                                  {provider.displayName}
+                                </div>
+                                <div className="mt-1 truncate text-[12px] text-text-tertiary">
+                                  {provider.providerKind} ·{' '}
+                                  {authSchemeLabel(provider.authScheme)}
+                                </div>
+                              </div>
+                              <span className="shrink-0 rounded-md border border-border bg-panel-bg px-2 py-1 text-[11px] text-text-secondary">
+                                {wireFormatLabel(provider.wireFormat)}
+                              </span>
+                            </div>
+                            <div className="mt-3 divide-y divide-border text-[12px]">
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  Model
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {provider.defaultModel}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  Endpoint
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {defaultEndpoint?.baseUrl ??
+                                    defaultEndpoint?.label ??
+                                    '-'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  Env
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {provider.apiKeyEnvVars.join(', ')}
+                                </span>
+                              </div>
+                            </div>
+                            {capabilityLabels.length > 0 && (
+                              <div className="mt-3 flex flex-wrap gap-1.5">
+                                {capabilityLabels.map((label) => (
+                                  <span
+                                    key={label}
+                                    className="rounded-md bg-surface-muted px-2 py-1 text-[11px] text-text-secondary"
+                                  >
+                                    {label}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {needsCustomBaseUrl && (
+                              <input
+                                className={cn(
+                                  fieldInput,
+                                  'mt-3 h-9 text-[12px]'
+                                )}
+                                value={customBaseUrls[provider.id] ?? ''}
+                                placeholder="https://api.example.com/v1"
+                                onChange={(event) => {
+                                  setCustomBaseUrls((current) => ({
+                                    ...current,
+                                    [provider.id]: event.target.value,
+                                  }))
+                                  setStatusMessage(null)
+                                  setErrorMessage(null)
+                                }}
+                              />
+                            )}
+                            <div className="mt-3 flex justify-end">
+                              <Button
+                                variant="secondary"
+                                className="h-8 px-3 text-[12px]"
+                                disabled={!canApply}
+                                onClick={() =>
+                                  void handleApplyProviderPreset(provider)
+                                }
+                              >
+                                {applyingProviderId === provider.id
+                                  ? '应用中...'
+                                  : '应用'}
+                              </Button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap justify-end gap-2.5">
                   <Button

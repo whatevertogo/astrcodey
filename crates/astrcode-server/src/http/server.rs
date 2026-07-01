@@ -126,6 +126,14 @@ fn router_parts(
         .route("/api/sessions/{id}", delete(sessions::delete_session))
         .route("/api/projects", delete(sessions::delete_project))
         .route("/api/config", get(config::get_config))
+        .route(
+            "/api/config/provider-catalog",
+            get(config::get_provider_catalog),
+        )
+        .route(
+            "/api/config/provider-preset/apply",
+            post(config::apply_provider_preset),
+        )
         .route("/api/config/reload", post(config::reload_config))
         .route(
             "/api/config/active-selection",

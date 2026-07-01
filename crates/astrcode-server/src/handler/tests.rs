@@ -10,7 +10,10 @@ use std::{
 
 use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
 use astrcode_core::{
-    config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+    config::{
+        ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
+        ProviderWireFormat,
+    },
     event::{Event, EventPayload, Phase},
     extension::{
         CommandContext, CompactStrategy, Extension, ExtensionCommandResult, ExtensionError,
@@ -675,7 +678,8 @@ fn test_runtime_with_settings(
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 1024,
@@ -693,7 +697,8 @@ fn test_runtime_with_settings(
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 1024,
@@ -2614,4 +2619,115 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
     }
     // 断路器只阻止再次调用 LLM，阈值仍满足时会做确定性 compact。
     assert_eq!(second_compactions, 1);
+}
+
+// ─── 流式工具调用测试 ──────────────────────────────────────────────────
+
+/// Mock LLM：发送两个 read 工具调用，并在两个调用都 start 后再发送完成信号。
+/// 第二次调用（工具结果反馈后）返回文本完成。
+struct StreamingToolCallLlm {
+    call_count: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for StreamingToolCallLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        match call {
+            0 => {
+                // 两个工具调用先后开始；OpenAI Chat Completions 的 done-marker fallback
+                // 也可能形成这种“全部 start 后再 completed”的事件顺序。
+                let _ = tx.send(LlmEvent::ToolCallStart {
+                    call_id: "stream-read-1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "Cargo.toml" }).to_string(),
+                });
+                let _ = tx.send(LlmEvent::ToolCallStart {
+                    call_id: "stream-read-2".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({ "path": "README.md" }).to_string(),
+                });
+
+                let _ = tx.send(LlmEvent::ToolCallCompleted {
+                    call_id: "stream-read-1".into(),
+                });
+                let _ = tx.send(LlmEvent::ToolCallCompleted {
+                    call_id: "stream-read-2".into(),
+                });
+
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "tool_calls".into(),
+                });
+            },
+            _ => {
+                let _ = tx.send(LlmEvent::ContentDelta {
+                    delta: "done".into(),
+                });
+                let _ = tx.send(LlmEvent::Done {
+                    finish_reason: "stop".into(),
+                });
+            },
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200000,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+/// 验证带 `ToolCallCompleted` 事件的流式工具调用能正确执行并提交结果。
+#[tokio::test]
+async fn streaming_tool_call_completed_executes_tools() {
+    let workspace = unique_workspace("streaming-tool-call");
+    fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+    fs::write(workspace.join("README.md"), "# test\n").unwrap();
+
+    let llm = Arc::new(StreamingToolCallLlm {
+        call_count: AtomicUsize::new(0),
+    });
+    let runtime = test_runtime_with_llm(llm);
+    let event_tx = Arc::new(EventFanout::new(128));
+    let mut event_rx = event_tx.subscribe();
+    let handler = spawn_test_actor(runtime.clone(), event_tx);
+
+    let sid = handler
+        .create_session(workspace.to_string_lossy().into_owned())
+        .await
+        .unwrap();
+
+    handler
+        .submit_input_for_session(sid.clone(), "read both files".into())
+        .await
+        .unwrap();
+
+    let finish_reason = wait_for_turn_completed(&mut event_rx).await;
+    assert_eq!(finish_reason, "stop");
+
+    // 验证两个工具调用都被执行并提交了 durable 事件
+    let events = runtime.event_store().replay_events(&sid).await.unwrap();
+    let completed_tool_calls: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::ToolCallCompleted { call_id, .. }
+                    if call_id.as_str() == "stream-read-1"
+                        || call_id.as_str() == "stream-read-2"
+            )
+        })
+        .collect();
+    assert_eq!(
+        completed_tool_calls.len(),
+        2,
+        "both streaming tool calls should be committed"
+    );
 }

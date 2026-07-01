@@ -456,6 +456,14 @@ pub enum LlmEvent {
         /// 本次增量参数片段。
         delta: String,
     },
+    /// 单个工具调用的参数已全部接收完毕。
+    ///
+    /// 此事件允许下游在 LLM 仍在流式输出其他工具调用时就提前准备和执行
+    /// 已完成的工具,从而缩短多工具调用场景的端到端延迟。
+    ToolCallCompleted {
+        /// 工具调用 ID。
+        call_id: String,
+    },
     /// 单次 LLM 调用的 token 使用统计。
     Usage { usage: LlmTokenUsage },
     /// 流式输出已完成。
@@ -582,6 +590,8 @@ pub struct LlmClientConfig {
     pub base_url: String,
     /// API 密钥。
     pub api_key: String,
+    /// API key 的鉴权方式。
+    pub auth_scheme: crate::config::ProviderAuthScheme,
     /// 连接超时时间（秒）。
     pub connect_timeout_secs: u64,
     /// 读取超时时间（秒）。
@@ -630,6 +640,7 @@ impl Default for LlmClientConfig {
         Self {
             base_url: "https://api.deepseek.com".into(),
             api_key: String::new(),
+            auth_scheme: crate::config::ProviderAuthScheme::Bearer,
             connect_timeout_secs: 10,
             read_timeout_secs: 90,
             max_retries: 2,

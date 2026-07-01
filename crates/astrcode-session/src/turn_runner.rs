@@ -29,6 +29,7 @@ use crate::{
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     session::Session,
     steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
+    tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
     tool_types::ExecuteToolCalls,
@@ -85,6 +86,15 @@ impl TurnLoop {
 
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
         self.cancellation_token.clone()
+    }
+
+    fn max_parallel_tool_calls(&self) -> usize {
+        self.session
+            .caps()
+            .read_effective()
+            .agent
+            .tool_max_parallel_calls
+            .max(1)
     }
 
     pub(crate) fn system_prompt(&self) -> &str {
@@ -202,7 +212,19 @@ impl TurnLoop {
             let request_messages = prepared.messages.clone();
             let model_context_window = prepared.llm.model_limits().max_input_tokens;
             let visible_tools = state.visible_tools();
-            let outcome = match self.llm_stage(prepared, &visible_tools, publisher).await {
+            // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
+            // visible_tools 传给 early exec context 供 prepare 使用。
+            let dedup_for_early = state.tool_deduplicator_mut();
+            let outcome = match self
+                .llm_stage(
+                    prepared,
+                    &visible_tools,
+                    publisher,
+                    Some(dedup_for_early),
+                    visible_tools.clone(),
+                )
+                .await
+            {
                 Ok(outcome) => outcome,
                 Err(TurnError::Llm(LlmError::PromptTooLong(_)))
                     if !state.reactive_compact_used() =>
@@ -330,6 +352,7 @@ impl TurnLoop {
                     text,
                     reasoning_content,
                     tool_calls,
+                    early_results,
                     message_id,
                     message_started,
                     usage,
@@ -369,6 +392,7 @@ impl TurnLoop {
                             extension_runner.as_ref(),
                             &mut state,
                             &tool_calls,
+                            early_results,
                             publisher,
                             hook_messages,
                         )
@@ -449,13 +473,35 @@ impl TurnLoop {
         prepared: PreparedProviderRequest,
         tools: &[ToolDefinition],
         publisher: &TurnEvents,
+        deduplicator: Option<&mut ToolCallDeduplicator>,
+        visible_tools: Vec<ToolDefinition>,
     ) -> Result<StreamOutcome, TurnError> {
         let request_messages = prepared.messages.clone();
         let rx = self
             .start_provider_stream(&prepared.llm, prepared.messages, tools, publisher)
             .await?;
         let message_id = new_message_id();
-        match consume_llm_stream(rx, publisher, message_id, &self.cancellation_token).await {
+
+        // 构建 early exec context（需要 deduplicator 和 visible_tools）
+        let early_exec = deduplicator.map(|dedup| {
+            let max_parallel = self.max_parallel_tool_calls();
+            crate::llm_stream::EarlyExecContext {
+                pipeline: &self.tools,
+                visible_tools,
+                deduplicator: dedup,
+                max_parallel,
+            }
+        });
+
+        match consume_llm_stream(
+            rx,
+            publisher,
+            message_id,
+            &self.cancellation_token,
+            early_exec,
+        )
+        .await
+        {
             Ok(outcome) => Ok(self
                 .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
                 .await),
@@ -503,6 +549,7 @@ impl TurnLoop {
                 text,
                 reasoning_content,
                 tool_calls,
+                early_results,
                 message_id,
                 message_started,
                 usage: _,
@@ -510,6 +557,7 @@ impl TurnLoop {
                 text,
                 reasoning_content,
                 tool_calls,
+                early_results,
                 message_id,
                 message_started,
                 usage,
@@ -572,6 +620,7 @@ impl TurnLoop {
         extension_runner: &dyn astrcode_kernel::ExtensionRuntime,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::PendingToolCall],
+        early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
     ) -> Result<ToolStageDecision, TurnError> {
@@ -579,22 +628,17 @@ impl TurnLoop {
             .await?;
 
         let visible_tools = state.visible_tools();
-        let deduplicator = state.tool_deduplicator_mut();
-        let prepared_tool_calls = match self
+
+        let plan = self
             .tools
-            .prepare_tool_calls(tool_calls, &visible_tools, publisher, deduplicator)
-            .await
-        {
-            Ok(prepared_tool_calls) => prepared_tool_calls,
-            Err(error) => {
-                return end_turn_with_error_typed(error);
-            },
-        };
+            .prepare_tool_call_plan(tool_calls, early_results, &visible_tools, state)
+            .await?;
+        let announced = self.tools.announce_tool_calls(plan, publisher).await?;
 
         let committed = match self
             .tools
             .execute_and_commit(ExecuteToolCalls {
-                prepared: &prepared_tool_calls,
+                announced,
                 tools: &visible_tools,
                 state,
                 publisher: Arc::clone(publisher),

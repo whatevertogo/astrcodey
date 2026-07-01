@@ -287,10 +287,24 @@ export interface ConnectionState {
 export interface ProfileView {
   name: string
   providerKind: string
+  wireFormat: ProviderWireFormat
+  authScheme: ProviderAuthScheme
   baseUrl: string
   hasApiKey: boolean
   models: ModelView[]
 }
+
+export type ProviderWireFormat =
+  | 'openai_chat_completions'
+  | 'openai_responses'
+  | 'anthropic_messages'
+  | 'google_genai'
+
+export type ProviderAuthScheme =
+  | 'none'
+  | 'bearer'
+  | 'x_api_key'
+  | 'x_goog_api_key'
 
 export interface ModelView {
   id: string
@@ -307,6 +321,52 @@ export interface ConfigView {
   approvalMode: 'manual' | 'yolo'
   extensionStates: Record<string, boolean>
   profiles: ProfileView[]
+  warning?: string
+}
+
+export interface ProviderCatalogView {
+  providers: ProviderSpecView[]
+}
+
+export interface ProviderSpecView {
+  id: string
+  displayName: string
+  providerKind: string
+  wireFormat: ProviderWireFormat
+  authScheme: ProviderAuthScheme
+  defaultModel: string
+  apiKeyEnvVars: string[]
+  endpoints: ProviderEndpointPresetView[]
+  capabilities: ProviderSpecCapabilitiesView
+}
+
+export interface ProviderEndpointPresetView {
+  id: string
+  label: string
+  baseUrl?: string
+  isDefault: boolean
+}
+
+export interface ProviderSpecCapabilitiesView {
+  promptCacheKey: boolean
+  streamUsage: boolean
+  reasoningEffort: boolean
+}
+
+export interface ApplyProviderPresetRequest {
+  providerId: string
+  endpointId?: string
+  profileName?: string
+  baseUrl?: string
+  modelId?: string
+  activate?: boolean
+}
+
+export interface ApplyProviderPresetResponse {
+  success: boolean
+  profileName: string
+  modelId: string
+  activated: boolean
   warning?: string
 }
 
@@ -359,12 +419,14 @@ export interface CurrentModelInfo {
   profileName: string
   modelId: string
   providerKind: string
+  wireFormat: ProviderWireFormat
 }
 
 export interface AvailableModel {
   profileName: string
   modelId: string
   providerKind: string
+  wireFormat: ProviderWireFormat
 }
 
 export interface ModelTestResult {

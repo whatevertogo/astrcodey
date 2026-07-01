@@ -1,6 +1,7 @@
 import type {
   AgentSessionLink,
   AgentSessionStatus,
+  ApplyProviderPresetResponse,
   AvailableModel,
   CompactSessionResponse,
   CommandCompletionResponse,
@@ -19,6 +20,12 @@ import type {
   ModelView,
   Phase,
   ProfileView,
+  ProviderCatalogView,
+  ProviderEndpointPresetView,
+  ProviderSpecCapabilitiesView,
+  ProviderSpecView,
+  ProviderAuthScheme,
+  ProviderWireFormat,
   PromptAttachmentWire,
   PromptSubmitResponse,
   SlashCommandInfo,
@@ -583,6 +590,26 @@ export function decodeConfigView(value: unknown): ConfigView {
   }
 }
 
+export function decodeProviderCatalog(value: unknown): ProviderCatalogView {
+  const object = decodeObject(value, 'provider catalog')
+  return {
+    providers: arrayField(object, 'providers').map(decodeProviderSpec),
+  }
+}
+
+export function decodeApplyProviderPresetResponse(
+  value: unknown
+): ApplyProviderPresetResponse {
+  const object = decodeObject(value, 'apply provider preset response')
+  return {
+    success: requiredBoolean(object, 'success'),
+    profileName: requiredString(object, 'profileName'),
+    modelId: requiredString(object, 'modelId'),
+    activated: requiredBoolean(object, 'activated'),
+    warning: optionalString(object, 'warning'),
+  }
+}
+
 function decodeApprovalMode(value: unknown): 'manual' | 'yolo' {
   return value === 'yolo' ? 'yolo' : 'manual'
 }
@@ -592,9 +619,80 @@ function decodeProfileView(value: unknown): ProfileView {
   return {
     name: requiredString(object, 'name'),
     providerKind: requiredString(object, 'providerKind'),
+    wireFormat: decodeProviderWireFormat(object['wireFormat']),
+    authScheme: decodeProviderAuthScheme(object['authScheme']),
     baseUrl: requiredString(object, 'baseUrl'),
     hasApiKey: requiredBoolean(object, 'hasApiKey'),
     models: arrayField(object, 'models').map(decodeModelView),
+  }
+}
+
+function decodeProviderWireFormat(value: unknown): ProviderWireFormat {
+  switch (value) {
+    case 'openai_chat_completions':
+    case 'openai_responses':
+    case 'anthropic_messages':
+    case 'google_genai':
+      return value
+    default:
+      throw new Error(`Invalid provider wire format: ${String(value)}`)
+  }
+}
+
+function decodeProviderAuthScheme(value: unknown): ProviderAuthScheme {
+  switch (value) {
+    case 'none':
+    case 'bearer':
+    case 'x_api_key':
+    case 'x_goog_api_key':
+      return value
+    default:
+      throw new Error(`Invalid provider auth scheme: ${String(value)}`)
+  }
+}
+
+function decodeProviderSpec(value: unknown): ProviderSpecView {
+  const object = decodeObject(value, 'provider spec')
+  return {
+    id: requiredString(object, 'id'),
+    displayName: requiredString(object, 'displayName'),
+    providerKind: requiredString(object, 'providerKind'),
+    wireFormat: decodeProviderWireFormat(object['wireFormat']),
+    authScheme: decodeProviderAuthScheme(object['authScheme']),
+    defaultModel: requiredString(object, 'defaultModel'),
+    apiKeyEnvVars: arrayField(object, 'apiKeyEnvVars').map((item) => {
+      if (typeof item !== 'string') {
+        throw new ProtocolDecodeError('expected string apiKeyEnvVars item')
+      }
+      return item
+    }),
+    endpoints: arrayField(object, 'endpoints').map(
+      decodeProviderEndpointPreset
+    ),
+    capabilities: decodeProviderSpecCapabilities(object['capabilities']),
+  }
+}
+
+function decodeProviderEndpointPreset(
+  value: unknown
+): ProviderEndpointPresetView {
+  const object = decodeObject(value, 'provider endpoint preset')
+  return {
+    id: requiredString(object, 'id'),
+    label: requiredString(object, 'label'),
+    baseUrl: optionalString(object, 'baseUrl'),
+    isDefault: requiredBoolean(object, 'isDefault'),
+  }
+}
+
+function decodeProviderSpecCapabilities(
+  value: unknown
+): ProviderSpecCapabilitiesView {
+  const object = decodeObject(value, 'provider spec capabilities')
+  return {
+    promptCacheKey: requiredBoolean(object, 'promptCacheKey'),
+    streamUsage: requiredBoolean(object, 'streamUsage'),
+    reasoningEffort: requiredBoolean(object, 'reasoningEffort'),
   }
 }
 
@@ -639,6 +737,7 @@ export function decodeCurrentModelInfo(value: unknown): CurrentModelInfo {
     profileName: requiredString(object, 'profileName'),
     modelId: requiredString(object, 'modelId'),
     providerKind: requiredString(object, 'providerKind'),
+    wireFormat: decodeProviderWireFormat(object['wireFormat']),
   }
 }
 
@@ -653,6 +752,7 @@ function decodeAvailableModel(value: unknown): AvailableModel {
     profileName: requiredString(object, 'profileName'),
     modelId: requiredString(object, 'modelId'),
     providerKind: requiredString(object, 'providerKind'),
+    wireFormat: decodeProviderWireFormat(object['wireFormat']),
   }
 }
 

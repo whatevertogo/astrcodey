@@ -459,6 +459,53 @@ impl LlmProvider for DelayThenCompleteLlm {
     }
 }
 
+struct EarlyCompletedToolLlm {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for EarlyCompletedToolLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let round = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::unbounded_channel();
+        if round == 0 {
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "checking".into(),
+            });
+            let _ = tx.send(LlmEvent::ToolCallStart {
+                call_id: "call-early".into(),
+                name: "unknown_tool".into(),
+                arguments: "{}".into(),
+            });
+            let _ = tx.send(LlmEvent::ToolCallCompleted {
+                call_id: "call-early".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "tool_calls".into(),
+            });
+        } else {
+            let _ = tx.send(LlmEvent::ContentDelta {
+                delta: "done".into(),
+            });
+            let _ = tx.send(LlmEvent::Done {
+                finish_reason: "stop".into(),
+            });
+        }
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
+            max_output_tokens: 4096,
+        }
+    }
+}
+
 #[tokio::test]
 async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
     let session = spawn_session(Arc::new(DelayThenCompleteLlm {
@@ -485,6 +532,66 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
         }),
         "tool-only turn must durable assistant shell then ToolCallRequested so projection merges \
          tool_calls"
+    );
+}
+
+#[tokio::test]
+async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
+    let (session, store, sid) = spawn_session_with_store(Arc::new(EarlyCompletedToolLlm {
+        calls: AtomicUsize::new(0),
+    }))
+    .await;
+    let turn_id = new_turn_id();
+    let handle = session
+        .submit("trigger early tool".into(), vec![], turn_id)
+        .await
+        .unwrap();
+    let _ = handle.wait().await.unwrap();
+
+    let events = store.replay_events(&sid).await.unwrap();
+    let assistant_completed_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload,
+                EventPayload::AssistantMessageCompleted { .. }
+            )
+        })
+        .expect("assistant message should be durable before tool request");
+    let tool_requested_index = events
+        .iter()
+        .position(|event| matches!(event.payload, EventPayload::ToolCallRequested { .. }))
+        .expect("tool request should be durable");
+    assert!(
+        assistant_completed_index < tool_requested_index,
+        "early tool preparation must not persist ToolCallRequested before \
+         assistant_message_completed"
+    );
+
+    let provider_messages = session.read_model().await.unwrap().provider_messages();
+    assert!(
+        provider_messages.iter().any(|message| {
+            message.role == LlmRole::Assistant
+                && message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        LlmContent::ToolCall { call_id, .. } if call_id == "call-early"
+                    )
+                })
+        }),
+        "provider history should retain assistant tool call"
+    );
+    assert!(
+        provider_messages.iter().any(|message| {
+            message.role == LlmRole::Tool
+                && message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        LlmContent::ToolResult { tool_call_id, .. } if tool_call_id == "call-early"
+                    )
+                })
+        }),
+        "provider history should retain tool result"
     );
 }
 

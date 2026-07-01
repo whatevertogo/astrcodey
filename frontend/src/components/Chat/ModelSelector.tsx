@@ -9,6 +9,19 @@ interface ModelSelectorProps {
   setModel: (profileName: string, model: string) => Promise<void>
 }
 
+function wireFormatLabel(value: AvailableModel['wireFormat']): string {
+  switch (value) {
+    case 'openai_chat_completions':
+      return 'OpenAI Chat'
+    case 'openai_responses':
+      return 'OpenAI Responses'
+    case 'anthropic_messages':
+      return 'Anthropic Messages'
+    case 'google_genai':
+      return 'Google GenAI'
+  }
+}
+
 export default function ModelSelector({
   refreshKey,
   getCurrentModel,
@@ -162,7 +175,7 @@ export default function ModelSelector({
               groupedOptions.map(([profileName, groupOpts], gi) => (
                 <div key={profileName} className={gi > 0 ? 'mt-1.5' : ''}>
                   <div className="px-4 py-1.5 text-[11px] font-semibold text-text-muted tracking-wider uppercase select-none">
-                    {profileName}
+                    {profileName} · {wireFormatLabel(groupOpts[0].wireFormat)}
                   </div>
                   <div className="flex flex-col gap-0.5 px-1.5">
                     {groupOpts.map((opt) => {

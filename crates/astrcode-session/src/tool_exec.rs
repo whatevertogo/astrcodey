@@ -100,6 +100,7 @@ impl ToolRuntimeCapabilities {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ToolCallRuntimeContext {
     pub turn: TurnToolContext,
     pub tools: Arc<[ToolDefinition]>,

@@ -18,6 +18,8 @@ const NAV_ITEMS: Array<{
   { icon: 'plug', label: '插件' },
 ]
 
+const COLLAPSED_PROJECTS_STORAGE_KEY = 'astrcode:collapsedProjectDirs'
+
 type SidebarContextMenu =
   | {
       kind: 'session'
@@ -58,6 +60,20 @@ function sortByUpdatedDesc(sessions: SessionListItem[]): SessionListItem[] {
   })
 }
 
+function readCollapsedProjectDirs(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_PROJECTS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(
+      parsed.filter((item): item is string => typeof item === 'string')
+    )
+  } catch {
+    return new Set()
+  }
+}
+
 interface SidebarProps {
   activeView: MainView
   onToggleSidebar: () => void
@@ -88,6 +104,9 @@ export default function Sidebar({
     null
   )
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [collapsedProjectDirs, setCollapsedProjectDirs] = useState(
+    readCollapsedProjectDirs
+  )
   const menuRef = useRef<HTMLDivElement>(null)
 
   const bridge = useMemo(() => getHostBridge(), [])
@@ -112,6 +131,12 @@ export default function Sidebar({
     }
     return ordered
   }, [projectFolderOrder, projectGroups])
+  const visibleCollapsedProjectDirs = useMemo(() => {
+    const active = new Set(orderedWorkingDirs)
+    return new Set(
+      [...collapsedProjectDirs].filter((workingDir) => active.has(workingDir))
+    )
+  }, [collapsedProjectDirs, orderedWorkingDirs])
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -120,6 +145,18 @@ export default function Sidebar({
     },
     [onOpenChat, switchSession]
   )
+
+  const toggleProjectCollapsed = useCallback((workingDir: string) => {
+    setCollapsedProjectDirs((current) => {
+      const next = new Set(current)
+      if (next.has(workingDir)) {
+        next.delete(workingDir)
+      } else {
+        next.add(workingDir)
+      }
+      return next
+    })
+  }, [])
 
   const handleSessionContextMenu = useCallback(
     (event: React.MouseEvent, sessionId: string) => {
@@ -172,6 +209,13 @@ export default function Sidebar({
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [contextMenu])
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      COLLAPSED_PROJECTS_STORAGE_KEY,
+      JSON.stringify([...visibleCollapsedProjectDirs])
+    )
+  }, [visibleCollapsedProjectDirs])
 
   const handleNewProject = useCallback(
     async (workingDir: string) => {
@@ -273,63 +317,96 @@ export default function Sidebar({
               : []
             const latestSession = orderedSessions[0]
             const isActive = dir === activeWorkingDir
+            const isCollapsed = visibleCollapsedProjectDirs.has(dir)
             return (
               <div key={dir} className="mb-2">
-                <button
-                  type="button"
+                <div
                   className={cn(
-                    'flex min-h-9 w-full items-center gap-3 rounded-lg px-3 text-left text-[15px] font-medium outline-none transition-colors duration-150',
+                    'group flex min-h-9 w-full items-center rounded-lg text-[15px] font-medium outline-none transition-colors duration-150',
                     isActive && activeView === 'chat'
                       ? 'bg-surface-muted text-text-primary'
                       : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
                   )}
-                  onClick={() => {
-                    if (latestSession)
-                      handleSelectSession(latestSession.sessionId)
-                  }}
                   onContextMenu={(event) =>
                     handleProjectContextMenu(event, dir)
                   }
-                  title={dir}
                 >
-                  <Icon name="project" size={16} className="shrink-0" />
-                  <span className="truncate">{projectNameFromDir(dir)}</span>
-                </button>
-
-                <div className="mt-1 space-y-0.5 pl-7">
-                  {orderedSessions.map((session) => {
-                    const isSessionActive =
-                      session.sessionId === activeSessionId
-                    return (
-                      <button
-                        key={session.sessionId}
-                        type="button"
-                        className={cn(
-                          'grid min-h-8 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2.5 text-left text-[14px] outline-none transition-colors duration-150',
-                          isSessionActive && activeView === 'chat'
-                            ? 'bg-surface-muted text-text-primary'
-                            : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
-                        )}
-                        onClick={() => handleSelectSession(session.sessionId)}
-                        onContextMenu={(event) =>
-                          handleSessionContextMenu(event, session.sessionId)
-                        }
-                        title={
-                          session.title || session.firstUserMessage || '新对话'
-                        }
-                      >
-                        <span className="truncate font-medium">
-                          {session.firstUserMessage ||
-                            session.title ||
-                            '新对话'}
-                        </span>
-                        <span className="shrink-0 text-[12px] text-text-muted">
-                          {formatSessionAge(session.updatedAt)}
-                        </span>
-                      </button>
-                    )
-                  })}
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left outline-none"
+                    onClick={() => {
+                      if (latestSession)
+                        handleSelectSession(latestSession.sessionId)
+                    }}
+                    title={dir}
+                  >
+                    <Icon name="project" size={16} className="shrink-0" />
+                    <span className="truncate">{projectNameFromDir(dir)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-text-muted outline-none transition-colors hover:bg-surface-soft hover:text-text-primary"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      toggleProjectCollapsed(dir)
+                    }}
+                    aria-label={
+                      isCollapsed
+                        ? `展开 ${projectNameFromDir(dir)}`
+                        : `折叠 ${projectNameFromDir(dir)}`
+                    }
+                    aria-expanded={!isCollapsed}
+                    title={isCollapsed ? '展开项目' : '折叠项目'}
+                  >
+                    <Icon
+                      name="chevron-right"
+                      size={15}
+                      className={cn(
+                        'transition-transform duration-150',
+                        !isCollapsed && 'rotate-90'
+                      )}
+                    />
+                  </button>
                 </div>
+
+                {!isCollapsed && (
+                  <div className="mt-1 space-y-0.5 pl-7">
+                    {orderedSessions.map((session) => {
+                      const isSessionActive =
+                        session.sessionId === activeSessionId
+                      return (
+                        <button
+                          key={session.sessionId}
+                          type="button"
+                          className={cn(
+                            'grid min-h-8 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2.5 text-left text-[14px] outline-none transition-colors duration-150',
+                            isSessionActive && activeView === 'chat'
+                              ? 'bg-surface-muted text-text-primary'
+                              : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
+                          )}
+                          onClick={() => handleSelectSession(session.sessionId)}
+                          onContextMenu={(event) =>
+                            handleSessionContextMenu(event, session.sessionId)
+                          }
+                          title={
+                            session.title ||
+                            session.firstUserMessage ||
+                            '新对话'
+                          }
+                        >
+                          <span className="truncate font-medium">
+                            {session.firstUserMessage ||
+                              session.title ||
+                              '新对话'}
+                          </span>
+                          <span className="shrink-0 text-[12px] text-text-muted">
+                            {formatSessionAge(session.updatedAt)}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             )
           })}

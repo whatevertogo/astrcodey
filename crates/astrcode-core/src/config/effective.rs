@@ -31,12 +31,14 @@ pub struct EffectiveConfig {
 pub struct LlmSettings {
     /// 提供者类型（如 "openai"）。
     pub provider_kind: String,
+    /// Provider wire 协议格式。
+    pub wire_format: super::raw::ProviderWireFormat,
+    /// API key 的鉴权方式。
+    pub auth_scheme: super::raw::ProviderAuthScheme,
     /// API 端点的基础 URL。
     pub base_url: String,
     /// API 密钥（已从环境变量解析）。
     pub api_key: String,
-    /// OpenAI API 调用模式（ChatCompletions 或 Responses）。
-    pub api_mode: super::raw::OpenAiApiMode,
     /// 模型标识。
     pub model_id: String,
     /// 最大输出 token 数。

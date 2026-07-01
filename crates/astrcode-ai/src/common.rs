@@ -5,9 +5,15 @@
 //! 本模块将这一公共骨架提取为泛型函数，各 provider 只需提供
 //! SSE 事件处理和请求体构造。
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use astrcode_core::llm::{LlmClientConfig, LlmError, LlmEvent};
+use astrcode_core::{
+    config::ProviderAuthScheme,
+    llm::{LlmClientConfig, LlmError, LlmEvent},
+};
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -30,10 +36,48 @@ type SseCallback =
 /// 配置无效时返回 [`LlmError::Transport`]，不在 silently 降级到无 timeout 的默认 client。
 pub fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(config.connect_timeout_secs))
-        .read_timeout(std::time::Duration::from_secs(config.read_timeout_secs))
+        .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+        .read_timeout(Duration::from_secs(config.read_timeout_secs))
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .map_err(|error| LlmError::Transport(format!("failed to create HTTP client: {error}")))
+}
+
+/// 添加 HTTP 头；若调用方已显式传入同名头（大小写无关）则保留调用方设置。
+pub(crate) fn ensure_header(
+    headers: &mut Vec<(String, String)>,
+    key: &str,
+    value: impl Into<String>,
+) {
+    if headers
+        .iter()
+        .any(|(existing_key, _)| existing_key.eq_ignore_ascii_case(key))
+    {
+        return;
+    }
+    headers.push((key.to_string(), value.into()));
+}
+
+/// 根据 provider 的鉴权方案补齐 API key 请求头。
+pub(crate) fn apply_auth_header(
+    headers: &mut Vec<(String, String)>,
+    scheme: ProviderAuthScheme,
+    api_key: &str,
+) {
+    match scheme {
+        ProviderAuthScheme::None => {},
+        ProviderAuthScheme::Bearer => {
+            ensure_header(headers, "Authorization", format!("Bearer {api_key}"));
+        },
+        ProviderAuthScheme::XApiKey => {
+            ensure_header(headers, "x-api-key", api_key);
+        },
+        ProviderAuthScheme::XGoogApiKey => {
+            ensure_header(headers, "x-goog-api-key", api_key);
+        },
+    }
 }
 
 /// 从流式片段中提取应向前端发送的增量文本。
@@ -238,8 +282,18 @@ impl HttpPostRequest {
 
         loop {
             attempt += 1;
+            let attempt_started = Instant::now();
             let response = match self.send_once().await {
-                Ok(response) => response,
+                Ok(response) => {
+                    tracing::debug!(
+                        endpoint = %redacted_endpoint(&self.endpoint),
+                        status = %response.status(),
+                        attempt,
+                        elapsed_ms = attempt_started.elapsed().as_millis(),
+                        "LLM response headers received"
+                    );
+                    response
+                },
                 Err(error) => {
                     if self.retry.should_retry_transport(attempt) {
                         let delay = self.retry.delay(attempt);
@@ -500,6 +554,8 @@ async fn parse_sse_bytes(
     let mut bytes_read = 0usize;
     let mut has_data_line = false;
     let mut body_preview = String::new();
+    let stream_started = Instant::now();
+    let mut first_chunk_reported = false;
 
     let mut dispatch_line = |line: &str| -> bool {
         process_sse_line(
@@ -527,6 +583,16 @@ async fn parse_sse_bytes(
             )
         })?;
         bytes_read += bytes.len();
+        if !first_chunk_reported && !bytes.is_empty() {
+            first_chunk_reported = true;
+            tracing::debug!(
+                endpoint = %redacted_endpoint(&endpoint),
+                status = status.as_u16(),
+                bytes = bytes.len(),
+                elapsed_ms = stream_started.elapsed().as_millis(),
+                "LLM stream first bytes received"
+            );
+        }
         if body_preview.is_empty() && !bytes.is_empty() {
             let preview_len = bytes.len().min(512);
             body_preview = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
@@ -686,7 +752,7 @@ fn error_source_chain(error: &reqwest::Error) -> String {
     message
 }
 
-fn redacted_endpoint(endpoint: &str) -> String {
+pub(crate) fn redacted_endpoint(endpoint: &str) -> String {
     let Ok(mut url) = reqwest::Url::parse(endpoint) else {
         return endpoint
             .split_once('?')

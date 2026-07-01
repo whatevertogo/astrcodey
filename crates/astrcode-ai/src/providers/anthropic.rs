@@ -13,11 +13,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        HttpPostRequest, StreamEventSink, build_client, report_stream_error,
-        retry_policy_from_config, send_event, stream_text_delta, stream_with_event_type,
+        HttpPostRequest, StreamEventSink, apply_auth_header, build_client, ensure_header,
+        report_stream_error, retry_policy_from_config, send_event, stream_text_delta,
+        stream_with_event_type,
     },
-    serialization::ContentMapper,
-    tool_result_wire::anthropic_tool_result_content,
+    wire::anthropic as anthropic_wire,
 };
 
 pub struct AnthropicProvider {
@@ -47,99 +47,18 @@ impl AnthropicProvider {
     }
 
     fn endpoint(&self) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        if base.ends_with("/messages") {
-            base.to_string()
-        } else if is_versioned_path(base) {
-            format!("{base}/messages")
-        } else {
-            format!("{base}/v1/messages")
-        }
+        anthropic_wire::endpoint_url(&self.config.base_url)
     }
 
     fn count_tokens_endpoint(&self) -> String {
-        let endpoint = self.endpoint();
-        if endpoint.ends_with("/count_tokens") {
-            endpoint
-        } else {
-            format!("{endpoint}/count_tokens")
-        }
+        anthropic_wire::count_tokens_endpoint(&self.config.base_url)
     }
 
-    fn convert_messages(
-        &self,
-        messages: &[LlmMessage],
-    ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
-        let mut system_blocks: Vec<serde_json::Value> = Vec::new();
-        let mut api_messages: Vec<serde_json::Value> = Vec::new();
-
-        for msg in messages {
-            match msg.role {
-                LlmRole::System => {
-                    let text: String = msg
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            LlmContent::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !text.is_empty() {
-                        system_blocks.push(serde_json::json!({
-                            "type": "text",
-                            "text": text,
-                            "cache_control": {"type": "ephemeral"}
-                        }));
-                    }
-                },
-                LlmRole::User => {
-                    api_messages.push(AnthropicMapper::map_user(msg));
-                },
-                LlmRole::Assistant => {
-                    api_messages.push(AnthropicMapper::map_assistant(msg));
-                },
-                LlmRole::Tool => {
-                    let block = convert_tool_result_block(msg);
-                    if let Some(last) = api_messages.last_mut() {
-                        if last["role"] == "user" && has_only_tool_results(last) {
-                            if let Some(content) =
-                                last.get_mut("content").and_then(|c| c.as_array_mut())
-                            {
-                                content.push(block);
-                                continue;
-                            }
-                            // has_only_tool_results returned true but content is not an array;
-                            // fall through to create a new message block.
-                            tracing::warn!(
-                                "tool result merge: last user message content is not an array, \
-                                 creating new block"
-                            );
-                        }
-                    }
-                    api_messages.push(serde_json::json!({
-                        "role": "user",
-                        "content": [block]
-                    }));
-                },
-            }
+    fn wire_config(&self) -> anthropic_wire::AnthropicRequestConfig<'_> {
+        anthropic_wire::AnthropicRequestConfig {
+            model_id: &self.model_id,
+            max_output_tokens: self.model_limits_val.max_output_tokens,
         }
-
-        // 在历史末尾（最后一条非当前 user 输入的消息）加第二个 cache marker，
-        // 使 "system + tools + 历史" 整段成为可缓存前缀。
-        // Anthropic 允许最多 4 个 cache breakpoint，当前用 2 个：
-        //   1. system block 末尾（已有，见上面循环）
-        //   2. 历史末尾（这里）
-        // 当前轮的 user input 在 marker 之后，每次变化但前缀仍命中。
-        mark_history_cache_breakpoint(&mut api_messages);
-
-        let system = if system_blocks.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Array(system_blocks))
-        };
-
-        (system, api_messages)
     }
 
     fn build_request_body(
@@ -148,22 +67,7 @@ impl AnthropicProvider {
         tools: &[ToolDefinition],
         stream: bool,
     ) -> serde_json::Value {
-        let (system, api_messages) = self.convert_messages(messages);
-        let mut request_body = serde_json::json!({
-            "model": self.model_id,
-            "messages": api_messages,
-            "max_tokens": self.model_limits_val.max_output_tokens,
-        });
-        if stream {
-            request_body["stream"] = serde_json::json!(true);
-        }
-        if let Some(sys) = system {
-            request_body["system"] = sys;
-        }
-        if !tools.is_empty() {
-            request_body["tools"] = convert_tools(tools);
-        }
-        request_body
+        anthropic_wire::build_request_body(self.wire_config(), messages, tools, stream)
     }
 
     fn build_count_tokens_body(
@@ -171,25 +75,19 @@ impl AnthropicProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        let mut body = self.build_request_body(messages, tools, false);
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("max_tokens");
-        }
-        body
+        anthropic_wire::build_count_tokens_body(self.wire_config(), messages, tools)
     }
 
     fn headers(&self) -> Vec<(String, String)> {
-        let headers = vec![
-            ("x-api-key".into(), self.config.api_key.clone()),
-            ("anthropic-version".into(), "2023-06-01".into()),
-        ];
-        let extra: Vec<(String, String)> = self
+        let mut headers: Vec<(String, String)> = self
             .config
             .extra_headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        [headers, extra].concat()
+        apply_auth_header(&mut headers, self.config.auth_scheme, &self.config.api_key);
+        ensure_header(&mut headers, "anthropic-version", "2023-06-01");
+        headers
     }
 }
 
@@ -203,7 +101,8 @@ impl LlmProvider for AnthropicProvider {
         let (tx, rx) = mpsc::unbounded_channel();
         let request_body = self.build_request_body(&messages, &tools, true);
         let endpoint = self.endpoint();
-        let headers = self.headers();
+        let mut headers = self.headers();
+        ensure_header(&mut headers, "Accept", "text/event-stream");
         let client = self.client.clone();
         let retry = retry_policy_from_config(&self.config);
 
@@ -444,6 +343,19 @@ fn handle_anthropic_event(
                 true
             }
         },
+        "content_block_stop" => {
+            if let Some(index) = event.get("index").and_then(|v| v.as_u64()) {
+                if let Some(call_id) = state.index_to_call_id.get(&index) {
+                    return send_event(
+                        tx,
+                        LlmEvent::ToolCallCompleted {
+                            call_id: call_id.clone(),
+                        },
+                    );
+                }
+            }
+            true
+        },
         "message_delta" => {
             if !state.usage_reported {
                 if let Some(usage) = extract_anthropic_token_usage(event) {
@@ -500,199 +412,9 @@ fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
         || usage.total_tokens.is_some()
 }
 
-// ─── Message conversion ──────────────────────────────────────────────────
-
-struct AnthropicMapper;
-
-impl ContentMapper for AnthropicMapper {
-    fn text(text: &str) -> serde_json::Value {
-        serde_json::json!({"type": "text", "text": text})
-    }
-
-    fn image(base64: &str, media_type: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": "image",
-            "source": {"type": "base64", "data": base64, "media_type": media_type}
-        })
-    }
-
-    fn tool_call(call_id: &str, name: &str, arguments: &serde_json::Value) -> serde_json::Value {
-        let args_str = match arguments {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        serde_json::json!({
-            "type": "tool_use",
-            "id": call_id,
-            "name": name,
-            "input": serde_json::from_str::<serde_json::Value>(&args_str)
-                .unwrap_or(serde_json::json!({}))
-        })
-    }
-
-    fn tool_result(id: &str, content: &str, is_error: bool) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": id,
-            "content": content,
-            "is_error": is_error,
-        }))
-    }
-
-    fn empty() -> serde_json::Value {
-        serde_json::json!({"type": "text", "text": ""})
-    }
-
-    fn wrap_user(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "user", "content": parts})
-    }
-
-    fn wrap_assistant(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "assistant", "content": parts})
-    }
-}
-
-fn convert_tool_result_block(msg: &LlmMessage) -> serde_json::Value {
-    for content in &msg.content {
-        if let LlmContent::ToolResult {
-            tool_call_id,
-            content,
-            is_error,
-        } = content
-        {
-            return serde_json::json!({
-                "type": "tool_result",
-                "tool_use_id": tool_call_id,
-                "content": anthropic_tool_result_content(content),
-                "is_error": is_error,
-            });
-        }
-    }
-    serde_json::json!({"type": "tool_result", "tool_use_id": "", "content": "", "is_error": false})
-}
-
-fn has_only_tool_results(msg: &serde_json::Value) -> bool {
-    let Some(content) = msg.get("content").and_then(|v| v.as_array()) else {
-        return false;
-    };
-    !content.is_empty() && content.iter().all(|b| b["type"] == "tool_result")
-}
-
-fn convert_tools(tools: &[ToolDefinition]) -> serde_json::Value {
-    let mut converted: Vec<serde_json::Value> = tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.parameters,
-            })
-        })
-        .collect();
-    // 在最后一个 tool 上加 cache_control，让 tool schema 整体进入缓存前缀。
-    // tools 数组在请求中位于 system 之后、messages 之前，标记最后一个等于
-    // 标记整段 tool schema 的末尾。
-    if let Some(last) = converted.last_mut() {
-        last["cache_control"] = serde_json::json!({"type": "ephemeral"});
-    }
-    serde_json::Value::Array(converted)
-}
-
-/// 判断 URL 路径是否已包含版本段（如 `/v1`、`/v2`）。
-fn is_versioned_path(url: &str) -> bool {
-    url.rsplit('/').next().is_some_and(|seg| {
-        seg.starts_with('v') && seg.len() > 1 && seg[1..].chars().all(|c| c.is_ascii_digit())
-    })
-}
-
-/// 在最后一条非空 message 的最后一个 content block 上加 cache_control，
-/// 把"历史末尾"标为缓存边界。当前轮的 user input 通常作为最后一条 user message
-/// 出现，调用方决定是否把它包含在 messages 中——这里只标记最后一项，缓存命中
-/// 由前缀稳定性保证。
-fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
-    let Some(last_msg) = api_messages.last_mut() else {
-        return;
-    };
-    let Some(content) = last_msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
-        return;
-    };
-    let Some(last_block) = content.last_mut() else {
-        return;
-    };
-    if let Some(obj) = last_block.as_object_mut() {
-        obj.insert(
-            "cache_control".into(),
-            serde_json::json!({"type": "ephemeral"}),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn user_message_converts_text() {
-        let msg = LlmMessage::user("hello");
-        let json = AnthropicMapper::map_user(&msg);
-        assert_eq!(json["role"], "user");
-        assert_eq!(json["content"][0]["type"], "text");
-        assert_eq!(json["content"][0]["text"], "hello");
-    }
-
-    #[test]
-    fn assistant_message_converts_tool_call() {
-        let msg = LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            }],
-            name: None,
-            reasoning_content: None,
-        };
-        let json = AnthropicMapper::map_assistant(&msg);
-        let block = &json["content"][0];
-        assert_eq!(block["type"], "tool_use");
-        assert_eq!(block["id"], "call_1");
-        assert_eq!(block["name"], "read");
-        assert_eq!(block["input"]["path"], "foo.rs");
-    }
-
-    #[test]
-    fn tool_results_merge_into_same_user_message() {
-        let mut api_messages: Vec<serde_json::Value> = Vec::new();
-        let msgs = vec![
-            LlmMessage::assistant("I'll check"),
-            LlmMessage::tool("read", "call_1", "file content", false),
-            LlmMessage::tool("grep", "call_2", "match found", false),
-        ];
-        for msg in &msgs {
-            match msg.role {
-                LlmRole::Assistant => api_messages.push(AnthropicMapper::map_assistant(msg)),
-                LlmRole::Tool => {
-                    let block = convert_tool_result_block(msg);
-                    if let Some(last) = api_messages.last_mut() {
-                        if last["role"] == "user" && has_only_tool_results(last) {
-                            last["content"]
-                                .as_array_mut()
-                                .expect("content array")
-                                .push(block);
-                            continue;
-                        }
-                    }
-                    api_messages.push(serde_json::json!({"role": "user", "content": [block]}));
-                },
-                _ => {},
-            }
-        }
-        assert_eq!(api_messages.len(), 2);
-        let content = api_messages[1]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2);
-        assert_eq!(content[0]["tool_use_id"], "call_1");
-        assert_eq!(content[1]["tool_use_id"], "call_2");
-    }
 
     #[test]
     fn endpoint_appends_messages() {
@@ -774,26 +496,6 @@ mod tests {
         assert!(body["tools"].is_array());
         assert!(body.get("stream").is_none());
         assert!(body.get("max_tokens").is_none());
-    }
-
-    #[test]
-    fn convert_messages_extracts_system() {
-        let provider = AnthropicProvider::new(
-            LlmClientConfig::default(),
-            "claude-sonnet-4-6".into(),
-            Some(4096),
-            Some(200_000),
-        )
-        .unwrap();
-        let msgs = vec![
-            LlmMessage::system("You are helpful"),
-            LlmMessage::user("hello"),
-        ];
-        let (system, api_messages) = provider.convert_messages(&msgs);
-        let sys = system.expect("system should be present");
-        assert_eq!(sys[0]["text"], "You are helpful");
-        assert_eq!(api_messages.len(), 1);
-        assert_eq!(api_messages[0]["role"], "user");
     }
 
     #[test]

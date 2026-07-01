@@ -7,6 +7,7 @@ pub(crate) mod compact_circuit_breaker;
 pub(crate) mod compaction_coordinator;
 pub mod compaction_run;
 pub(crate) mod deferred_tools;
+pub(crate) mod early_tool_scheduler;
 pub(crate) mod llm_request_history;
 pub(crate) mod llm_stream;
 pub mod payload;

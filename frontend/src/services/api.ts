@@ -2,6 +2,7 @@ import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
 import {
   decodeActiveSelectionResponse,
+  decodeApplyProviderPresetResponse,
   decodeAvailableModels,
   decodeCommandCompletionResponse,
   decodeCommandInvokeResponse,
@@ -14,6 +15,7 @@ import {
   decodeExtensionListResponse,
   decodeExtensionReloadResponse,
   decodeModelTestResult,
+  decodeProviderCatalog,
   decodePromptSubmitResponse,
   decodeSetExtensionEnabledResponse,
   decodeSlashCommandListResponse,
@@ -27,10 +29,13 @@ import type {
   PromptSubmitResponse,
   SessionListResponse,
   ConversationSnapshot,
+  ApplyProviderPresetRequest,
+  ApplyProviderPresetResponse,
   ConfigView,
   CurrentModelInfo,
   AvailableModel,
   ModelTestResult,
+  ProviderCatalogView,
   SlashCommandListResponse,
   ExtensionStateView,
 } from './types'
@@ -271,6 +276,21 @@ export async function healthCheck(): Promise<boolean> {
 
 export async function getConfig(): Promise<ConfigView> {
   return decodeConfigView(await request('/api/config'))
+}
+
+export async function getProviderCatalog(): Promise<ProviderCatalogView> {
+  return decodeProviderCatalog(await request('/api/config/provider-catalog'))
+}
+
+export async function applyProviderPreset(
+  preset: ApplyProviderPresetRequest
+): Promise<ApplyProviderPresetResponse> {
+  return decodeApplyProviderPresetResponse(
+    await request('/api/config/provider-preset/apply', {
+      method: 'POST',
+      body: JSON.stringify(preset),
+    })
+  )
 }
 
 export async function reloadConfig(): Promise<{

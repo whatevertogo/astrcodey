@@ -3,421 +3,19 @@
 //! 泛型参数 `A` 为内容累积器，允许子提供商（如 Kimi）替换流解析逻辑，
 //! 同时复用 HTTP 请求构造、SSE 传输、重试等基础设施。
 
-use std::collections::BTreeMap;
-
 use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+use crate::wire::openai::parser::process_sse_line;
+pub use crate::wire::openai::parser::{ChatAccumulator, StandardAccumulator};
 use crate::{
     common::{
-        HttpPostRequest, build_client, report_stream_error, retry_policy_from_config, send_event,
-        stream_body_error, stream_text_delta,
+        HttpPostRequest, apply_auth_header, build_client, report_stream_error,
+        retry_policy_from_config,
     },
-    retry::RetryPolicy,
-    serialization::{
-        chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
-        responses_tools_json, stable_hash_hex, system_text, tools_to_json,
-    },
-    stream_decoder::{SseLineReader, StreamDecoderError, Utf8StreamDecoder, clean_json_fragment},
+    wire::openai as openai_wire,
 };
-
-fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
-    LlmError::StreamParse(error.to_string())
-}
-
-// ─── ChatAccumulator trait ──────────────────────────────────────────────
-
-/// Chat Completions / Responses 流的内容累积器。
-///
-/// 每个提供商可以实现自己的累积策略（标准 OpenAI、Kimi 内联令牌等），
-/// HTTP/SSE 基础设施通过此 trait 做静态分发。
-pub trait ChatAccumulator: Default + Send + Sync + 'static {
-    fn ingest_chat_completion(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    );
-    fn ingest_responses(&mut self, event: &serde_json::Value, tx: &mpsc::UnboundedSender<LlmEvent>);
-    fn done_sent(&self) -> bool;
-    fn finish_reason(&self) -> Option<&str>;
-    fn mark_done(&mut self);
-}
-
-// ─── StandardAccumulator ────────────────────────────────────────────────
-
-#[derive(Debug, Default)]
-struct ToolCallPartial {
-    id: Option<String>,
-    emitted_call_id: Option<String>,
-    name: Option<String>,
-    started: bool,
-    pending_arguments: String,
-}
-
-#[derive(Debug, Default)]
-struct ResponseToolCallPartial {
-    call_id: Option<String>,
-    name: Option<String>,
-    started: bool,
-    arguments_delta_seen: bool,
-    pending_arguments: String,
-}
-
-/// 标准 OpenAI 格式的流累积器。
-#[derive(Default)]
-pub struct StandardAccumulator {
-    text: String,
-    tool_calls: BTreeMap<u64, ToolCallPartial>,
-    response_tool_items: BTreeMap<String, ResponseToolCallPartial>,
-    done_sent: bool,
-    finish_reason: Option<String>,
-    cache_usage_reported: bool,
-    /// 累计的 reasoning 文本，用于 diff 提取增量。
-    reasoning_accumulated: String,
-}
-
-impl StandardAccumulator {
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    fn ingest_tool_call_like_delta(
-        &mut self,
-        index: u64,
-        id: Option<&str>,
-        fallback_id: Option<&str>,
-        function: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        let partial = self.tool_calls.entry(index).or_default();
-        if let Some(id) = id {
-            partial.id = Some(id.to_string());
-        } else if partial.id.is_none() {
-            if let Some(fallback) = fallback_id {
-                partial.id = Some(fallback.to_string());
-            }
-        }
-        if let Some(name) = function["name"].as_str() {
-            partial.name = Some(name.to_string());
-        }
-
-        let arguments = function.get("arguments").and_then(json_argument_fragment);
-        if !partial.started {
-            if let Some(name) = partial.name.clone() {
-                let call_id = chat_tool_call_id(index, partial);
-                partial.emitted_call_id = Some(call_id.clone());
-                partial.started = true;
-                send_event(
-                    tx,
-                    LlmEvent::ToolCallStart {
-                        call_id: call_id.clone(),
-                        name,
-                        arguments: String::new(),
-                    },
-                );
-                if !partial.pending_arguments.is_empty() {
-                    let delta = std::mem::take(&mut partial.pending_arguments);
-                    send_event(tx, LlmEvent::ToolCallDelta { call_id, delta });
-                }
-            }
-        }
-
-        if let Some(arguments) = arguments {
-            if arguments.is_empty() {
-                return;
-            }
-            if partial.started {
-                send_event(
-                    tx,
-                    LlmEvent::ToolCallDelta {
-                        call_id: chat_tool_call_id(index, partial),
-                        delta: arguments,
-                    },
-                );
-            } else {
-                partial.pending_arguments.push_str(&arguments);
-            }
-        }
-    }
-
-    fn ingest_chat_tool_call_delta(
-        &mut self,
-        index: u64,
-        tool_call: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        let id = tool_call["id"].as_str();
-        let Some(function) = tool_call.get("function") else {
-            return;
-        };
-        self.ingest_tool_call_like_delta(index, id, None, function, tx);
-    }
-
-    fn ingest_legacy_function_call_delta(
-        &mut self,
-        function_call: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        self.ingest_tool_call_like_delta(0, None, Some("function_call"), function_call, tx);
-    }
-
-    fn emit_response_tool_start(
-        &mut self,
-        item_id: &str,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) -> Option<String> {
-        let partial = self
-            .response_tool_items
-            .entry(item_id.to_string())
-            .or_default();
-        if partial.started {
-            return partial.call_id.clone();
-        }
-        let name = partial.name.clone()?;
-        let call_id = partial
-            .call_id
-            .clone()
-            .unwrap_or_else(|| item_id.to_string());
-        partial.started = true;
-        send_event(
-            tx,
-            LlmEvent::ToolCallStart {
-                call_id: call_id.clone(),
-                name,
-                arguments: String::new(),
-            },
-        );
-        if !partial.pending_arguments.is_empty() {
-            let delta = std::mem::take(&mut partial.pending_arguments);
-            send_event(
-                tx,
-                LlmEvent::ToolCallDelta {
-                    call_id: call_id.clone(),
-                    delta,
-                },
-            );
-        }
-        Some(call_id)
-    }
-}
-
-impl ChatAccumulator for StandardAccumulator {
-    fn ingest_chat_completion(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        if !self.cache_usage_reported {
-            if let Some(usage) = extract_token_usage(event) {
-                send_event(tx, LlmEvent::Usage { usage });
-                self.cache_usage_reported = true;
-            }
-        }
-        if let Some(choices) = event["choices"].as_array() {
-            for choice in choices {
-                if let Some(delta) = choice.get("delta") {
-                    if let Some(content) = delta["content"].as_str() {
-                        if let Some(incremental) = stream_text_delta(&mut self.text, content) {
-                            send_event(tx, LlmEvent::ContentDelta { delta: incremental });
-                        }
-                    }
-                    if let Some(reasoning) = delta
-                        .get("reasoning_content")
-                        .or_else(|| delta.get("reasoning"))
-                        .or_else(|| delta.get("thinking"))
-                        .and_then(|value| value.as_str())
-                    {
-                        if let Some(incremental) =
-                            stream_text_delta(&mut self.reasoning_accumulated, reasoning)
-                        {
-                            send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
-                        }
-                    }
-                    // Some providers emit cumulative reasoning_details[].text.
-                    if let Some(details) = delta.get("reasoning_details").and_then(|v| v.as_array())
-                    {
-                        let latest = details
-                            .iter()
-                            .filter_map(|d| d.get("text").and_then(|t| t.as_str()))
-                            .collect::<Vec<_>>()
-                            .join("");
-                        if let Some(incremental) =
-                            stream_text_delta(&mut self.reasoning_accumulated, &latest)
-                        {
-                            send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
-                        }
-                    }
-                    if let Some(tool_calls) = delta["tool_calls"].as_array() {
-                        for tc in tool_calls {
-                            let idx = tc["index"].as_u64().unwrap_or(0);
-                            self.ingest_chat_tool_call_delta(idx, tc, tx);
-                        }
-                    }
-                    if let Some(function_call) = delta.get("function_call") {
-                        self.ingest_legacy_function_call_delta(function_call, tx);
-                    }
-                }
-                if let Some(finish) = choice["finish_reason"].as_str() {
-                    self.finish_reason = Some(finish.to_string());
-                }
-            }
-        }
-    }
-
-    fn ingest_responses(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) {
-        if !self.cache_usage_reported {
-            if let Some(usage) = extract_token_usage(event) {
-                send_event(tx, LlmEvent::Usage { usage });
-                self.cache_usage_reported = true;
-            }
-        }
-        let Some(event_type) = event["type"].as_str() else {
-            return;
-        };
-        match event_type {
-            "response.output_text.delta" => {
-                if let Some(delta) = event["delta"].as_str() {
-                    if let Some(incremental) = stream_text_delta(&mut self.text, delta) {
-                        send_event(tx, LlmEvent::ContentDelta { delta: incremental });
-                    }
-                }
-            },
-            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-                if let Some(delta) = event["delta"].as_str() {
-                    if let Some(incremental) =
-                        stream_text_delta(&mut self.reasoning_accumulated, delta)
-                    {
-                        send_event(tx, LlmEvent::ThinkingDelta { delta: incremental });
-                    }
-                }
-            },
-            "response.output_item.added" => {
-                let Some(item) = event["item"].as_object() else {
-                    return;
-                };
-                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
-                    return;
-                }
-                let item_id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| event["item_id"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(item_id.as_str())
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let partial = self.response_tool_items.entry(item_id.clone()).or_default();
-                partial.call_id = Some(call_id);
-                partial.name = Some(name);
-                let item_arguments = item.get("arguments").and_then(json_argument_fragment);
-                let started_call_id = self.emit_response_tool_start(&item_id, tx);
-                if let (Some(call_id), Some(arguments)) = (started_call_id, item_arguments) {
-                    if !arguments.is_empty() {
-                        let partial = self.response_tool_items.entry(item_id.clone()).or_default();
-                        partial.arguments_delta_seen = true;
-                        send_event(
-                            tx,
-                            LlmEvent::ToolCallDelta {
-                                call_id,
-                                delta: arguments,
-                            },
-                        );
-                    }
-                }
-            },
-            "response.function_call_arguments.delta" => {
-                let item_id = event["item_id"].as_str().unwrap_or_default();
-                if let Some(delta) = event.get("delta").and_then(json_argument_fragment) {
-                    if delta.is_empty() {
-                        return;
-                    }
-                    let call_id = self
-                        .response_tool_items
-                        .get(item_id)
-                        .and_then(|p| p.call_id.clone())
-                        .unwrap_or_else(|| item_id.to_string());
-                    let partial = self
-                        .response_tool_items
-                        .entry(item_id.to_string())
-                        .or_default();
-                    partial.arguments_delta_seen = true;
-                    if partial.started {
-                        send_event(tx, LlmEvent::ToolCallDelta { call_id, delta });
-                    } else {
-                        partial.pending_arguments.push_str(&delta);
-                    }
-                }
-            },
-            "response.function_call_arguments.done" => {
-                let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
-                let partial = self.response_tool_items.entry(item_id.clone()).or_default();
-                if let Some(call_id) = event["call_id"].as_str() {
-                    partial.call_id = Some(call_id.to_string());
-                }
-                if let Some(name) = event["name"].as_str() {
-                    partial.name = Some(name.to_string());
-                }
-                let fallback_call_id = partial.call_id.clone().unwrap_or_else(|| item_id.clone());
-                let call_id = if partial.started {
-                    fallback_call_id
-                } else {
-                    self.emit_response_tool_start(&item_id, tx)
-                        .unwrap_or(fallback_call_id)
-                };
-                let partial = self.response_tool_items.entry(item_id).or_default();
-                if !partial.arguments_delta_seen {
-                    if let Some(arguments) = event.get("arguments").and_then(json_argument_fragment)
-                    {
-                        if arguments.is_empty() {
-                            return;
-                        }
-                        send_event(
-                            tx,
-                            LlmEvent::ToolCallDelta {
-                                call_id,
-                                delta: arguments,
-                            },
-                        );
-                    }
-                }
-            },
-            "response.completed" if !self.done_sent => {
-                self.done_sent = true;
-                send_event(
-                    tx,
-                    LlmEvent::Done {
-                        finish_reason: "stop".into(),
-                    },
-                );
-            },
-            _ => {},
-        }
-    }
-
-    fn done_sent(&self) -> bool {
-        self.done_sent
-    }
-
-    fn finish_reason(&self) -> Option<&str> {
-        self.finish_reason.as_deref()
-    }
-
-    fn mark_done(&mut self) {
-        self.done_sent = true;
-    }
-}
 
 // ─── OpenAiProvider ─────────────────────────────────────────────────────
 
@@ -453,33 +51,22 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
     }
 
     fn endpoint(&self) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        match self.api_mode {
-            OpenAiApiMode::ChatCompletions => {
-                if base.ends_with("/chat/completions") {
-                    base.to_string()
-                } else {
-                    format!("{}/chat/completions", base)
-                }
-            },
-            OpenAiApiMode::Responses => {
-                if base.ends_with("/responses") {
-                    base.to_string()
-                } else {
-                    format!("{}/responses", base)
-                }
-            },
-        }
+        openai_wire::endpoint_url(self.api_mode, &self.config.base_url)
     }
 
     fn input_tokens_endpoint(&self) -> String {
-        let base = self.config.base_url.trim_end_matches('/');
-        if base.ends_with("/responses/input_tokens") {
-            base.to_string()
-        } else if base.ends_with("/responses") {
-            format!("{base}/input_tokens")
-        } else {
-            format!("{base}/responses/input_tokens")
+        openai_wire::input_tokens_endpoint(&self.config.base_url)
+    }
+
+    fn wire_config(&self) -> openai_wire::OpenAiRequestConfig<'_> {
+        openai_wire::OpenAiRequestConfig {
+            api_mode: self.api_mode,
+            model_id: &self.model_id,
+            max_output_tokens: self.model_limits_val.max_output_tokens,
+            supports_stream_usage: self.config.supports_stream_usage(),
+            supports_prompt_cache_key: self.config.supports_prompt_cache_key(),
+            prompt_cache_retention: self.config.prompt_cache_retention(),
+            thinking_level: self.config.thinking_level(),
         }
     }
 
@@ -488,80 +75,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        match self.api_mode {
-            OpenAiApiMode::ChatCompletions => self.build_chat_request_body(messages, tools),
-            OpenAiApiMode::Responses => self.build_responses_request_body(messages, tools),
-        }
-    }
-
-    fn build_chat_request_body(
-        &self,
-        messages: &[LlmMessage],
-        tools: &[ToolDefinition],
-    ) -> serde_json::Value {
-        let messages_json: Vec<serde_json::Value> =
-            messages.iter().map(chat_message_to_json).collect();
-
-        let mut body = serde_json::json!({
-            "model": self.model_id,
-            "messages": messages_json,
-            "max_tokens": self.model_limits_val.max_output_tokens,
-            "stream": true,
-        });
-        if self.config.supports_stream_usage() {
-            body["stream_options"] = serde_json::json!({ "include_usage": true });
-        }
-
-        if !tools.is_empty() {
-            body["tools"] = tools_to_json(tools);
-            body["tool_choice"] = serde_json::json!("auto");
-        }
-        self.apply_prompt_cache_fields(&mut body, messages, tools);
-        body
-    }
-
-    fn build_responses_request_body(
-        &self,
-        messages: &[LlmMessage],
-        tools: &[ToolDefinition],
-    ) -> serde_json::Value {
-        let instructions = messages
-            .iter()
-            .filter(|m| matches!(m.role, LlmRole::System))
-            .flat_map(|m| m.content.iter())
-            .filter_map(|c| match c {
-                LlmContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let input: Vec<serde_json::Value> = messages
-            .iter()
-            .filter(|m| !matches!(m.role, LlmRole::System))
-            .flat_map(responses_input_items)
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": self.model_id,
-            "instructions": instructions,
-            "input": input,
-            "max_output_tokens": self.model_limits_val.max_output_tokens,
-            "stream": true,
-        });
-
-        if !tools.is_empty() {
-            body["parallel_tool_calls"] = serde_json::json!(true);
-            body["tools"] = responses_tools_json(tools);
-        }
-        if let Some(level) = self.config.thinking_level() {
-            body["reasoning"] = serde_json::json!({
-                "effort": level.as_wire_value()
-            });
-        }
-        self.apply_prompt_cache_fields(&mut body, messages, tools);
-
-        body
+        openai_wire::build_request_body(self.wire_config(), messages, tools)
     }
 
     fn build_responses_count_body(
@@ -569,141 +83,7 @@ impl<A: ChatAccumulator> OpenAiProvider<A> {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        let mut body = self.build_responses_request_body(messages, tools);
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("max_output_tokens");
-            obj.remove("stream");
-            obj.remove("parallel_tool_calls");
-        }
-        body
-    }
-
-    fn apply_prompt_cache_fields(
-        &self,
-        body: &mut serde_json::Value,
-        messages: &[LlmMessage],
-        tools: &[ToolDefinition],
-    ) {
-        if !self.config.supports_prompt_cache_key() {
-            return;
-        }
-
-        body["prompt_cache_key"] = serde_json::json!(self.prompt_cache_key(messages, tools));
-        if let Some(retention) = self.config.prompt_cache_retention() {
-            body["prompt_cache_retention"] =
-                serde_json::json!(prompt_cache_retention_wire_value(self.api_mode, retention));
-        }
-    }
-
-    fn prompt_cache_key(&self, messages: &[LlmMessage], tools: &[ToolDefinition]) -> String {
-        let sys = system_text(messages);
-        let tools_json = match self.api_mode {
-            OpenAiApiMode::ChatCompletions => tools_to_json(tools),
-            OpenAiApiMode::Responses => responses_tools_json(tools),
-        };
-        let tools_text = serde_json::to_string(&tools_json).unwrap_or_default();
-        format!(
-            "astrcode-{}",
-            stable_hash_hex(&[self.model_id.as_str(), sys.as_str(), tools_text.as_str()])
-        )
-    }
-
-    // ─── HTTP / SSE ─────────────────────────────────────────────────
-
-    #[allow(clippy::too_many_arguments)]
-    async fn stream_request(
-        client: reqwest::Client,
-        endpoint: String,
-        api_key: String,
-        extra_headers: std::collections::HashMap<String, String>,
-        body: serde_json::Value,
-        api_mode: OpenAiApiMode,
-        retry: RetryPolicy,
-        tx: mpsc::UnboundedSender<LlmEvent>,
-    ) -> Result<(), LlmError> {
-        let mut headers: Vec<(String, String)> = extra_headers.into_iter().collect();
-        headers.push(("Authorization".into(), format!("Bearer {api_key}")));
-
-        HttpPostRequest {
-            client,
-            endpoint,
-            headers,
-            body,
-            retry,
-        }
-        .run(|response| Self::parse_stream::<A>(response, api_mode, &tx))
-        .await
-    }
-
-    async fn parse_stream<ACC: ChatAccumulator>(
-        response: reqwest::Response,
-        api_mode: OpenAiApiMode,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    ) -> Result<(), LlmError> {
-        use futures_util::StreamExt;
-        let endpoint = response.url().to_string();
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let content_encoding = response
-            .headers()
-            .get(reqwest::header::CONTENT_ENCODING)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let mut stream = response.bytes_stream();
-        let mut decoder = Utf8StreamDecoder::new();
-        let mut accumulator = ACC::default();
-        let mut line_reader = SseLineReader::new();
-        let mut bytes_read = 0usize;
-
-        while let Some(chunk) = stream.next().await {
-            if tx.is_closed() {
-                return Ok(());
-            }
-            let bytes = chunk.map_err(|error| {
-                stream_body_error(
-                    &endpoint,
-                    status.as_u16(),
-                    content_type.as_deref(),
-                    content_encoding.as_deref(),
-                    bytes_read,
-                    error,
-                )
-            })?;
-            bytes_read += bytes.len();
-            if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
-                for line in line_reader
-                    .push_chunk(&text)
-                    .map_err(stream_decoder_error)?
-                {
-                    process_sse_line(&line, &mut accumulator, api_mode, tx);
-                    if tx.is_closed() {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        if let Some(tail_text) = decoder.finish() {
-            for line in line_reader
-                .push_chunk(&tail_text)
-                .map_err(stream_decoder_error)?
-            {
-                process_sse_line(&line, &mut accumulator, api_mode, tx);
-                if tx.is_closed() {
-                    return Ok(());
-                }
-            }
-        }
-        if let Some(line) = line_reader.flush() {
-            process_sse_line(&line, &mut accumulator, api_mode, tx);
-        }
-        if !accumulator.done_sent() && !tx.is_closed() {
-            emit_done_once(&mut accumulator, tx);
-        }
-        Ok(())
+        openai_wire::build_input_token_count_body(self.wire_config(), messages, tools)
     }
 }
 
@@ -721,16 +101,18 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
 
         let endpoint = self.endpoint();
         let api_key = self.config.api_key.clone();
+        let auth_scheme = self.config.auth_scheme;
         let extra_headers = self.config.extra_headers.clone();
         let client = self.client.clone();
         let api_mode = self.api_mode;
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
-            let result = Self::stream_request(
+            let result = openai_wire::transport::stream_request::<A>(
                 client,
                 endpoint,
                 api_key,
+                auth_scheme,
                 extra_headers,
                 body,
                 api_mode,
@@ -757,10 +139,7 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
 
         let mut headers: Vec<(String, String)> =
             self.config.extra_headers.clone().into_iter().collect();
-        headers.push((
-            "Authorization".into(),
-            format!("Bearer {}", self.config.api_key),
-        ));
+        apply_auth_header(&mut headers, self.config.auth_scheme, &self.config.api_key);
         let value = HttpPostRequest {
             client: self.client.clone(),
             endpoint: self.input_tokens_endpoint(),
@@ -786,194 +165,6 @@ impl<A: ChatAccumulator> LlmProvider for OpenAiProvider<A> {
     fn model_limits(&self) -> ModelLimits {
         self.model_limits_val.clone()
     }
-}
-
-// ─── SSE 行处理 ─────────────────────────────────────────────────────────
-
-fn process_sse_line(
-    line: &str,
-    accumulator: &mut impl ChatAccumulator,
-    api_mode: OpenAiApiMode,
-    tx: &mpsc::UnboundedSender<LlmEvent>,
-) {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let Some(after_prefix) = trimmed.strip_prefix("data:") else {
-        return;
-    };
-    let data = after_prefix.trim_start();
-    if data == "[DONE]" {
-        emit_done_once(accumulator, tx);
-        return;
-    }
-
-    process_sse_data(data, accumulator, api_mode, tx);
-}
-
-fn emit_done_once(accumulator: &mut impl ChatAccumulator, tx: &mpsc::UnboundedSender<LlmEvent>) {
-    if accumulator.done_sent() {
-        return;
-    }
-    accumulator.mark_done();
-    let finish_reason = accumulator.finish_reason().unwrap_or("stop").to_string();
-    send_event(tx, LlmEvent::Done { finish_reason });
-}
-
-fn process_sse_data(
-    data: &str,
-    accumulator: &mut impl ChatAccumulator,
-    api_mode: OpenAiApiMode,
-    tx: &mpsc::UnboundedSender<LlmEvent>,
-) {
-    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-        ingest_sse_event(&event, accumulator, api_mode, tx);
-        return;
-    }
-
-    let cleaned = clean_json_fragment(data);
-    if cleaned != data {
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&cleaned) {
-            ingest_sse_event(&event, accumulator, api_mode, tx);
-            return;
-        }
-    }
-
-    let api_mode_name = match api_mode {
-        OpenAiApiMode::ChatCompletions => "Chat Completions",
-        OpenAiApiMode::Responses => "Responses",
-    };
-    tracing::warn!(
-        "Failed to parse {} SSE data: {} bytes, preview: {:?}",
-        api_mode_name,
-        data.len(),
-        &data[..data.len().min(80)]
-    );
-}
-
-fn ingest_sse_event(
-    event: &serde_json::Value,
-    accumulator: &mut impl ChatAccumulator,
-    api_mode: OpenAiApiMode,
-    tx: &mpsc::UnboundedSender<LlmEvent>,
-) {
-    if emit_stream_error(event, accumulator, tx) {
-        return;
-    }
-    match api_mode {
-        OpenAiApiMode::ChatCompletions => accumulator.ingest_chat_completion(event, tx),
-        OpenAiApiMode::Responses => accumulator.ingest_responses(event, tx),
-    }
-}
-
-// ─── 辅助函数 ──────────────────────────────────────────────────────────
-
-fn emit_stream_error(
-    event: &serde_json::Value,
-    accumulator: &mut impl ChatAccumulator,
-    tx: &mpsc::UnboundedSender<LlmEvent>,
-) -> bool {
-    if !is_stream_error_event(event) {
-        return false;
-    }
-
-    accumulator.mark_done();
-    send_event(
-        tx,
-        LlmEvent::Error {
-            message: stream_error_message(event).unwrap_or_else(|| event.to_string()),
-        },
-    );
-    true
-}
-
-fn is_stream_error_event(event: &serde_json::Value) -> bool {
-    event.get("error").is_some_and(|value| !value.is_null())
-        || event
-            .pointer("/response/error")
-            .is_some_and(|value| !value.is_null())
-        || event.get("type").and_then(|value| value.as_str()) == Some("error")
-        || event.get("type").and_then(|value| value.as_str()) == Some("response.failed")
-}
-
-fn stream_error_message(event: &serde_json::Value) -> Option<String> {
-    event
-        .pointer("/error/message")
-        .or_else(|| event.pointer("/response/error/message"))
-        .or_else(|| event.get("message"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            event
-                .get("error")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-}
-
-fn chat_tool_call_id(index: u64, partial: &ToolCallPartial) -> String {
-    partial
-        .emitted_call_id
-        .clone()
-        .or_else(|| partial.id.clone())
-        .unwrap_or_else(|| index.to_string())
-}
-
-fn json_argument_fragment(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(text) => Some(clean_json_fragment(text)),
-        other => serde_json::to_string(other).ok(),
-    }
-}
-
-fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
-    let usage = event
-        .get("usage")
-        .or_else(|| event.pointer("/response/usage"))?;
-
-    let input_tokens = usage
-        .get("prompt_tokens")
-        .or_else(|| usage.get("input_tokens"))
-        .and_then(|v| v.as_u64());
-    let cached_input_tokens = usage
-        .pointer("/prompt_tokens_details/cached_tokens")
-        .or_else(|| usage.pointer("/input_tokens_details/cached_tokens"))
-        .and_then(|v| v.as_u64());
-    let output_tokens = usage
-        .get("completion_tokens")
-        .or_else(|| usage.get("output_tokens"))
-        .and_then(|v| v.as_u64());
-    let reasoning_output_tokens = usage
-        .pointer("/completion_tokens_details/reasoning_tokens")
-        .or_else(|| usage.pointer("/output_tokens_details/reasoning_tokens"))
-        .and_then(|v| v.as_u64());
-    let total_tokens = usage.get("total_tokens").and_then(|v| v.as_u64());
-
-    let usage = LlmTokenUsage {
-        input_tokens,
-        cached_input_tokens,
-        cache_creation_input_tokens: None,
-        output_tokens,
-        reasoning_output_tokens,
-        total_tokens,
-        source: Some(LlmTokenUsageSource::ProviderUsage),
-    };
-    if token_usage_has_value(&usage) {
-        Some(usage)
-    } else {
-        None
-    }
-}
-
-fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
-    usage.input_tokens.is_some()
-        || usage.cached_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.output_tokens.is_some()
-        || usage.reasoning_output_tokens.is_some()
-        || usage.total_tokens.is_some()
 }
 
 // ─── 便捷类型别名 ──────────────────────────────────────────────────────
@@ -1520,6 +711,62 @@ mod tests {
             })
             .collect();
         assert_eq!(deltas, vec!["{\"path\""]);
+    }
+
+    #[test]
+    fn responses_done_then_completed_does_not_duplicate_tool_completion() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StandardAccumulator::default();
+
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "item": { "type": "function_call", "id": "i1", "call_id": "c1", "name": "read" }
+            }),
+            &tx,
+        );
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "i1",
+                "arguments": "{\"path\":\"Cargo.toml\"}"
+            }),
+            &tx,
+        );
+        acc.ingest_responses(&serde_json::json!({"type": "response.completed"}), &tx);
+
+        let completed_count = drain_events(&mut rx)
+            .into_iter()
+            .filter(
+                |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "c1"),
+            )
+            .count();
+        assert_eq!(completed_count, 1);
+    }
+
+    #[test]
+    fn responses_completed_completes_started_tool_calls() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StandardAccumulator::default();
+
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "item": { "type": "function_call", "id": "i1", "call_id": "c1", "name": "read" }
+            }),
+            &tx,
+        );
+        acc.ingest_responses(&serde_json::json!({"type": "response.completed"}), &tx);
+
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| {
+            matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "c1")
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::Done { .. }))
+        );
     }
 
     #[test]

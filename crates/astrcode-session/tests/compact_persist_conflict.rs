@@ -8,7 +8,7 @@ use std::sync::{
 use astrcode_core::{
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-        OpenAiApiMode,
+        ProviderAuthScheme, ProviderWireFormat,
     },
     context::{
         COMPACT_SUMMARY_MARKER, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
@@ -151,7 +151,8 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 200_000,
@@ -169,7 +170,8 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
             provider_kind: "mock".into(),
             base_url: String::new(),
             api_key: String::new(),
-            api_mode: OpenAiApiMode::ChatCompletions,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
             model_id: "mock-model".into(),
             max_tokens: 1024,
             context_limit: 200_000,

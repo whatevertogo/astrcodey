@@ -1,8 +1,13 @@
 //! 配置查看 / 重载 / 激活选择路由。
 
-use astrcode_core::permission::ApprovalMode;
+use astrcode_core::{
+    config::{ModelConfig, Profile, ProviderCapabilities, ProviderSpec, builtin_provider_catalog},
+    permission::ApprovalMode,
+};
 use astrcode_protocol::http::{
-    ConfigReloadResponseDto, ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto,
+    ApplyProviderPresetRequest, ApplyProviderPresetResponseDto, ConfigReloadResponseDto,
+    ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto, ProviderCatalogResponseDto,
+    ProviderEndpointPresetDto, ProviderSpecCapabilitiesDto, ProviderSpecDto,
     UpdateActiveSelectionRequest, UpdateActiveSelectionResponseDto,
 };
 use axum::{
@@ -29,6 +34,8 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         .map(|p| ProfileDto {
             name: p.name.clone(),
             provider_kind: p.provider_kind.clone(),
+            wire_format: p.wire_format,
+            auth_scheme: p.auth_scheme,
             base_url: p.base_url.clone(),
             has_api_key: astrcode_core::config::profile_has_resolvable_api_key(p),
             models: p
@@ -68,6 +75,116 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         approval_mode: approval_mode_to_wire(approval_mode),
         profiles,
         warning: None,
+    })
+    .into_response()
+}
+
+pub(in crate::http) async fn get_provider_catalog() -> Response {
+    Json(ProviderCatalogResponseDto {
+        providers: builtin_provider_catalog()
+            .iter()
+            .map(provider_spec_to_dto)
+            .collect(),
+    })
+    .into_response()
+}
+
+pub(in crate::http) async fn apply_provider_preset(
+    State(state): State<HttpState>,
+    Json(request): Json<ApplyProviderPresetRequest>,
+) -> Response {
+    let Some(spec) = builtin_provider_catalog()
+        .iter()
+        .find(|spec| spec.id == request.provider_id)
+    else {
+        return bad_request_response(
+            "unknown_provider_preset",
+            format!("Unknown provider preset {:?}", request.provider_id),
+        );
+    };
+
+    let profile_name = request
+        .profile_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(spec.id)
+        .to_string();
+    let model_id = request
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(spec.default_model)
+        .to_string();
+    let Some(base_url) = provider_preset_base_url(
+        spec,
+        request.endpoint_id.as_deref(),
+        request.base_url.as_deref(),
+    ) else {
+        return bad_request_response(
+            "invalid_provider_endpoint",
+            format!(
+                "Provider preset {:?} requires a valid endpointId or baseUrl",
+                spec.id
+            ),
+        );
+    };
+
+    let profile =
+        profile_from_provider_spec(spec, profile_name.clone(), model_id.clone(), base_url);
+    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
+    upsert_profile(&mut candidate.profiles, profile);
+
+    let mut activated = false;
+    let mut warning = None;
+    if request.activate {
+        let mut activated_candidate = candidate.clone();
+        activated_candidate.active_profile = profile_name.clone();
+        activated_candidate.active_model = model_id.clone();
+        match activated_candidate.clone().into_effective() {
+            Ok(_) => {
+                candidate = activated_candidate;
+                activated = true;
+            },
+            Err(error) => {
+                warning = Some(format!(
+                    "Profile saved but not activated: {error}. Configure the API key first."
+                ));
+            },
+        }
+    }
+
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .config_store()
+        .save(&candidate)
+        .await
+    {
+        return internal_error_response("save_failed", error);
+    }
+
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .apply_raw_config_and_rebuild(candidate)
+    {
+        tracing::warn!("apply_raw_config_and_rebuild failed after provider preset save: {error}");
+        append_warning(
+            &mut warning,
+            format!("Saved to disk but runtime kept the previous provider: {error}."),
+        );
+    } else {
+        state.runtime.sync_session_model_bindings();
+    }
+
+    Json(ApplyProviderPresetResponseDto {
+        success: true,
+        profile_name,
+        model_id,
+        activated,
+        warning,
     })
     .into_response()
 }
@@ -208,5 +325,107 @@ fn approval_mode_to_wire(mode: ApprovalMode) -> String {
     match mode {
         ApprovalMode::Manual => "manual".to_string(),
         ApprovalMode::Yolo => "yolo".to_string(),
+    }
+}
+
+fn provider_spec_to_dto(spec: &ProviderSpec) -> ProviderSpecDto {
+    ProviderSpecDto {
+        id: spec.id.to_string(),
+        display_name: spec.display_name.to_string(),
+        provider_kind: spec.provider_kind.to_string(),
+        wire_format: spec.wire_format,
+        auth_scheme: spec.auth_scheme,
+        default_model: spec.default_model.to_string(),
+        api_key_env_vars: spec
+            .api_key_env_vars
+            .iter()
+            .map(|env| (*env).to_string())
+            .collect(),
+        endpoints: spec
+            .endpoints
+            .iter()
+            .map(|endpoint| ProviderEndpointPresetDto {
+                id: endpoint.id.to_string(),
+                label: endpoint.label.to_string(),
+                base_url: endpoint.base_url.map(str::to_string),
+                is_default: endpoint.is_default,
+            })
+            .collect(),
+        capabilities: ProviderSpecCapabilitiesDto {
+            prompt_cache_key: spec.capabilities.prompt_cache_key,
+            stream_usage: spec.capabilities.stream_usage,
+            reasoning_effort: spec.capabilities.reasoning_effort,
+        },
+    }
+}
+
+fn provider_preset_base_url(
+    spec: &ProviderSpec,
+    endpoint_id: Option<&str>,
+    custom_base_url: Option<&str>,
+) -> Option<String> {
+    if let Some(base_url) = custom_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(base_url.trim_end_matches('/').to_string());
+    }
+    let endpoint = match endpoint_id {
+        Some(id) => spec.endpoints.iter().find(|endpoint| endpoint.id == id)?,
+        None => spec.endpoints.iter().find(|endpoint| endpoint.is_default)?,
+    };
+    endpoint
+        .base_url
+        .map(|base_url| base_url.trim_end_matches('/').to_string())
+}
+
+fn profile_from_provider_spec(
+    spec: &ProviderSpec,
+    profile_name: String,
+    model_id: String,
+    base_url: String,
+) -> Profile {
+    Profile {
+        name: profile_name,
+        provider_kind: spec.provider_kind.to_string(),
+        wire_format: spec.wire_format,
+        auth_scheme: spec.auth_scheme,
+        base_url,
+        api_key: spec
+            .api_key_env_vars
+            .first()
+            .map(|env| format!("env:{env}")),
+        capabilities: ProviderCapabilities {
+            supports_prompt_cache_key: spec.capabilities.prompt_cache_key.then_some(true),
+            prompt_cache_retention: None,
+            supports_stream_usage: spec.capabilities.stream_usage.then_some(true),
+        },
+        models: vec![ModelConfig {
+            id: model_id,
+            max_tokens: None,
+            context_limit: None,
+            model_options: None,
+        }],
+    }
+}
+
+fn upsert_profile(profiles: &mut Vec<Profile>, profile: Profile) {
+    if let Some(existing) = profiles
+        .iter_mut()
+        .find(|existing| existing.name == profile.name)
+    {
+        *existing = profile;
+    } else {
+        profiles.push(profile);
+    }
+}
+
+fn append_warning(warning: &mut Option<String>, next: String) {
+    match warning {
+        Some(existing) => {
+            existing.push(' ');
+            existing.push_str(&next);
+        },
+        None => *warning = Some(next),
     }
 }

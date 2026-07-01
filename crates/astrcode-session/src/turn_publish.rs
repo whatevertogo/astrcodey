@@ -304,7 +304,10 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use astrcode_core::{
-        config::{ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, OpenAiApiMode},
+        config::{
+            ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
+            ProviderWireFormat,
+        },
         context::{
             CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
             CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
@@ -419,7 +422,8 @@ mod tests {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                api_mode: OpenAiApiMode::ChatCompletions,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
                 model_id: "mock-model".into(),
                 max_tokens: 1024,
                 context_limit: 1024,
@@ -437,7 +441,8 @@ mod tests {
                 provider_kind: "mock".into(),
                 base_url: String::new(),
                 api_key: String::new(),
-                api_mode: OpenAiApiMode::ChatCompletions,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
                 model_id: "mock-model".into(),
                 max_tokens: 1024,
                 context_limit: 1024,

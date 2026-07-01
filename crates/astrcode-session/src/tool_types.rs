@@ -23,6 +23,7 @@ pub struct PendingToolCall {
     pub arguments: String,
 }
 
+#[derive(Clone)]
 pub struct PreparedToolCall {
     pub index: usize,
     pub call_id: String,
@@ -32,8 +33,38 @@ pub struct PreparedToolCall {
     pub outcome: PreparedToolOutcome,
 }
 
+pub struct ToolCallPlan {
+    prepared: Vec<PreparedToolCall>,
+    pre_executed: HashMap<usize, ToolResult>,
+}
+
+impl ToolCallPlan {
+    pub fn new(prepared: Vec<PreparedToolCall>, pre_executed: HashMap<usize, ToolResult>) -> Self {
+        Self {
+            prepared,
+            pre_executed,
+        }
+    }
+
+    pub fn prepared(&self) -> &[PreparedToolCall] {
+        &self.prepared
+    }
+
+    pub fn into_announced(self) -> AnnouncedToolCalls {
+        AnnouncedToolCalls {
+            prepared: self.prepared,
+            pre_executed: self.pre_executed,
+        }
+    }
+}
+
+pub struct AnnouncedToolCalls {
+    pub prepared: Vec<PreparedToolCall>,
+    pub pre_executed: HashMap<usize, ToolResult>,
+}
+
 pub struct ExecuteToolCalls<'a> {
-    pub prepared: &'a [PreparedToolCall],
+    pub announced: AnnouncedToolCalls,
     pub tools: &'a [ToolDefinition],
     pub state: &'a mut TurnState,
     pub publisher: std::sync::Arc<TurnEvents>,
@@ -67,6 +98,7 @@ impl CommittedToolResults {
     }
 }
 
+#[derive(Clone)]
 pub enum PreparedToolOutcome {
     Ready,
     Blocked(ToolResult),

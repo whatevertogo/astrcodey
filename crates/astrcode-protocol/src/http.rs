@@ -624,9 +624,82 @@ pub struct SetExtensionEnabledResponseDto {
 pub struct ProfileDto {
     pub name: String,
     pub provider_kind: String,
+    pub wire_format: astrcode_core::config::ProviderWireFormat,
+    pub auth_scheme: astrcode_core::config::ProviderAuthScheme,
     pub base_url: String,
     pub has_api_key: bool,
     pub models: Vec<ModelDto>,
+}
+
+/// GET /api/config/provider-catalog 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCatalogResponseDto {
+    pub providers: Vec<ProviderSpecDto>,
+}
+
+/// Provider catalog 中的单个 provider spec。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSpecDto {
+    pub id: String,
+    pub display_name: String,
+    pub provider_kind: String,
+    pub wire_format: astrcode_core::config::ProviderWireFormat,
+    pub auth_scheme: astrcode_core::config::ProviderAuthScheme,
+    pub default_model: String,
+    pub api_key_env_vars: Vec<String>,
+    pub endpoints: Vec<ProviderEndpointPresetDto>,
+    pub capabilities: ProviderSpecCapabilitiesDto,
+}
+
+/// Provider catalog 中的 endpoint preset。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEndpointPresetDto {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub is_default: bool,
+}
+
+/// Provider catalog 暴露给 UI 的能力摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSpecCapabilitiesDto {
+    pub prompt_cache_key: bool,
+    pub stream_usage: bool,
+    pub reasoning_effort: bool,
+}
+
+/// POST /api/config/provider-preset/apply 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyProviderPresetRequest {
+    pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub activate: bool,
+}
+
+/// POST /api/config/provider-preset/apply 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyProviderPresetResponseDto {
+    pub success: bool,
+    pub profile_name: String,
+    pub model_id: String,
+    pub activated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Profile 中的模型选项（与 config.json 的 `modelOptions` 对齐）。
@@ -689,6 +762,7 @@ pub struct CurrentModelResponseDto {
     pub profile_name: String,
     pub model_id: String,
     pub provider_kind: String,
+    pub wire_format: astrcode_core::config::ProviderWireFormat,
 }
 
 /// GET /api/models 响应中的单个模型。
@@ -698,6 +772,7 @@ pub struct AvailableModelDto {
     pub profile_name: String,
     pub model_id: String,
     pub provider_kind: String,
+    pub wire_format: astrcode_core::config::ProviderWireFormat,
 }
 
 /// GET /api/models 响应。
