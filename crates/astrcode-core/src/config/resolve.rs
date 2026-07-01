@@ -42,11 +42,11 @@ fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
         // astrcode historically uses GOOGLE_API_KEY; pi-mono uses GEMINI_API_KEY.
         // Accept both (prefer the one that's set).
         "gemini" | "google" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-        _ => match profile.provider_kind.as_str() {
-            "anthropic" => &["ANTHROPIC_API_KEY"],
-            "google_genai" | "gemini" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        _ => match profile.wire_format {
+            ProviderWireFormat::AnthropicMessages => &["ANTHROPIC_API_KEY"],
+            ProviderWireFormat::GoogleGenAi => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
             // openai-compatible providers vary widely; do not guess here.
-            _ => &[],
+            ProviderWireFormat::OpenAiChatCompletions | ProviderWireFormat::OpenAiResponses => &[],
         },
     }
 }
@@ -154,17 +154,16 @@ fn resolve_llm_settings(
         runtime.allow_api_key_shell_command.unwrap_or(false),
     )?;
 
-    let api_mode = profile.api_mode.unwrap_or(OpenAiApiMode::ChatCompletions);
-    let openai_capabilities = profile.openai_capabilities.as_ref();
     let options = model.model_options.as_ref();
     let reasoning = options.and_then(|o| o.reasoning).unwrap_or(false);
     let thinking_level = options.and_then(|o| o.thinking_level);
 
     Ok(LlmSettings {
         provider_kind: profile.provider_kind.clone(),
+        wire_format: profile.wire_format,
+        auth_scheme: profile.auth_scheme,
         base_url: profile.base_url.clone(),
         api_key,
-        api_mode,
         model_id: model_name.into(),
         max_tokens: model.max_tokens.unwrap_or(8192),
         context_limit: model.context_limit.unwrap_or(65536),
@@ -180,13 +179,12 @@ fn resolve_llm_settings(
         retry_base_delay_ms: runtime
             .llm_retry_base_delay_ms
             .unwrap_or(super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS),
-        supports_prompt_cache_key: openai_capabilities
-            .and_then(|c| c.supports_prompt_cache_key)
+        supports_prompt_cache_key: profile
+            .capabilities
+            .supports_prompt_cache_key
             .unwrap_or(false),
-        supports_stream_usage: openai_capabilities
-            .and_then(|c| c.supports_stream_usage)
-            .unwrap_or(false),
-        prompt_cache_retention: openai_capabilities.and_then(|c| c.prompt_cache_retention),
+        supports_stream_usage: profile.capabilities.supports_stream_usage.unwrap_or(false),
+        prompt_cache_retention: profile.capabilities.prompt_cache_retention,
         reasoning,
         thinking_level,
     })
@@ -528,8 +526,9 @@ mod tests {
                 provider_kind: "openai".into(),
                 base_url: "https://api.test.com".into(),
                 api_key: None,
-                api_mode: None,
-                openai_capabilities: None,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities::default(),
                 models: vec![ModelConfig {
                     id: "test-model".into(),
                     max_tokens: Some(1024),
@@ -554,8 +553,9 @@ mod tests {
                 provider_kind: "openai".into(),
                 base_url: "https://api.deepseek.com".into(),
                 api_key: Some("sk-test".into()),
-                api_mode: Some(OpenAiApiMode::ChatCompletions),
-                openai_capabilities: None,
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities::default(),
                 models: vec![ModelConfig {
                     id: "deepseek-chat".into(),
                     max_tokens: Some(8192),
@@ -609,8 +609,9 @@ mod tests {
                     provider_kind: "openai".into(),
                     base_url: "https://api.deepseek.com".into(),
                     api_key: Some("sk-deep".into()),
-                    api_mode: Some(OpenAiApiMode::ChatCompletions),
-                    openai_capabilities: None,
+                    wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                    auth_scheme: ProviderAuthScheme::Bearer,
+                    capabilities: ProviderCapabilities::default(),
                     models: vec![ModelConfig {
                         id: "deepseek-chat".into(),
                         max_tokens: Some(8192),
@@ -623,8 +624,9 @@ mod tests {
                     provider_kind: "anthropic".into(),
                     base_url: "https://api.anthropic.com/v1".into(),
                     api_key: Some("sk-ant".into()),
-                    api_mode: None,
-                    openai_capabilities: None,
+                    wire_format: ProviderWireFormat::AnthropicMessages,
+                    auth_scheme: ProviderAuthScheme::XApiKey,
+                    capabilities: ProviderCapabilities::default(),
                     models: vec![ModelConfig {
                         id: "claude-haiku-4-5-20251001".into(),
                         max_tokens: Some(8192),
@@ -711,8 +713,9 @@ mod tests {
                 provider_kind: "openai".into(),
                 base_url: "https://api.openai.com/v1".into(),
                 api_key: Some("sk-test".into()),
-                api_mode: Some(OpenAiApiMode::Responses),
-                openai_capabilities: None,
+                wire_format: ProviderWireFormat::OpenAiResponses,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities::default(),
                 models: vec![ModelConfig {
                     id: "gpt-4.1".into(),
                     max_tokens: Some(8192),
