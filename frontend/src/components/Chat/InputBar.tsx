@@ -403,16 +403,14 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       className={cn(
         'shrink-0',
         isHero
-          ? 'w-full max-w-[980px]'
+          ? 'w-full'
           : 'bg-panel-bg px-[var(--layout-page-padding-x)] pb-4 pt-3'
       )}
     >
       <div
         className={cn(
           'w-full translate-x-[var(--chat-assistant-center-shift)]',
-          isHero
-            ? 'mx-auto max-w-[980px]'
-            : 'mx-auto max-w-[var(--layout-content-max-width)]'
+          'mx-auto max-w-[var(--layout-content-max-width)]'
         )}
       >
         <PendingMessagesPanel
@@ -434,7 +432,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
               className={cn(
                 'relative',
                 isHero
-                  ? 'px-5 pb-3 pt-4'
+                  ? 'px-4 pb-2.5 pt-3.5'
                   : 'px-[var(--chat-composer-shell-padding-x)] py-3'
               )}
             >
@@ -447,7 +445,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 className={cn(
                   'w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
                   isHero
-                    ? 'mb-4 max-h-60 min-h-[72px] text-[17px] leading-[1.65]'
+                    ? 'mb-3 max-h-44 min-h-12 text-[16px] leading-[1.55]'
                     : 'mb-3 max-h-60 min-h-10 text-[15px] leading-[1.6]'
                 )}
                 placeholder={isHero ? '随心输入' : '向 AstrCode 提问...'}
@@ -585,7 +583,14 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
               </div>
             </div>
             {(projectName || extraStatusItems.length > 0) && (
-              <div className="flex min-h-12 min-w-0 items-center gap-5 border-t border-border bg-surface-soft/35 px-5 text-[14px] text-text-muted">
+              <div
+                className={cn(
+                  'flex min-w-0 items-center gap-5 border-t border-border bg-surface-soft/35 text-text-muted',
+                  isHero
+                    ? 'min-h-10 px-4 text-[13px]'
+                    : 'min-h-12 px-5 text-[14px]'
+                )}
+              >
                 {projectName && (
                   <div
                     className="flex min-w-0 items-center gap-2 text-text-secondary"

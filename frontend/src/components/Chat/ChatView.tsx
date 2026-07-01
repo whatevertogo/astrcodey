@@ -24,13 +24,15 @@ export default function ChatView({
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-panel-bg">
       <TopBar isSidebarOpen={isSidebarOpen} onToggleSidebar={onToggleSidebar} />
       {showHeroComposer ? (
-        <main className="flex min-h-0 flex-1 flex-col items-center justify-center bg-panel-bg px-[var(--layout-page-padding-x)] pb-[18vh]">
-          <h1 className="mb-14 max-w-[min(100%,920px)] text-center text-[36px] font-medium leading-tight text-text-primary">
-            我们应该在{' '}
-            {workingDir?.split(/[\\/]/).filter(Boolean).pop() ?? 'astrcodey'}{' '}
-            中构建什么？
-          </h1>
-          <InputBar presentation="hero" />
+        <main className="flex min-h-0 flex-1 flex-col items-center justify-center bg-panel-bg px-[var(--layout-page-padding-x)] pb-[14vh]">
+          <div className="flex w-full max-w-[var(--layout-content-max-width)] flex-col items-center">
+            <h1 className="mb-10 w-full text-center text-[34px] font-medium leading-tight text-text-primary">
+              我们应该在{' '}
+              {workingDir?.split(/[\\/]/).filter(Boolean).pop() ?? 'astrcodey'}{' '}
+              中构建什么？
+            </h1>
+            <InputBar presentation="hero" />
+          </div>
         </main>
       ) : (
         <>
