@@ -16,9 +16,11 @@ export default function ChatView({
   const blocks = useAppStore((s) => s.blocks)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const workingDir = useAppStore((s) => s.workingDir)
+  const phase = useAppStore((s) => s.phase)
 
   useKeybindings()
-  const showHeroComposer = activeSessionId !== null && blocks.length === 0
+  const showHeroComposer =
+    activeSessionId !== null && blocks.length === 0 && phase === 'idle'
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-panel-bg">

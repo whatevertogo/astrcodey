@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useMemo } from 'react'
+import { memo, useRef, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ConversationBlock } from '../../services/types'
 import { cn } from '../../lib/utils'
@@ -9,6 +9,10 @@ import ToolCallBlock from './ToolCallBlock'
 import ErrorBlock from './ErrorBlock'
 import SystemNote from './SystemNote'
 import CompactSummaryCard from './CompactSummaryCard'
+import {
+  useFollowLatestScroll,
+  type FollowLatestVirtualizer,
+} from './useFollowLatestScroll'
 
 interface MessageListProps {
   blocks: ConversationBlock[]
@@ -58,49 +62,13 @@ const BlockRenderer = memo(function BlockRenderer({
   )
 })
 
-import {
-  isNearBottom as isNearBottomPx,
-  nextStickToBottom,
-} from './scrollStickiness'
-
 const BLOCK_GAP_PX = 40 // matches Tailwind gap-10 (2.5rem ≈ 40px)
-
-function isNearBottom(container: HTMLDivElement) {
-  return isNearBottomPx(
-    container.scrollTop,
-    container.scrollHeight,
-    container.clientHeight
-  )
-}
 
 export default function MessageList({ blocks, sessionId }: MessageListProps) {
   'use no memo'
   // TanStack Virtual returns mutable functions, so this component opts out of React Compiler memoization.
   const listRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const shouldStickRef = useRef(true)
-  const prevItemCountRef = useRef(0)
-  const lastScrollTopRef = useRef(0)
-  const ignoreScrollRef = useRef(false)
-  const touchStartYRef = useRef<number | null>(null)
-
-  const runProgrammaticScroll = useCallback(
-    (behavior: ScrollBehavior = 'auto') => {
-      const container = listRef.current
-      if (!container) return
-      ignoreScrollRef.current = true
-      const itemCount = prevItemCountRef.current
-      if (itemCount > 0) {
-        virtualizerRef.current.scrollToIndex(itemCount - 1, { align: 'end' })
-      }
-      container.scrollTo({ top: container.scrollHeight, behavior })
-      requestAnimationFrame(() => {
-        lastScrollTopRef.current = container.scrollTop
-        ignoreScrollRef.current = false
-      })
-    },
-    []
-  )
 
   const allItems = useMemo(() => {
     const items: { type: 'block'; block: ConversationBlock; index: number }[] =
@@ -132,71 +100,8 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     getItemKey: (index) => allItems[index].block.id,
   })
 
-  const virtualizerRef = useRef(virtualizer)
+  const virtualizerRef = useRef<FollowLatestVirtualizer | null>(null)
   virtualizerRef.current = virtualizer
-
-  const followLatest = useCallback(
-    (behavior: ScrollBehavior = 'auto') => {
-      if (!shouldStickRef.current) return
-      runProgrammaticScroll(behavior)
-    },
-    [runProgrammaticScroll]
-  )
-
-  const markUserScrolledUp = useCallback(() => {
-    shouldStickRef.current = false
-  }, [])
-
-  const updateStickiness = useCallback(() => {
-    if (ignoreScrollRef.current) return
-
-    const container = listRef.current
-    if (!container) return
-
-    const scrollTop = container.scrollTop
-    shouldStickRef.current = nextStickToBottom(
-      shouldStickRef.current,
-      scrollTop,
-      lastScrollTopRef.current,
-      isNearBottom(container)
-    )
-    lastScrollTopRef.current = scrollTop
-  }, [])
-
-  const handleWheel = useCallback(
-    (e: React.WheelEvent<HTMLDivElement>) => {
-      if (e.deltaY < 0) {
-        markUserScrolledUp()
-      }
-    },
-    [markUserScrolledUp]
-  )
-
-  const handleTouchStart = useCallback(
-    (e: React.TouchEvent<HTMLDivElement>) => {
-      touchStartYRef.current = e.touches[0]?.clientY ?? null
-    },
-    []
-  )
-
-  const handleTouchMove = useCallback(
-    (e: React.TouchEvent<HTMLDivElement>) => {
-      const startY = touchStartYRef.current
-      const currentY = e.touches[0]?.clientY
-      if (startY === null || currentY === undefined) return
-      if (currentY > startY + 4) {
-        markUserScrolledUp()
-      }
-    },
-    [markUserScrolledUp]
-  )
-
-  // New session: default to following the latest messages.
-  useEffect(() => {
-    shouldStickRef.current = true
-    prevItemCountRef.current = 0
-    lastScrollTopRef.current = 0
-  }, [sessionId])
 
   // Stable streaming block identifier — changes only when streaming starts/stops
   // or the streaming block changes, NOT on every text delta.  This prevents the
@@ -204,58 +109,25 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
   // fast output, which was the main source of layout thrashing.
   const streamingBlockId = useMemo(() => {
     const last = blocks[blocks.length - 1]
-    if (last?.kind === 'assistant' && last.status === 'streaming') {
+    if (
+      last &&
+      (last.kind === 'assistant' || last.kind === 'toolCall') &&
+      last.status === 'streaming'
+    ) {
       return last.id
     }
     return null
   }, [blocks])
 
-  // New block / queued message: scroll only when the list grows and user is following.
-  useEffect(() => {
-    const itemCount = totalItemCount
-    const isFirstPaint = prevItemCountRef.current === 0 && itemCount > 0
-    const grew = itemCount > prevItemCountRef.current
-    prevItemCountRef.current = itemCount
-
-    if (!grew && !isFirstPaint) return
-    if (!shouldStickRef.current && !isFirstPaint) return
-
-    const frame = requestAnimationFrame(() => {
-      if (!shouldStickRef.current && !isFirstPaint) return
-      if (itemCount === 0) return
-      followLatest()
+  const { handleScroll, handleWheel, handleTouchStart, handleTouchMove } =
+    useFollowLatestScroll({
+      listRef,
+      contentRef,
+      virtualizerRef,
+      itemCount: totalItemCount,
+      sessionId,
+      streamingBlockId,
     })
-    return () => cancelAnimationFrame(frame)
-  }, [totalItemCount, followLatest])
-
-  // Streaming: single ResizeObserver for the duration of streaming.
-  // Created once when streaming starts, kept alive until streaming ends.
-  // Fires scroll-to-bottom on content size change (text growth) — no per-delta teardown.
-  useEffect(() => {
-    if (!streamingBlockId) return
-    const content = contentRef.current
-    if (!content) return
-
-    // Scroll to latest when streaming starts or the streaming block changes
-    if (shouldStickRef.current) {
-      followLatest()
-    }
-
-    let raf = 0
-    const observer = new ResizeObserver(() => {
-      if (!shouldStickRef.current) return
-      cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(() => {
-        if (!shouldStickRef.current) return
-        followLatest()
-      })
-    })
-    observer.observe(content)
-    return () => {
-      cancelAnimationFrame(raf)
-      observer.disconnect()
-    }
-  }, [streamingBlockId, followLatest])
 
   const virtualItems = virtualizer.getVirtualItems()
 
@@ -263,7 +135,7 @@ export default function MessageList({ blocks, sessionId }: MessageListProps) {
     <div
       ref={listRef}
       className="flex min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-panel-bg px-[var(--layout-page-padding-x)] py-7"
-      onScroll={updateStickiness}
+      onScroll={handleScroll}
       onWheel={handleWheel}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}

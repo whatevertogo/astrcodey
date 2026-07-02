@@ -132,48 +132,22 @@ pub async fn consume_llm_stream(
             LlmEvent::ContentDelta { delta } => {
                 ensure_assistant_message_started(publisher, &message_id, &mut message_started)
                     .await;
-                let mut batch = delta;
-                current_text.push_str(&batch);
-                while let Ok(next) = rx.try_recv() {
-                    match next {
-                        LlmEvent::ContentDelta { delta } => {
-                            current_text.push_str(&delta);
-                            batch.push_str(&delta);
-                        },
-                        other => {
-                            pending = Some(other);
-                            break;
-                        },
-                    }
-                }
+                current_text.push_str(&delta);
                 publisher
                     .live(EventPayload::AssistantTextDelta {
                         message_id: message_id.clone(),
-                        delta: batch,
+                        delta,
                     })
                     .await;
             },
             LlmEvent::ThinkingDelta { delta } => {
                 ensure_assistant_message_started(publisher, &message_id, &mut message_started)
                     .await;
-                let mut batch = delta;
-                reasoning_content.push_str(&batch);
-                while let Ok(next) = rx.try_recv() {
-                    match next {
-                        LlmEvent::ThinkingDelta { delta } => {
-                            reasoning_content.push_str(&delta);
-                            batch.push_str(&delta);
-                        },
-                        other => {
-                            pending = Some(other);
-                            break;
-                        },
-                    }
-                }
+                reasoning_content.push_str(&delta);
                 publisher
                     .live(EventPayload::ThinkingDelta {
                         message_id: message_id.clone(),
-                        delta: batch,
+                        delta,
                     })
                     .await;
             },

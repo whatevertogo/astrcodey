@@ -263,10 +263,6 @@ pub(in crate::http) async fn session_stream(
                     Some(input) => {
                         let mut items: std::collections::VecDeque<_> =
                             live_input_to_sse_items(&mut state, input).await.into();
-                        // Non-blocking drain: if more notifications are already
-                        // buffered in the channel, process them now so they are
-                        // sent in the same HTTP chunk as the first one.
-                        drain_pending_live_inputs(&mut state, &mut items).await;
 
                         if items.is_empty() {
                             continue;
@@ -320,32 +316,6 @@ async fn state_cursor(runtime: &ServerRuntime, session_id: &SessionId) -> String
             );
             "0".to_string()
         },
-    }
-}
-
-/// Non-blocking drain: if more live inputs are already buffered in the
-/// channel, process them now so they are batched into the same HTTP chunk.
-async fn drain_pending_live_inputs(
-    state: &mut LiveStreamState,
-    items: &mut std::collections::VecDeque<SseItem>,
-) {
-    loop {
-        let mut drained = false;
-        while let Ok(event) = state.event_rx.try_recv() {
-            drained = true;
-            let more = live_input_to_sse_items(state, LiveInput::Event(event)).await;
-            items.extend(more);
-        }
-        while let Ok(notification) = state.notification_rx.try_recv() {
-            drained = true;
-            let more =
-                live_input_to_sse_items(state, LiveInput::Notification(Box::new(notification)))
-                    .await;
-            items.extend(more);
-        }
-        if !drained {
-            break;
-        }
     }
 }
 

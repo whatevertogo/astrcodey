@@ -11,6 +11,8 @@ import type { AppState } from './types'
 
 const SSE_RECONNECT_BASE_MS = 1000
 const SSE_RECONNECT_MAX_MS = 30_000
+const STREAM_FLUSH_FALLBACK_MS = 16
+type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 
 function sseReconnectDelayMs(attempt: number): number {
   const capped = Math.min(
@@ -38,6 +40,15 @@ export function connectSse(
   let rafId: number | null = null
   let timeoutId: number | null = null
 
+  const flushBlockDeltas = (blockDeltas: BlockDelta[]) => {
+    if (blockDeltas.length === 0) return
+    const deltas = blockDeltas.splice(0)
+    set((current) => {
+      const { blocks: newBlocks } = applyCoalescedDeltas(current.blocks, deltas)
+      return { blocks: newBlocks }
+    })
+  }
+
   const flushPending = () => {
     if (rafId !== null) {
       cancelAnimationFrame(rafId)
@@ -61,34 +72,20 @@ export function connectSse(
     latestCursor = null
 
     const coalesced = coalesceDeltas(deltas)
+    const blockDeltas: BlockDelta[] = []
 
-    const textDeltas: CoalescedDelta[] = []
-    const otherDeltas: ConversationDelta[] = []
     for (const c of coalesced) {
       if (c.kind === 'other') {
-        otherDeltas.push(c.delta)
+        flushBlockDeltas(blockDeltas)
+        applyDeltaToState(get(), c.delta, get, set)
       } else {
-        textDeltas.push(c)
+        blockDeltas.push(c)
       }
     }
 
-    if (textDeltas.length > 0) {
-      set((current) => {
-        const { blocks: newBlocks } = applyCoalescedDeltas(
-          current.blocks,
-          textDeltas
-        )
-        return {
-          blocks: newBlocks,
-          ...(cursorUpdate ?? {}),
-        }
-      })
-    } else if (cursorUpdate) {
+    flushBlockDeltas(blockDeltas)
+    if (cursorUpdate) {
       set(cursorUpdate)
-    }
-
-    for (const delta of otherDeltas) {
-      applyDeltaToState(get(), delta, get, set)
     }
   }
 
@@ -97,7 +94,7 @@ export function connectSse(
       rafId = requestAnimationFrame(flushPending)
     }
     if (timeoutId === null) {
-      timeoutId = window.setTimeout(flushPending, 32)
+      timeoutId = window.setTimeout(flushPending, STREAM_FLUSH_FALLBACK_MS)
     }
   }
 

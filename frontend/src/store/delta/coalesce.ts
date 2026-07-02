@@ -21,76 +21,86 @@ export type CoalescedDelta =
   | { kind: 'other'; delta: ConversationDelta }
 
 export function coalesceDeltas(deltas: ConversationDelta[]): CoalescedDelta[] {
-  const textPatches = new Map<string, string>()
-  const thinkingPatches = new Map<string, string>()
-  const argPatches = new Map<
-    string,
-    { arguments: string; argumentsJson?: Record<string, unknown> }
-  >()
-  const toolOutputs = new Map<
-    string,
-    { stream: ToolOutputStream; delta: string }[]
-  >()
-  const others: CoalescedDelta[] = []
-
+  const result: CoalescedDelta[] = []
   for (const delta of deltas) {
+    const last = result[result.length - 1]
     switch (delta.kind) {
-      case 'patchBlock': {
-        const existing = textPatches.get(delta.blockId)
-        textPatches.set(
-          delta.blockId,
-          existing ? existing + delta.textDelta : delta.textDelta
-        )
-        break
-      }
-      case 'thinkingDelta': {
-        const existing = thinkingPatches.get(delta.blockId)
-        thinkingPatches.set(
-          delta.blockId,
-          existing ? existing + delta.delta : delta.delta
-        )
-        break
-      }
-      case 'patchArguments': {
-        argPatches.set(delta.blockId, {
-          arguments: delta.arguments,
-          argumentsJson: delta.argumentsJson,
-        })
-        break
-      }
-      case 'toolOutput': {
-        const existing = toolOutputs.get(delta.callId)
-        if (existing) {
-          existing.push({ stream: delta.stream, delta: delta.delta })
+      case 'patchBlock':
+        if (last?.kind === 'patchBlock' && last.blockId === delta.blockId) {
+          last.textDelta += delta.textDelta
         } else {
-          toolOutputs.set(delta.callId, [
-            { stream: delta.stream, delta: delta.delta },
-          ])
+          result.push({
+            kind: 'patchBlock',
+            blockId: delta.blockId,
+            textDelta: delta.textDelta,
+          })
         }
         break
-      }
+      case 'thinkingDelta':
+        if (last?.kind === 'thinkingDelta' && last.blockId === delta.blockId) {
+          last.delta += delta.delta
+        } else {
+          result.push({
+            kind: 'thinkingDelta',
+            blockId: delta.blockId,
+            delta: delta.delta,
+          })
+        }
+        break
+      case 'patchArguments':
+        if (last?.kind === 'patchArguments' && last.blockId === delta.blockId) {
+          last.arguments = delta.arguments
+          last.argumentsJson = delta.argumentsJson
+        } else {
+          result.push({
+            kind: 'patchArguments',
+            blockId: delta.blockId,
+            arguments: delta.arguments,
+            argumentsJson: delta.argumentsJson,
+          })
+        }
+        break
+      case 'toolOutput':
+        if (last?.kind === 'toolOutput' && last.callId === delta.callId) {
+          last.parts.push({ stream: delta.stream, delta: delta.delta })
+        } else {
+          result.push({
+            kind: 'toolOutput',
+            callId: delta.callId,
+            parts: [{ stream: delta.stream, delta: delta.delta }],
+          })
+        }
+        break
       default:
-        others.push({ kind: 'other', delta })
+        result.push({ kind: 'other', delta })
     }
   }
 
-  const result: CoalescedDelta[] = []
-
-  for (const [blockId, textDelta] of textPatches) {
-    result.push({ kind: 'patchBlock', blockId, textDelta })
-  }
-  for (const [blockId, delta] of thinkingPatches) {
-    result.push({ kind: 'thinkingDelta', blockId, delta })
-  }
-  for (const [blockId, args] of argPatches) {
-    result.push({ kind: 'patchArguments', blockId, ...args })
-  }
-  for (const [callId, parts] of toolOutputs) {
-    result.push({ kind: 'toolOutput', callId, parts })
-  }
-  result.push(...others)
-
   return result
+}
+
+function findBlockIdx(
+  blocks: ConversationBlock[],
+  mutations: Map<number, ConversationBlock>,
+  predicate: (block: ConversationBlock) => boolean
+): number {
+  const inBlocks = blocks.findIndex(predicate)
+  if (inBlocks !== -1) return inBlocks
+  for (const [idx, block] of mutations) {
+    if (predicate(block)) return idx
+  }
+  return -1
+}
+
+function nextMutationIdx(
+  blocks: ConversationBlock[],
+  mutations: Map<number, ConversationBlock>
+): number {
+  let idx = blocks.length
+  while (mutations.has(idx)) {
+    idx += 1
+  }
+  return idx
 }
 
 function findOrCreateToolCallIdx(
@@ -98,16 +108,13 @@ function findOrCreateToolCallIdx(
   mutations: Map<number, ConversationBlock>,
   callId: string
 ): number {
-  const inBlocks = blocks.findIndex(
+  const existing = findBlockIdx(
+    blocks,
+    mutations,
     (b) => b.kind === 'toolCall' && b.id === callId
   )
-  if (inBlocks !== -1) return inBlocks
-  for (const [idx, block] of mutations) {
-    if (block.kind === 'toolCall' && block.id === callId) {
-      return idx
-    }
-  }
-  const newIdx = blocks.length
+  if (existing !== -1) return existing
+  const newIdx = nextMutationIdx(blocks, mutations)
   mutations.set(newIdx, {
     kind: 'toolCall',
     id: callId,
@@ -132,7 +139,7 @@ export function applyCoalescedDeltas(
     blockId: string,
     kind: 'assistant' | 'toolCall'
   ): number => {
-    const idx = blocks.findIndex((b) => b.id === blockId)
+    const idx = findBlockIdx(blocks, mutations, (b) => b.id === blockId)
     if (idx !== -1) return idx
     const newBlock: ConversationBlock =
       kind === 'assistant'
@@ -145,9 +152,9 @@ export function applyCoalescedDeltas(
             text: '',
             status: 'streaming',
           }
-    mutations.set(blocks.length, newBlock)
+    mutations.set(nextMutationIdx(blocks, mutations), newBlock)
     needsNewBlocks = true
-    return blocks.length
+    return findBlockIdx(blocks, mutations, (b) => b.id === blockId)
   }
 
   for (const c of coalesced) {
@@ -172,7 +179,9 @@ export function applyCoalescedDeltas(
         break
       }
       case 'patchArguments': {
-        const idx = blocks.findIndex(
+        const idx = findBlockIdx(
+          blocks,
+          mutations,
           (b) => b.kind === 'toolCall' && b.id === c.blockId
         )
         if (idx === -1) break
@@ -207,19 +216,14 @@ export function applyCoalescedDeltas(
 
   let newBlocks = blocks
   if (needsNewBlocks) {
-    if (mutations.has(blocks.length)) {
-      newBlocks = [...blocks]
-      for (const [idx, block] of mutations) {
-        if (idx < blocks.length) {
-          newBlocks[idx] = block
-        } else {
-          newBlocks.push(block)
-        }
-      }
-    } else {
-      newBlocks = [...blocks]
-      for (const [idx, block] of mutations) {
+    newBlocks = [...blocks]
+    for (const [idx, block] of [...mutations.entries()].sort(
+      ([left], [right]) => left - right
+    )) {
+      if (idx < blocks.length) {
         newBlocks[idx] = block
+      } else {
+        newBlocks.push(block)
       }
     }
   }
