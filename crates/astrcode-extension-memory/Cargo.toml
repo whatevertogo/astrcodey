@@ -6,7 +6,7 @@ license.workspace = true
 description = "Codex-style markdown memory extension"
 
 [dependencies]
-astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["trusted-bundled"] }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }

@@ -5,8 +5,9 @@
 
 use std::{
     collections::HashMap,
+    fs::File,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
 };
 
 use astrcode_core::{
@@ -19,6 +20,8 @@ use astrcode_core::{
 };
 use astrcode_support::{hostpaths, perf_snapshot};
 use chrono::Utc;
+use fs2::FileExt;
+use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -60,8 +63,20 @@ pub struct FileSystemSessionRepository {
     projects_base: PathBuf,
 }
 
+static SESSION_OWNER_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>>> =
+    OnceLock::new();
+
+fn session_owner_locks() -> &'static Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>> {
+    SESSION_OWNER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// 会话的内部元数据，持有事件日志和快照管理器。
 struct SessionMeta {
+    /// 本进程对该 session 目录的所有权锁。
+    ///
+    /// 当前文件系统仓库刻意采用单 server owner 模型：同一进程可复用已持有的
+    /// owner lock，另一个 server 进程若尝试打开同一 session 会收到明确错误。
+    _owner_lock: SessionOwnerLock,
     /// 事件日志实例，负责追加式写入和重放
     log: Arc<EventLog>,
     /// 快照管理器，负责创建和列出恢复点
@@ -70,10 +85,70 @@ struct SessionMeta {
     dir: PathBuf,
     /// 从事件日志同步维护的内部读模型（本进程内由 `append_event` 增量更新）。
     ///
-    /// TODO(multi-process): 多 server 进程共享同一 session 目录时，另一进程写入 JSONL 后
-    /// 本实例缓存不会自动失效。刷新策略待定：比较日志 `mtime` 或尾部 `seq` 与
-    /// `projection.latest_seq`，落后则 `replay_after` 并写回此字段（见 `get_or_open_meta`）。
+    /// 文件系统仓库不支持多个 server 进程同时拥有同一个 session 目录。`_owner_lock`
+    /// 会在打开/创建 session 时阻止第二个进程进入，避免投影缓存和 JSONL writer
+    /// 出现跨进程失效问题。
     projection: RwLock<SessionReadModel>,
+}
+
+struct SessionOwnerLock {
+    _inner: Arc<SessionOwnerLockInner>,
+}
+
+struct SessionOwnerLockInner {
+    path: PathBuf,
+    _file: File,
+}
+
+impl SessionOwnerLock {
+    fn acquire(session_dir: &Path) -> Result<Self, StorageError> {
+        let key = std::fs::canonicalize(session_dir).unwrap_or_else(|_| session_dir.to_path_buf());
+        let mut locks = session_owner_locks().lock();
+
+        if let Some(inner) = locks.get(&key).and_then(Weak::upgrade) {
+            return Ok(Self { _inner: inner });
+        }
+
+        let lock_path = key.join(".astrcode-session-owner.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(StorageError::Io)?;
+
+        file.try_lock_exclusive().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                StorageError::LockError(format!(
+                    "session directory {} is already owned by another AstrCode server process; \
+                     stop that process before opening this session here",
+                    key.display()
+                ))
+            } else {
+                StorageError::Io(error)
+            }
+        })?;
+
+        let inner = Arc::new(SessionOwnerLockInner {
+            path: key.clone(),
+            _file: file,
+        });
+        locks.insert(key, Arc::downgrade(&inner));
+        Ok(Self { _inner: inner })
+    }
+}
+
+impl Drop for SessionOwnerLockInner {
+    fn drop(&mut self) {
+        let mut locks = session_owner_locks().lock();
+        if locks
+            .get(&self.path)
+            .is_some_and(|existing| existing.strong_count() == 0)
+        {
+            locks.remove(&self.path);
+        }
+    }
 }
 
 impl Default for FileSystemSessionRepository {
@@ -209,10 +284,6 @@ impl FileSystemSessionRepository {
     /// 如果会话已在内存中则直接返回缓存；否则从磁盘打开事件日志，
     /// 恢复其内存中的 seq 计数器，并加入缓存。
     /// 使用双重检查锁定模式避免重复打开。
-    ///
-    /// TODO(multi-process): 缓存命中时也应检测外部写入（日志 `mtime` / 尾部 `seq` vs
-    /// `projection.latest_seq`），必要时增量重放并更新 `SessionMeta::projection`，避免
-    /// `session_read_model` 等读路径返回过期状态。
     async fn get_or_open_meta(
         &self,
         session_id: &SessionId,
@@ -221,7 +292,6 @@ impl FileSystemSessionRepository {
             .map_err(|e| StorageError::InvalidId(e.to_string()))?;
 
         if let Some(meta) = self.sessions.read().await.get(session_id).cloned() {
-            // TODO(multi-process): call refresh_projection_if_stale(&meta) here
             return Ok(meta);
         }
 
@@ -229,12 +299,14 @@ impl FileSystemSessionRepository {
         // 否则会阻塞同实例上的 append/checkpoint，并在 Windows 上与未释放的
         // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
+        let owner_lock = SessionOwnerLock::acquire(&dir)?;
         let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
         let projection = self
             .restore_projection(session_id, &log, &snapshot_mgr)
             .await?;
         let opened = Arc::new(SessionMeta {
+            _owner_lock: owner_lock,
             log,
             snapshot_mgr,
             dir,
@@ -315,7 +387,6 @@ impl EventReader for FileSystemSessionRepository {
         session_id: &SessionId,
     ) -> Result<SessionReadModel, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        // TODO(multi-process): stale check belongs in get_or_open_meta; keep read path thin
         let model = meta.projection.read().await.clone();
         Ok(model)
     }
@@ -492,6 +563,7 @@ impl EventStore for FileSystemSessionRepository {
             None => self.session_dir_from_working_dir(working_dir, session_id),
         };
         tokio::fs::create_dir_all(&dir).await?;
+        let owner_lock = SessionOwnerLock::acquire(&dir)?;
 
         let start_event = Event::new(
             session_id.clone(),
@@ -514,6 +586,7 @@ impl EventStore for FileSystemSessionRepository {
         self.sessions.write().await.insert(
             session_id.clone(),
             Arc::new(SessionMeta {
+                _owner_lock: owner_lock,
                 log: Arc::new(log),
                 snapshot_mgr: SnapshotManager::new(dir.join("snapshots")),
                 dir,
@@ -921,6 +994,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn session_owner_lock_reports_existing_owner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let lock_path = temp_dir.path().join(".astrcode-session-owner.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        file.try_lock_exclusive().unwrap();
+
+        let error = match SessionOwnerLock::acquire(temp_dir.path()) {
+            Ok(_) => panic!("session owner lock should reject an existing owner"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            StorageError::LockError(message)
+                if message.contains("already owned by another AstrCode server process")
+        ));
+    }
 
     #[tokio::test]
     async fn compact_snapshot_writes_metadata_and_messages() {

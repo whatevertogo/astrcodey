@@ -8,7 +8,7 @@ description = "Extension/hook system: lifecycle events, hook modes, extension lo
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-kernel = { path = "../astrcode-kernel" }
-astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["trusted-bundled"] }
 astrcode-support = { path = "../astrcode-support" }
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros"] }
 serde = { workspace = true }

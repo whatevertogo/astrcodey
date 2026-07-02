@@ -19,9 +19,12 @@ mod turn_recall;
 
 use std::sync::{Arc, OnceLock};
 
-use astrcode_extension_sdk::extension::{
-    Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-    ExtensionHostServices, ExtensionTasks, HookMode, ProviderEvent, Registrar, StopReason,
+use astrcode_extension_sdk::{
+    extension::{
+        Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError,
+        ExtensionEvent, ExtensionTasks, HookMode, ProviderEvent, Registrar, StopReason,
+    },
+    trusted::ExtensionHostServices,
 };
 use handlers::{
     MemoryDeleteHandler, MemoryListHandler, MemoryRecallHandler, MemorySaveHandler,

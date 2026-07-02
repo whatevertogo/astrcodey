@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Stable authoring surface for AstrCode extensions"
 
+[features]
+default = []
+trusted-bundled = []
+
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-protocol = { path = "../astrcode-protocol" }

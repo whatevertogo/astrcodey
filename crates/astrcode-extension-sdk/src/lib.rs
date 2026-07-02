@@ -5,11 +5,33 @@
 //! contracts to session, storage, and provider implementations.
 
 pub mod extension {
-    pub use astrcode_core::extension::*;
+    pub use astrcode_core::extension::{
+        AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
+        AfterToolResultsRegistration, AfterToolResultsResult, ChildToolPolicy,
+        CommandCompletionItem, CommandCompletions, CommandContext, CommandDiscoveryHandler,
+        CommandHandler, CompactContext, CompactContributions, CompactEvent, CompactHandler,
+        CompactResult, CompactStrategy, CompactTrigger, ContinueAfterStopContext,
+        ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
+        ContinueAfterStopRegistration, ContinueAfterStopResult, DiscoveredTool,
+        EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
+        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionManifest,
+        ExtensionTasks, ExtensionToolOutcome, HookMode, HookResult, Keybinding, LifecycleContext,
+        LifecycleHandler, PostToolUseContext, PostToolUseFailureContext, PostToolUseFailureHandler,
+        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
+        PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        StatusItem, StatusItemUpdatePayload, StopReason, ToolDiscoveryHandler, ToolHandler,
+        ToolHookRegistration, ToolHookTarget, UserMessageEnvelopeContext,
+        UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, UserMessageEnvelopeResult,
+    };
+}
 
-    // TODO: ExtensionHostServices 通过 pub use * 对所有 SDK 消费者可见，
-    //       但它只应给 trusted bundled extension 使用。未来需要过滤这个类型的公开可见性，
-    //       或者改用 capped re-export 代替通配符。
+#[cfg(feature = "trusted-bundled")]
+pub mod trusted {
+    /// Host services are only for trusted bundled extensions started in-process.
+    /// Disk/IPC extensions must use the capability-gated host API instead.
+    pub use astrcode_core::extension::ExtensionHostServices;
 }
 
 pub mod config {

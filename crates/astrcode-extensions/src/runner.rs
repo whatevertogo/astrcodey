@@ -20,6 +20,7 @@ use astrcode_extension_sdk::{
         ExecutionMode, SessionOperations, Tool, ToolDefinition, ToolError, ToolExecutionContext,
         ToolResult,
     },
+    trusted::ExtensionHostServices,
 };
 use astrcode_kernel::ExtensionRuntime;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
