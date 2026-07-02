@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 // Post-install script: resolve the correct platform-specific binary package.
 
-const { existsSync, mkdirSync, copyFileSync, chmodSync } = require('fs');
+const {
+  existsSync,
+  mkdirSync,
+  copyFileSync,
+  chmodSync,
+  linkSync,
+  unlinkSync,
+} = require('fs');
 const { join } = require('path');
 
 const PLATFORM_MAP = {
@@ -46,7 +53,14 @@ if (!existsSync(binDir)) {
 
 const ext = platform === 'win32' ? '.exe' : '';
 const dest = join(binDir, `astrcode${ext}`);
-copyFileSync(binaryPath, dest);
+try {
+  if (existsSync(dest)) {
+    unlinkSync(dest);
+  }
+  linkSync(binaryPath, dest);
+} catch (e) {
+  copyFileSync(binaryPath, dest);
+}
 if (platform !== 'win32') {
   chmodSync(dest, 0o755);
 }
