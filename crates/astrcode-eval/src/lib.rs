@@ -14,9 +14,9 @@ pub mod setup;
 
 use std::path::PathBuf;
 
+pub use adapter::{BenchmarkAdapter, SweBenchAdapter};
 pub use report::EvalReport;
 pub use runner::EvalRunner;
-pub use adapter::{BenchmarkAdapter, SweBenchAdapter};
 
 /// Eval 全局配置。
 #[derive(Debug, Clone)]

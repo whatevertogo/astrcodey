@@ -14,7 +14,7 @@ use walkdir::WalkDir;
 
 use crate::{
     EvalError,
-    case::{EvalCase, JudgeConfig, Setup, DEFAULT_TIMEOUT_SECS},
+    case::{DEFAULT_TIMEOUT_SECS, EvalCase, JudgeConfig, Setup},
 };
 
 /// 外部 benchmark 适配器。
@@ -153,12 +153,19 @@ fn collect_case_files(source: &Path) -> Result<Vec<PathBuf>, EvalError> {
     }
 
     let mut paths = Vec::new();
-    for entry in WalkDir::new(source).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(source)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         let path = entry.path();
         if !entry.file_type().is_file() {
             continue;
         }
-        match path.extension().and_then(OsStr::to_str).map(|ext| ext.to_ascii_lowercase()) {
+        match path
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| ext.to_ascii_lowercase())
+        {
             Some(ext) if ext == "json" || ext == "jsonl" => paths.push(path.to_path_buf()),
             _ => (),
         }
@@ -181,10 +188,7 @@ fn load_swe_case_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
     let trimmed = text.trim();
     if trimmed.starts_with('[') {
         return serde_json::from_str::<Vec<SweBenchRecord>>(trimmed).map_err(|e| {
-            EvalError::CaseLoad(format!(
-                "invalid SWE JSON array {}: {e}",
-                path.display()
-            ))
+            EvalError::CaseLoad(format!("invalid SWE JSON array {}: {e}", path.display()))
         });
     }
 
@@ -255,7 +259,9 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
         prompts.extend(hints.into_iter().map(|hint| format!("Hint: {hint}")));
     }
 
-    let repo = record.repo.ok_or_else(|| EvalError::CaseLoad(format!("{id}: missing repo")))?;
+    let repo = record
+        .repo
+        .ok_or_else(|| EvalError::CaseLoad(format!("{id}: missing repo")))?;
     let commit = record
         .base_commit
         .or(record.commit)
@@ -274,7 +280,7 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
 
     Ok(EvalCase {
         id,
-        description: format!("SWE benchmark case"),
+        description: "SWE benchmark case".to_string(),
         setup: Setup::Git {
             repo: normalize_repo_url(&repo),
             commit,

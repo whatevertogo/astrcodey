@@ -10,7 +10,9 @@ mod exec;
 mod transport;
 mod tui;
 
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
+#[cfg(feature = "dev-mode")]
+use std::path::PathBuf;
+use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use astrcode_core::permission::ApprovalMode;
 use astrcode_protocol::framing::PROTOCOL_VERSION;
@@ -32,6 +34,7 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
     }
 }
 
+#[cfg(feature = "dev-mode")]
 fn swe_to_source(raw: String) -> astrcode_eval::EvalSource {
     if raw.starts_with("http://") || raw.starts_with("https://") {
         astrcode_eval::EvalSource::SweBenchUrl(raw)
