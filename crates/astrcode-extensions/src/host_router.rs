@@ -4,7 +4,10 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::EventPayload,
-    extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHostServices},
+    extension::{
+        ChildToolPolicy, ExtensionCapability, ExtensionError, ExtensionEventDecl,
+        ExtensionHostServices,
+    },
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     tool::{
         CreateSessionRequest, SessionAccessPair, SessionOperations, SubmitTurnRequest,
@@ -436,7 +439,7 @@ impl HostRouter {
             working_dir: input["working_dir"].as_str().map(str::to_string),
             system_prompt: input["system_prompt"].as_str().map(str::to_string),
             model_preference: input["model_preference"].as_str().map(str::to_string),
-            tool_policy: None,
+            tool_policy: parse_child_tool_policy(input)?,
             source_extension: Some(ctx.extension_id.clone()),
             ephemeral: input["ephemeral"].as_bool().unwrap_or(false),
             tool_call_id: input["tool_call_id"].as_str().unwrap_or("").to_string(),
@@ -676,6 +679,44 @@ fn required_capability_for_astrcode(cap: &str) -> Option<ExtensionCapability> {
     }
 }
 
+fn parse_child_tool_policy(input: &Value) -> Result<Option<ChildToolPolicy>, ErrorPayload> {
+    let Some(value) = input.get("tool_policy") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let policy = serde_json::from_value::<ChildToolPolicy>(value.clone()).map_err(|e| {
+        ErrorPayload::new("invalid_input", format!("invalid tool_policy: {e}"))
+            .with_hint("expected {\"mode\":\"allow|deny\",\"tools\":[\"tool_name\"]}")
+    })?;
+    validate_child_tool_policy(&policy)?;
+    Ok(Some(policy))
+}
+
+fn validate_child_tool_policy(policy: &ChildToolPolicy) -> Result<(), ErrorPayload> {
+    let tools = match policy {
+        ChildToolPolicy::Deny { tools } => tools,
+        ChildToolPolicy::Allow { tools } if tools.is_empty() => {
+            return Err(ErrorPayload::new(
+                "invalid_input",
+                "tool_policy allow mode requires at least one tool",
+            ));
+        },
+        ChildToolPolicy::Allow { tools } => tools,
+    };
+
+    if tools.iter().any(|tool| tool.trim().is_empty()) {
+        return Err(ErrorPayload::new(
+            "invalid_input",
+            "tool_policy tools must be non-empty strings",
+        ));
+    }
+
+    Ok(())
+}
+
 fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescriptor> {
     let object_schema = serde_json::json!({ "type": "object" });
     match cap {
@@ -713,7 +754,44 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
             CapabilityDescriptor {
                 name: "astrcode.session.control.create".into(),
                 description: "Create a child session".into(),
-                input_schema: object_schema.clone(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "working_dir": { "type": "string" },
+                        "system_prompt": { "type": "string" },
+                        "model_preference": { "type": "string" },
+                        "ephemeral": { "type": "boolean" },
+                        "tool_call_id": { "type": "string" },
+                        "tool_policy": {
+                            "type": "object",
+                            "description": "Child session tool visibility policy.",
+                            "oneOf": [
+                                {
+                                    "properties": {
+                                        "mode": { "const": "deny" },
+                                        "tools": {
+                                            "type": "array",
+                                            "items": { "type": "string" }
+                                        }
+                                    },
+                                    "required": ["mode", "tools"]
+                                },
+                                {
+                                    "properties": {
+                                        "mode": { "const": "allow" },
+                                        "tools": {
+                                            "type": "array",
+                                            "items": { "type": "string" },
+                                            "minItems": 1
+                                        }
+                                    },
+                                    "required": ["mode", "tools"]
+                                }
+                            ]
+                        }
+                    }
+                }),
                 output_schema: object_schema.clone(),
                 supports_stream: false,
                 cancelable: false,
@@ -884,6 +962,15 @@ pub fn build_host_router(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use astrcode_core::{
+        permission::ApprovalDecision,
+        tool::{
+            CreateRootSessionRequest, SessionAccess, SessionApiError, SessionHandle, SessionStatus,
+        },
+    };
+
     use super::*;
 
     #[test]
@@ -891,6 +978,17 @@ mod tests {
         let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
         let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"astrcode.session.control.create"));
+    }
+
+    #[test]
+    fn session_control_create_schema_includes_tool_policy() {
+        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
+        let create = caps
+            .iter()
+            .find(|cap| cap.name == "astrcode.session.control.create")
+            .expect("create capability");
+
+        assert!(create.input_schema["properties"]["tool_policy"].is_object());
     }
 
     #[test]
@@ -1002,6 +1100,71 @@ mod tests {
     }
 
     #[test]
+    fn invoke_session_create_forwards_tool_policy() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ops = Arc::new(CapturingSessionOps::default());
+        let ctx = InvokeContext {
+            extension_id: "test-extension".into(),
+            session_id: Some("parent".into()),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+
+        let output = router
+            .invoke_sync(
+                "astrcode.session.control.create",
+                &json!({
+                    "name": "worker",
+                    "tool_policy": {
+                        "mode": "deny",
+                        "tools": ["agent"]
+                    }
+                })
+                .to_string(),
+                &ctx,
+            )
+            .expect("create child session");
+
+        assert_eq!(output["session_id"], "child-1");
+        let requests = ops.creates.lock().expect("creates lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].tool_policy,
+            Some(ChildToolPolicy::Deny {
+                tools: vec!["agent".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn invoke_session_create_rejects_invalid_tool_policy() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(Arc::new(CapturingSessionOps::default())),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+
+        let err = router
+            .invoke_sync(
+                "astrcode.session.control.create",
+                &json!({
+                    "tool_policy": {
+                        "mode": "allow",
+                        "tools": []
+                    }
+                })
+                .to_string(),
+                &ctx,
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, "invalid_input");
+    }
+
+    #[test]
     fn invoke_stream_sync_rejects_precancelled_token() {
         let router = HostRouter::from_backends(HostBackends::default());
         let token = CancellationToken::new();
@@ -1020,5 +1183,94 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, "cancelled");
+    }
+
+    #[derive(Default)]
+    struct CapturingSessionOps {
+        creates: Mutex<Vec<CreateSessionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionOperations for CapturingSessionOps {
+        async fn create_root_session(
+            &self,
+            _request: CreateRootSessionRequest,
+        ) -> Result<SessionHandle, SessionApiError> {
+            Ok(SessionHandle {
+                session_id: "root".into(),
+            })
+        }
+
+        async fn create_session(
+            &self,
+            _parent_session_id: &str,
+            request: CreateSessionRequest,
+        ) -> Result<SessionHandle, SessionApiError> {
+            let mut creates = self.creates.lock().expect("creates lock");
+            creates.push(request);
+            Ok(SessionHandle {
+                session_id: format!("child-{}", creates.len()),
+            })
+        }
+
+        async fn inject_message(
+            &self,
+            _access: SessionAccess<'_>,
+            _content: String,
+        ) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResult, SessionApiError> {
+            Ok(SubmitTurnResult::Backgrounded {
+                task_id: "task".into(),
+                session_id: "child".into(),
+            })
+        }
+
+        async fn query_session(
+            &self,
+            _access: SessionAccess<'_>,
+        ) -> Result<SessionStatus, SessionApiError> {
+            Ok(SessionStatus {
+                alive: true,
+                has_active_turn: false,
+                last_finish_reason: None,
+                message_count: 0,
+            })
+        }
+
+        async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn delete_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn restore_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn resolve_tool_approval(
+            &self,
+            _target_session_id: &str,
+            _call_id: &str,
+            _decision: ApprovalDecision,
+        ) -> Result<(), SessionApiError> {
+            Ok(())
+        }
+
+        async fn resolve_tool_ui_response(
+            &self,
+            _target_session_id: &str,
+            _call_id: &str,
+            _answers: std::collections::BTreeMap<String, String>,
+        ) -> Result<(), SessionApiError> {
+            Ok(())
+        }
     }
 }

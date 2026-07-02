@@ -301,11 +301,19 @@ let created = HostClient::call(
         "model_preference": model,
         "ephemeral": true,
         "tool_call_id": tool_call_id,
-        "working_dir": working_dir
+        "working_dir": working_dir,
+        "tool_policy": {
+            "mode": "deny",
+            "tools": ["agent"]
+        }
     }),
 ).await?;
 let child_id = created["session_id"].as_str().unwrap();
 ```
+
+`tool_policy` 是子会话工具可见性策略。外置 agent 默认建议使用
+`{"mode":"deny","tools":["agent"]}`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
+`{"mode":"allow","tools":["tool_a","tool_b"]}` 白名单。
 
 提交 turn（**外置扩展请用异步**，避免 peer 死锁）：
 
