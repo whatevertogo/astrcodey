@@ -10,7 +10,7 @@ mod exec;
 mod transport;
 mod tui;
 
-use std::{net::SocketAddr, process::ExitCode, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
 
 use astrcode_core::permission::ApprovalMode;
 use astrcode_protocol::framing::PROTOCOL_VERSION;
@@ -29,6 +29,14 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
         default_approval_mode_if_unset: Some(ApprovalMode::Yolo),
         approval_mode_override,
         ..Default::default()
+    }
+}
+
+fn swe_to_source(raw: String) -> astrcode_eval::EvalSource {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        astrcode_eval::EvalSource::SweBenchUrl(raw)
+    } else {
+        astrcode_eval::EvalSource::SweBench(PathBuf::from(raw))
     }
 }
 
@@ -81,6 +89,9 @@ enum Commands {
         /// eval case 目录路径
         #[arg(long, default_value = "eval-tasks")]
         cases: std::path::PathBuf,
+        /// SWE-bench 数据文件、目录或 URL（json/jsonl）。设置后覆盖 --cases。
+        #[arg(long)]
+        swe: Option<String>,
         /// 报告输出路径（默认 stdout）
         #[arg(long)]
         output: Option<std::path::PathBuf>,
@@ -202,6 +213,7 @@ async fn main() -> ExitCode {
         #[cfg(feature = "dev-mode")]
         Commands::Eval {
             cases,
+            swe,
             output,
             format,
             concurrency,
@@ -213,6 +225,7 @@ async fn main() -> ExitCode {
         } => {
             let config = astrcode_eval::EvalConfig {
                 cases_dir: cases,
+                source: swe.map_or(astrcode_eval::EvalSource::TomlDir, swe_to_source),
                 concurrency,
                 tags_filter: tags,
                 keep_workdir,

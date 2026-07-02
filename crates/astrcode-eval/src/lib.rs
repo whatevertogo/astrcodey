@@ -16,12 +16,15 @@ use std::path::PathBuf;
 
 pub use report::EvalReport;
 pub use runner::EvalRunner;
+pub use adapter::{BenchmarkAdapter, SweBenchAdapter};
 
 /// Eval 全局配置。
 #[derive(Debug, Clone)]
 pub struct EvalConfig {
     /// eval case 目录路径。
     pub cases_dir: PathBuf,
+    /// 用例来源。
+    pub source: EvalSource,
     /// 最大并发 case 数。
     pub concurrency: usize,
     /// 按 tag 过滤 case。
@@ -41,10 +44,22 @@ pub struct EvalConfig {
     pub storage_root: Option<PathBuf>,
 }
 
+/// eval 用例来源。
+#[derive(Debug, Clone)]
+pub enum EvalSource {
+    /// 原有格式：目录下读取 .toml case 文件。
+    TomlDir,
+    /// SWE 格式实例文件（json 或 jsonl）。
+    SweBench(PathBuf),
+    /// SWE 格式实例 URL（json 或 jsonl）。
+    SweBenchUrl(String),
+}
+
 impl Default for EvalConfig {
     fn default() -> Self {
         Self {
             cases_dir: PathBuf::from("eval-tasks"),
+            source: EvalSource::TomlDir,
             concurrency: 4,
             tags_filter: None,
             keep_workdir: false,
@@ -60,7 +75,11 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
     // 设置存储隔离：通过 ASTRCODE_TEST_HOME 注入 eval 专用存储目录
     let _storage_dir = setup_storage_isolation(&config)?;
 
-    let mut cases = case::load_case_set(&config.cases_dir)?;
+    let mut cases = match &config.source {
+        EvalSource::TomlDir => case::load_case_set(&config.cases_dir)?,
+        EvalSource::SweBench(path) => SweBenchAdapter.load_cases(path)?,
+        EvalSource::SweBenchUrl(url) => SweBenchAdapter.load_cases_from_source(url).await?,
+    };
 
     // 按 tag 过滤
     if let Some(ref tags) = config.tags_filter {

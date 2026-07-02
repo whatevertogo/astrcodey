@@ -31,8 +31,11 @@ pub struct EvalCase {
 }
 
 fn default_timeout() -> u64 {
-    300
+    DEFAULT_TIMEOUT_SECS
 }
+
+/// 默认 case 超时时间（秒）。
+pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// 工作目录准备策略。
 #[derive(Debug, Clone, Deserialize, Default)]
