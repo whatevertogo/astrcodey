@@ -358,6 +358,7 @@ export interface ApplyProviderPresetRequest {
   endpointId?: string
   profileName?: string
   baseUrl?: string
+  apiKey?: string
   modelId?: string
   activate?: boolean
 }
@@ -367,6 +368,18 @@ export interface ApplyProviderPresetResponse {
   profileName: string
   modelId: string
   activated: boolean
+  warning?: string
+}
+
+export interface RemoveProviderPresetRequest {
+  profileName: string
+}
+
+export interface RemoveProviderPresetResponse {
+  success: boolean
+  removedProfileName: string
+  activeProfile: string
+  activeModel: string
   warning?: string
 }
 

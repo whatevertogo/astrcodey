@@ -1,4 +1,13 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
 use astrcode_core::{
@@ -228,7 +237,13 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
     })
     .to_string();
 
-    let response = post_json_owned(app, "/api/config/provider-preset/apply", body, &token).await;
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
 
     assert_eq!(response.status(), StatusCode::OK);
     let applied: ApplyProviderPresetResponseDto =
@@ -237,8 +252,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
     assert_eq!(applied.model_id, "qwen3-coder-plus");
     assert!(!applied.activated);
 
-    let saved = fs::read_to_string(runtime.config_manager().config_store().path()).unwrap();
-    let config: astrcode_core::config::Config = serde_json::from_str(&saved).unwrap();
+    let config = runtime.config_manager().raw_config_snapshot();
     let profile = config
         .profiles
         .iter()
@@ -254,6 +268,88 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
         "https://dashscope.aliyuncs.com/compatible-mode/v1"
     );
     assert_eq!(profile.api_key.as_deref(), Some("env:DASHSCOPE_API_KEY"));
+}
+
+#[tokio::test]
+async fn provider_preset_apply_uses_submitted_api_key() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let body = serde_json::json!({
+        "providerId": "openai-compatible",
+        "baseUrl": "https://api.example.test/v1",
+        "apiKey": "test-key-from-settings",
+        "modelId": "custom-model",
+        "activate": true
+    })
+    .to_string();
+
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let applied: ApplyProviderPresetResponseDto =
+        serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(applied.profile_name, "openai-compatible");
+    assert_eq!(applied.model_id, "custom-model");
+    assert!(applied.activated);
+
+    let config = runtime.config_manager().raw_config_snapshot();
+    assert_eq!(config.active_profile, "openai-compatible");
+    assert_eq!(config.active_model, "custom-model");
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "openai-compatible")
+        .expect("custom provider profile was persisted");
+    assert_eq!(profile.base_url, "https://api.example.test/v1");
+    assert_eq!(profile.api_key.as_deref(), Some("test-key-from-settings"));
+
+    let body = serde_json::json!({
+        "providerId": "openai-compatible",
+        "baseUrl": "https://api.changed.example.test/v1",
+        "modelId": "custom-model",
+        "activate": true
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let config = runtime.config_manager().raw_config_snapshot();
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "openai-compatible")
+        .expect("custom provider profile was persisted");
+    assert_eq!(profile.base_url, "https://api.changed.example.test/v1");
+    assert_eq!(profile.api_key.as_deref(), Some("test-key-from-settings"));
+
+    let body = serde_json::json!({
+        "profileName": "openai-compatible"
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/provider-preset/remove", body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let config = runtime.config_manager().raw_config_snapshot();
+    assert_ne!(config.active_profile, "openai-compatible");
+    assert!(
+        config
+            .profiles
+            .iter()
+            .all(|profile| profile.name != "openai-compatible")
+    );
 }
 
 #[tokio::test]
@@ -1205,6 +1301,8 @@ impl EventStore for TestEventStore {
 }
 
 async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+    static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
+
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -1282,7 +1380,10 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     ));
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-config.json"),
+            std::path::PathBuf::from(format!(
+                "target/test-config-{}.json",
+                NEXT_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
+            )),
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),

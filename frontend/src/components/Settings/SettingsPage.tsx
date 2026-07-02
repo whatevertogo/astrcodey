@@ -3,7 +3,7 @@ import { useAppStore } from '../../store/conversation'
 import { btnPrimary, fieldInput } from '../../lib/styles'
 import { cn } from '../../lib/utils'
 import { getStoredTheme, setTheme, type ThemePreference } from '../../lib/theme'
-import { Button, Icon, IconButton } from '../ui'
+import { Button, Icon, IconButton, Modal } from '../ui'
 import { PageHeader } from '../layout'
 import * as api from '../../services/api'
 import type {
@@ -16,6 +16,19 @@ import type {
 } from '../../services/types'
 
 type SettingsSection = 'model' | 'appearance'
+
+interface ProviderConfigDialogState {
+  provider: ProviderSpecView
+  existingProfile?: ProfileView
+  baseUrl: string
+  apiKey: string
+  modelId: string
+}
+
+interface ProviderRemoveDialogState {
+  provider: ProviderSpecView
+  profile: ProfileView
+}
 
 const THEME_OPTIONS: { value: ThemePreference; label: string; hint: string }[] =
   [
@@ -75,6 +88,20 @@ function authLabel(profile: ProfileView | undefined): string {
   return profile ? authSchemeLabel(profile.authScheme) : ''
 }
 
+function findProviderProfile(
+  profiles: ProfileView[],
+  provider: ProviderSpecView
+): ProfileView | undefined {
+  return (
+    profiles.find((profile) => profile.name === provider.id) ??
+    profiles.find(
+      (profile) =>
+        profile.providerKind === provider.providerKind &&
+        profile.wireFormat === provider.wireFormat
+    )
+  )
+}
+
 export default function SettingsPage({
   isSidebarOpen,
   onToggleSidebar,
@@ -101,9 +128,16 @@ export default function SettingsPage({
   const [applyingProviderId, setApplyingProviderId] = useState<string | null>(
     null
   )
-  const [customBaseUrls, setCustomBaseUrls] = useState<Record<string, string>>(
-    {}
+  const [removingProviderId, setRemovingProviderId] = useState<string | null>(
+    null
   )
+  const [activatingProviderId, setActivatingProviderId] = useState<
+    string | null
+  >(null)
+  const [providerConfigDialog, setProviderConfigDialog] =
+    useState<ProviderConfigDialogState | null>(null)
+  const [providerRemoveDialog, setProviderRemoveDialog] =
+    useState<ProviderRemoveDialogState | null>(null)
 
   const applyConfig = useCallback((config: ConfigView) => {
     setConfigView(config)
@@ -205,26 +239,55 @@ export default function SettingsPage({
     }
   }, [])
 
-  const handleApplyProviderPreset = useCallback(
-    async (provider: ProviderSpecView) => {
+  const openProviderConfigDialog = useCallback(
+    (provider: ProviderSpecView, existingProfile?: ProfileView) => {
       const defaultEndpoint = provider.endpoints.find(
         (endpoint) => endpoint.isDefault
       )
-      const customBaseUrl = (customBaseUrls[provider.id] ?? '').trim()
-      if (!defaultEndpoint?.baseUrl && !customBaseUrl) return
+      const modelId =
+        existingProfile?.models.find((model) => model.id === selectedModel)
+          ?.id ??
+        existingProfile?.models[0]?.id ??
+        provider.defaultModel
 
-      setApplyingProviderId(provider.id)
+      setProviderConfigDialog({
+        provider,
+        existingProfile,
+        baseUrl: existingProfile?.baseUrl ?? defaultEndpoint?.baseUrl ?? '',
+        apiKey: '',
+        modelId,
+      })
+      setStatusMessage(null)
+      setErrorMessage(null)
+      setTestResult(null)
+    },
+    [selectedModel]
+  )
+
+  const handleApplyProviderPreset = useCallback(
+    async (dialog: ProviderConfigDialogState, activate = true) => {
+      const baseUrl = dialog.baseUrl.trim()
+      const apiKey = dialog.apiKey.trim()
+      const modelId = dialog.modelId.trim() || dialog.provider.defaultModel
+      if (!baseUrl) return
+
+      setApplyingProviderId(dialog.provider.id)
       setStatusMessage(null)
       setErrorMessage(null)
       setTestResult(null)
       try {
         const response = await api.applyProviderPreset({
-          providerId: provider.id,
-          endpointId: defaultEndpoint?.id,
-          baseUrl: defaultEndpoint?.baseUrl ? undefined : customBaseUrl,
-          activate: true,
+          providerId: dialog.provider.id,
+          baseUrl,
+          apiKey: apiKey || undefined,
+          modelId,
+          activate,
         })
         applyConfig(await api.getConfig())
+        if (activate) {
+          bumpModelRefreshKey()
+        }
+        setProviderConfigDialog(null)
         setStatusMessage(
           response.warning
             ? `已保存 ${response.profileName}；${response.warning}`
@@ -238,7 +301,71 @@ export default function SettingsPage({
         setApplyingProviderId(null)
       }
     },
-    [applyConfig, customBaseUrls]
+    [applyConfig, bumpModelRefreshKey]
+  )
+
+  const handleActivateProviderProfile = useCallback(
+    async (provider: ProviderSpecView, profile: ProfileView) => {
+      const modelId = profile.models[0]?.id
+      if (!modelId) return
+
+      setActivatingProviderId(provider.id)
+      setStatusMessage(null)
+      setErrorMessage(null)
+      setTestResult(null)
+      try {
+        const response = await api.updateActiveSelection(
+          profile.name,
+          modelId,
+          selectedSmallProfile || undefined,
+          selectedSmallModel || undefined,
+          yoloEnabled ? 'yolo' : 'manual'
+        )
+        applyConfig(await api.getConfig())
+        bumpModelRefreshKey()
+        setStatusMessage(
+          response.warning
+            ? `已切换到 ${profile.name}；${response.warning}`
+            : `已切换到 ${profile.name}`
+        )
+      } catch (err) {
+        setErrorMessage(String(err))
+      } finally {
+        setActivatingProviderId(null)
+      }
+    },
+    [
+      applyConfig,
+      bumpModelRefreshKey,
+      selectedSmallModel,
+      selectedSmallProfile,
+      yoloEnabled,
+    ]
+  )
+
+  const handleRemoveProviderPreset = useCallback(
+    async (dialog: ProviderRemoveDialogState) => {
+      setRemovingProviderId(dialog.provider.id)
+      setStatusMessage(null)
+      setErrorMessage(null)
+      setTestResult(null)
+      try {
+        const response = await api.removeProviderPreset(dialog.profile.name)
+        applyConfig(await api.getConfig())
+        bumpModelRefreshKey()
+        setProviderRemoveDialog(null)
+        setStatusMessage(
+          response.warning
+            ? `已取消 ${response.removedProfileName}；${response.warning}`
+            : `已取消 ${response.removedProfileName}`
+        )
+      } catch (err) {
+        setErrorMessage(String(err))
+      } finally {
+        setRemovingProviderId(null)
+      }
+    },
+    [applyConfig, bumpModelRefreshKey]
   )
 
   const handleThemeChange = useCallback((preference: ThemePreference) => {
@@ -504,15 +631,40 @@ export default function SettingsPage({
                         const defaultEndpoint = provider.endpoints.find(
                           (endpoint) => endpoint.isDefault
                         )
-                        const needsCustomBaseUrl = !defaultEndpoint?.baseUrl
-                        const customBaseUrl =
-                          customBaseUrls[provider.id]?.trim() ?? ''
-                        const canApply =
+                        const existingProviderProfile = findProviderProfile(
+                          profiles,
+                          provider
+                        )
+                        const isConfigured = Boolean(existingProviderProfile)
+                        const isActive =
+                          existingProviderProfile?.name === selectedProfile
+                        const configuredModel =
+                          existingProviderProfile?.models.find(
+                            (model) => model.id === selectedModel
+                          )?.id ?? existingProviderProfile?.models[0]?.id
+                        const displayedBaseUrl =
+                          existingProviderProfile?.baseUrl ??
+                          defaultEndpoint?.baseUrl ??
+                          defaultEndpoint?.label ??
+                          '-'
+                        const isProviderBusy =
+                          applyingProviderId === provider.id ||
+                          removingProviderId === provider.id ||
+                          activatingProviderId === provider.id
+                        const canConfigure =
                           !applyingProviderId &&
+                          !removingProviderId &&
+                          !activatingProviderId &&
                           !saving &&
                           !reloading &&
-                          !testing &&
-                          (!needsCustomBaseUrl || customBaseUrl.length > 0)
+                          !testing
+                        const canActivate =
+                          Boolean(existingProviderProfile && configuredModel) &&
+                          !isActive &&
+                          canConfigure
+                        const canRemove =
+                          Boolean(existingProviderProfile) &&
+                          canConfigure
                         const capabilityLabels = [
                           provider.capabilities.promptCacheKey
                             ? 'Cache key'
@@ -546,28 +698,51 @@ export default function SettingsPage({
                             <div className="mt-3 divide-y divide-border text-[12px]">
                               <div className="flex justify-between gap-3 py-1.5">
                                 <span className="shrink-0 text-text-tertiary">
+                                  状态
+                                </span>
+                                <span
+                                  className={cn(
+                                    'min-w-0 text-right font-medium',
+                                    isActive
+                                      ? 'text-success'
+                                      : isConfigured
+                                        ? 'text-text-primary'
+                                        : 'text-text-tertiary'
+                                  )}
+                                >
+                                  {isActive
+                                    ? '当前使用'
+                                    : isConfigured
+                                      ? '已配置'
+                                      : '未配置'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
                                   Model
                                 </span>
                                 <span className="min-w-0 break-all text-right text-text-primary">
-                                  {provider.defaultModel}
+                                  {configuredModel ?? provider.defaultModel}
                                 </span>
                               </div>
                               <div className="flex justify-between gap-3 py-1.5">
                                 <span className="shrink-0 text-text-tertiary">
-                                  Endpoint
+                                  Base URL
                                 </span>
                                 <span className="min-w-0 break-all text-right text-text-primary">
-                                  {defaultEndpoint?.baseUrl ??
-                                    defaultEndpoint?.label ??
-                                    '-'}
+                                  {displayedBaseUrl}
                                 </span>
                               </div>
                               <div className="flex justify-between gap-3 py-1.5">
                                 <span className="shrink-0 text-text-tertiary">
-                                  Env
+                                  API Key
                                 </span>
                                 <span className="min-w-0 break-all text-right text-text-primary">
-                                  {provider.apiKeyEnvVars.join(', ')}
+                                  {existingProviderProfile?.hasApiKey
+                                    ? '已配置'
+                                    : provider.apiKeyEnvVars[0]
+                                      ? `env:${provider.apiKeyEnvVars[0]}`
+                                      : '未配置'}
                                 </span>
                               </div>
                             </div>
@@ -583,37 +758,56 @@ export default function SettingsPage({
                                 ))}
                               </div>
                             )}
-                            {needsCustomBaseUrl && (
-                              <input
-                                className={cn(
-                                  fieldInput,
-                                  'mt-3 h-9 text-[12px]'
+                            <div className="mt-3 flex flex-wrap justify-between gap-2">
+                              {existingProviderProfile ? (
+                                <Button
+                                  variant="danger"
+                                  className="h-8 px-3 text-[12px]"
+                                  disabled={!canRemove}
+                                  onClick={() => {
+                                    setProviderRemoveDialog({
+                                      provider,
+                                      profile: existingProviderProfile,
+                                    })
+                                  }}
+                                >
+                                  移除配置
+                                </Button>
+                              ) : (
+                                <span />
+                              )}
+                              <div className="flex flex-wrap justify-end gap-2">
+                                {existingProviderProfile && !isActive && (
+                                  <Button
+                                    variant="secondary"
+                                    className="h-8 px-3 text-[12px]"
+                                    disabled={!canActivate}
+                                    onClick={() =>
+                                      void handleActivateProviderProfile(
+                                        provider,
+                                        existingProviderProfile
+                                      )
+                                    }
+                                  >
+                                    {activatingProviderId === provider.id
+                                      ? '切换中...'
+                                      : '设为当前'}
+                                  </Button>
                                 )}
-                                value={customBaseUrls[provider.id] ?? ''}
-                                placeholder="https://api.example.com/v1"
-                                onChange={(event) => {
-                                  setCustomBaseUrls((current) => ({
-                                    ...current,
-                                    [provider.id]: event.target.value,
-                                  }))
-                                  setStatusMessage(null)
-                                  setErrorMessage(null)
-                                }}
-                              />
-                            )}
-                            <div className="mt-3 flex justify-end">
-                              <Button
-                                variant="secondary"
-                                className="h-8 px-3 text-[12px]"
-                                disabled={!canApply}
-                                onClick={() =>
-                                  void handleApplyProviderPreset(provider)
-                                }
-                              >
-                                {applyingProviderId === provider.id
-                                  ? '应用中...'
-                                  : '应用'}
-                              </Button>
+                                <Button
+                                  variant="secondary"
+                                  className="h-8 px-3 text-[12px]"
+                                  disabled={!canConfigure || isProviderBusy}
+                                  onClick={() =>
+                                    openProviderConfigDialog(
+                                      provider,
+                                      existingProviderProfile
+                                    )
+                                  }
+                                >
+                                  {isConfigured ? '编辑配置' : '配置'}
+                                </Button>
+                              </div>
                             </div>
                           </div>
                         )
@@ -701,6 +895,167 @@ export default function SettingsPage({
           </section>
         </div>
       </main>
+      {providerConfigDialog && (
+        <Modal
+          title={`${providerConfigDialog.existingProfile ? '编辑' : '配置'} ${providerConfigDialog.provider.displayName}`}
+          onClose={() => {
+            if (applyingProviderId) return
+            setProviderConfigDialog(null)
+          }}
+          className="w-[520px]"
+        >
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handleApplyProviderPreset(providerConfigDialog, true)
+            }}
+          >
+            <div>
+              <label className="mb-2 block text-[13px] font-semibold text-text-secondary">
+                Base URL
+              </label>
+              <input
+                className={fieldInput}
+                value={providerConfigDialog.baseUrl}
+                placeholder="https://api.example.com/v1"
+                disabled={Boolean(applyingProviderId)}
+                onChange={(event) => {
+                  const baseUrl = event.target.value
+                  setProviderConfigDialog((current) =>
+                    current ? { ...current, baseUrl } : current
+                  )
+                  setStatusMessage(null)
+                  setErrorMessage(null)
+                }}
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-[13px] font-semibold text-text-secondary">
+                API Key
+              </label>
+              <input
+                className={fieldInput}
+                type="password"
+                value={providerConfigDialog.apiKey}
+                placeholder={
+                  providerConfigDialog.existingProfile?.hasApiKey
+                    ? '已配置，留空保留'
+                    : providerConfigDialog.provider.apiKeyEnvVars[0]
+                      ? `API Key 或 env:${providerConfigDialog.provider.apiKeyEnvVars[0]}`
+                      : 'API Key'
+                }
+                disabled={Boolean(applyingProviderId)}
+                onChange={(event) => {
+                  const apiKey = event.target.value
+                  setProviderConfigDialog((current) =>
+                    current ? { ...current, apiKey } : current
+                  )
+                  setStatusMessage(null)
+                  setErrorMessage(null)
+                }}
+              />
+              {providerConfigDialog.existingProfile?.hasApiKey && (
+                <div className="mt-2 text-[12px] text-text-tertiary">
+                  已保存的 Key 不会显示。
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-2 block text-[13px] font-semibold text-text-secondary">
+                Model
+              </label>
+              <input
+                className={fieldInput}
+                value={providerConfigDialog.modelId}
+                placeholder={providerConfigDialog.provider.defaultModel}
+                disabled={Boolean(applyingProviderId)}
+                onChange={(event) => {
+                  const modelId = event.target.value
+                  setProviderConfigDialog((current) =>
+                    current ? { ...current, modelId } : current
+                  )
+                  setStatusMessage(null)
+                  setErrorMessage(null)
+                }}
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="secondary"
+                disabled={Boolean(applyingProviderId)}
+                onClick={() => setProviderConfigDialog(null)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={
+                  Boolean(applyingProviderId) ||
+                  !providerConfigDialog.baseUrl.trim()
+                }
+                onClick={() =>
+                  void handleApplyProviderPreset(providerConfigDialog, false)
+                }
+              >
+                仅保存
+              </Button>
+              <Button
+                variant="primary"
+                disabled={
+                  Boolean(applyingProviderId) ||
+                  !providerConfigDialog.baseUrl.trim()
+                }
+                type="submit"
+              >
+                {applyingProviderId ? '保存中...' : '保存并使用'}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {providerRemoveDialog && (
+        <Modal
+          title={`移除 ${providerRemoveDialog.provider.displayName} 配置`}
+          onClose={() => {
+            if (removingProviderId) return
+            setProviderRemoveDialog(null)
+          }}
+          className="w-[460px]"
+        >
+          <div className="space-y-4">
+            <p className="text-[13px] leading-relaxed text-text-secondary">
+              这会删除 {providerRemoveDialog.profile.name} 的 Base URL、API
+              Key 和模型配置。
+            </p>
+            {providerRemoveDialog.profile.name === selectedProfile && (
+              <p className="rounded-lg border border-warning/20 bg-warning-soft px-3 py-2 text-[13px] text-warning">
+                当前正在使用这个 Provider，移除后会切换到其他可用配置。
+              </p>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="secondary"
+                disabled={Boolean(removingProviderId)}
+                onClick={() => setProviderRemoveDialog(null)}
+              >
+                返回
+              </Button>
+              <Button
+                variant="danger"
+                disabled={Boolean(removingProviderId)}
+                onClick={() => void handleRemoveProviderPreset(providerRemoveDialog)}
+              >
+                {removingProviderId ? '移除中...' : '移除配置'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }

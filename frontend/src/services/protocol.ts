@@ -28,6 +28,7 @@ import type {
   ProviderWireFormat,
   PromptAttachmentWire,
   PromptSubmitResponse,
+  RemoveProviderPresetResponse,
   SlashCommandInfo,
   SlashCommandListResponse,
   KeybindingInfo,
@@ -606,6 +607,19 @@ export function decodeApplyProviderPresetResponse(
     profileName: requiredString(object, 'profileName'),
     modelId: requiredString(object, 'modelId'),
     activated: requiredBoolean(object, 'activated'),
+    warning: optionalString(object, 'warning'),
+  }
+}
+
+export function decodeRemoveProviderPresetResponse(
+  value: unknown
+): RemoveProviderPresetResponse {
+  const object = decodeObject(value, 'remove provider preset response')
+  return {
+    success: requiredBoolean(object, 'success'),
+    removedProfileName: requiredString(object, 'removedProfileName'),
+    activeProfile: requiredString(object, 'activeProfile'),
+    activeModel: requiredString(object, 'activeModel'),
     warning: optionalString(object, 'warning'),
   }
 }

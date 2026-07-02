@@ -17,6 +17,7 @@ import {
   decodeModelTestResult,
   decodeProviderCatalog,
   decodePromptSubmitResponse,
+  decodeRemoveProviderPresetResponse,
   decodeSetExtensionEnabledResponse,
   decodeSlashCommandListResponse,
   decodeSessionListResponse,
@@ -36,6 +37,7 @@ import type {
   AvailableModel,
   ModelTestResult,
   ProviderCatalogView,
+  RemoveProviderPresetResponse,
   SlashCommandListResponse,
   ExtensionStateView,
 } from './types'
@@ -289,6 +291,17 @@ export async function applyProviderPreset(
     await request('/api/config/provider-preset/apply', {
       method: 'POST',
       body: JSON.stringify(preset),
+    })
+  )
+}
+
+export async function removeProviderPreset(
+  profileName: string
+): Promise<RemoveProviderPresetResponse> {
+  return decodeRemoveProviderPresetResponse(
+    await request('/api/config/provider-preset/remove', {
+      method: 'POST',
+      body: JSON.stringify({ profileName }),
     })
   )
 }

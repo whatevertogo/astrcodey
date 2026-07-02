@@ -685,6 +685,8 @@ pub struct ApplyProviderPresetRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default)]
     pub activate: bool,
@@ -698,6 +700,25 @@ pub struct ApplyProviderPresetResponseDto {
     pub profile_name: String,
     pub model_id: String,
     pub activated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// POST /api/config/provider-preset/remove 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProviderPresetRequest {
+    pub profile_name: String,
+}
+
+/// POST /api/config/provider-preset/remove 响应。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveProviderPresetResponseDto {
+    pub success: bool,
+    pub removed_profile_name: String,
+    pub active_profile: String,
+    pub active_model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }

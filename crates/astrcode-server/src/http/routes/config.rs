@@ -8,7 +8,8 @@ use astrcode_protocol::http::{
     ApplyProviderPresetRequest, ApplyProviderPresetResponseDto, ConfigReloadResponseDto,
     ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto, ProviderCatalogResponseDto,
     ProviderEndpointPresetDto, ProviderSpecCapabilitiesDto, ProviderSpecDto,
-    UpdateActiveSelectionRequest, UpdateActiveSelectionResponseDto,
+    RemoveProviderPresetRequest, RemoveProviderPresetResponseDto, UpdateActiveSelectionRequest,
+    UpdateActiveSelectionResponseDto,
 };
 use axum::{
     Json,
@@ -131,9 +132,20 @@ pub(in crate::http) async fn apply_provider_preset(
         );
     };
 
-    let profile =
-        profile_from_provider_spec(spec, profile_name.clone(), model_id.clone(), base_url);
     let mut candidate = state.runtime.config_manager().raw_config_snapshot();
+    let existing_api_key = candidate
+        .profiles
+        .iter()
+        .find(|profile| profile.name == profile_name)
+        .and_then(|profile| profile.api_key.clone());
+    let api_key = provider_preset_api_key(spec, request.api_key.as_deref(), existing_api_key);
+    let profile = profile_from_provider_spec(
+        spec,
+        profile_name.clone(),
+        model_id.clone(),
+        base_url,
+        api_key,
+    );
     upsert_profile(&mut candidate.profiles, profile);
 
     let mut activated = false;
@@ -184,6 +196,83 @@ pub(in crate::http) async fn apply_provider_preset(
         profile_name,
         model_id,
         activated,
+        warning,
+    })
+    .into_response()
+}
+
+pub(in crate::http) async fn remove_provider_preset(
+    State(state): State<HttpState>,
+    Json(request): Json<RemoveProviderPresetRequest>,
+) -> Response {
+    let profile_name = request.profile_name.trim();
+    if profile_name.is_empty() {
+        return bad_request_response("invalid_profile_name", "Profile name cannot be empty");
+    }
+
+    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
+    let profile_count = candidate.profiles.len();
+    candidate
+        .profiles
+        .retain(|profile| profile.name != profile_name);
+    if candidate.profiles.len() == profile_count {
+        return bad_request_response(
+            "unknown_profile",
+            format!("Profile {profile_name:?} is not configured"),
+        );
+    }
+    if candidate.profiles.is_empty() {
+        return bad_request_response(
+            "cannot_remove_last_profile",
+            "Cannot remove the only configured profile",
+        );
+    }
+
+    if candidate.active_profile == profile_name {
+        let Some((next_profile, next_model)) = first_profile_model(&candidate.profiles) else {
+            return bad_request_response(
+                "no_model_available",
+                "No remaining profile has a configured model",
+            );
+        };
+        candidate.active_profile = next_profile;
+        candidate.active_model = next_model;
+    }
+    if candidate.active_small_profile.as_deref() == Some(profile_name) {
+        candidate.active_small_profile = None;
+        candidate.active_small_model = None;
+    }
+
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .config_store()
+        .save(&candidate)
+        .await
+    {
+        return internal_error_response("save_failed", error);
+    }
+
+    let mut warning = None;
+    if let Err(error) = state
+        .runtime
+        .config_manager
+        .apply_raw_config_and_rebuild(candidate.clone())
+    {
+        tracing::warn!("apply_raw_config_and_rebuild failed after provider preset remove: {error}");
+        append_warning(
+            &mut warning,
+            format!("Saved to disk but runtime kept the previous provider: {error}."),
+        );
+    } else {
+        state.runtime.sync_session_model_bindings();
+    }
+
+    Json(RemoveProviderPresetResponseDto {
+        success: true,
+        removed_profile_name: profile_name.to_string(),
+        active_profile: candidate.active_profile,
+        active_model: candidate.active_model,
         warning,
     })
     .into_response()
@@ -379,11 +468,38 @@ fn provider_preset_base_url(
         .map(|base_url| base_url.trim_end_matches('/').to_string())
 }
 
+fn provider_preset_api_key(
+    spec: &ProviderSpec,
+    request_api_key: Option<&str>,
+    existing_api_key: Option<String>,
+) -> Option<String> {
+    request_api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(existing_api_key)
+        .or_else(|| {
+            spec.api_key_env_vars
+                .first()
+                .map(|env| format!("env:{env}"))
+        })
+}
+
+fn first_profile_model(profiles: &[Profile]) -> Option<(String, String)> {
+    profiles.iter().find_map(|profile| {
+        profile
+            .models
+            .first()
+            .map(|model| (profile.name.clone(), model.id.clone()))
+    })
+}
+
 fn profile_from_provider_spec(
     spec: &ProviderSpec,
     profile_name: String,
     model_id: String,
     base_url: String,
+    api_key: Option<String>,
 ) -> Profile {
     Profile {
         name: profile_name,
@@ -391,10 +507,7 @@ fn profile_from_provider_spec(
         wire_format: spec.wire_format,
         auth_scheme: spec.auth_scheme,
         base_url,
-        api_key: spec
-            .api_key_env_vars
-            .first()
-            .map(|env| format!("env:{env}")),
+        api_key,
         capabilities: ProviderCapabilities {
             supports_prompt_cache_key: spec.capabilities.prompt_cache_key.then_some(true),
             prompt_cache_retention: None,

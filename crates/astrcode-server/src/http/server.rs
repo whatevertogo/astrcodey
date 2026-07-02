@@ -134,6 +134,10 @@ fn router_parts(
             "/api/config/provider-preset/apply",
             post(config::apply_provider_preset),
         )
+        .route(
+            "/api/config/provider-preset/remove",
+            post(config::remove_provider_preset),
+        )
         .route("/api/config/reload", post(config::reload_config))
         .route(
             "/api/config/active-selection",
