@@ -723,7 +723,7 @@ pub struct RemoveProviderPresetResponseDto {
     pub warning: Option<String>,
 }
 
-/// Profile 中的模型选项（与 config.json 的 `modelOptions` 对齐）。
+/// Profile 中的模型选项（与 config.toml 的 `modelOptions` 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionsDto {

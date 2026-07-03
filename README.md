@@ -53,66 +53,65 @@ AstrCode requires LLM provider and API key configuration to function properly. I
 
 | File | Path | Purpose |
 |---|---|---|
-| Main config | `~/.astrcode/config.json` | LLM providers, models, runtime parameters |
-| Project config | `<workspace>/.astrcode/config.json` | Project-level overrides (optional) |
+| Main config | `~/.astrcode/config.toml` | LLM providers, models, runtime parameters |
+| Project config | `<workspace>/.astrcode/config.toml` | Project-level overrides (optional) |
 | Global MCP | `~/.astrcode/mcp.json` | MCP server configuration |
 | Project MCP | `<workspace>/.astrcode/mcp.json` | Project-level MCP configuration (optional) |
 
 ### LLM Provider Configuration
 
-Example `~/.astrcode/config.json`:
+Example `~/.astrcode/config.toml`:
 
-```json
-{
-  "version": "1",
-  "activeProfile": "deepseek",
-  "activeModel": "deepseek-v4-flash",
-  "activeSmallProfile": "deepseek",
-  "activeSmallModel": "deepseek-v4-flash",
-  "profiles": [
-    {
-      "name": "deepseek",
-      "providerKind": "openai",
-      "baseUrl": "https://api.deepseek.com",
-      "apiKey": "env:DEEPSEEK_API_KEY",
-      "wireFormat": "openai_chat_completions",
-      "authScheme": "bearer",
-      "models": [
-        {
-          "id": "deepseek-v4-flash",
-          "maxTokens": 393216,
-          "contextLimit": 1000000,
-          "modelOptions": { "reasoning": true }
-        }
-      ]
-    },
-    {
-      "name": "openai",
-      "providerKind": "openai",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "env:OPENAI_API_KEY",
-      "wireFormat": "openai_responses",
-      "authScheme": "bearer",
-      "models": [
-        { "id": "gpt-4.1", "maxTokens": 16384, "contextLimit": 128000, "modelOptions": { "thinkingLevel": "medium" } }
-      ]
-    },
-    {
-      "name": "anthropic",
-      "providerKind": "anthropic",
-      "baseUrl": "https://api.anthropic.com/v1",
-      "wireFormat": "anthropic_messages",
-      "authScheme": "x_api_key",
-      "apiKey": "env:ANTHROPIC_API_KEY",
-      "models": [
-        { "id": "claude-sonnet-4-6", "maxTokens": 64000, "contextLimit": 1000000 }
-      ]
-    }
-  ]
-}
+```toml
+version = "1"
+activeProfile = "deepseek"
+activeModel = "deepseek-v4-flash"
+activeSmallProfile = "deepseek"
+activeSmallModel = "deepseek-v4-flash"
+
+[[profiles]]
+name = "deepseek"
+providerKind = "openai"
+baseUrl = "https://api.deepseek.com"
+apiKey = "env:DEEPSEEK_API_KEY"
+wireFormat = "openai_chat_completions"
+authScheme = "bearer"
+
+[[profiles.models]]
+id = "deepseek-v4-flash"
+maxTokens = 393216
+contextLimit = 1000000
+modelOptions = { reasoning = true }
+
+[[profiles]]
+name = "openai"
+providerKind = "openai"
+baseUrl = "https://api.openai.com/v1"
+apiKey = "env:OPENAI_API_KEY"
+wireFormat = "openai_responses"
+authScheme = "bearer"
+
+[[profiles.models]]
+id = "gpt-4.1"
+maxTokens = 16384
+contextLimit = 128000
+modelOptions = { thinkingLevel = "medium" }
+
+[[profiles]]
+name = "anthropic"
+providerKind = "anthropic"
+baseUrl = "https://api.anthropic.com/v1"
+wireFormat = "anthropic_messages"
+authScheme = "x_api_key"
+apiKey = "env:ANTHROPIC_API_KEY"
+
+[[profiles.models]]
+id = "claude-sonnet-4-6"
+maxTokens = 64000
+contextLimit = 1000000
 ```
 
-**API Key Note**: Use `"apiKey": "env:VARIABLE_NAME"` to reference environment variables instead of writing keys directly in the configuration file.
+**API Key Note**: Use `apiKey = "env:VARIABLE_NAME"` to reference environment variables instead of writing keys directly in the configuration file.
 
 Set the corresponding environment variables beforehand:
 
@@ -170,18 +169,14 @@ MCP servers start at extension initialization and persist across turns via a lon
 
 ### Extension Configuration
 
-Extensions can be enabled or disabled via `~/.astrcode/config.json`. By default, all extensions are enabled except `memory` and `channels`, which are disabled by default.
+Extensions can be enabled or disabled via `~/.astrcode/config.toml`. By default, all extensions are enabled except `memory` and `channels`, which are disabled by default.
 
-```json
-{
-  "version": "1",
-  "runtime": {
-    "extensionStates": {
-      "astrcode.memory": true,
-      "astrcode-channels": true
-    }
-  }
-}
+```toml
+version = "1"
+
+[runtime.extensionStates]
+"astrcode.memory" = true
+"astrcode-channels" = true
 ```
 
 To enable the memory extension, set `"astrcode.memory": true` under `runtime.extensionStates`.
@@ -189,19 +184,12 @@ To enable the channels extension, set `"astrcode-channels": true` there and conf
 Telegram channels are configured under `extensions.astrcode-channels.telegram`; keep
 `allowedChatIds` populated unless you explicitly set `allowAllChats` to `true`.
 
-```json
-{
-  "extensions": {
-    "astrcode-channels": {
-      "telegram": {
-        "enabled": true,
-        "botTokenEnv": "TELEGRAM_BOT_TOKEN",
-        "allowedChatIds": ["123456789"],
-        "workingDir": "D:/astrcode"
-      }
-    }
-  }
-}
+```toml
+[extensions.astrcode-channels.telegram]
+enabled = true
+botTokenEnv = "TELEGRAM_BOT_TOKEN"
+allowedChatIds = ["123456789"]
+workingDir = "D:/astrcode"
 ```
 
 ### Built-in Extensions
@@ -222,17 +210,10 @@ First-party extensions are wired through [`astrcode-bundled-extensions`](crates/
 
 Configure Web Tools under `extensions.astrcode-web-tools` (enabled by default):
 
-```json
-{
-  "extensions": {
-    "astrcode-web-tools": {
-      "search": {
-        "provider": "duckduckgo",
-        "braveApiKeyEnv": "BRAVE_API_KEY"
-      }
-    }
-  }
-}
+```toml
+[extensions.astrcode-web-tools.search]
+provider = "duckduckgo"
+braveApiKeyEnv = "BRAVE_API_KEY"
 ```
 
 See [Configuration Guide](docs/configuration.md#web-tools-extension) for full options.
@@ -245,38 +226,32 @@ cargo build
 
 # 2. Create config directory and config file
 mkdir -p ~/.astrcode
-cat > ~/.astrcode/config.json << 'EOF'
-{
-  "version": "1",
-  "activeProfile": "openai",
-  "activeModel": "gpt-4o",
-  "activeSmallProfile": "openai",
-  "activeSmallModel": "gpt-4o-mini",
-  "profiles": [
-    {
-      "name": "openai",
-      "providerKind": "openai",
-      "wireFormat": "openai_chat_completions",
-      "authScheme": "bearer",
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "env:OPENAI_API_KEY",
-      "models": [
-        {
-          "id": "gpt-4o",
-          "maxTokens": 128000,
-          "contextLimit": 128000,
-          "modelOptions": { "thinkingLevel": "medium" }
-        },
-        {
-          "id": "gpt-4o-mini",
-          "maxTokens": 128000,
-          "contextLimit": 128000,
-          "modelOptions": { "thinkingLevel": "low" }
-        }
-      ]
-    }
-  ]
-}
+cat > ~/.astrcode/config.toml << 'EOF'
+version = "1"
+activeProfile = "openai"
+activeModel = "gpt-4o"
+activeSmallProfile = "openai"
+activeSmallModel = "gpt-4o-mini"
+
+[[profiles]]
+name = "openai"
+providerKind = "openai"
+wireFormat = "openai_chat_completions"
+authScheme = "bearer"
+baseUrl = "https://api.openai.com/v1"
+apiKey = "env:OPENAI_API_KEY"
+
+[[profiles.models]]
+id = "gpt-4o"
+maxTokens = 128000
+contextLimit = 128000
+modelOptions = { thinkingLevel = "medium" }
+
+[[profiles.models]]
+id = "gpt-4o-mini"
+maxTokens = 128000
+contextLimit = 128000
+modelOptions = { thinkingLevel = "low" }
 EOF
 
 # 3. Set API key environment variable
@@ -303,12 +278,12 @@ cargo run --features dev-mode -- eval
 
 ## Configuration
 
-AstrCode uses a JSON-based configuration system stored in `~/.astrcode/config.json`. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
+AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. Legacy `config.json` files are still loaded as a migration fallback. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
 
 **Key configuration features:**
 - Multi-provider support (Anthropic, OpenAI, Google GenAI)
 - Separate small LLM configuration for extensions (e.g., memory extraction)
-- Project-level config overrides via `.astrcode/config.json`
+- Project-level config overrides via `.astrcode/config.toml`
 - Environment variable substitution for API keys (`env:VAR_NAME`)
 - Runtime behavior tuning (timeouts, retries, compaction, agent limits)
 - Compact circuit breaker and optional predictive compact
@@ -573,7 +548,7 @@ Extensions can register additional slash commands and keybindings at runtime.
 | Document | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | Event-sourcing, server layers, compact, prompt pipeline, tools, extensions |
-| [Configuration Guide](docs/configuration.md) | Full `config.json` reference |
+| [Configuration Guide](docs/configuration.md) | Full `config.toml` reference |
 | [Extension System](docs/extension-system.md) | Built-in vs disk IPC extensions, host capabilities |
 | [Extension Author Guide](docs/extension-author-guide.md) | Disk s5r extension development guide |
 | [UI Render Spec](docs/ui-render-spec.md) | Structured rendering protocol for tool results |

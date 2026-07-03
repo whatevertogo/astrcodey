@@ -1,7 +1,7 @@
-//! 原始配置类型——从磁盘读取的 JSON 结构（所有字段可选/带默认值）。
+//! 原始配置类型——从磁盘读取的配置结构（所有字段可选/带默认值）。
 //!
-//! 这些类型直接对应配置文件的 JSON 结构，使用 `serde` 进行序列化/反序列化。
-//! 字段使用 `camelCase` 命名约定以匹配 JSON 约定。
+//! 这些类型直接对应配置文件结构，使用 `serde` 进行序列化/反序列化。
+//! 字段使用 `camelCase` 命名约定以保持旧 JSON 配置兼容。
 
 use std::collections::BTreeMap;
 
@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::{PromptCacheRetention, ThinkingLevel};
 
-/// 扩展配置的原始 JSON 值类型。
-/// 用户可在 `config.json` 的 `extensions.<id>` 下写入任意 JSON，
+/// 扩展配置的原始值类型。
+/// 用户可在 `config.toml` 的 `extensions.<id>` 下写入扩展自定义配置，
 /// 由扩展在 `start()` 时自行反序列化为具体类型。
 pub type ExtensionRawConfig = serde_json::Value;
 
 // ─── 顶层 Config ────────────────────────────────────────────────────────
 
-/// 顶层配置结构，对应配置文件的完整 JSON。
+/// 顶层配置结构，对应配置文件的完整内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
@@ -193,7 +193,7 @@ pub struct ModelOptionsConfig {
 
 // ─── Runtime Section (placeholder for future use) ────────────────────────
 
-/// 运行时配置段——保留用于 JSON 兼容性。字段在功能实现时添加。
+/// 运行时配置段。字段在功能实现时添加。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSection {
@@ -252,8 +252,8 @@ pub struct RuntimeSection {
 
 /// 项目级配置覆盖层。
 ///
-/// 用于 `<workspace>/.astrcode/config.json` 中的项目特定配置，
-/// 在启动时通过 [`super::resolve::merge_overlay`] 合并进全局 `config.json`。
+/// 用于 `<workspace>/.astrcode/config.toml` 中的项目特定配置，
+/// 在启动时通过 [`super::resolve::merge_overlay`] 合并进全局 `config.toml`。
 /// 仅列出需要覆盖的字段；未出现的字段沿用全局值。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

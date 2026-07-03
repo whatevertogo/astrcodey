@@ -58,7 +58,7 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 | `astrcode-channels` | `astrcode-extension-channels` | **关闭** | Telegram 通道桥接 |
 | `astrcode-web-tools` | `astrcode-extension-web-tools` | 启用 | `web-search` / `fetch-url` 内置 Web 工具 |
 
-通过 `config.json` 的 `extensionStates` 覆盖默认开关。配置示例见 [configuration.md](configuration.md#web-tools-extension)。
+通过 `config.toml` 的 `runtime.extensionStates` 覆盖默认开关。配置示例见 [configuration.md](configuration.md#web-tools-extension)。
 
 ## 4. 磁盘 s5r 扩展
 

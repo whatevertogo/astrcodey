@@ -34,7 +34,7 @@ pub enum ResolveError {
 
 fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
     // Note: keep this list intentionally small and stable. It is a fallback when
-    // the user does not specify `api_key` in config.json.
+    // the user does not specify `api_key` in config.toml.
     match profile.name.as_str() {
         "openai" => &["OPENAI_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY"],

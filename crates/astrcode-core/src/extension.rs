@@ -70,7 +70,7 @@ pub trait Extension: Send + Sync {
 
     /// 扩展配置发生热更新时调用。
     ///
-    /// 当用户修改 `config.json` 中的 `extensions.<id>` 并触发重载时，
+    /// 当用户修改 `config.toml` 中的 `extensions.<id>` 并触发重载时，
     /// 运行器会调用此方法通知扩展更新内部状态。
     /// 默认 no-op（兼容不支持热更新的扩展）。
     async fn on_config_changed(&self, _config: ExtensionConfig) -> Result<(), ExtensionError> {
@@ -102,7 +102,7 @@ pub enum ExtensionCapability {
 
 /// 扩展专有配置的包装类型。
 ///
-/// 包装用户 `config.json` 中 `extensions.<id>` 下的任意 JSON，
+/// 包装用户 `config.toml` 中 `extensions.<id>` 下的扩展配置，
 /// 扩展在 `start()` 或 `on_config_changed()` 时通过 `deserialize::<T>()` 获取。
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionConfig(pub serde_json::Value);

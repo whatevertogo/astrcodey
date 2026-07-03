@@ -2,11 +2,11 @@
 //!
 //! # 架构
 //!
-//! 配置知识集中在本目录，按「磁盘 JSON → 有效配置 → 运行时消费」分层：
+//! 配置知识集中在本目录，按「磁盘配置 → 有效配置 → 运行时消费」分层：
 //!
 //! | 模块 | 类型 | 职责 |
 //! |------|------|------|
-//! | [`raw`] | `Config`, `ConfigOverlay`, `Profile`, `RuntimeSection` | 与 `config.json` 字段一一对应的 serde 类型（字段多为 `Option`） |
+//! | [`raw`] | `Config`, `ConfigOverlay`, `Profile`, `RuntimeSection` | 与 `config.toml` 字段一一对应的 serde 类型（字段多为 `Option`） |
 //! | [`effective`] | `EffectiveConfig`, `LlmSettings`, … | 解析后的具体值，供 LLM / compact / 扩展加载使用 |
 //! | [`resolve`] | `into_effective()`, `merge_overlay()`, `resolve_api_key()` | 纯函数解析与项目覆盖合并 |
 //! | [`defaults`] | 常量与 serde 默认值函数 | 内置默认 profile、超时、compact 阈值等 |
@@ -15,8 +15,8 @@
 //!
 //! | 路径 | 格式 | 说明 |
 //! |------|------|------|
-//! | `~/.astrcode/config.json` | [`Config`] | 全局主配置 |
-//! | `<workspace>/.astrcode/config.json` | [`ConfigOverlay`] | 项目覆盖（启动时合并进全局） |
+//! | `~/.astrcode/config.toml` | [`Config`] | 全局主配置；缺失时兼容旧 `config.json` |
+//! | `<workspace>/.astrcode/config.toml` | [`ConfigOverlay`] | 项目覆盖（启动时合并进全局）；缺失时兼容旧 `config.json` |
 //! | `~/.astrcode/mcp.json` | MCP 专用 JSON | MCP 服务器（**不**走 `extensions` 段） |
 //! | `<workspace>/.astrcode/mcp.json` | 同上 | 项目 MCP（需 `ASTRCODE_ENABLE_PROJECT_MCP=1`） |
 //!
@@ -24,11 +24,11 @@
 //!
 //! # 解析流程
 //!
-//! 1. 加载 `~/.astrcode/config.json`（不存在则写入内置默认）。
-//! 2. 若存在 `<startup_cwd>/.astrcode/config.json`，[`merge_overlay`] 合并 [`ConfigOverlay`]。
+//! 1. 加载 `~/.astrcode/config.toml`（不存在则写入内置默认；旧 `config.json` 作为 fallback）。
+//! 2. 若存在 `<startup_cwd>/.astrcode/config.toml`，[`merge_overlay`] 合并 [`ConfigOverlay`]。
 //! 3. [`Config::effective_from()`] 解析主模型 / 小模型、API key、runtime、permissions、extensions。
-//! 4. 解析失败时服务端回退到 `.last-known-good.json` 或内置 dummy LLM（见
-//!    `astrcode-server::bootstrap::config_resolve`）。
+//! 4. 解析失败时服务端回退到 `.last-known-good.toml`、旧 `.last-known-good.json` 或内置 dummy
+//!    LLM（见 `astrcode-server::bootstrap::config_resolve`）。
 //!
 //! # 新增字段
 //!

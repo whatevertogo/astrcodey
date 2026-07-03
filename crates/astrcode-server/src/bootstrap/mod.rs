@@ -425,3 +425,75 @@ impl SessionResourceCleanup for TurnSchedulerCleanup {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use astrcode_storage::config_store::FileConfigStore;
+
+    use super::*;
+
+    fn isolated_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("astrcode-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn load_merged_config_applies_toml_project_overlay() {
+        let root = isolated_test_dir("config-overlay");
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let config_path = home.join(".astrcode").join("config.toml");
+        let overlay_path = workspace.join(".astrcode").join("config.toml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"version = "1"
+activeProfile = "base"
+activeModel = "base-model"
+
+[[profiles]]
+name = "base"
+providerKind = "openai"
+wireFormat = "openai_chat_completions"
+authScheme = "bearer"
+baseUrl = "https://example.com"
+apiKey = "test-key"
+
+[[profiles.models]]
+id = "base-model"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &overlay_path,
+            r#"activeProfile = "overlay"
+activeModel = "overlay-model"
+
+[[profiles]]
+name = "overlay"
+providerKind = "openai"
+wireFormat = "openai_chat_completions"
+authScheme = "bearer"
+baseUrl = "https://overlay.example.com"
+apiKey = "overlay-key"
+
+[[profiles.models]]
+id = "overlay-model"
+"#,
+        )
+        .unwrap();
+        let store = FileConfigStore::new(config_path);
+        let opts = BootstrapOptions {
+            working_dir: Some(workspace),
+            ..BootstrapOptions::default()
+        };
+
+        let config = load_merged_config(&store, &opts).await.unwrap();
+
+        assert_eq!(config.active_profile, "overlay");
+        assert_eq!(config.active_model, "overlay-model");
+        assert_eq!(config.profiles[0].name, "overlay");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
