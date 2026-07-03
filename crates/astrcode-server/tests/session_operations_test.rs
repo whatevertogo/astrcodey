@@ -164,7 +164,7 @@ fn build_test_ops_with_llm(
     ));
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-session-ops-config.json"),
+            std::path::PathBuf::from("target/test-session-ops-config.toml"),
         )),
         Default::default(),
         Arc::clone(&extension_runner),

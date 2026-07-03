@@ -2,7 +2,7 @@
 
 > 以当前代码为准（`astrcode-core::config`、`astrcode-storage::config_store`、`astrcode-server` 启动流程）。
 
-AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。迁移期仍兼容旧的 `config.json`；当同目录同时存在 `config.toml` 和 `config.json` 时优先读取 TOML。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
+AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。迁移期仍兼容旧的 `config.json`；当同目录同时存在 `config.toml` 和 `config.json` 时优先读取 TOML。首次从旧 JSON 读取主配置、项目覆盖或 last-known-good 快照时，会自动写出对应的 TOML 文件；旧 JSON 会保留为备份。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
 
 ---
 

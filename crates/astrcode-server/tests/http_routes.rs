@@ -1381,7 +1381,7 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from(format!(
-                "target/test-config-{}.json",
+                "target/test-config-{}.toml",
                 NEXT_CONFIG_ID.fetch_add(1, Ordering::Relaxed)
             )),
         )),

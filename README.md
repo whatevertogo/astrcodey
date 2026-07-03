@@ -278,7 +278,7 @@ cargo run --features dev-mode -- eval
 
 ## Configuration
 
-AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. Legacy `config.json` files are still loaded as a migration fallback. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
+AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. Legacy `config.json` files are still loaded as a migration fallback and are automatically written out as `config.toml` on first load. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
 
 **Key configuration features:**
 - Multi-provider support (Anthropic, OpenAI, Google GenAI)

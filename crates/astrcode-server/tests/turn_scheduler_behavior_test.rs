@@ -143,7 +143,7 @@ fn build_scheduler_with_llm(
     ));
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/turn-behavior-config.json"),
+            std::path::PathBuf::from("target/turn-behavior-config.toml"),
         )),
         Default::default(),
         Arc::clone(&extension_runner),

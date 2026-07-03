@@ -750,7 +750,7 @@ fn test_runtime_with_settings(
     ));
     let config = Arc::new(crate::config_manager::ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-config.json"),
+            std::path::PathBuf::from("target/test-config.toml"),
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),

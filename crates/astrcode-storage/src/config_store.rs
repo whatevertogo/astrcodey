@@ -49,10 +49,11 @@ impl FileConfigStore {
     pub async fn load_last_known_good(&self) -> Result<Option<Config>, ConfigStoreError> {
         let path = self.last_known_good_path();
         tokio::task::spawn_blocking(move || {
-            let Some(path) = first_existing_path(&path) else {
+            let Some(loaded_path) = first_existing_path(&path) else {
                 return Ok(None);
             };
-            let config = read_config_value(&path)?;
+            let config = read_config_value(&loaded_path)?;
+            backfill_primary_config(&config, &loaded_path, &path);
             Ok(Some(config))
         })
         .await
@@ -134,6 +135,30 @@ fn write_atomic(path: &Path, data: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn backfill_primary_config<T: Serialize>(value: &T, loaded_path: &Path, primary_path: &Path) {
+    if is_same_config_path(loaded_path, primary_path) {
+        return;
+    }
+    match serialize_config_value(value, primary_path) {
+        Ok(data) => {
+            if let Err(error) = write_atomic(primary_path, &data) {
+                tracing::warn!(
+                    path = %primary_path.display(),
+                    %error,
+                    "failed to migrate legacy JSON config to TOML"
+                );
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                path = %primary_path.display(),
+                %error,
+                "failed to serialize legacy JSON config as TOML"
+            );
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
@@ -148,9 +173,7 @@ impl ConfigStore for FileConfigStore {
             };
             let config: Config = read_config_value(&loaded_path)?;
             // Re-serialize to backfill any new fields added since the file was written.
-            if let Ok(data) = serialize_config_value(&config, &path) {
-                let _ = write_atomic(&path, &data);
-            }
+            backfill_primary_config(&config, &loaded_path, &path);
             Ok(config)
         })
         .await
@@ -185,10 +208,11 @@ impl ConfigStore for FileConfigStore {
             return Ok(None);
         }
         tokio::task::spawn_blocking(move || {
-            let Some(overlay_path) = first_existing_path(&overlay_path) else {
+            let Some(loaded_path) = first_existing_path(&overlay_path) else {
                 return Ok(None);
             };
-            let overlay: ConfigOverlay = read_config_value(&overlay_path)?;
+            let overlay: ConfigOverlay = read_config_value(&loaded_path)?;
+            backfill_primary_config(&overlay, &loaded_path, &overlay_path);
             Ok(Some(overlay))
         })
         .await
@@ -422,6 +446,42 @@ activeModel = "{active_model}"
     }
 
     #[tokio::test]
+    async fn load_overlay_reads_legacy_json_and_backfills_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let global_path = temp
+            .path()
+            .join("home")
+            .join(".astrcode")
+            .join("config.toml");
+        let workspace = temp.path().join("workspace");
+        let overlay_path = workspace.join(".astrcode").join("config.toml");
+        let legacy_overlay_path = overlay_path.with_extension("json");
+        std::fs::create_dir_all(legacy_overlay_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_overlay_path,
+            r#"{
+  "activeProfile": "legacy-overlay",
+  "activeModel": "legacy-model"
+}"#,
+        )
+        .unwrap();
+        let store = FileConfigStore::new(global_path);
+
+        let overlay = store
+            .load_overlay(workspace.to_str().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(overlay.active_profile.as_deref(), Some("legacy-overlay"));
+        assert_eq!(overlay.active_model.as_deref(), Some("legacy-model"));
+        assert!(overlay_path.exists());
+        assert!(legacy_overlay_path.exists());
+        let migrated = std::fs::read_to_string(overlay_path).unwrap();
+        assert!(migrated.contains("activeProfile = \"legacy-overlay\""));
+    }
+
+    #[tokio::test]
     async fn save_overlay_writes_toml_by_default() {
         let temp = tempfile::tempdir().unwrap();
         let global_path = temp
@@ -476,5 +536,6 @@ activeModel = "{active_model}"
         let loaded = store.load_last_known_good().await.unwrap().unwrap();
         assert_eq!(loaded.active_profile, "legacy-snapshot");
         assert_eq!(loaded.active_model, "legacy-snapshot-model");
+        assert!(snapshot_path.exists());
     }
 }
