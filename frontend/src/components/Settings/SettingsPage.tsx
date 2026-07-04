@@ -663,8 +663,7 @@ export default function SettingsPage({
                           !isActive &&
                           canConfigure
                         const canRemove =
-                          Boolean(existingProviderProfile) &&
-                          canConfigure
+                          Boolean(existingProviderProfile) && canConfigure
                         const capabilityLabels = [
                           provider.capabilities.promptCacheKey
                             ? 'Cache key'
@@ -1029,8 +1028,8 @@ export default function SettingsPage({
         >
           <div className="space-y-4">
             <p className="text-[13px] leading-relaxed text-text-secondary">
-              这会删除 {providerRemoveDialog.profile.name} 的 Base URL、API
-              Key 和模型配置。
+              这会删除 {providerRemoveDialog.profile.name} 的 Base URL、API Key
+              和模型配置。
             </p>
             {providerRemoveDialog.profile.name === selectedProfile && (
               <p className="rounded-lg border border-warning/20 bg-warning-soft px-3 py-2 text-[13px] text-warning">
@@ -1048,7 +1047,9 @@ export default function SettingsPage({
               <Button
                 variant="danger"
                 disabled={Boolean(removingProviderId)}
-                onClick={() => void handleRemoveProviderPreset(providerRemoveDialog)}
+                onClick={() =>
+                  void handleRemoveProviderPreset(providerRemoveDialog)
+                }
               >
                 {removingProviderId ? '移除中...' : '移除配置'}
               </Button>

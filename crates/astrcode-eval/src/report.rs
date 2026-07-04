@@ -14,7 +14,17 @@ pub struct EvalResult {
     pub metrics: Metrics,
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub swe_bench_prediction: Option<SweBenchPrediction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// SWE-bench 官方 harness 可消费的单条 prediction。
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
+pub struct SweBenchPrediction {
+    pub instance_id: String,
+    pub model_name_or_path: String,
+    pub model_patch: String,
 }
 
 /// 评测报告（所有 case 的汇总）。
@@ -61,6 +71,26 @@ impl EvalReport {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
     }
 
+    pub fn swe_bench_predictions_jsonl(&self) -> Result<String, serde_json::Error> {
+        let mut jsonl = String::new();
+        for prediction in self
+            .results
+            .iter()
+            .filter_map(|result| result.swe_bench_prediction.as_ref())
+        {
+            jsonl.push_str(&serde_json::to_string(prediction)?);
+            jsonl.push('\n');
+        }
+        Ok(jsonl)
+    }
+
+    pub fn swe_bench_prediction_count(&self) -> usize {
+        self.results
+            .iter()
+            .filter(|result| result.swe_bench_prediction.is_some())
+            .count()
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# Eval Report\n\n");
@@ -71,6 +101,13 @@ impl EvalReport {
             self.summary.pass_rate * 100.0,
             self.summary.total_duration_ms as f64 / 1000.0,
         ));
+        let prediction_count = self.swe_bench_prediction_count();
+        if prediction_count > 0 {
+            md.push_str(&format!(
+                "**SWE-bench predictions:** {prediction_count} generated; use JSON output to \
+                 collect `swe_bench_prediction` entries for the official harness.\n\n"
+            ));
+        }
         md.push_str("| Case | Result | Duration | Tools | Errors |\n");
         md.push_str("|------|--------|----------|-------|--------|\n");
         for r in &self.results {

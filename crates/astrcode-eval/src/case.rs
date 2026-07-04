@@ -76,6 +76,8 @@ pub enum JudgeConfig {
     },
     /// 检查 event log 条件。
     EventLog { condition: String },
+    /// 生成 SWE-bench 官方 harness 可消费的 prediction。
+    SweBenchPatch { instance_id: String },
 }
 
 fn default_true() -> bool {

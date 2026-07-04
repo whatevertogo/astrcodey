@@ -5,9 +5,10 @@
 //! 这样消除了「ConfigManager 持一份、Capabilities 持一份再手动 sync」的双份事实。
 //!
 //! 写入路径（`apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` /
-//! `set_llm_provider`）直接更新 `Capabilities` 内的 `llm` 与 `effective_config`，
-//! 正在运行的 session 在下一轮 LLM 调用前看到新值；已打开的 per-session
-//! `SessionRuntimeState` 需由
+//! `set_llm_provider`）会先更新原始配置，再尝试更新 `Capabilities` 内的 `llm` 与
+//! `effective_config`。若配置已持久化但当前环境暂时无法解析为 effective config（例如
+//! 缺少 API key 环境变量），原始配置仍保持为最新，运行时 provider 保持旧值。已打开的
+//! per-session `SessionRuntimeState` 需由
 //! [`crate::session_manager::SessionManager::sync_all_model_bindings_from_config`]
 //! 在配置写入后同步。
 
@@ -177,15 +178,16 @@ impl ConfigManager {
         &self,
         config: Config,
     ) -> Result<(), astrcode_core::config::ResolveError> {
-        let new_effective = config.clone().into_effective()?;
+        {
+            let mut guard = self.raw_config.write();
+            *guard = config.clone();
+        }
+
+        let new_effective = config.into_effective()?;
         let changed = {
             let old_effective = self.read_effective();
             old_effective.extensions.extension_configs != new_effective.extensions.extension_configs
         };
-        {
-            let mut guard = self.raw_config.write();
-            *guard = config;
-        }
         self.shell_timeout_secs
             .store(new_effective.agent.shell_timeout_secs, Ordering::Relaxed);
         self.capabilities.update_effective(new_effective);

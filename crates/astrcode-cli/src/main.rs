@@ -43,6 +43,74 @@ fn swe_to_source(raw: String) -> astrcode_eval::EvalSource {
     }
 }
 
+#[cfg(feature = "dev-mode")]
+fn default_swe_predictions_output() -> PathBuf {
+    PathBuf::from("target")
+        .join("astrcode-eval")
+        .join("swebench-predictions.jsonl")
+}
+
+#[cfg(feature = "dev-mode")]
+fn write_swe_predictions(
+    report: &astrcode_eval::EvalReport,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let predictions = report
+        .swe_bench_predictions_jsonl()
+        .map_err(|e| format!("serialize SWE-bench predictions: {e}"))?;
+    if predictions.is_empty() {
+        return Err("no SWE-bench predictions were generated".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create predictions dir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, predictions)
+        .map_err(|e| format!("write SWE-bench predictions {}: {e}", path.display()))
+}
+
+#[cfg(feature = "dev-mode")]
+struct SweHarnessConfig {
+    python: String,
+    dataset: String,
+    split: String,
+    run_id: String,
+    max_workers: usize,
+}
+
+#[cfg(feature = "dev-mode")]
+async fn run_swe_harness(
+    predictions_path: &std::path::Path,
+    config: SweHarnessConfig,
+) -> Result<(), String> {
+    let status = tokio::process::Command::new(&config.python)
+        .args([
+            "-m",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            &config.dataset,
+            "--predictions_path",
+        ])
+        .arg(predictions_path)
+        .args([
+            "--split",
+            &config.split,
+            "--max_workers",
+            &config.max_workers.to_string(),
+            "--run_id",
+            &config.run_id,
+        ])
+        .status()
+        .await
+        .map_err(|e| format!("start SWE-bench harness: {e}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("SWE-bench harness exited with {status}"))
+    }
+}
+
 /// CLI 顶层参数结构。
 #[derive(Parser)]
 #[command(name = "astrcode", version, about = "AI coding agent platform")]
@@ -53,6 +121,7 @@ struct Cli {
 
 /// 支持的子命令枚举。
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// 启动交互式终端 UI（默认）
     Tui {
@@ -92,9 +161,11 @@ enum Commands {
         /// eval case 目录路径
         #[arg(long, default_value = "eval-tasks")]
         cases: std::path::PathBuf,
-        /// SWE-bench 数据文件、目录或 URL（json/jsonl）。设置后覆盖 --cases。
+        /// SWE-bench 数据文件、目录或 URL（json/jsonl/parquet）。设置后覆盖 --cases。
         #[arg(long)]
         swe: Option<String>,
+        // TODO: Add --limit/--sample before encouraging full SWE-bench runs. Full datasets are
+        // expensive and should have a first-class bounded-run path.
         /// 报告输出路径（默认 stdout）
         #[arg(long)]
         output: Option<std::path::PathBuf>,
@@ -119,6 +190,27 @@ enum Commands {
         /// Auth token
         #[arg(long)]
         auth_token: Option<String>,
+        /// 将 SWE-bench predictions 聚合输出为官方 harness 可消费的 JSONL。
+        #[arg(long)]
+        swe_predictions_output: Option<std::path::PathBuf>,
+        /// 输出 predictions 后调用官方 SWE-bench harness 进行 Docker 判分。
+        #[arg(long)]
+        swe_harness: bool,
+        /// 官方 harness 的 dataset_name 参数。
+        #[arg(long, default_value = "princeton-nlp/SWE-bench_Lite")]
+        swe_harness_dataset: String,
+        /// 官方 harness 的 split 参数。
+        #[arg(long, default_value = "test")]
+        swe_harness_split: String,
+        /// 官方 harness 的 run_id 参数。
+        #[arg(long, default_value = "astrcode-eval")]
+        swe_harness_run_id: String,
+        /// 官方 harness 的 max_workers 参数。
+        #[arg(long, default_value = "1")]
+        swe_harness_max_workers: usize,
+        /// 用于执行 `-m swebench.harness.run_evaluation` 的 Python 命令。
+        #[arg(long, default_value = "python")]
+        swe_harness_python: String,
     },
     /// 显示版本信息
     Version,
@@ -225,6 +317,13 @@ async fn main() -> ExitCode {
             storage,
             server_addr,
             auth_token,
+            swe_predictions_output,
+            swe_harness,
+            swe_harness_dataset,
+            swe_harness_split,
+            swe_harness_run_id,
+            swe_harness_max_workers,
+            swe_harness_python,
         } => {
             let config = astrcode_eval::EvalConfig {
                 cases_dir: cases,
@@ -250,8 +349,41 @@ async fn main() -> ExitCode {
                     } else {
                         println!("{text}");
                     }
+                    let predictions_output = match (swe_predictions_output, swe_harness) {
+                        (Some(path), _) => Some(path),
+                        (None, true) => Some(default_swe_predictions_output()),
+                        (None, false) => None,
+                    };
+                    if let Some(path) = predictions_output.as_deref() {
+                        if let Err(e) = write_swe_predictions(&report, path) {
+                            eprintln!("Failed to write SWE-bench predictions: {e}");
+                            return ExitCode::from(1);
+                        }
+                        eprintln!(
+                            "Wrote {} SWE-bench predictions to {}",
+                            report.swe_bench_prediction_count(),
+                            path.display()
+                        );
+                    }
                     if !report.all_passed() {
                         return ExitCode::from(1);
+                    }
+                    if swe_harness {
+                        let Some(path) = predictions_output.as_deref() else {
+                            eprintln!("SWE-bench harness requires a predictions output path");
+                            return ExitCode::from(1);
+                        };
+                        let harness_config = SweHarnessConfig {
+                            python: swe_harness_python,
+                            dataset: swe_harness_dataset,
+                            split: swe_harness_split,
+                            run_id: swe_harness_run_id,
+                            max_workers: swe_harness_max_workers,
+                        };
+                        if let Err(e) = run_swe_harness(path, harness_config).await {
+                            eprintln!("SWE-bench harness failed: {e}");
+                            return ExitCode::from(1);
+                        }
                     }
                 },
                 Err(e) => {

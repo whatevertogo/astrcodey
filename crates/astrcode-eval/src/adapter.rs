@@ -6,10 +6,16 @@
 use std::{
     ffi::OsStr,
     fs,
+    fs::File,
     path::{Path, PathBuf},
 };
 
+use parquet::{
+    file::reader::{FileReader, SerializedFileReader},
+    record::{Field, Row},
+};
 use serde::Deserialize;
+use serde_json::{Map, Number, Value};
 use walkdir::WalkDir;
 
 use crate::{
@@ -89,6 +95,14 @@ struct SweBenchRecord {
     #[serde(alias = "test", default)]
     test: Option<String>,
     #[serde(default)]
+    hints_text: Option<String>,
+    #[serde(rename = "FAIL_TO_PASS", default)]
+    fail_to_pass: Option<String>,
+    #[serde(rename = "PASS_TO_PASS", default)]
+    pass_to_pass: Option<String>,
+    #[serde(default)]
+    test_patch: Option<String>,
+    #[serde(default)]
     timeout_secs: Option<u64>,
     #[serde(default)]
     tags: Option<Vec<String>>,
@@ -166,21 +180,33 @@ fn collect_case_files(source: &Path) -> Result<Vec<PathBuf>, EvalError> {
             .and_then(OsStr::to_str)
             .map(|ext| ext.to_ascii_lowercase())
         {
-            Some(ext) if ext == "json" || ext == "jsonl" => paths.push(path.to_path_buf()),
+            Some(ext) if ext == "json" || ext == "jsonl" || ext == "parquet" => {
+                paths.push(path.to_path_buf())
+            },
             _ => (),
         }
     }
 
     if paths.is_empty() {
         return Err(EvalError::CaseLoad(format!(
-            "no .json/.jsonl files under {}",
+            "no .json/.jsonl/.parquet files under {}",
             source.display()
         )));
     }
     Ok(paths)
 }
 
+fn is_parquet_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
+}
+
 fn load_swe_case_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
+    if is_parquet_file(path) {
+        return load_swe_parquet_file(path);
+    }
+
     let text = fs::read_to_string(path).map_err(|e| {
         EvalError::CaseLoad(format!("failed to read SWE file {}: {e}", path.display()))
     })?;
@@ -211,6 +237,126 @@ fn load_swe_case_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
     Ok(records)
 }
 
+fn load_swe_parquet_file(path: &Path) -> Result<Vec<SweBenchRecord>, EvalError> {
+    let file = File::open(path).map_err(|e| {
+        EvalError::CaseLoad(format!(
+            "failed to open SWE parquet {}: {e}",
+            path.display()
+        ))
+    })?;
+    let reader = SerializedFileReader::new(file).map_err(|e| {
+        EvalError::CaseLoad(format!(
+            "failed to read SWE parquet {}: {e}",
+            path.display()
+        ))
+    })?;
+    let rows = reader.get_row_iter(None).map_err(|e| {
+        EvalError::CaseLoad(format!(
+            "failed to iterate SWE parquet rows {}: {e}",
+            path.display()
+        ))
+    })?;
+
+    let mut records = Vec::new();
+    for (index, row) in rows.enumerate() {
+        let row = row.map_err(|e| {
+            EvalError::CaseLoad(format!(
+                "failed to read SWE parquet row {}:{}: {e}",
+                path.display(),
+                index + 1
+            ))
+        })?;
+        let value = parquet_row_to_json(row);
+        let record = serde_json::from_value::<SweBenchRecord>(value).map_err(|e| {
+            EvalError::CaseLoad(format!(
+                "invalid SWE parquet row {}:{}: {e}",
+                path.display(),
+                index + 1
+            ))
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn parquet_row_to_json(row: Row) -> Value {
+    Value::Object(
+        row.into_columns()
+            .into_iter()
+            .map(|(name, field)| (name, parquet_field_to_json(field)))
+            .collect::<Map<_, _>>(),
+    )
+}
+
+fn parquet_field_to_json(field: Field) -> Value {
+    match field {
+        Field::Null => Value::Null,
+        Field::Bool(value) => Value::Bool(value),
+        Field::Byte(value) => Number::from(value).into(),
+        Field::Short(value) => Number::from(value).into(),
+        Field::Int(value) => Number::from(value).into(),
+        Field::Long(value) => Number::from(value).into(),
+        Field::UByte(value) => Number::from(value).into(),
+        Field::UShort(value) => Number::from(value).into(),
+        Field::UInt(value) => Number::from(value).into(),
+        Field::ULong(value) => Number::from(value).into(),
+        Field::Float16(value) => Number::from_f64(value.to_f32() as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Field::Float(value) => Number::from_f64(value as f64)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Field::Double(value) => Number::from_f64(value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Field::Decimal(value) => Value::String(format!("{value:?}")),
+        Field::Str(value) => Value::String(value),
+        Field::Bytes(value) => Value::String(
+            value
+                .as_utf8()
+                .map(str::to_string)
+                .unwrap_or_else(|_| String::from_utf8_lossy(value.data()).into_owned()),
+        ),
+        Field::Date(value) => Number::from(value).into(),
+        Field::TimeMillis(value) => Number::from(value).into(),
+        Field::TimeMicros(value) => Number::from(value).into(),
+        Field::TimestampMillis(value) => Number::from(value).into(),
+        Field::TimestampMicros(value) => Number::from(value).into(),
+        Field::Group(value) => parquet_row_to_json(value),
+        Field::ListInternal(value) => Value::Array(
+            value
+                .elements()
+                .iter()
+                .cloned()
+                .map(parquet_field_to_json)
+                .collect(),
+        ),
+        Field::MapInternal(value) => Value::Object(
+            value
+                .entries()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        parquet_field_to_map_key(key),
+                        parquet_field_to_json(value.clone()),
+                    )
+                })
+                .collect::<Map<_, _>>(),
+        ),
+    }
+}
+
+fn parquet_field_to_map_key(field: &Field) -> String {
+    match field {
+        Field::Str(value) => value.clone(),
+        Field::Bytes(value) => value
+            .as_utf8()
+            .map(str::to_string)
+            .unwrap_or_else(|_| String::from_utf8_lossy(value.data()).into_owned()),
+        _ => field.to_string(),
+    }
+}
+
 fn map_records_to_cases(path: &Path, records: Vec<SweBenchRecord>) -> Vec<EvalCase> {
     let mut cases = Vec::new();
     for record in records {
@@ -239,6 +385,17 @@ fn pick_test_command(test_command: Option<String>, test: Option<String>) -> Opti
     })
 }
 
+fn non_empty_text(raw: Option<String>) -> Option<String> {
+    raw.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn normalize_repo_url(repo: &str) -> String {
     let repo = repo.trim();
     if repo.starts_with("http://") || repo.starts_with("https://") {
@@ -249,14 +406,19 @@ fn normalize_repo_url(repo: &str) -> String {
 }
 
 fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError> {
+    let official = is_official_swe_bench_record(&record);
     let id = record.id;
-    let prompt = record
+    let problem = record
         .problem_statement
         .or(record.question)
         .unwrap_or_else(|| format!("SWE case [{}]", id));
-    let mut prompts = vec![prompt];
+    let hints_text = non_empty_text(record.hints_text);
+    let mut prompts = vec![problem];
     if let Some(hints) = record.hints {
         prompts.extend(hints.into_iter().map(|hint| format!("Hint: {hint}")));
+    }
+    if let Some(hints_text) = hints_text {
+        prompts.push(format!("Hints:\n{hints_text}"));
     }
 
     let repo = record
@@ -273,14 +435,25 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
             command: test_command,
             expect_exit_code: Some(0),
         });
+    } else if official {
+        judges.push(JudgeConfig::SweBenchPatch {
+            instance_id: id.clone(),
+        });
     }
 
     let mut tags = record.tags.unwrap_or_default();
     tags.push("swe-bench".to_string());
+    if official {
+        tags.push("official-swe-bench".to_string());
+    }
 
     Ok(EvalCase {
         id,
-        description: "SWE benchmark case".to_string(),
+        description: if official {
+            "Official SWE-bench case".to_string()
+        } else {
+            "SWE benchmark case".to_string()
+        },
         setup: Setup::Git {
             repo: normalize_repo_url(&repo),
             commit,
@@ -290,4 +463,154 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
         timeout_secs: record.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
         tags,
     })
+}
+
+fn is_official_swe_bench_record(record: &SweBenchRecord) -> bool {
+    record
+        .test_patch
+        .as_ref()
+        .is_some_and(|patch| !patch.is_empty())
+        || record
+            .fail_to_pass
+            .as_ref()
+            .is_some_and(|tests| !tests.is_empty())
+        || record
+            .pass_to_pass
+            .as_ref()
+            .is_some_and(|tests| !tests.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn official_swe_bench_record_uses_prediction_judge() {
+        let record: SweBenchRecord = serde_json::from_str(
+            r#"{
+                "instance_id": "django__django-12345",
+                "repo": "django/django",
+                "base_commit": "abc123",
+                "problem_statement": "Fix the issue.",
+                "hints_text": "Look at the parser.",
+                "FAIL_TO_PASS": "[\"tests.test_parser\"]",
+                "PASS_TO_PASS": "[]",
+                "test_patch": "diff --git a/tests.py b/tests.py"
+            }"#,
+        )
+        .unwrap();
+
+        let case = map_swe_record_to_case(record).unwrap();
+
+        assert_eq!(case.id, "django__django-12345");
+        assert_eq!(case.description, "Official SWE-bench case");
+        assert!(case.tags.contains(&"official-swe-bench".to_string()));
+        assert!(
+            case.prompts
+                .iter()
+                .any(|prompt| prompt.contains("Fix the issue."))
+        );
+        assert!(
+            case.prompts
+                .iter()
+                .any(|prompt| prompt.contains("Look at the parser."))
+        );
+        assert!(matches!(
+            case.judges.as_slice(),
+            [JudgeConfig::SweBenchPatch { instance_id }] if instance_id == "django__django-12345"
+        ));
+    }
+
+    #[test]
+    fn explicit_test_command_takes_precedence_over_official_prediction_judge() {
+        let record: SweBenchRecord = serde_json::from_str(
+            r#"{
+                "instance_id": "custom-1",
+                "repo": "owner/repo",
+                "base_commit": "abc123",
+                "problem_statement": "Fix it.",
+                "test_patch": "diff --git a/tests.py b/tests.py",
+                "command": "pytest tests/test_issue.py"
+            }"#,
+        )
+        .unwrap();
+
+        let case = map_swe_record_to_case(record).unwrap();
+
+        assert!(matches!(
+            case.judges.as_slice(),
+            [JudgeConfig::Command { command, expect_exit_code: Some(0) }]
+                if command == "pytest tests/test_issue.py"
+        ));
+    }
+
+    #[test]
+    fn parquet_input_loads_official_swe_bench_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-00000-of-00001.parquet");
+        write_single_swe_parquet_record(&path);
+
+        let records = load_swe_case_file(&path).unwrap();
+        let case = map_swe_record_to_case(records.into_iter().next().unwrap()).unwrap();
+
+        assert_eq!(case.id, "django__django-12345");
+        assert_eq!(case.description, "Official SWE-bench case");
+        assert!(matches!(
+            case.judges.as_slice(),
+            [JudgeConfig::SweBenchPatch { instance_id }] if instance_id == "django__django-12345"
+        ));
+    }
+
+    fn write_single_swe_parquet_record(path: &Path) {
+        use std::sync::Arc;
+
+        use parquet::{
+            data_type::{ByteArray, ByteArrayType},
+            file::{properties::WriterProperties, writer::SerializedFileWriter},
+            schema::parser::parse_message_type,
+        };
+
+        let schema = Arc::new(
+            parse_message_type(
+                r#"
+                message swe_bench {
+                    REQUIRED BINARY instance_id (UTF8);
+                    REQUIRED BINARY repo (UTF8);
+                    REQUIRED BINARY base_commit (UTF8);
+                    REQUIRED BINARY problem_statement (UTF8);
+                    REQUIRED BINARY hints_text (UTF8);
+                    REQUIRED BINARY FAIL_TO_PASS (UTF8);
+                    REQUIRED BINARY PASS_TO_PASS (UTF8);
+                    REQUIRED BINARY test_patch (UTF8);
+                }
+                "#,
+            )
+            .unwrap(),
+        );
+        let props = Arc::new(WriterProperties::builder().build());
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+
+        for value in [
+            "django__django-12345",
+            "django/django",
+            "abc123",
+            "Fix the issue.",
+            "Look at the parser.",
+            "[\"tests.test_parser\"]",
+            "[]",
+            "diff --git a/tests.py b/tests.py",
+        ] {
+            let mut column = row_group.next_column().unwrap().unwrap();
+            column
+                .typed::<ByteArrayType>()
+                .write_batch(&[ByteArray::from(value)], None, None)
+                .unwrap();
+            column.close().unwrap();
+        }
+
+        row_group.close().unwrap();
+        writer.close().unwrap();
+    }
 }

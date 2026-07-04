@@ -18,3 +18,4 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
+parquet = { version = "59", default-features = false, features = ["brotli", "flate2-zlib-rs", "lz4", "snap", "zstd"] }

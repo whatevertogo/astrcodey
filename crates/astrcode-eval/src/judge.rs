@@ -1,6 +1,6 @@
 //! Judge 判定系统 — trait 定义与内置 judges。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use astrcode_core::event::Event;
 
@@ -58,6 +58,9 @@ async fn evaluate_single(config: &JudgeConfig, ctx: &JudgeContext<'_>) -> Verdic
             evaluate_file_exists(ctx.work_dir, path, *exists)
         },
         JudgeConfig::EventLog { condition } => evaluate_event_log(condition, ctx.metrics),
+        JudgeConfig::SweBenchPatch { instance_id } => {
+            evaluate_swe_bench_patch(ctx.work_dir, instance_id).await
+        },
     }
 }
 
@@ -241,5 +244,176 @@ fn evaluate_event_log(condition: &str, metrics: &Metrics) -> Verdict {
         _ => Verdict::Fail {
             reason: format!("unrecognized event_log condition: {condition}"),
         },
+    }
+}
+
+// ─── SWE-bench Prediction Judge ─────────────────────────────────────────
+
+async fn evaluate_swe_bench_patch(work_dir: &Path, instance_id: &str) -> Verdict {
+    let patch = match collect_model_patch(work_dir).await {
+        Ok(patch) => patch,
+        Err(e) => {
+            return Verdict::Fail {
+                reason: format!("cannot collect SWE-bench model patch: {e}"),
+            };
+        },
+    };
+
+    if patch.trim().is_empty() {
+        return Verdict::Fail {
+            reason: "SWE-bench model patch is empty".to_string(),
+        };
+    }
+
+    let prediction = serde_json::json!({
+        "instance_id": instance_id,
+        "model_name_or_path": "astrcode-eval",
+        "model_patch": patch,
+    });
+    let prediction_path = work_dir.join(".astrcode-swebench-prediction.json");
+    let content = match serde_json::to_string_pretty(&prediction) {
+        Ok(content) => content,
+        Err(e) => {
+            return Verdict::Fail {
+                reason: format!("cannot serialize SWE-bench prediction: {e}"),
+            };
+        },
+    };
+
+    match std::fs::write(&prediction_path, content) {
+        Ok(()) => Verdict::Pass,
+        Err(e) => Verdict::Fail {
+            reason: format!("cannot write {}: {e}", prediction_path.display()),
+        },
+    }
+}
+
+async fn collect_model_patch(work_dir: &Path) -> Result<String, std::io::Error> {
+    let mut patch = run_git_capture(work_dir, &["diff", "--binary", "HEAD", "--"]).await?;
+    for path in collect_untracked_paths(work_dir).await? {
+        let file_patch = run_git_capture_path(
+            work_dir,
+            &["diff", "--binary", "--no-index", "--", "/dev/null"],
+            &path,
+        )
+        .await?;
+        patch.push_str(&file_patch);
+    }
+    Ok(patch)
+}
+
+async fn collect_untracked_paths(work_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let output = tokio::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .current_dir(work_dir)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+        .collect())
+}
+
+async fn run_git_capture(work_dir: &Path, args: &[&str]) -> Result<String, std::io::Error> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(work_dir)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn run_git_capture_path(
+    work_dir: &Path,
+    args: &[&str],
+    path: &Path,
+) -> Result<String, std::io::Error> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .arg(path)
+        .current_dir(work_dir)
+        .output()
+        .await?;
+
+    let code = output.status.code().unwrap_or(-1);
+    if output.status.success() || code == 1 {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    Err(std::io::Error::other(
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, process::Command};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn swe_bench_patch_prediction_includes_tracked_and_untracked_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init"]);
+        fs::write(dir.path().join("tracked.txt"), "before\n").unwrap();
+        run_git(dir.path(), &["add", "tracked.txt"]);
+        run_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+
+        fs::write(dir.path().join("tracked.txt"), "after\n").unwrap();
+        fs::write(dir.path().join("new.txt"), "new file\n").unwrap();
+
+        let verdict = evaluate_swe_bench_patch(dir.path(), "repo__project-1").await;
+        assert!(verdict.is_pass());
+
+        let prediction_path = dir.path().join(".astrcode-swebench-prediction.json");
+        let prediction: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(prediction_path).unwrap()).unwrap();
+        let patch = prediction["model_patch"].as_str().unwrap();
+
+        assert_eq!(prediction["instance_id"], "repo__project-1");
+        assert!(patch.contains("diff --git a/tracked.txt b/tracked.txt"));
+        assert!(patch.contains("-before"));
+        assert!(patch.contains("+after"));
+        assert!(patch.contains("diff --git a/new.txt b/new.txt"));
+        assert!(patch.contains("+new file"));
+    }
+
+    fn run_git(work_dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(work_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

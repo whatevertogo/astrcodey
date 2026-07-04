@@ -10,7 +10,7 @@ use crate::{
     client::EvalClient,
     judge::{self, JudgeContext, Verdict},
     metrics::Metrics,
-    report::{EvalReport, EvalResult},
+    report::{EvalReport, EvalResult, SweBenchPrediction},
     setup,
 };
 
@@ -116,6 +116,7 @@ impl EvalRunner {
                         }],
                         metrics: Metrics::default(),
                         duration_ms: 0,
+                        swe_bench_prediction: None,
                         error: Some(format!("panic: {e}")),
                     });
                 },
@@ -149,6 +150,7 @@ async fn run_single_case(
                 }],
                 metrics: Metrics::default(),
                 duration_ms: started.elapsed().as_millis() as u64,
+                swe_bench_prediction: None,
                 error: Some(e.to_string()),
             };
         },
@@ -169,6 +171,7 @@ async fn run_single_case(
                 }],
                 metrics: Metrics::default(),
                 duration_ms: started.elapsed().as_millis() as u64,
+                swe_bench_prediction: None,
                 error: Some(e.to_string()),
             };
         },
@@ -186,6 +189,7 @@ async fn run_single_case(
                 }],
                 metrics: Metrics::default(),
                 duration_ms: started.elapsed().as_millis() as u64,
+                swe_bench_prediction: None,
                 error: Some(e.to_string()),
             };
         }
@@ -199,6 +203,7 @@ async fn run_single_case(
                 }],
                 metrics: Metrics::default(),
                 duration_ms: started.elapsed().as_millis() as u64,
+                swe_bench_prediction: None,
                 error: Some(e.to_string()),
             };
         }
@@ -217,6 +222,7 @@ async fn run_single_case(
     };
     let verdicts = judge::evaluate_judges(&case.judges, &ctx).await;
     let passed = verdicts.iter().all(|v| v.is_pass());
+    let swe_bench_prediction = read_swe_bench_prediction(&work_dir);
 
     // Cleanup
     if !keep_workdir {
@@ -232,8 +238,15 @@ async fn run_single_case(
         verdicts,
         metrics,
         duration_ms: started.elapsed().as_millis() as u64,
+        swe_bench_prediction,
         error: None,
     }
+}
+
+fn read_swe_bench_prediction(work_dir: &std::path::Path) -> Option<SweBenchPrediction> {
+    let path = work_dir.join(".astrcode-swebench-prediction.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
 }
 
 /// 从 ~/.astrcode/run.json 读取 server 连接信息。

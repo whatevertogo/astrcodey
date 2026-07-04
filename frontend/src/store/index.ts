@@ -115,8 +115,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       console.error('Failed to refresh sessions:', err)
       set({
-        transientHint:
-          err instanceof Error ? err.message : '刷新会话列表失败',
+        transientHint: err instanceof Error ? err.message : '刷新会话列表失败',
       })
     }
   },
@@ -225,8 +224,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
       set({
-        transientHint:
-          err instanceof Error ? err.message : '刷新会话快照失败',
+        transientHint: err instanceof Error ? err.message : '刷新会话快照失败',
       })
     }
   },
@@ -238,8 +236,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       console.error('Failed to refresh extensions:', err)
       set({
-        transientHint:
-          err instanceof Error ? err.message : '刷新扩展数据失败',
+        transientHint: err instanceof Error ? err.message : '刷新扩展数据失败',
       })
     }
   },
@@ -289,8 +286,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (err) {
       console.error('Failed to refresh commands:', err)
       set({
-        transientHint:
-          err instanceof Error ? err.message : '刷新命令列表失败',
+        transientHint: err instanceof Error ? err.message : '刷新命令列表失败',
       })
     }
   },

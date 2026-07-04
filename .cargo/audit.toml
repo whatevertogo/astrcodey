@@ -22,4 +22,9 @@ ignore = [
     "RUSTSEC-2025-0081",
     "RUSTSEC-2025-0098",
     "RUSTSEC-2025-0100",
+    # quick-xml via plist 1.9.0, which is pulled in by the Tauri desktop stack.
+    # plist is currently the latest release and still pins quick-xml ^0.39.2.
+    # Remove these once plist/tauri can depend on quick-xml >=0.41.0.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
