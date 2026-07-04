@@ -7,6 +7,9 @@ exclude = ["astrcode-desktop"]
 
 [advisories]
 version = 2
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "parquet 59 depends on paste; no safe upstream upgrade is available yet" },
+]
 
 [licenses]
 version = 2
@@ -24,7 +27,6 @@ allow = [
     "CC0-1.0",
     "CDLA-Permissive-2.0",
     "MPL-2.0",
-    "OpenSSL",
     "Unlicense",
     "BSL-1.0",
 ]
