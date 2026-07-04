@@ -122,7 +122,8 @@
   --font-outfit: 'Outfit', -apple-system, sans-serif;
   /* Layout tokens */
   --layout-page-padding-x: 32px;
-  --layout-content-max-width: 840px;
+  --layout-content-max-width: 1040px;
+  --layout-hero-composer-max-width: 920px;
   --layout-avatar-size: 28px;
   --layout-avatar-gap: 16px;
   --layout-assistant-indent: calc(
@@ -266,24 +267,26 @@ body,
   }
 }
 
-button {
-  cursor: pointer;
-  border: none;
-  background: none;
-  color: inherit;
-  font-family: var(--font-outfit);
-  font-size: inherit;
-  padding: 0;
-}
+@layer base {
+  button {
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: inherit;
+    font-family: var(--font-outfit);
+    font-size: inherit;
+    padding: 0;
+  }
 
-textarea {
-  font-family: inherit;
-  font-size: inherit;
-  color: inherit;
-  background: none;
-  border: none;
-  outline: none;
-  resize: none;
+  textarea {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: none;
+    border: none;
+    outline: none;
+    resize: none;
+  }
 }
 
 code,

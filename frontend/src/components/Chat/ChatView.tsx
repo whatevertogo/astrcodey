@@ -26,9 +26,9 @@ export default function ChatView({
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-panel-bg">
       <TopBar isSidebarOpen={isSidebarOpen} onToggleSidebar={onToggleSidebar} />
       {showHeroComposer ? (
-        <main className="flex min-h-0 flex-1 flex-col items-center justify-center bg-panel-bg px-[var(--layout-page-padding-x)] pb-[14vh]">
-          <div className="flex w-full max-w-[var(--layout-content-max-width)] flex-col items-center">
-            <h1 className="mb-10 w-full text-center text-[34px] font-medium leading-tight text-text-primary">
+        <main className="flex min-h-0 flex-1 flex-col bg-panel-bg px-[var(--layout-page-padding-x)] pb-10 pt-[clamp(180px,24vh,320px)]">
+          <div className="mx-auto flex w-full max-w-[var(--layout-hero-composer-max-width)] flex-col items-center">
+            <h1 className="mb-8 w-full text-center text-[34px] font-medium leading-tight text-text-primary">
               我们应该在{' '}
               {workingDir?.split(/[\\/]/).filter(Boolean).pop() ?? 'astrcodey'}{' '}
               中构建什么？

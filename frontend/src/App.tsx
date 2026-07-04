@@ -33,7 +33,18 @@ export default function App() {
         className={`flex h-full min-h-0 overflow-hidden bg-app-bg text-text-primary${isResizing ? ' select-none' : ''}`}
       >
         {isOpen && (
-          <div className="min-h-0 min-w-0 flex-none" style={{ width }}>
+          <button
+            type="button"
+            aria-label="关闭边栏"
+            className="fixed inset-0 z-30 bg-overlay-backdrop md:hidden"
+            onClick={toggle}
+          />
+        )}
+        {isOpen && (
+          <div
+            className="fixed inset-y-0 left-0 z-40 min-h-0 min-w-0 flex-none shadow-surface-lg md:static md:z-auto md:shadow-none"
+            style={{ width, maxWidth: 'calc(100vw - 64px)' }}
+          >
             <Sidebar
               activeView={mainView}
               onToggleSidebar={toggle}
@@ -45,7 +56,7 @@ export default function App() {
         )}
         {isOpen && (
           <div
-            className={`relative z-10 w-px flex-none cursor-col-resize bg-border transition-colors duration-100 hover:bg-border-strong ${isResizing ? 'bg-border-strong' : ''}`}
+            className={`relative z-10 hidden w-px flex-none cursor-col-resize bg-border transition-colors duration-100 hover:bg-border-strong md:block ${isResizing ? 'bg-border-strong' : ''}`}
             onPointerDown={onResizeStart}
           />
         )}
