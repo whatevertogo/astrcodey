@@ -35,10 +35,38 @@ pub enum ResolveError {
 fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
     // Note: keep this list intentionally small and stable. It is a fallback when
     // the user does not specify `api_key` in config.toml.
-    match profile.name.as_str() {
-        "openai" => &["OPENAI_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY"],
+    let name = profile.name.as_str();
+    let provider_kind = profile.provider_kind.as_str();
+    if matches!(name, "deepseek") || matches!(provider_kind, "deepseek") {
+        return &["DEEPSEEK_API_KEY"];
+    }
+    if matches!(name, "anthropic") || matches!(provider_kind, "anthropic") {
+        return &["ANTHROPIC_API_KEY"];
+    }
+    if matches!(name, "qwen")
+        || matches!(provider_kind, "qwen")
+        || profile.base_url.contains("dashscope.aliyuncs.com")
+    {
+        return &["DASHSCOPE_API_KEY", "QWEN_API_KEY"];
+    }
+    if matches!(name, "ark")
+        || matches!(provider_kind, "ark")
+        || profile.base_url.contains("volces.com")
+    {
+        return &["ARK_API_KEY", "VOLCENGINE_API_KEY"];
+    }
+    if matches!(name, "zhipu" | "zai")
+        || matches!(provider_kind, "zhipu" | "zai")
+        || profile.base_url.contains("open.bigmodel.cn")
+        || profile.base_url.contains("api.z.ai")
+    {
+        return &["ZHIPU_API_KEY", "BIGMODEL_API_KEY"];
+    }
+    if matches!(name, "openai") || matches!(provider_kind, "openai") {
+        return &["OPENAI_API_KEY"];
+    }
+
+    match name {
         // astrcode historically uses GOOGLE_API_KEY; pi-mono uses GEMINI_API_KEY.
         // Accept both (prefer the one that's set).
         "gemini" | "google" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
@@ -543,6 +571,40 @@ mod tests {
         let result = config.into_effective();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("api_key"));
+    }
+
+    #[test]
+    fn known_env_keys_include_zhipu_aliases_and_endpoints() {
+        let profile = Profile {
+            name: "zhipu-coding".into(),
+            provider_kind: "openai".into(),
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".into(),
+            api_key: None,
+            wire_format: ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: ProviderAuthScheme::Bearer,
+            capabilities: ProviderCapabilities::default(),
+            models: vec![ModelConfig {
+                id: "glm-5.2".into(),
+                max_tokens: None,
+                context_limit: None,
+                model_options: None,
+            }],
+        };
+        assert_eq!(
+            known_env_keys_for_profile(&profile),
+            &["ZHIPU_API_KEY", "BIGMODEL_API_KEY"]
+        );
+
+        let profile = Profile {
+            name: "custom".into(),
+            provider_kind: "zhipu".into(),
+            base_url: "https://api.z.ai/api/coding/paas/v4".into(),
+            ..profile
+        };
+        assert_eq!(
+            known_env_keys_for_profile(&profile),
+            &["ZHIPU_API_KEY", "BIGMODEL_API_KEY"]
+        );
     }
 
     #[test]

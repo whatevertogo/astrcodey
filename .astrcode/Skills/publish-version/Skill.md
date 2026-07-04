@@ -1,100 +1,210 @@
 ---
 name: publish-version
-description: 发布新版本：检查并同步所有版本号，提交，打 tag，推送到 GitHub 触发 release workflow,用户说「发版」「发布」「publish」「release」或明确要求发布某个版本时触发。
+description: 按开源项目标准发布 AstrCode 新版本。用户说“发版”“发布”“release”“publish”“发 patch/minor/major”“发布 0.x.y”“打 tag”“触发 release workflow”时使用；负责 SemVer 选择、发布前检查、CI gate、GitHub Actions 发版、精确版本 release PR、tag/发布跟踪与失败排查。
 ---
 
-## 发版流程
+# Publish Version
 
-### 1. 确认目标版本号
+## 发布原则
 
-询问用户要发布的版本号（如 `0.1.7`），或根据上一个 tag 自动推断 patch bump。
+按开源项目的默认标准执行：
 
-```bash
-git tag --sort=-v:refname | head -1
-```
+- 从受保护的 `main` 发布，不从脏工作区、未推送提交或临时分支发布。
+- 所有代码变更先经 PR 合入；发版动作只做版本 bump、tag、构建和发布。
+- 优先用 GitHub Actions `Release` workflow；不要本地手写改版本号。
+- 推送 tag、触发 release workflow、npm publish 都属于发布动作，执行前必须获得用户明确确认。
+- 失败后先看 CI 日志并修正根因；不要直接重跑掩盖问题。
 
-### 2. 版本号一致性检查
+## 分流
 
-**逐项检查以下所有位置**，全部必须与目标版本一致。这是最容易出错的一步，不可跳过。
+1. 用户要求 `patch` / `minor` / `major`：走 workflow dispatch 标准路径。
+2. 用户只说“发版”：建议 `patch`，先确认 bump 类型。
+3. 用户指定精确版本号：走 release PR 路径；PR 合并后再 tag 或让用户改用 bump workflow。
+4. 用户说“检查能不能发版”：只做 preflight，不触发 workflow，不创建 tag。
+5. 只有用户明确要求维护者应急发版，才允许本地直接 tag push。
 
-| # | 位置 | 检查命令 | 说明 |
-|---|------|----------|------|
-| 1 | workspace 下的所有 crate（数量视仓库而定） | `grep -R --include='Cargo.toml' '^version' crates` | 递归查找 workspace 中的所有 `Cargo.toml` 中的 `version` 字段 |
-| 2 | `src-tauri/Cargo.toml` | `grep '^version' src-tauri/Cargo.toml` | Tauri 桌面应用的 Rust 依赖，**容易遗漏** |
-| 3 | `src-tauri/tauri.conf.json` | `grep '"version"' src-tauri/tauri.conf.json` | 决定桌面安装包的文件名版本（如 `AstrCode_0.1.7_x64-setup.exe`） |
-| 4 | `frontend/package.json` | `grep '"version"' frontend/package.json` | 前端 npm 包版本 |
-| 5 | `npm/astrcode/package.json` | `grep '"version"' npm/astrcode/package.json` | npm 主包模板，CI 中 `prepare-npm-packages.sh` 用 `$VERSION` 注入，但本地模板也需同步 |
-| 6 | `npm/astrcode/package.json` 中的平台依赖 | `grep '"@whatevertogo/astrcode-' npm/astrcode/package.json` | 平台相关包（以 `@whatevertogo/astrcode-` 为前缀）的版本号也需要更新 |
+## SemVer 选择
 
-**如果发现不一致，先统一更新再继续。** 以下是常用的示例脚本（把 `OLD` 替换为当前版本，`NEW` 替换为目标版本）。
+根据已合入 `main` 的变化选择版本：
 
-注意：下面的 `sed -i` 写法假定使用 GNU sed（Linux）。在 macOS (BSD sed) 上请使用 `sed -i '' -e 's/.../.../'` 或改用 `perl -pi -e` 以确保兼容性。
+| bump | 使用场景 |
+|------|----------|
+| `patch` | bug fix、文档、CI、内部重构、无兼容性影响 |
+| `minor` | 新功能、向后兼容的新 API/CLI/配置能力 |
+| `major` | 破坏兼容的 CLI、配置、协议、插件 SDK、持久化格式或 npm 分发变化 |
 
-```bash
-# 1. 所有 crate Cargo.toml：对每个 Cargo.toml，只替换首个匹配的 version 行
-for toml in $(find crates -name "Cargo.toml"); do
-  sed -i "0,/^version = \"OLD\"/{s/^version = \"OLD\"/version = \"NEW\"/}" "$toml"
-done
+如果 commit 范围中出现 breaking change、协议/SDK/持久化迁移，默认提高到 `major`，除非用户明确决定不这样做。
 
-# 2. src-tauri/Cargo.toml
-sed -i "0,/^version = \"OLD\"/{s/^version = \"OLD\"/version = \"NEW\"/}" src-tauri/Cargo.toml
+## Preflight
 
-# 3. src-tauri/tauri.conf.json
-sed -i 's/"version": "OLD"/"version": "NEW"/' src-tauri/tauri.conf.json
-
-# 4. frontend/package.json
-sed -i 's/"version": "OLD"/"version": "NEW"/' frontend/package.json
-
-# 5 & 6. npm/astrcode/package.json（主版本 + 平台依赖）
-sed -i 's/"version": "OLD"/"version": "NEW"/g' npm/astrcode/package.json
-# 替换以 @whatevertogo/astrcode- 前缀的依赖版本（视 package.json 结构，可使用更可靠的 jq/perl 操作）
-sed -i 's/"@whatevertogo\/astrcode-\(.*\)": "OLD"/"@whatevertogo\/astrcode-\1": "NEW"/g' npm/astrcode/package.json
-等等内容所有版本都需要更新
-```
-
-> 可选更安全做法：使用 `jq` 或 `node` 脚本直接解析并更新 `package.json`，以避免误替换。
-
-### 3. 编译验证
-
-版本号更新后必须通过编译和测试：
+先收集状态：
 
 ```bash
-cargo check
-cargo fmt --check
-cargo clippy --all
-cargo clippy --all-targets -- -D warnings
-cargo test
+git fetch origin main --tags
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git rev-parse origin/main
+git tag --sort=-v:refname | head -5
+gh run list --branch main --limit 10
 ```
 
-### 4. 提交并打 tag
+必须满足：
+
+- `git status --short` 为空。
+- 本地 `main` 与 `origin/main` 一致；否则先 fast-forward 或停止。
+- 最近一次目标分支 CI 通过，或用户明确接受等待/风险。
+- 没有同名 `v<version>` tag。
+- 不覆盖、不删除、不 force-push 已发布 tag；需要修复坏版本时发布新 patch。
+
+检查 release notes 输入：
+
+```bash
+LAST_TAG=$(git tag --sort=-v:refname | grep '^v' | head -1)
+git log "${LAST_TAG}..origin/main" --pretty=format:'%s (%h)' --no-merges
+```
+
+确认重要变更会进入 release notes；若发现 breaking change 或迁移说明缺失，先补文档或 release note 内容。
+
+本地最小检查：
+
+```bash
+cargo fmt --all -- --check
+python3 scripts/check-deps.py
+cargo check --workspace --all-features --exclude astrcode-desktop
+bash -n scripts/bump-release-version.sh scripts/prepare-npm-packages.sh
+git diff --check
+```
+
+完整发布前最好由 CI 覆盖：clippy、tests、audit/deny、frontend lint/typecheck/format/contract/build、多平台 release binary build。
+
+## 标准路径：workflow dispatch
+
+适合 `patch` / `minor` / `major`。不要在本地改版本号。
+
+确认用户同意发布后执行：
+
+```bash
+gh workflow run release.yml --ref main -f bump=<patch|minor|major>
+```
+
+跟踪：
+
+```bash
+gh run list --workflow release.yml --limit 3
+gh run watch <run-id> --exit-status
+```
+
+失败时：
+
+```bash
+gh run view <run-id> --log-failed
+```
+
+workflow 会计算下一个版本，运行 `scripts/bump-release-version.sh`，提交版本 bump，创建 `v<version>` tag，并发布 GitHub Release / npm 包。
+
+## 精确版本：release PR 路径
+
+适合用户要求“发布 0.x.y”。不要直接在本地 main 打 tag。
+
+1. 校验版本号和 tag：
+
+```bash
+VERSION=<version>
+printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+! git rev-parse "v${VERSION}" >/dev/null 2>&1
+```
+
+2. 创建 release 分支并同步版本：
+
+```bash
+git switch main
+git pull --ff-only origin main
+git switch -c release/v${VERSION}
+bash scripts/bump-release-version.sh "$VERSION"
+```
+
+脚本负责同步 `Cargo.toml`、lockfile、Tauri、frontend、npm 主包与 s5r fixture 的版本。
+
+3. 验证：
+
+```bash
+cargo fmt --all -- --check
+python3 scripts/check-deps.py
+cargo check --workspace --all-features --exclude astrcode-desktop
+bash -n scripts/bump-release-version.sh scripts/prepare-npm-packages.sh
+git diff --check
+```
+
+4. 提交并开 PR：
 
 ```bash
 git add -A
-git commit -m "chore: bump version to <VERSION>"
-git tag -a "v<VERSION>" -m "v<VERSION>"
+git commit -m "chore: bump version to ${VERSION}"
+git push -u origin release/v${VERSION}
+gh pr create --base main --head release/v${VERSION} \
+  --title "chore: bump version to ${VERSION}" \
+  --body "Release version metadata sync for v${VERSION}."
 ```
 
-### 5. 确认推送
+5. 等 PR CI 通过并合并后，再从最新 `main` 创建 tag：
 
-**推送前必须向用户确认**，因为推送 tag 会立即触发 GitHub Actions release workflow（构建 + npm publish + GitHub Release），不可撤销。
-
-确认后：
 ```bash
-git push origin main
-git push origin "v<VERSION>"
+git switch main
+git pull --ff-only origin main
+grep -q "^version = \"${VERSION}\"" Cargo.toml
+grep -q "\"version\": \"${VERSION}\"" src-tauri/tauri.conf.json
+grep -q "\"version\": \"${VERSION}\"" frontend/package.json
+grep -q "\"version\": \"${VERSION}\"" npm/astrcode/package.json
+git tag -a "v${VERSION}" -m "v${VERSION}"
 ```
 
-### 6. 发版后提示
+推送 tag 前再次确认用户同意：
 
-告知用户：
-- GitHub Actions release workflow 已触发
-- 可在 GitHub Actions 页面查看构建进度
-- release 产物包括：CLI 二进制（6 平台）、Tauri Desktop 安装包、npm 包、GitHub Release
+```bash
+git push origin "v${VERSION}"
+```
 
-## 注意事项
+tag push 触发 `release.yml` 的 tag 路径；该路径只校验版本一致性，不自动 bump。
 
-- 不要跳过版本号一致性检查，这是最常出错的地方
-- `src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 在 workspace 外，极其容易遗漏
-- npm 版本由 `scripts/prepare-npm-packages.sh` 通过 `$VERSION` 环境变量注入，但本地模板 `npm/astrcode/package.json` 也需要同步，否则下次手动检查会混乱
-- `eval-tasks/fixtures/` 下的 `Cargo.toml`（version = "0.1.0"）是测试夹具，不需要更新
-- 如果用户想重新发布同一版本，需要先删除远程 tag
+## 应急路径：直接 tag
+
+只有维护者明确要求绕过 PR 时使用。仍必须保持工作区干净、CI 通过、版本文件已同步，并在最终回复中说明绕过了 PR gate。
+
+```bash
+git switch main
+git pull --ff-only origin main
+bash scripts/bump-release-version.sh "$VERSION"
+cargo fmt --all -- --check
+python3 scripts/check-deps.py
+cargo check --workspace --all-features --exclude astrcode-desktop
+git diff --check
+git add -A
+git commit -m "chore: bump version to ${VERSION}"
+git tag -a "v${VERSION}" -m "v${VERSION}"
+git push origin HEAD:main
+git push origin "v${VERSION}"
+```
+
+## 发布后报告
+
+回复用户时包含：
+
+- 版本号和 bump 类型。
+- 使用路径：workflow dispatch、release PR + tag，或应急直接 tag。
+- GitHub Actions run URL 或 run id。
+- 安装命令：
+
+```bash
+npm install -g @whatevertogo/astrcode@<version>
+```
+
+- 未跑或未通过的检查，以及剩余风险。
+
+## 项目特定易错点
+
+- 不要把 `eval-tasks/fixtures/` 里的 fixture 版本随发版 bump。
+- `src-tauri/Cargo.toml` 使用 workspace 版本；桌面展示版本在 `src-tauri/tauri.conf.json`。
+- npm 主包和平台包 license 必须是 `AGPL-3.0-only`。
+- Release notes 安装命令必须是 `@whatevertogo/astrcode`，不是裸 `astrcode`。
+- Weekly Release 只在上一个 `v*` tag 后有新提交时发布，不发布空版本。

@@ -15,7 +15,7 @@ import type {
   ProviderWireFormat,
 } from '../../services/types'
 
-type SettingsSection = 'model' | 'appearance'
+type SettingsSection = 'models' | 'providers' | 'permissions' | 'appearance'
 
 interface ProviderConfigDialogState {
   provider: ProviderSpecView
@@ -26,7 +26,7 @@ interface ProviderConfigDialogState {
 }
 
 interface ProviderRemoveDialogState {
-  provider: ProviderSpecView
+  provider?: ProviderSpecView
   profile: ProfileView
 }
 
@@ -88,6 +88,21 @@ function authLabel(profile: ProfileView | undefined): string {
   return profile ? authSchemeLabel(profile.authScheme) : ''
 }
 
+function normalizeBaseUrl(value: string | undefined): string {
+  return (value ?? '').trim().replace(/\/+$/, '').toLowerCase()
+}
+
+function profileMatchesProviderEndpoint(
+  profile: ProfileView,
+  provider: ProviderSpecView
+): boolean {
+  const profileBaseUrl = normalizeBaseUrl(profile.baseUrl)
+  if (!profileBaseUrl) return false
+  return provider.endpoints.some(
+    (endpoint) => normalizeBaseUrl(endpoint.baseUrl) === profileBaseUrl
+  )
+}
+
 function findProviderProfile(
   profiles: ProfileView[],
   provider: ProviderSpecView
@@ -98,6 +113,12 @@ function findProviderProfile(
       (profile) =>
         profile.providerKind === provider.providerKind &&
         profile.wireFormat === provider.wireFormat
+    ) ??
+    profiles.find(
+      (profile) =>
+        profile.wireFormat === provider.wireFormat &&
+        profile.authScheme === provider.authScheme &&
+        profileMatchesProviderEndpoint(profile, provider)
     )
   )
 }
@@ -108,7 +129,7 @@ export default function SettingsPage({
   onOpenPlugins,
 }: SettingsPageProps) {
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
-  const [section, setSection] = useState<SettingsSection>('model')
+  const [section, setSection] = useState<SettingsSection>('models')
   const [configView, setConfigView] = useState<ConfigView | null>(null)
   const [providerCatalog, setProviderCatalog] = useState<ProviderSpecView[]>([])
   const [selectedProfile, setSelectedProfile] = useState('')
@@ -128,10 +149,13 @@ export default function SettingsPage({
   const [applyingProviderId, setApplyingProviderId] = useState<string | null>(
     null
   )
-  const [removingProviderId, setRemovingProviderId] = useState<string | null>(
+  const [removingProfileName, setRemovingProfileName] = useState<string | null>(
     null
   )
   const [activatingProviderId, setActivatingProviderId] = useState<
+    string | null
+  >(null)
+  const [activatingProfileName, setActivatingProfileName] = useState<
     string | null
   >(null)
   const [providerConfigDialog, setProviderConfigDialog] =
@@ -343,9 +367,48 @@ export default function SettingsPage({
     ]
   )
 
+  const handleActivateConfiguredProfile = useCallback(
+    async (profile: ProfileView) => {
+      const modelId = profile.models[0]?.id
+      if (!modelId) return
+
+      setActivatingProfileName(profile.name)
+      setStatusMessage(null)
+      setErrorMessage(null)
+      setTestResult(null)
+      try {
+        const response = await api.updateActiveSelection(
+          profile.name,
+          modelId,
+          selectedSmallProfile || undefined,
+          selectedSmallModel || undefined,
+          yoloEnabled ? 'yolo' : 'manual'
+        )
+        applyConfig(await api.getConfig())
+        bumpModelRefreshKey()
+        setStatusMessage(
+          response.warning
+            ? `已切换到 ${profile.name}；${response.warning}`
+            : `已切换到 ${profile.name}`
+        )
+      } catch (err) {
+        setErrorMessage(String(err))
+      } finally {
+        setActivatingProfileName(null)
+      }
+    },
+    [
+      applyConfig,
+      bumpModelRefreshKey,
+      selectedSmallModel,
+      selectedSmallProfile,
+      yoloEnabled,
+    ]
+  )
+
   const handleRemoveProviderPreset = useCallback(
     async (dialog: ProviderRemoveDialogState) => {
-      setRemovingProviderId(dialog.provider.id)
+      setRemovingProfileName(dialog.profile.name)
       setStatusMessage(null)
       setErrorMessage(null)
       setTestResult(null)
@@ -362,7 +425,7 @@ export default function SettingsPage({
       } catch (err) {
         setErrorMessage(String(err))
       } finally {
-        setRemovingProviderId(null)
+        setRemovingProfileName(null)
       }
     },
     [applyConfig, bumpModelRefreshKey]
@@ -408,11 +471,13 @@ export default function SettingsPage({
               设置
             </h1>
             <p className="mt-2 text-[14px] leading-relaxed text-text-secondary">
-              调整模型、权限和界面外观。
+              调整模型、Provider、权限和界面外观。
             </p>
             <div className="mt-6 space-y-1">
               {[
-                { id: 'model' as const, label: '模型与权限' },
+                { id: 'models' as const, label: '模型' },
+                { id: 'providers' as const, label: 'Providers' },
+                { id: 'permissions' as const, label: '权限' },
                 { id: 'appearance' as const, label: '外观' },
               ].map((item) => (
                 <button
@@ -438,7 +503,7 @@ export default function SettingsPage({
                 <span className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-text-secondary" />
                 加载设置...
               </div>
-            ) : section === 'model' ? (
+            ) : section === 'models' ? (
               <div className="space-y-5">
                 <div>
                   <label className="mb-2 block text-[13px] font-semibold text-text-secondary">
@@ -571,32 +636,6 @@ export default function SettingsPage({
                   </div>
                 </div>
 
-                <div className="rounded-lg border border-border bg-surface-soft px-4 py-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="text-[14px] font-semibold text-text-primary">
-                        工具权限
-                      </div>
-                      <div className="mt-1 text-[13px] leading-relaxed text-text-secondary">
-                        开启后自动批准工具调用；关闭时保留手动确认。
-                      </div>
-                    </div>
-                    <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-[13px] text-text-secondary">
-                      <input
-                        type="checkbox"
-                        checked={yoloEnabled}
-                        onChange={(event) => {
-                          setYoloEnabled(event.target.checked)
-                          setStatusMessage(null)
-                          setErrorMessage(null)
-                        }}
-                        className="h-4 w-4 accent-accent-strong"
-                      />
-                      {yoloEnabled ? '完全访问' : '手动确认'}
-                    </label>
-                  </div>
-                </div>
-
                 <div className="divide-y divide-border rounded-lg border border-border">
                   <div className="flex justify-between gap-4 px-4 py-3">
                     <span className="text-[13px] text-text-secondary">
@@ -616,11 +655,47 @@ export default function SettingsPage({
                   </div>
                 </div>
 
+                <div className="flex flex-wrap justify-end gap-2.5">
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleReload()}
+                    disabled={reloading || saving || testing}
+                  >
+                    {reloading ? '重载中...' : '从磁盘重载'}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => void handleTest()}
+                    disabled={testing || saving}
+                  >
+                    {testing ? '测试中...' : '测试连接'}
+                  </Button>
+                  <button
+                    type="button"
+                    className={btnPrimary}
+                    onClick={() => void handleSave()}
+                    disabled={saving || testing}
+                  >
+                    {saving ? '保存中...' : '保存模型'}
+                  </button>
+                </div>
+              </div>
+            ) : section === 'providers' ? (
+              <div className="space-y-5">
+                <div>
+                  <label className="mb-2 block text-[13px] font-semibold text-text-secondary">
+                    配置文件
+                  </label>
+                  <div className="overflow-hidden text-ellipsis whitespace-nowrap rounded-lg border border-border bg-surface-soft px-3 py-2.5 text-[12px] text-text-primary">
+                    {configView?.configPath ?? ''}
+                  </div>
+                </div>
+
                 {catalogProviders.length > 0 && (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-4">
                       <h2 className="text-[13px] font-semibold text-text-secondary">
-                        Provider Catalog
+                        Provider Presets
                       </h2>
                       <span className="text-[12px] text-text-tertiary">
                         {catalogProviders.length} presets
@@ -649,11 +724,12 @@ export default function SettingsPage({
                           '-'
                         const isProviderBusy =
                           applyingProviderId === provider.id ||
-                          removingProviderId === provider.id ||
+                          removingProfileName ===
+                            existingProviderProfile?.name ||
                           activatingProviderId === provider.id
                         const canConfigure =
                           !applyingProviderId &&
-                          !removingProviderId &&
+                          !removingProfileName &&
                           !activatingProviderId &&
                           !saving &&
                           !reloading &&
@@ -815,28 +891,183 @@ export default function SettingsPage({
                   </div>
                 )}
 
+                {profiles.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-4">
+                      <h2 className="text-[13px] font-semibold text-text-secondary">
+                        已配置 Profiles
+                      </h2>
+                      <span className="text-[12px] text-text-tertiary">
+                        {profiles.length} configured
+                      </span>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {profiles.map((profile) => {
+                        const configuredModel =
+                          profile.models.find(
+                            (model) => model.id === selectedModel
+                          )?.id ?? profile.models[0]?.id
+                        const isActive = profile.name === selectedProfile
+                        const isBusy = activatingProfileName === profile.name
+                        const isRemoving = removingProfileName === profile.name
+                        const canRemove =
+                          !applyingProviderId &&
+                          !removingProfileName &&
+                          !activatingProviderId &&
+                          !activatingProfileName &&
+                          !saving &&
+                          !reloading &&
+                          !testing
+                        const canActivate =
+                          Boolean(configuredModel) &&
+                          !isActive &&
+                          !applyingProviderId &&
+                          !removingProfileName &&
+                          !activatingProviderId &&
+                          !activatingProfileName &&
+                          !saving &&
+                          !reloading &&
+                          !testing
+
+                        return (
+                          <div
+                            key={profile.name}
+                            className="min-w-0 rounded-lg border border-border bg-surface-soft px-4 py-3"
+                          >
+                            <div className="flex min-w-0 items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="truncate text-[14px] font-semibold text-text-primary">
+                                  {profile.name}
+                                </div>
+                                <div className="mt-1 truncate text-[12px] text-text-tertiary">
+                                  {profile.providerKind} ·{' '}
+                                  {authSchemeLabel(profile.authScheme)}
+                                </div>
+                              </div>
+                              <span className="shrink-0 rounded-md border border-border bg-panel-bg px-2 py-1 text-[11px] text-text-secondary">
+                                {wireFormatLabel(profile.wireFormat)}
+                              </span>
+                            </div>
+                            <div className="mt-3 divide-y divide-border text-[12px]">
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  状态
+                                </span>
+                                <span
+                                  className={cn(
+                                    'min-w-0 text-right font-medium',
+                                    isActive
+                                      ? 'text-success'
+                                      : 'text-text-primary'
+                                  )}
+                                >
+                                  {isActive ? '当前使用' : '已配置'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  Model
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {configuredModel ?? '-'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  Base URL
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {profile.baseUrl || '-'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-3 py-1.5">
+                                <span className="shrink-0 text-text-tertiary">
+                                  API Key
+                                </span>
+                                <span className="min-w-0 break-all text-right text-text-primary">
+                                  {profile.hasApiKey ? '已配置' : '未配置'}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="mt-3 flex flex-wrap justify-between gap-2">
+                              <Button
+                                variant="danger"
+                                className="h-8 px-3 text-[12px]"
+                                disabled={!canRemove}
+                                onClick={() => {
+                                  setProviderRemoveDialog({ profile })
+                                }}
+                              >
+                                {isRemoving ? '移除中...' : '移除配置'}
+                              </Button>
+                              {!isActive && (
+                                <Button
+                                  variant="secondary"
+                                  className="h-8 px-3 text-[12px]"
+                                  disabled={!canActivate}
+                                  onClick={() =>
+                                    void handleActivateConfiguredProfile(
+                                      profile
+                                    )
+                                  }
+                                >
+                                  {isBusy ? '切换中...' : '设为当前'}
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap justify-end gap-2.5">
                   <Button
                     variant="secondary"
                     onClick={() => void handleReload()}
-                    disabled={reloading || saving || testing}
+                    disabled={reloading || applyingProviderId !== null}
                   >
                     {reloading ? '重载中...' : '从磁盘重载'}
                   </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={() => void handleTest()}
-                    disabled={testing || saving}
-                  >
-                    {testing ? '测试中...' : '测试连接'}
-                  </Button>
+                </div>
+              </div>
+            ) : section === 'permissions' ? (
+              <div className="space-y-5">
+                <div className="rounded-lg border border-border bg-surface-soft px-4 py-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="text-[14px] font-semibold text-text-primary">
+                        工具权限
+                      </div>
+                      <div className="mt-1 text-[13px] leading-relaxed text-text-secondary">
+                        开启后自动批准工具调用；关闭时保留手动确认。
+                      </div>
+                    </div>
+                    <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 text-[13px] text-text-secondary">
+                      <input
+                        type="checkbox"
+                        checked={yoloEnabled}
+                        onChange={(event) => {
+                          setYoloEnabled(event.target.checked)
+                          setStatusMessage(null)
+                          setErrorMessage(null)
+                        }}
+                        className="h-4 w-4 accent-accent-strong"
+                      />
+                      {yoloEnabled ? '完全访问' : '手动确认'}
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap justify-end gap-2.5">
                   <button
                     type="button"
                     className={btnPrimary}
                     onClick={() => void handleSave()}
                     disabled={saving || testing}
                   >
-                    {saving ? '保存中...' : '保存'}
+                    {saving ? '保存中...' : '保存权限'}
                   </button>
                 </div>
               </div>
@@ -1019,9 +1250,9 @@ export default function SettingsPage({
 
       {providerRemoveDialog && (
         <Modal
-          title={`移除 ${providerRemoveDialog.provider.displayName} 配置`}
+          title={`移除 ${providerRemoveDialog.provider?.displayName ?? providerRemoveDialog.profile.name} 配置`}
           onClose={() => {
-            if (removingProviderId) return
+            if (removingProfileName) return
             setProviderRemoveDialog(null)
           }}
           className="w-[460px]"
@@ -1039,19 +1270,19 @@ export default function SettingsPage({
             <div className="flex justify-end gap-2 pt-2">
               <Button
                 variant="secondary"
-                disabled={Boolean(removingProviderId)}
+                disabled={Boolean(removingProfileName)}
                 onClick={() => setProviderRemoveDialog(null)}
               >
                 返回
               </Button>
               <Button
                 variant="danger"
-                disabled={Boolean(removingProviderId)}
+                disabled={Boolean(removingProfileName)}
                 onClick={() =>
                   void handleRemoveProviderPreset(providerRemoveDialog)
                 }
               >
-                {removingProviderId ? '移除中...' : '移除配置'}
+                {removingProfileName ? '移除中...' : '移除配置'}
               </Button>
             </div>
           </div>

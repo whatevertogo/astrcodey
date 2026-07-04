@@ -76,12 +76,20 @@ const ARK_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset {
     is_default: true,
 }];
 
-const ZHIPU_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset {
-    id: "coding-paas",
-    label: "Coding PAAS",
-    base_url: Some("https://open.bigmodel.cn/api/coding/paas/v4"),
-    is_default: true,
-}];
+const ZHIPU_ENDPOINTS: &[ProviderEndpointPreset] = &[
+    ProviderEndpointPreset {
+        id: "zai-coding-paas",
+        label: "Z.ai Coding PAAS",
+        base_url: Some("https://api.z.ai/api/coding/paas/v4"),
+        is_default: true,
+    },
+    ProviderEndpointPreset {
+        id: "bigmodel-coding-paas",
+        label: "BigModel Coding PAAS",
+        base_url: Some("https://open.bigmodel.cn/api/coding/paas/v4"),
+        is_default: false,
+    },
+];
 
 const OPENAI_COMPATIBLE_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset {
     id: "custom",
@@ -230,8 +238,8 @@ mod tests {
     }
 
     #[test]
-    fn qwen_and_ark_are_openai_chat_compatible_presets() {
-        for id in ["qwen", "ark"] {
+    fn domestic_openai_compatible_presets_have_expected_shape() {
+        for id in ["qwen", "ark", "zhipu"] {
             let spec = builtin_provider_catalog()
                 .iter()
                 .find(|spec| spec.id == id)
@@ -240,5 +248,21 @@ mod tests {
             assert_eq!(spec.auth_scheme, ProviderAuthScheme::Bearer);
             assert!(spec.endpoints[0].base_url.is_some());
         }
+    }
+
+    #[test]
+    fn zhipu_catalog_accepts_current_and_legacy_coding_endpoints() {
+        let spec = builtin_provider_catalog()
+            .iter()
+            .find(|spec| spec.id == "zhipu")
+            .expect("zhipu provider spec exists");
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|endpoint| endpoint.base_url == Some("https://api.z.ai/api/coding/paas/v4"))
+        );
+        assert!(spec.endpoints.iter().any(
+            |endpoint| endpoint.base_url == Some("https://open.bigmodel.cn/api/coding/paas/v4")
+        ));
     }
 }
