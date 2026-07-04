@@ -20,6 +20,8 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 一个关键边界：所有 `astrcode-extension-*` 内置扩展都只依赖 `astrcode-extension-sdk`，不直接依赖 server/session/storage 等宿主内部 crate。这保证内置扩展和外置扩展走同一套公开 SDK 契约。
 
+依赖方向由 `scripts/check-deps.py` 检查。脚本使用的校验层级偏向依赖可达性（例如 desktop 作为最终应用入口独立约束），不完全等同于上面的产品架构分层；文档中的分层用于理解职责边界。
+
 ## Workspace 成员索引
 
 | Crate | 路径 | 类型 | 主要用途 |
@@ -281,7 +283,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `state`：`session_data_dir`，给扩展规范 session-local 数据目录。
 - `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
 
-依赖边界：依赖 `astrcode-core`、`astrcode-protocol`、`astrcode-support`。TODO 中已标出 `ExtensionHostServices` 当前通过 glob re-export 暴露过宽，后续可以收窄 trusted bundled extension 可见性。
+依赖边界：依赖 `astrcode-core`、`astrcode-protocol`、`astrcode-support`。`ExtensionHostServices` 只在 `trusted-bundled` feature 下通过 `trusted` 模块暴露给可信进程内扩展；磁盘/IPC 扩展必须走 capability-gated host API。
 
 测试线索：`worker/*`、`builder.rs`、`manifest.rs`、`runtime/*` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 

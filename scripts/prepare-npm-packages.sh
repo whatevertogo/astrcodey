@@ -16,17 +16,17 @@ ARTIFACTS_DIR="${1:?Usage: prepare-npm-packages.sh <artifacts-dir> <output-dir>}
 OUTPUT_DIR="${2:?Usage: prepare-npm-packages.sh <artifacts-dir> <output-dir>}"
 VERSION="${VERSION:?VERSION env var required}"
 
-declare -A PACKAGES=(
-  ["astrcode-linux-x64"]="astrcode-x86_64-linux.tar.gz:astrcode:linux:x64"
-  ["astrcode-linux-arm64"]="astrcode-aarch64-linux.tar.gz:astrcode:linux:arm64"
-  ["astrcode-darwin-x64"]="astrcode-x86_64-macos.tar.gz:astrcode:darwin:x64"
-  ["astrcode-darwin-arm64"]="astrcode-aarch64-macos.tar.gz:astrcode:darwin:arm64"
-  ["astrcode-win32-x64"]="astrcode-x86_64-windows.zip:astrcode.exe:win32:x64"
-  ["astrcode-win32-arm64"]="astrcode-aarch64-windows.zip:astrcode.exe:win32:arm64"
+PACKAGES=(
+  "astrcode-linux-x64|astrcode-x86_64-linux.tar.gz|astrcode|linux|x64"
+  "astrcode-linux-arm64|astrcode-aarch64-linux.tar.gz|astrcode|linux|arm64"
+  "astrcode-darwin-x64|astrcode-x86_64-macos.tar.gz|astrcode|darwin|x64"
+  "astrcode-darwin-arm64|astrcode-aarch64-macos.tar.gz|astrcode|darwin|arm64"
+  "astrcode-win32-x64|astrcode-x86_64-windows.zip|astrcode.exe|win32|x64"
+  "astrcode-win32-arm64|astrcode-aarch64-windows.zip|astrcode.exe|win32|arm64"
 )
 
-for pkg_name in "${!PACKAGES[@]}"; do
-  IFS=':' read -r archive binary os cpu <<< "${PACKAGES[$pkg_name]}"
+for package_spec in "${PACKAGES[@]}"; do
+  IFS='|' read -r pkg_name archive binary os cpu <<< "$package_spec"
   pkg_dir="${OUTPUT_DIR}/@whatevertogo/${pkg_name}"
   mkdir -p "$pkg_dir"
 
@@ -49,7 +49,7 @@ for pkg_name in "${!PACKAGES[@]}"; do
   "name": "@whatevertogo/${pkg_name}",
   "version": "${VERSION}",
   "description": "astrcode CLI binary for ${os}-${cpu}",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "os": ["${os}"],
   "cpu": ["${cpu}"],
   "files": ["${binary}"]

@@ -29,6 +29,9 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
 
       - name: Check for changes since last release
         id: check
@@ -69,6 +72,13 @@ jobs:
           echo "new_version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Next version: v${NEW_VERSION} (bump: ${BUMP})"
+
+      - name: Bump release metadata
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.new_version }}"
+          bash scripts/bump-release-version.sh "${VERSION}"
+          cargo check --workspace --exclude astrcode-desktop
 
       - name: Generate release notes
         if: steps.check.outputs.has_changes == 'true'
@@ -140,7 +150,7 @@ jobs:
 
             echo "---"
             echo ""
-            echo "**Install:** \`npm install -g astrcode@${TAG#v}\`"
+            echo "**Install:** \`npm install -g @whatevertogo/astrcode@${TAG#v}\`"
           } > release-notes.md
 
           cat release-notes.md
@@ -151,7 +161,10 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: bump version to ${TAG#v}" || echo "No changes to commit"
           git tag -a "$TAG" -m "Release $TAG" -m "$(cat release-notes.md)"
+          git push origin HEAD:${{ github.ref_name }}
           git push origin "$TAG"
 
   # 触发 release.yml（由 tag push 触发）

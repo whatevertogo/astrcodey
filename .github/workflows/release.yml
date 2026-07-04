@@ -66,18 +66,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
-          OLD=$(grep -A5 '^\[workspace\.package\]' Cargo.toml | grep -m1 '^version = ' | sed 's/.*"\(.*\)"/\1/')
 
-          # workspace 版本（各 crate 通过 version.workspace = true 继承）
-          sed -i "0,/^version = \"${OLD}\"/{s/^version = \"${OLD}\"/version = \"${VERSION}\"/}" Cargo.toml
-
-          sed -i "s/\"version\": \"${OLD}\"/\"version\": \"${VERSION}\"/" src-tauri/tauri.conf.json
-
-          # Keep frontend package metadata and its lockfile in sync.
-          npm version "${VERSION}" --no-git-tag-version --prefix frontend
-
-          sed -i "s/${OLD}/${VERSION}/g" npm/astrcode/package.json
-
+          bash scripts/bump-release-version.sh "${VERSION}"
           cargo check --workspace --exclude astrcode-desktop
 
           # 提交并打 tag
@@ -88,6 +78,15 @@ jobs:
           git tag -a "${TAG}" -m "${TAG}"
           git push origin HEAD:${{ github.ref_name }}
           git push origin "${TAG}"
+
+      - name: Verify tagged release version
+        if: github.event_name == 'push'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          grep -q "^version = \"${VERSION}\"" Cargo.toml
+          grep -q "\"version\": \"${VERSION}\"" src-tauri/tauri.conf.json
+          grep -q "\"version\": \"${VERSION}\"" frontend/package.json
+          grep -q "\"version\": \"${VERSION}\"" npm/astrcode/package.json
 
   # ── CLI binary builds ─────────────────────────────────────────────
 
@@ -322,9 +321,17 @@ jobs:
               echo ""
             fi
 
+            OTHER=$(git log "$RANGE" --pretty=format:"%s (%h)" --no-merges 2>/dev/null | grep -viE '^(feat|fix|refactor|chore|docs|ci|test|style)' || true)
+            if [ -n "$OTHER" ]; then
+              echo "### 📝 Other"
+              echo ""
+              echo "$OTHER" | sed 's/^/- /'
+              echo ""
+            fi
+
             echo "---"
             echo ""
-            echo "**Install:** \`npm install -g astrcode@${{ needs.prepare.outputs.version }}\`"
+            echo "**Install:** \`npm install -g @whatevertogo/astrcode@${{ needs.prepare.outputs.version }}\`"
           } > release-notes.md
           cat release-notes.md
       - name: Create GitHub Release

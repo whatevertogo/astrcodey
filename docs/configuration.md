@@ -47,9 +47,6 @@ agentToolMaxParallelCalls = 5
 shellTimeoutSecs = 120
 approvalMode = "manual"
 
-[runtime.extensionStates]
-"astrcode.memory" = true
-
 [permissions]
 deny = []
 ask = []

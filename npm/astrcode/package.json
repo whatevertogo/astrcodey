@@ -2,7 +2,7 @@
   "name": "@whatevertogo/astrcode",
   "version": "0.3.7",
   "description": "AI-powered coding assistant CLI",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/whatevertogo/astrcodey"

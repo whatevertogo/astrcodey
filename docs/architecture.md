@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~111k 行（Rust ~100k + TypeScript ~11.4k），`crates/` 下 26 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 26 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -83,7 +83,7 @@ session-A (root)
 
 ### 输入投递（`TurnScheduler::deliver_input`）
 
-运行中的 session 收到用户文本时，由**调用方**选择 [`InputDelivery`](crates/astrcode-server/src/turn_scheduler.rs) 策略，调度层统一执行：
+运行中的 session 收到用户文本时，由**调用方**选择 [`InputDelivery`](../crates/astrcode-server/src/turn_scheduler.rs) 策略，调度层统一执行：
 
 | 策略 | turn 运行中 | turn 空闲 | 典型入口 |
 |------|-------------|-------------|----------|
@@ -237,7 +237,7 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 
 ### 当前状态
 
-内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode / Memory / Channels / Web Tools）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
+内部插件实现（MCP client / Skill / Agent-Tool / Todo / Mode / Goal / Memory / Channels / Web Tools）统一依赖扩展 SDK；外置扩展通过 s5r 子进程加载，并在 `Initialize.metadata` 中声明宿主能力。
 
 ---
 

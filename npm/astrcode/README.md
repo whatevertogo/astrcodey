@@ -30,7 +30,7 @@ After installation, run in your terminal:
 astrcode
 ```
 
-Before the first run, configure an LLM provider in `~/.astrcode/config.json`. See the [Configuration Guide](https://github.com/whatevertogo/astrcode/blob/main/docs/configuration.md).
+Before the first run, configure an LLM provider in `~/.astrcode/config.toml`. Legacy `config.json` files are still migrated automatically. See the [Configuration Guide](https://github.com/whatevertogo/astrcodey/blob/main/docs/configuration.md).
 
 ## Features
 
@@ -40,12 +40,12 @@ Before the first run, configure an LLM provider in `~/.astrcode/config.json`. Se
 - **Web tools**: built-in `web-search` and `fetch-url` (DuckDuckGo default; Brave/Serper optional)
 - **Multiple frontends**: TUI, Web, Desktop GUI (Tauri)
 - **Extension system**: plugins, MCP, Skills, disk s5r extensions
-- **Session management**: event-sourcing architecture with fork and compact
+- **Session management**: event-sourcing architecture with fork, compact, and goal tracking
 
 ## More Information
 
-- GitHub: https://github.com/whatevertogo/astrcode
-- Documentation: https://github.com/whatevertogo/astrcode/tree/main/docs
+- GitHub: https://github.com/whatevertogo/astrcodey
+- Documentation: https://github.com/whatevertogo/astrcodey/tree/main/docs
 - NPM: https://www.npmjs.com/package/@whatevertogo/astrcode
 
 ## License
@@ -72,7 +72,7 @@ npm i @whatevertogo/astrcode
 astrcode
 ```
 
-首次运行前请在 `~/.astrcode/config.json` 中配置 LLM Provider，详见[配置指南](https://github.com/whatevertogo/astrcode/blob/main/docs/configuration.md)。
+首次运行前请在 `~/.astrcode/config.toml` 中配置 LLM Provider；旧版 `config.json` 仍会自动迁移。详见[配置指南](https://github.com/whatevertogo/astrcodey/blob/main/docs/configuration.md)。
 
 ### 功能特性
 
@@ -82,9 +82,9 @@ astrcode
 - **Web 工具**：内置 `web-search` 与 `fetch-url`（默认 DuckDuckGo；可选 Brave/Serper）
 - **多种前端**：TUI、Web、Desktop GUI
 - **扩展系统**：插件、MCP、Skills、s5r 磁盘扩展
-- **会话管理**：Event Sourcing 架构，支持 fork、compact
+- **会话管理**：Event Sourcing 架构，支持 fork、compact 和目标追踪
 
 ### 更多信息
 
-- GitHub: https://github.com/whatevertogo/astrcode
-- 文档: https://github.com/whatevertogo/astrcode/tree/main/docs
+- GitHub: https://github.com/whatevertogo/astrcodey
+- 文档: https://github.com/whatevertogo/astrcodey/tree/main/docs

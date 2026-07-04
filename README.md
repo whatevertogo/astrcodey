@@ -8,12 +8,11 @@
 | Interface | Preview |
 |-----------|---------|
 | **CLI (TUI)** | <img width="1210" height="924" alt="astrcode TUI screenshot" src="https://github.com/user-attachments/assets/55259723-9bd7-4a1a-a74e-1e799ece2eed" /> |
-| **Web / Desktop** | <img width="1197" height="805" alt="image" src="https://github.com/user-attachments/assets/5ee17441-e478-476e-b8f5-f426e1ff1867" />
-|
+| **Web / Desktop** | <img width="1197" height="805" alt="image" src="https://github.com/user-attachments/assets/5ee17441-e478-476e-b8f5-f426e1ff1867" /> |
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~100k lines of Rust across 26 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~11.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 26 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -198,12 +197,12 @@ First-party extensions are wired through [`astrcode-bundled-extensions`](crates/
 
 | Extension | Crate | Description |
 |---|---|---|
+| **Agent Tools** | `astrcode-extension-agent-tools` | Sub-agent delegation, agent discovery |
+| **MCP** | `astrcode-extension-mcp` | MCP protocol client with persistent process pool, background pre-warm, inflight merge |
+| **Skill** | `astrcode-extension-skill` | Slash-command skill discovery and dispatch |
+| **Todo Tool** | `astrcode-extension-todo-tool` | Progress tracking todo list tool |
 | **Mode** | `astrcode-extension-mode` | Agent running mode switching (Code / Plan), with Exit Gate, plan artifact persistence, keybinding & status item registration |
 | **Goal** | `astrcode-extension-goal` | Codex-style session goal tracking, token budgets, and automatic continuation |
-| **Skill** | `astrcode-extension-skill` | Slash-command skill discovery and dispatch |
-| **MCP** | `astrcode-extension-mcp` | MCP protocol client with persistent process pool, background pre-warm, inflight merge |
-| **Todo Tool** | `astrcode-extension-todo-tool` | Progress tracking todo list tool |
-| **Agent Tools** | `astrcode-extension-agent-tools` | Sub-agent delegation, agent discovery |
 | **Memory** | `astrcode-extension-memory` | Project-scoped markdown memory storage (disabled by default) |
 | **Channels** | `astrcode-extension-channels` | Telegram channel bridge for using AstrCode from an external chat (disabled by default) |
 | **Web Tools** | `astrcode-extension-web-tools` | Built-in `web-search` and `fetch-url` tools (DuckDuckGo default; Brave/Serper optional) |
@@ -343,70 +342,69 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 
 The Cargo workspace under [`crates/`](crates/) contains **26 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**27 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
 
-### Layer 0: Foundation
+### Layer 0: Foundation Contracts
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-kernel`](crates/astrcode-kernel) | 0.5k | Embeddable kernel: tool pack composition, tool registry, extension runtime abstraction |
-| [`astrcode-core`](crates/astrcode-core) | 9.1k | Shared domain types, traits, config system, extension contracts, prompt composition |
+| [`astrcode-core`](crates/astrcode-core) | 9.5k | Shared domain types, traits, config system, extension contracts, prompt composition |
+| [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
 | [`astrcode-support`](crates/astrcode-support) | 1.3k | Host utilities: path resolution, shell detection, tool result persistence |
+| [`astrcode-kernel`](crates/astrcode-kernel) | 0.5k | Embeddable kernel: tool pack composition, tool registry, extension runtime abstraction |
+
+### Layer 1: Core Implementations
+
+| Crate | Lines | Description |
+|---|---|---|
+| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
+| [`astrcode-storage`](crates/astrcode-storage) | 5.0k | JSONL event log, snapshots, config persistence, file locking |
+| [`astrcode-context`](crates/astrcode-context) | 4.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
+| [`astrcode-tools`](crates/astrcode-tools) | 7.8k | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, task |
 | [`astrcode-log`](crates/astrcode-log) | 0.4k | File rotation, stderr output, env-filter logging |
 
-### Layer 1: Domain Services
+### Layer 2: Session Runtime
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-ai`](crates/astrcode-ai) | 5.2k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
-| [`astrcode-tools`](crates/astrcode-tools) | 7.8k | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, task |
-| [`astrcode-storage`](crates/astrcode-storage) | 4.6k | JSONL event log, snapshots, config persistence, file locking |
-| [`astrcode-context`](crates/astrcode-context) | 4.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
-| [`astrcode-session`](crates/astrcode-session) | 11.3k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
-| [`astrcode-extensions`](crates/astrcode-extensions) | 7.4k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
+| [`astrcode-session`](crates/astrcode-session) | 12.1k | Agent loop: turn runner, tool pipeline, LLM stream, compact orchestration, runtime services |
 
-### Layer 2: Extensions
+### Layer 3: Extension System
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 2.7k | Stable extension authoring API, capability declarations, wire protocol types, manifest helpers |
+| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 2.8k | Stable extension authoring API, capability declarations, wire protocol types, manifest helpers |
+| [`astrcode-extensions`](crates/astrcode-extensions) | 7.6k | Extension lifecycle, hook dispatch, capability gating, disk IPC extension loader |
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 0.2k | Composition root that registers all first-party extension crates |
-| [`astrcode-extension-mode`](crates/astrcode-extension-mode) | 1.3k | Code / Plan mode switching, exit gate, plan artifact, keybindings & status bar |
-| [`astrcode-extension-goal`](crates/astrcode-extension-goal) | 1.6k | Codex-style session goals, token budgets, and automatic continuation |
-| [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 1.0k | Slash-command skill discovery and Skill tool dispatch |
-| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 0.9k | Progress-tracking todo list tool |
 | [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 0.8k | Sub-agent delegation, agent discovery (Claude Code compatible) |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | 3.4k | MCP client: stdio/HTTP transports, persistent process pool, pre-warm, health checks |
+| [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 1.0k | Slash-command skill discovery and Skill tool dispatch |
+| [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 0.8k | Progress-tracking todo list tool |
+| [`astrcode-extension-mode`](crates/astrcode-extension-mode) | 1.3k | Code / Plan mode switching, exit gate, plan artifact, keybindings & status bar |
+| [`astrcode-extension-goal`](crates/astrcode-extension-goal) | 1.6k | Codex-style session goals, token budgets, and automatic continuation |
 | [`astrcode-extension-memory`](crates/astrcode-extension-memory) | 3.2k | Project-scoped markdown memory (disabled by default) |
 | [`astrcode-extension-channels`](crates/astrcode-extension-channels) | 1.1k | Telegram channel bridge (disabled by default) |
 | [`astrcode-extension-web-tools`](crates/astrcode-extension-web-tools) | 1.9k | Web search and URL fetch tools with SSRF guards and fetch cache |
 
-### Layer 3: Server & Protocol
+### Layer 4: Services & Clients
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-protocol`](crates/astrcode-protocol) | 1.8k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
-| [`astrcode-server`](crates/astrcode-server) | 17.3k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
-
-### Layer 4: Clients
-
-| Crate | Lines | Description |
-|---|---|---|
+| [`astrcode-server`](crates/astrcode-server) | 18.0k | Session manager, JSON-RPC/HTTP/ACP handlers, transport, HTTP projection & SSE |
 | [`astrcode-client`](crates/astrcode-client) | 0.7k | Typed JSON-RPC client, transport abstraction, stream subscription |
-| [`astrcode-cli`](crates/astrcode-cli) | 8.3k | CLI entry: TUI (ratatui), headless exec, server launcher |
 
-### Eval
+### Layer 5: User Entry Points
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-eval`](crates/astrcode-eval) | 1.1k | Benchmark runner: HTTP server control, event-log metrics, structured reports |
+| [`astrcode-cli`](crates/astrcode-cli) | 8.4k | CLI entry: TUI (ratatui), headless exec, server launcher |
+| [`src-tauri/`](src-tauri) | 0.8k | Tauri v2 desktop shell: sidecar management, single-instance coordination, native dialogs |
 
+### Layer 6: Evaluation
 
-### Desktop Shell
-
-| Component | Lines | Description |
+| Crate | Lines | Description |
 |---|---|---|
-| [`src-tauri/`](src-tauri) | 0.8k | Tauri v2 shell: sidecar management, single-instance coordination, native dialogs |
+| [`astrcode-eval`](crates/astrcode-eval) | 2.0k | Benchmark runner: HTTP server control, event-log metrics, structured reports |
 
-**Totals:** ~100k lines of Rust (26 crates + Tauri), **317** `.rs` files; ~11.4k lines of TypeScript in `frontend/` (~**111k** lines overall).
+**Totals:** ~104.4k lines of Rust (26 crates + Tauri), **326** `.rs` files; ~12.4k lines of TypeScript in `frontend/` (~**116.8k** lines overall).
 
 ## Key Design Decisions
 
@@ -552,13 +550,16 @@ Extensions can register additional slash commands and keybindings at runtime.
 | [Extension System](docs/extension-system.md) | Built-in vs disk IPC extensions, host capabilities |
 | [Extension Author Guide](docs/extension-author-guide.md) | Disk s5r extension development guide |
 | [UI Render Spec](docs/ui-render-spec.md) | Structured rendering protocol for tool results |
+| [Release Guide](docs/release.md) | Version sync, release workflows, and npm/GitHub distribution |
 | [TODO](docs/TODO.md) | Project roadmap and pending items |
 
 ## Distribution
 
-Pre-built binaries are available for Linux, macOS, and Windows (x86_64 + aarch64) via GitHub Releases on every version tag. A weekly automated release pipeline publishes patch bumps every Monday.
+Pre-built binaries are available for Linux, macOS, and Windows (x86_64 + aarch64) via GitHub Releases on every version tag. Manual releases should use the `Release` workflow so version metadata, tags, npm packages, and GitHub assets stay in sync. The weekly workflow publishes a patch release only when commits landed since the previous version.
 
 **NPM Package**: [`@whatevertogo/astrcode`](https://www.npmjs.com/package/@whatevertogo/astrcode)
+
+See [Release Guide](docs/release.md) for the release checklist.
 
 ## Acknowledgments
 
