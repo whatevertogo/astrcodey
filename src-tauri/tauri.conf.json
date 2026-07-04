@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/schema.json",
   "productName": "AstrCode",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "identifier": "com.astrcode.desktop",
   "build": {
     "frontendDist": "../frontend/dist",
@@ -38,6 +38,8 @@
     "icon": [
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/astrcode-http-server"]
+    "externalBin": [
+      "binaries/astrcode-http-server"
+    ]
   }
 }
