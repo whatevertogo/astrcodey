@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import { PHASE_BG_CLASS } from '../../lib/styles'
-import { PageHeader } from '../layout'
 import { Dropdown, Icon, IconButton } from '../ui'
 
 const PHASE_LABELS: Record<string, string> = {
@@ -50,107 +49,112 @@ export default function TopBar({
   const [subsessionMenuOpen, setSubsessionMenuOpen] = useState(false)
 
   return (
-    <PageHeader>
-      <div className="flex min-w-0 items-center gap-1.5">
+    <header className="relative z-30 shrink-0 bg-panel-bg/92 backdrop-blur-[12px]">
+      <div className="relative flex min-h-[52px] items-center px-[var(--layout-page-padding-x)] py-2">
         {!isSidebarOpen && (
-          <IconButton
-            icon="sidebar"
-            label="展开侧边栏"
-            onClick={onToggleSidebar}
-            className="-ml-1"
-          />
+          <div className="absolute left-[var(--layout-page-padding-x)] top-1/2 -translate-y-1/2">
+            <IconButton
+              icon="sidebar"
+              label="展开侧边栏"
+              onClick={onToggleSidebar}
+              className="-ml-1"
+            />
+          </div>
         )}
-        <span
-          className={cn(
-            'h-[9px] w-[9px] shrink-0 rounded-full opacity-70 shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
-            isSidebarOpen && 'sr-only',
-            PHASE_BG_CLASS[phase] ?? PHASE_BG_CLASS.idle
-          )}
-          title={phase}
-          aria-hidden="true"
-        />
-        <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
-          {isSidebarOpen ? '' : activeSessionTitle || 'AstrCode'}
-        </span>
-        {phase !== 'idle' && (
-          <span className="shrink-0 text-xs text-text-secondary">
-            {PHASE_LABELS[phase] ?? phase}
+
+        <div className="mx-auto flex w-full max-w-[var(--layout-content-max-width)] min-w-0 items-center gap-1.5">
+          <span
+            className={cn(
+              'h-[9px] w-[9px] shrink-0 rounded-full opacity-70 shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
+              isSidebarOpen && 'sr-only',
+              PHASE_BG_CLASS[phase] ?? PHASE_BG_CLASS.idle
+            )}
+            title={phase}
+            aria-hidden="true"
+          />
+          <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
+            {isSidebarOpen ? '' : activeSessionTitle || 'AstrCode'}
           </span>
+          {phase !== 'idle' && (
+            <span className="shrink-0 text-xs text-text-secondary">
+              {PHASE_LABELS[phase] ?? phase}
+            </span>
+          )}
+        </div>
+
+        {agentSessions.length > 0 && (
+          <div className="absolute right-[var(--layout-page-padding-x)] top-1/2 shrink-0 -translate-y-1/2">
+            <Dropdown
+              open={subsessionMenuOpen}
+              onClose={() => setSubsessionMenuOpen(false)}
+              label="子会话"
+              align="right"
+              trigger={
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-full bg-accent-soft/20 px-2 py-0.5 text-xs font-medium text-accent hover:bg-accent-soft/30"
+                  onClick={() => setSubsessionMenuOpen((v) => !v)}
+                  aria-expanded={subsessionMenuOpen}
+                  aria-haspopup="menu"
+                >
+                  <Icon name="users" size={12} />
+                  {agentSessions.length} 个子会话
+                </button>
+              }
+            >
+              {agentSessions.map((agent) => (
+                <button
+                  key={agent.childSessionId}
+                  type="button"
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent-soft/10"
+                  role="menuitem"
+                  onClick={() => {
+                    switchSession(agent.childSessionId)
+                    setSubsessionMenuOpen(false)
+                  }}
+                >
+                  <span
+                    className={statusDotClass(agent.status)}
+                    aria-hidden="true"
+                  >
+                    ●
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-medium text-text-primary">
+                        {agent.agentName || '子会话'}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-text-secondary">
+                        {agent.status === 'running' && agent.phase
+                          ? PHASE_LABELS[agent.phase]
+                          : STATUS_LABELS[agent.status ?? 'running']}
+                      </span>
+                    </span>
+                    <span className="block truncate text-text-secondary">
+                      {agent.task || ''}
+                    </span>
+                    {agent.status === 'running' && agent.currentTool && (
+                      <span className="block truncate text-[11px] text-text-secondary">
+                        {agent.currentTool}
+                      </span>
+                    )}
+                    {agent.status === 'completed' && agent.summary && (
+                      <span className="block truncate text-[11px] text-text-secondary">
+                        {agent.summary}
+                      </span>
+                    )}
+                    {agent.status === 'failed' && agent.error && (
+                      <span className="block truncate text-[11px] text-danger">
+                        {agent.error}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              ))}
+            </Dropdown>
+          </div>
         )}
       </div>
-
-      {agentSessions.length > 0 && (
-        <div className="relative ml-auto shrink-0">
-          <Dropdown
-            open={subsessionMenuOpen}
-            onClose={() => setSubsessionMenuOpen(false)}
-            label="子会话"
-            align="right"
-            trigger={
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 rounded-full bg-accent-soft/20 px-2 py-0.5 text-xs font-medium text-accent hover:bg-accent-soft/30"
-                onClick={() => setSubsessionMenuOpen((v) => !v)}
-                aria-expanded={subsessionMenuOpen}
-                aria-haspopup="menu"
-              >
-                <Icon name="users" size={12} />
-                {agentSessions.length} 个子会话
-              </button>
-            }
-          >
-            {agentSessions.map((agent) => (
-              <button
-                key={agent.childSessionId}
-                type="button"
-                className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-accent-soft/10"
-                role="menuitem"
-                onClick={() => {
-                  switchSession(agent.childSessionId)
-                  setSubsessionMenuOpen(false)
-                }}
-              >
-                <span
-                  className={statusDotClass(agent.status)}
-                  aria-hidden="true"
-                >
-                  ●
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate font-medium text-text-primary">
-                      {agent.agentName || '子会话'}
-                    </span>
-                    <span className="shrink-0 text-[11px] text-text-secondary">
-                      {agent.status === 'running' && agent.phase
-                        ? PHASE_LABELS[agent.phase]
-                        : STATUS_LABELS[agent.status ?? 'running']}
-                    </span>
-                  </span>
-                  <span className="block truncate text-text-secondary">
-                    {agent.task || ''}
-                  </span>
-                  {agent.status === 'running' && agent.currentTool && (
-                    <span className="block truncate text-[11px] text-text-secondary">
-                      {agent.currentTool}
-                    </span>
-                  )}
-                  {agent.status === 'completed' && agent.summary && (
-                    <span className="block truncate text-[11px] text-text-secondary">
-                      {agent.summary}
-                    </span>
-                  )}
-                  {agent.status === 'failed' && agent.error && (
-                    <span className="block truncate text-[11px] text-danger">
-                      {agent.error}
-                    </span>
-                  )}
-                </span>
-              </button>
-            ))}
-          </Dropdown>
-        </div>
-      )}
-    </PageHeader>
+    </header>
   )
 }
