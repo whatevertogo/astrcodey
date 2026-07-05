@@ -7,9 +7,9 @@
 /// 配置文件格式的默认版本号。
 pub const DEFAULT_VERSION: &str = "1";
 /// 默认激活的配置文件名称。
-pub const DEFAULT_ACTIVE_PROFILE: &str = "deepseek";
+pub const DEFAULT_ACTIVE_PROFILE: &str = "";
 /// 默认激活的模型标识。
-pub const DEFAULT_ACTIVE_MODEL: &str = "deepseek-v4-flash";
+pub const DEFAULT_ACTIVE_MODEL: &str = "";
 
 // ── LLM 连接参数默认值 ─────────────────────────────────────────────────
 
@@ -77,5 +77,5 @@ pub fn default_active_model() -> String {
 
 /// serde 用：返回内置的默认配置文件列表。
 pub fn default_profiles() -> Vec<super::raw::Profile> {
-    super::raw::raw_default_profiles()
+    Vec::new()
 }

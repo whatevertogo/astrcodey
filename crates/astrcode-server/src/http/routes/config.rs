@@ -221,22 +221,14 @@ pub(in crate::http) async fn remove_provider_preset(
             format!("Profile {profile_name:?} is not configured"),
         );
     }
-    if candidate.profiles.is_empty() {
-        return bad_request_response(
-            "cannot_remove_last_profile",
-            "Cannot remove the only configured profile",
-        );
-    }
-
     if candidate.active_profile == profile_name {
-        let Some((next_profile, next_model)) = first_profile_model(&candidate.profiles) else {
-            return bad_request_response(
-                "no_model_available",
-                "No remaining profile has a configured model",
-            );
-        };
-        candidate.active_profile = next_profile;
-        candidate.active_model = next_model;
+        if let Some((next_profile, next_model)) = first_profile_model(&candidate.profiles) {
+            candidate.active_profile = next_profile;
+            candidate.active_model = next_model;
+        } else {
+            candidate.active_profile.clear();
+            candidate.active_model.clear();
+        }
     }
     if candidate.active_small_profile.as_deref() == Some(profile_name) {
         candidate.active_small_profile = None;

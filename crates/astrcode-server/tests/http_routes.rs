@@ -343,7 +343,8 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let config = runtime.config_manager().raw_config_snapshot();
-    assert_ne!(config.active_profile, "openai-compatible");
+    assert!(config.active_profile.is_empty());
+    assert!(config.active_model.is_empty());
     assert!(
         config
             .profiles
