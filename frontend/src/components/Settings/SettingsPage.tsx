@@ -767,7 +767,7 @@ export default function SettingsPage({
                     variant="secondary"
                     className={quietButtonClass}
                     onClick={() => void handleTest()}
-                    disabled={testing || saving}
+                    disabled={testing || saving || !selectedProfile || !selectedModel}
                   >
                     {testing ? '测试中...' : '测试连接'}
                   </Button>
@@ -775,7 +775,7 @@ export default function SettingsPage({
                     type="button"
                     className={settingsPrimaryButtonClass}
                     onClick={() => void handleSave()}
-                    disabled={saving || testing}
+                    disabled={saving || testing || !selectedProfile || !selectedModel}
                   >
                     {saving ? '保存中...' : '保存模型'}
                   </button>

@@ -65,6 +65,34 @@ pub struct LlmSettings {
     pub thinking_level: Option<crate::llm::ThinkingLevel>,
 }
 
+impl LlmSettings {
+    /// 返回未配置模型时的占位设置。
+    ///
+    /// 这让应用在首次启动或用户清空模型配置后仍能打开；真正发起模型调用时会因为
+    /// endpoint/model 为空而失败，提示用户去设置页配置模型。
+    pub fn unconfigured() -> Self {
+        Self {
+            provider_kind: "openai".into(),
+            wire_format: super::raw::ProviderWireFormat::OpenAiChatCompletions,
+            auth_scheme: super::raw::ProviderAuthScheme::Bearer,
+            base_url: String::new(),
+            api_key: String::new(),
+            model_id: String::new(),
+            max_tokens: 1024,
+            context_limit: 4096,
+            connect_timeout_secs: super::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
+            read_timeout_secs: super::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS,
+            max_retries: 0,
+            retry_base_delay_ms: super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS,
+            supports_prompt_cache_key: false,
+            supports_stream_usage: false,
+            prompt_cache_retention: None,
+            reasoning: false,
+            thinking_level: None,
+        }
+    }
+}
+
 // ─── Context Settings ────────────────────────────────────────────────────
 
 /// 已解析的上下文窗口 / compact 配置。

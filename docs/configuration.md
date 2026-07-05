@@ -70,7 +70,7 @@ modelOptions = { reasoning = true }
 provider = "duckduckgo"
 ```
 
-内置 **profiles**（未自定义时）：`deepseek`、`openai`、`anthropic`、`gemini`（`providerKind`: `google_genai`）。默认激活：`deepseek` / `deepseek-v4-flash`。完整默认常量见 [`defaults.rs`](../crates/astrcode-core/src/config/defaults.rs)。
+默认不内置激活模型，也不写入 profiles；首次启动可以打开 UI，用户再到模型配置中添加 provider/profile 并设为当前模型。Provider 预设由 `/api/config/provider-catalog` 提供。完整默认常量见 [`defaults.rs`](../crates/astrcode-core/src/config/defaults.rs)。
 
 ---
 

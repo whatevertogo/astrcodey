@@ -139,7 +139,7 @@ export default function ModelSelector({
         aria-label="选择模型"
       >
         <span className="max-w-[140px] truncate font-medium">
-          {currentModel?.modelId ?? (loading ? '加载中...' : '未选择')}
+          {currentModel?.modelId || (loading ? '加载中...' : '未选择')}
         </span>
         <svg
           className={`w-3.5 h-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
@@ -169,7 +169,7 @@ export default function ModelSelector({
           <div className="overflow-y-auto p-1.5 max-h-[240px]">
             {groupedOptions.length === 0 ? (
               <div className="px-3 py-6 text-center text-[12px] text-text-muted">
-                无结果
+                {options.length === 0 ? '未配置模型' : '无结果'}
               </div>
             ) : (
               groupedOptions.map(([profileName, groupOpts], gi) => (

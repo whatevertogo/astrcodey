@@ -163,6 +163,10 @@ fn resolve_llm_settings(
     model_name: &str,
     runtime: &RuntimeSection,
 ) -> Result<LlmSettings, ResolveError> {
+    if profile_name.is_empty() && model_name.is_empty() {
+        return Ok(LlmSettings::unconfigured());
+    }
+
     let profile = profiles
         .iter()
         .find(|p| p.name == profile_name)
@@ -546,6 +550,19 @@ mod tests {
     }
 
     #[test]
+    fn default_config_has_no_active_model_and_still_resolves() {
+        let config = Config::default();
+
+        assert!(config.active_profile.is_empty());
+        assert!(config.active_model.is_empty());
+        assert!(config.profiles.is_empty());
+
+        let effective = config.into_effective().unwrap();
+        assert!(effective.llm.model_id.is_empty());
+        assert!(effective.small_llm.model_id.is_empty());
+    }
+
+    #[test]
     fn test_missing_api_key_returns_error() {
         // 没有 api_key 且无可用 env fallback 的 Config 应产生 MissingField 错误
         let config = Config {
@@ -638,19 +655,25 @@ mod tests {
     #[test]
     fn test_openai_prompt_cache_capabilities_are_resolved() {
         let config = Config {
-            active_profile: "openai".into(),
-            active_model: "gpt-4.1".into(),
-            ..Config::default()
-        };
-        // Replace env-referenced api_key with a plain value to avoid env var dependency
-        let mut profiles = config.profiles;
-        for p in &mut profiles {
-            if p.name == "openai" {
-                p.api_key = Some("sk-test".into());
-            }
-        }
-        let config = Config {
-            profiles,
+            profiles: vec![Profile {
+                name: "openai".into(),
+                provider_kind: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: Some("sk-test".into()),
+                wire_format: ProviderWireFormat::OpenAiResponses,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities {
+                    supports_prompt_cache_key: Some(true),
+                    prompt_cache_retention: None,
+                    supports_stream_usage: Some(true),
+                },
+                models: vec![ModelConfig {
+                    id: "gpt-4.1".into(),
+                    max_tokens: Some(16384),
+                    context_limit: Some(128000),
+                    model_options: None,
+                }],
+            }],
             active_profile: "openai".into(),
             active_model: "gpt-4.1".into(),
             ..Config::default()
