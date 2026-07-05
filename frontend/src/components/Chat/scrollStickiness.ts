@@ -1,5 +1,5 @@
 /** Within this distance from the bottom we treat the user as "following" the stream. */
-export const STICK_TO_BOTTOM_THRESHOLD_PX = 64
+export const STICK_TO_BOTTOM_THRESHOLD_PX = 80
 
 export function isNearBottom(
   scrollTop: number,

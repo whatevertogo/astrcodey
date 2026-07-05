@@ -19,11 +19,7 @@ import {
 } from '../../tool-ui'
 import { GateApprovalCard } from '../../tool-ui/components/GateApprovalCard'
 import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
-import {
-  chevronIcon,
-  toolPanelPaddingX,
-  toolPanelScrollViewport,
-} from '../../lib/styles'
+import { toolPanelScrollViewport } from '../../lib/styles'
 import { RenderSpecViewer } from './RenderSpecViewer'
 import './tools/builtinRenderers'
 import {
@@ -31,15 +27,19 @@ import {
   type ToolRenderer,
   type ToolRendererContext,
 } from './tools/registry'
-import { compactLine, statusLabel, toolArgs, toolMeta } from './tools/helpers'
-import { DefaultToolDetails, StatusIndicatorDot } from './tools/shared'
+import { compactLine, numberValue, toolArgs, toolMeta } from './tools/helpers'
+import { DefaultToolDetails } from './tools/shared'
 import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
-import { Icon } from '../ui/Icon'
+import { Icon, type IconName } from '../ui/Icon'
 
 interface ToolCallBlockProps {
   block: Extract<ConversationBlock, { kind: 'toolCall' }>
   sessionId: string | null
+  embedded?: boolean
+  defaultOpen?: boolean
+  summaryContent?: ReactNode
+  summaryIconName?: IconName
 }
 
 function ToolDetails({
@@ -83,8 +83,102 @@ function ToolDetails({
   return <DefaultToolDetails block={toolContext.block} />
 }
 
-function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
-  const [isOpen, setIsOpen] = useState(false)
+function DetailRow({
+  label,
+  children,
+}: {
+  label: string
+  children: ReactNode
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">
+        {label}
+      </span>
+      {children}
+    </div>
+  )
+}
+
+function DetailValue({ children }: { children: ReactNode }) {
+  return (
+    <div className="min-w-0 overflow-wrap-anywhere rounded bg-transparent font-mono text-[12px] leading-relaxed text-text-secondary">
+      {children}
+    </div>
+  )
+}
+
+function formatArgs(args: Record<string, unknown>, fallback: string): string {
+  if (Object.keys(args).length > 0) {
+    return JSON.stringify(args, null, 2)
+  }
+  const trimmed = fallback.trim()
+  if (!trimmed) return '{}'
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2)
+  } catch {
+    return trimmed
+  }
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 1) return `${Math.round(seconds * 1000)}ms`
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  const restSeconds = Math.round(seconds % 60)
+  return `${minutes}m ${restSeconds}s`
+}
+
+function durationFromMetadata(meta: Record<string, unknown>): string {
+  const durationMs = numberValue(meta, 'durationMs', 'duration_ms')
+  if (durationMs != null) return formatDuration(durationMs / 1000)
+  const durationSeconds = numberValue(meta, 'duration', 'durationSeconds')
+  return durationSeconds != null ? formatDuration(durationSeconds) : ''
+}
+
+function toolIconName(name: string): IconName {
+  const lower = name.toLowerCase()
+  if (lower.includes('shell') || lower.includes('terminal')) return 'monitor'
+  if (lower.includes('approval') || lower.includes('gate')) return 'shield'
+  return 'plug'
+}
+
+function statusText({
+  gatePending,
+  questionnairePending,
+  linkedAgentCurrentTool,
+  linkedAgentRunning,
+  streaming,
+  elapsed,
+}: {
+  gatePending: boolean
+  questionnairePending: boolean
+  linkedAgentCurrentTool?: string
+  linkedAgentRunning: boolean
+  streaming: boolean
+  elapsed: number
+}): string {
+  if (gatePending) return '待审批'
+  if (questionnairePending) return '待回答'
+  if (linkedAgentRunning) {
+    return linkedAgentCurrentTool
+      ? `子Agent · ${linkedAgentCurrentTool}`
+      : '子Agent运行中'
+  }
+  if (streaming) return runningElapsedLabel(elapsed, 'zh')
+  return '完成'
+}
+
+function ToolCallBlock({
+  block,
+  sessionId,
+  embedded = false,
+  defaultOpen = false,
+  summaryContent,
+  summaryIconName,
+}: ToolCallBlockProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen)
   const agentSessions = useAppStore((s) => s.agentSessions)
   const switchSession = useAppStore((s) => s.switchSession)
   const args = toolArgs(block)
@@ -115,7 +209,7 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
   const renderer = getToolRenderer(context)
 
   const streaming = block.status === 'streaming'
-  const elapsed = useElapsedSeconds(streaming && !block.text)
+  const elapsed = useElapsedSeconds(streaming)
   const shellRunningSummary =
     block.name === 'shell' && streaming && !block.text
       ? runningElapsedLabel(elapsed, 'en')
@@ -148,57 +242,85 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
   const autoExpand =
     toolApprovalShouldAutoExpand(toolUiCtx) || gatePending || !!agentChildUi
 
-  const displayStatus = gatePending
-    ? '待审批'
-    : questionnairePending
-      ? '待回答'
-      : linkedAgent && block.status === 'streaming'
-        ? linkedAgent.currentTool
-          ? `子Agent · ${linkedAgent.currentTool}`
-          : '子Agent运行中'
-        : streaming
-          ? runningElapsedLabel(elapsed, 'zh')
-          : statusLabel(block.status)
+  const displayStatus =
+    block.status === 'error'
+      ? '失败'
+      : statusText({
+          gatePending,
+          questionnairePending,
+          linkedAgentCurrentTool: linkedAgent?.currentTool,
+          linkedAgentRunning: Boolean(
+            linkedAgent && block.status === 'streaming'
+          ),
+          streaming,
+          elapsed,
+        })
+  const durationLabel = durationFromMetadata(meta)
+  const detailArgs = formatArgs(args, block.arguments)
+  const toolName = block.name || 'tool'
+  const summaryIcon = summaryIconName ?? toolIconName(toolName)
 
   return (
     <details
-      className="group mb-1 ml-[var(--layout-assistant-indent)] block min-w-0 max-w-full animate-block-enter motion-reduce:animate-none"
+      className={cn(
+        'group mb-1 block min-w-0 animate-block-enter text-text-secondary motion-reduce:animate-none',
+        embedded
+          ? 'max-w-full overflow-hidden rounded-lg border border-border bg-surface-soft/80 shadow-soft'
+          : 'ml-[var(--layout-assistant-indent)] max-w-[760px]'
+      )}
       open={block.status === 'error' || isOpen || !!agentSpec || autoExpand}
       onToggle={(e) => setIsOpen(e.currentTarget.open)}
     >
-      <summary className="flex min-w-0 cursor-pointer list-none items-center gap-3 py-2 font-mono text-[13px] leading-relaxed text-text-secondary select-none hover:opacity-90 [&::-webkit-details-marker]:hidden">
-        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-0.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-text-secondary">
-          <StatusIndicatorDot
-            status={block.status}
-            pendingApproval={gatePending}
-          />
-          {block.name}
+      <summary
+        className={cn(
+          'max-w-full cursor-pointer list-none items-center gap-2 text-[14px] leading-snug text-text-secondary select-none transition-colors duration-150 hover:text-text-primary [&::-webkit-details-marker]:hidden',
+          embedded
+            ? 'flex px-3 py-1.5 hover:bg-surface-muted/60'
+            : 'inline-flex py-1'
+        )}
+      >
+        <Icon name={summaryIcon} size={15} className="shrink-0 opacity-85" />
+        {summaryContent ? (
+          <span className="min-w-0 overflow-wrap-anywhere">
+            {summaryContent}
+          </span>
+        ) : (
+          <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+            工具调用 {toolName}
+          </span>
+        )}
+        <span className="shrink-0 text-[13px] text-text-muted">
+          {block.status === 'error'
+            ? displayStatus
+            : durationLabel || displayStatus}
         </span>
-        <span
-          className="block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12.5px] text-text-secondary/85 opacity-90"
-          title={summaryLine}
-        >
-          {summaryLine}
-        </span>
-        <span
-          className={cn(
-            'shrink-0 text-[11px] font-semibold uppercase tracking-wider',
-            gatePending
-              ? 'text-warning'
-              : questionnairePending
-                ? 'text-accent'
-                : 'text-text-muted'
-          )}
-        >
-          {displayStatus}
-        </span>
-        <span className={chevronIcon}>
-          <Icon name="chevron-right" size={14} />
+        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-text-muted transition-transform duration-150 ease-out group-open:rotate-90">
+          <Icon name="chevron-right" size={16} />
         </span>
       </summary>
-      <div className="mt-1.5 min-w-0 overflow-hidden rounded-xl border border-border bg-code-surface shadow-soft">
+      <div
+        className={cn(
+          'min-w-0 overflow-hidden',
+          embedded
+            ? 'border-t border-border bg-surface/45 px-3 py-2'
+            : 'mt-2 pl-[26px]'
+        )}
+      >
         <div className={toolPanelScrollViewport}>
-          <div className={cn(toolPanelPaddingX, 'py-3')}>
+          <div className="space-y-3 pb-1">
+            <DetailRow label="ID">
+              <DetailValue>{block.id}</DetailValue>
+            </DetailRow>
+            <DetailRow label="Args">
+              <pre className="m-0 max-h-[200px] overflow-auto whitespace-pre-wrap bg-transparent font-mono text-[12px] leading-relaxed text-text-secondary">
+                {detailArgs}
+              </pre>
+            </DetailRow>
+            {summaryLine && summaryLine !== detailArgs ? (
+              <DetailRow label="Summary">
+                <DetailValue>{summaryLine}</DetailValue>
+              </DetailRow>
+            ) : null}
             {gatePending && sessionId ? (
               <GateApprovalCard
                 sessionId={sessionId}
@@ -208,12 +330,22 @@ function ToolCallBlock({ block, sessionId }: ToolCallBlockProps) {
                 args={args}
               />
             ) : (
-              <ToolDetails
-                toolContext={context}
-                approvalUi={approvalUi}
-                renderer={renderer}
-                agentChildUi={agentChildUi}
-              />
+              <DetailRow label="Result">
+                <div
+                  className={cn(
+                    'min-w-0 rounded-lg border border-border bg-surface-soft px-3 py-2',
+                    block.status === 'error' &&
+                      'border-danger/25 bg-danger-soft/40'
+                  )}
+                >
+                  <ToolDetails
+                    toolContext={context}
+                    approvalUi={approvalUi}
+                    renderer={renderer}
+                    agentChildUi={agentChildUi}
+                  />
+                </div>
+              </DetailRow>
             )}
           </div>
         </div>

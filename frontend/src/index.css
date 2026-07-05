@@ -124,8 +124,8 @@
   --layout-page-padding-x: 32px;
   --layout-content-max-width: 1040px;
   --layout-hero-composer-max-width: 920px;
-  --layout-avatar-size: 28px;
-  --layout-avatar-gap: 16px;
+  --layout-avatar-size: 48px;
+  --layout-avatar-gap: 10px;
   --layout-assistant-indent: calc(
     var(--layout-avatar-size) + var(--layout-avatar-gap)
   );

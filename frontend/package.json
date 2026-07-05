@@ -20,12 +20,12 @@
     "format": "prettier --write .",
     "test:contract": "esbuild src/services/protocol.ts --bundle --format=esm --outfile=../target/frontend-contract/services/protocol.js && node scripts/protocol-contract.test.mjs",
     "test:dev-server": "node scripts/dev-server.test.mjs",
+    "test:assistant-run": "esbuild src/components/Chat/assistantRunModel.ts --bundle --format=esm --outfile=../target/frontend-assistant-run/assistantRunModel.js && node scripts/assistant-run-model.test.mjs",
     "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
     "test:delta": "esbuild src/store/delta/coalesce.ts --bundle --format=esm --outfile=../target/frontend-delta/coalesce.js && node scripts/delta-coalesce.test.mjs",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:streaming-cache && npm run test:delta"
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta"
   },
   "dependencies": {
-    "@tanstack/react-virtual": "^3.13.25",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-http": "^2.5.9",
     "clsx": "^2.1.1",

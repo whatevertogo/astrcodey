@@ -11,17 +11,9 @@ import {
   nextStickToBottom,
 } from './scrollStickiness'
 
-export interface FollowLatestVirtualizer {
-  scrollToIndex: (
-    index: number,
-    options?: { align?: 'start' | 'center' | 'end' | 'auto' }
-  ) => void
-}
-
 interface UseFollowLatestScrollOptions {
   listRef: RefObject<HTMLDivElement | null>
   contentRef: RefObject<HTMLDivElement | null>
-  virtualizerRef: RefObject<FollowLatestVirtualizer | null>
   itemCount: number
   sessionId: string | null
   streamingBlockId: string | null
@@ -38,7 +30,6 @@ function isNearBottom(container: HTMLDivElement) {
 export function useFollowLatestScroll({
   listRef,
   contentRef,
-  virtualizerRef,
   itemCount,
   sessionId,
   streamingBlockId,
@@ -54,16 +45,21 @@ export function useFollowLatestScroll({
     shouldStickRef.current = false
   }, [])
 
+  const syncStickinessFromCurrentPosition = useCallback(() => {
+    const container = listRef.current
+    if (!container) return shouldStickRef.current
+    if (isNearBottom(container)) {
+      shouldStickRef.current = true
+    }
+    return shouldStickRef.current
+  }, [listRef])
+
   const runProgrammaticScroll = useCallback(
     (behavior: ScrollBehavior = 'auto') => {
       const container = listRef.current
       if (!container) return
 
       ignoreScrollRef.current = true
-      const latestIndex = itemCount - 1
-      if (latestIndex >= 0) {
-        virtualizerRef.current?.scrollToIndex(latestIndex, { align: 'end' })
-      }
       container.scrollTo({ top: container.scrollHeight, behavior })
 
       if (programmaticScrollFrameRef.current) {
@@ -75,15 +71,15 @@ export function useFollowLatestScroll({
         programmaticScrollFrameRef.current = 0
       })
     },
-    [itemCount, listRef, virtualizerRef]
+    [listRef]
   )
 
   const followLatest = useCallback(
     (behavior: ScrollBehavior = 'auto') => {
-      if (!shouldStickRef.current) return
+      if (!syncStickinessFromCurrentPosition()) return
       runProgrammaticScroll(behavior)
     },
-    [runProgrammaticScroll]
+    [runProgrammaticScroll, syncStickinessFromCurrentPosition]
   )
 
   const handleScroll = useCallback(() => {
@@ -139,40 +135,54 @@ export function useFollowLatestScroll({
     prevItemCountRef.current = itemCount
 
     if (!grew && !isFirstPaint) return
-    if (!shouldStickRef.current && !isFirstPaint) return
+    const shouldFollow = syncStickinessFromCurrentPosition() || isFirstPaint
+    if (!shouldFollow) return
 
     const frame = requestAnimationFrame(() => {
-      if (!shouldStickRef.current && !isFirstPaint) return
+      if (!syncStickinessFromCurrentPosition() && !isFirstPaint) return
       if (itemCount === 0) return
       followLatest()
     })
     return () => cancelAnimationFrame(frame)
-  }, [itemCount, followLatest])
+  }, [itemCount, followLatest, syncStickinessFromCurrentPosition])
 
   useEffect(() => {
     if (!streamingBlockId) return
     const content = contentRef.current
     if (!content) return
 
-    if (shouldStickRef.current) {
+    if (syncStickinessFromCurrentPosition()) {
       followLatest()
     }
 
     let frame = 0
-    const observer = new ResizeObserver(() => {
-      if (!shouldStickRef.current) return
+    const scheduleFollowLatest = () => {
+      if (!syncStickinessFromCurrentPosition()) return
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
-        if (!shouldStickRef.current) return
+        if (!syncStickinessFromCurrentPosition()) return
         followLatest()
       })
+    }
+    const resizeObserver = new ResizeObserver(scheduleFollowLatest)
+    const mutationObserver = new MutationObserver(scheduleFollowLatest)
+    resizeObserver.observe(content)
+    mutationObserver.observe(content, {
+      childList: true,
+      characterData: true,
+      subtree: true,
     })
-    observer.observe(content)
     return () => {
       cancelAnimationFrame(frame)
-      observer.disconnect()
+      resizeObserver.disconnect()
+      mutationObserver.disconnect()
     }
-  }, [contentRef, streamingBlockId, followLatest])
+  }, [
+    contentRef,
+    streamingBlockId,
+    followLatest,
+    syncStickinessFromCurrentPosition,
+  ])
 
   useEffect(
     () => () => {

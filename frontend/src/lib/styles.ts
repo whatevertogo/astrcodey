@@ -28,7 +28,7 @@ export const errorSurface =
   'self-stretch rounded-lg border border-danger/15 bg-danger-soft/50 px-4 py-3 text-danger'
 export const emptyStateSurface = 'px-6 py-8 text-center text-sm text-text-muted'
 export const assistantAvatar =
-  'inline-flex h-[28px] w-[28px] shrink-0 items-center justify-center rounded bg-linear-to-b from-avatar-surface to-avatar-surface-strong text-avatar-text'
+  'inline-flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-full bg-transparent text-accent'
 export const expandableBody = 'mb-3 ml-2 mt-2 border-l-2 border-border pl-4'
 
 /** ToolCallBlock 内容区内边距（与 toolCodePreviewBleed 配套）。 */

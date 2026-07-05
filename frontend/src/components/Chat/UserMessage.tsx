@@ -23,8 +23,8 @@ function UserMessage({ block }: UserMessageProps) {
     <div className="flex justify-end">
       <div
         className={cn(
-          'max-w-[85%] rounded-2xl rounded-br-md border border-user-bubble-border',
-          'bg-user-bubble px-4 py-3 text-[15px] leading-[1.65] text-text-primary prose-chat'
+          'max-w-[60%] rounded-[1.5rem] border border-user-bubble-border max-sm:max-w-[88%]',
+          'bg-user-bubble px-[18px] py-3 text-[15px] leading-[1.65] text-text-primary prose-chat'
         )}
       >
         {imageSources.length > 0 && (
