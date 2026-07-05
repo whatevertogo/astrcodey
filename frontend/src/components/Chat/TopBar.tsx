@@ -49,7 +49,12 @@ export default function TopBar({
   const [subsessionMenuOpen, setSubsessionMenuOpen] = useState(false)
 
   return (
-    <header className="relative z-30 shrink-0 bg-panel-bg/92 backdrop-blur-[12px]">
+    <header
+      className={cn(
+        'relative shrink-0 border-b border-border bg-surface-soft/96 backdrop-blur-[12px]',
+        isSidebarOpen ? 'z-10 md:z-30' : 'z-30'
+      )}
+    >
       <div className="relative flex min-h-[52px] items-center px-[var(--layout-page-padding-x)] py-2">
         {!isSidebarOpen && (
           <div className="absolute left-[var(--layout-page-padding-x)] top-1/2 -translate-y-1/2">
@@ -62,7 +67,12 @@ export default function TopBar({
           </div>
         )}
 
-        <div className="mx-auto flex w-full max-w-[var(--layout-content-max-width)] min-w-0 items-center gap-1.5">
+        <div
+          className={cn(
+            'mx-auto flex w-full max-w-[var(--layout-content-max-width)] min-w-0 items-center gap-1.5',
+            !isSidebarOpen && 'pl-11'
+          )}
+        >
           <span
             className={cn(
               'h-[9px] w-[9px] shrink-0 rounded-full opacity-70 shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
