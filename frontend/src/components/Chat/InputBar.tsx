@@ -431,7 +431,9 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
             <div
               className={cn(
                 'relative',
-                isHero ? 'px-5 pb-3 pt-4' : 'px-5 pb-3.5 pt-4 sm:px-6 sm:pt-5'
+                isHero
+                  ? 'px-[var(--layout-content-inset-x)] pb-3 pt-4'
+                  : 'px-[var(--layout-content-inset-x)] pb-3.5 pt-4 sm:pt-5'
               )}
             >
               <ComposerAttachments

@@ -1,6 +1,5 @@
 import React, { memo } from 'react'
 import type { ConversationBlock } from '../../services/types'
-import { assistantAvatar } from '../../lib/styles'
 import { MarkdownContent, StreamingMarkdown } from './MarkdownContent'
 import {
   cachedThinkingExtraction,
@@ -32,7 +31,7 @@ export function AssistantMessageContent({
     : (streamingParts ?? staticParts ?? { visibleText: '', thinkingBlocks: [] })
 
   return (
-    <div className="relative min-w-0 max-w-[760px] overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
+    <div className="relative min-w-0 max-w-full overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
       {showThinking &&
         assistantParts.thinkingBlocks.map((thinkingBlock, index) => (
           <details
@@ -103,10 +102,7 @@ export function AssistantMessageContent({
 
 function AssistantMessage({ block, reasoningText }: AssistantMessageProps) {
   return (
-    <div className="flex items-start gap-[16px] animate-message-enter max-sm:gap-[12px] motion-reduce:animate-none">
-      <div className={assistantAvatar} aria-hidden="true">
-        <span className="-mt-1 select-none text-[30px] leading-none">✦</span>
-      </div>
+    <div className="flex items-start animate-message-enter motion-reduce:animate-none">
       <div className="min-w-0 flex-1 pt-0.5">
         <AssistantMessageContent block={block} reasoningText={reasoningText} />
       </div>

@@ -3,7 +3,6 @@ import {
   useElapsedSeconds,
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
-import { assistantAvatar } from '../../lib/styles'
 import { cn } from '../../lib/utils'
 import { toolApprovalPending, type ToolUiContext } from '../../tool-ui'
 import { extractRenderSpec } from '../../types/render-spec'
@@ -195,12 +194,9 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
   const runModel = buildAssistantRunModel(blocks)
 
   return (
-    <div className="flex items-start gap-[16px] animate-message-enter max-sm:gap-[12px] motion-reduce:animate-none">
-      <div className={assistantAvatar} aria-hidden="true">
-        <span className="-mt-1 select-none text-[30px] leading-none">✦</span>
-      </div>
+    <div className="flex items-start animate-message-enter motion-reduce:animate-none">
       <div className="min-w-0 flex-1 pt-0.5">
-        <div className="relative min-w-0 max-w-[760px] overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
+        <div className="relative min-w-0 max-w-full overflow-wrap-anywhere bg-transparent py-2 text-text-primary prose-chat">
           {runModel.segments.map((segment, index) => {
             if (segment.type === 'content') {
               return (

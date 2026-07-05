@@ -27,7 +27,7 @@ const BlockRenderer = memo(function BlockRenderer({
   sessionId: string | null
 }) {
   return (
-    <div className="mx-auto w-[min(100%,var(--layout-content-max-width))] min-w-0">
+    <div className="mx-auto w-[min(100%,var(--layout-content-max-width))] min-w-0 px-[var(--layout-content-inset-x)]">
       {item.type === 'assistantRun' ? (
         <AssistantRunMessage blocks={item.blocks} sessionId={sessionId} />
       ) : item.block.kind === 'user' ? (
