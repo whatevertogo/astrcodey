@@ -121,9 +121,9 @@
   --prose-table-header: #201b16;
   --font-outfit: 'Outfit', -apple-system, sans-serif;
   /* Layout tokens */
-  --layout-page-padding-x: 32px;
-  --layout-content-max-width: 1040px;
-  --layout-hero-composer-max-width: 920px;
+  --layout-page-padding-x: clamp(24px, 3vw, 40px);
+  --layout-content-max-width: clamp(760px, 64vw, 960px);
+  --layout-hero-composer-max-width: clamp(680px, 58vw, 860px);
   --layout-avatar-size: 48px;
   --layout-avatar-gap: 10px;
   --layout-assistant-indent: calc(
