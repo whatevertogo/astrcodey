@@ -404,7 +404,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         'shrink-0',
         isHero
           ? 'w-full'
-          : 'bg-panel-bg px-[var(--layout-page-padding-x)] pb-4 pt-3'
+          : 'bg-panel-bg px-[var(--layout-page-padding-x)] pb-5 pt-2'
       )}
     >
       <div
@@ -431,9 +431,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
             <div
               className={cn(
                 'relative',
-                isHero
-                  ? 'px-4 pb-2.5 pt-3.5'
-                  : 'px-[var(--chat-composer-shell-padding-x)] py-3'
+                isHero ? 'px-5 pb-3 pt-4' : 'px-5 pb-3.5 pt-4 sm:px-6 sm:pt-5'
               )}
             >
               <ComposerAttachments
@@ -445,8 +443,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 className={cn(
                   'w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
                   isHero
-                    ? 'mb-3 max-h-44 min-h-12 text-[16px] leading-[1.55]'
-                    : 'mb-3 max-h-60 min-h-10 text-[15px] leading-[1.6]'
+                    ? 'mb-5 max-h-44 min-h-12 text-[16px] leading-[1.55]'
+                    : 'mb-5 max-h-60 min-h-14 text-[16px] leading-[1.6]'
                 )}
                 placeholder={isHero ? '随心输入' : '向 AstrCode 提问...'}
                 value={value}
@@ -468,11 +466,11 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 className="hidden"
                 onChange={handleAttachFromPicker}
               />
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 shrink items-center gap-2">
+              <div className="flex min-h-10 items-center justify-between gap-3">
+                <div className="flex min-w-0 shrink items-center gap-2.5">
                   <button
                     type="button"
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
                     onClick={() => fileInputRef.current?.click()}
                     aria-label="添加图片"
                     title="添加图片"
@@ -483,7 +481,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                   <button
                     type="button"
                     className={cn(
-                      'inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-semibold transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60',
+                      'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[14px] font-semibold transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60',
                       approvalMode === 'yolo'
                         ? 'text-accent'
                         : 'text-text-secondary'
@@ -500,8 +498,33 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                     <Icon name="shield" size={15} />
                     {approvalLabel}
                   </button>
+                  {projectName && (
+                    <div
+                      className="hidden min-w-0 max-w-[180px] items-center gap-1.5 rounded-full px-2 text-[13px] text-text-muted lg:flex"
+                      title={workingDir ?? undefined}
+                    >
+                      <Icon name="project" size={15} className="shrink-0" />
+                      <span className="truncate font-medium">
+                        {projectName}
+                      </span>
+                    </div>
+                  )}
+                  {branchLabel && (
+                    <div className="hidden min-w-0 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[13px] text-text-muted xl:flex">
+                      <Icon name="branch" size={15} className="shrink-0" />
+                      <span className="truncate">{branchLabel}</span>
+                    </div>
+                  )}
+                  {extraStatusItems.map(([id, text]) => (
+                    <span
+                      key={id}
+                      className="hidden min-w-0 max-w-[140px] truncate rounded-full px-2 text-[13px] text-text-muted 2xl:inline-flex"
+                    >
+                      {text}
+                    </span>
+                  ))}
                 </div>
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1.5">
                   <ModelSelector
                     refreshKey={modelRefreshKey}
                     getCurrentModel={api.getCurrentModel}
@@ -582,40 +605,6 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 </div>
               </div>
             </div>
-            {(projectName || extraStatusItems.length > 0) && (
-              <div
-                className={cn(
-                  'flex min-w-0 items-center gap-5 border-t border-border bg-surface-soft/35 text-text-muted',
-                  isHero
-                    ? 'min-h-10 px-4 text-[13px]'
-                    : 'min-h-12 px-5 text-[14px]'
-                )}
-              >
-                {projectName && (
-                  <div
-                    className="flex min-w-0 items-center gap-2 text-text-secondary"
-                    title={workingDir ?? undefined}
-                  >
-                    <Icon name="project" size={16} />
-                    <span className="truncate font-semibold text-text-primary">
-                      {projectName}
-                    </span>
-                  </div>
-                )}
-                {branchLabel && (
-                  <div className="flex min-w-0 items-center gap-2">
-                    <Icon name="branch" size={16} />
-                    <span className="truncate">{branchLabel}</span>
-                    <Icon name="chevron-down" size={14} />
-                  </div>
-                )}
-                {extraStatusItems.map(([id, text]) => (
-                  <span key={id} className="min-w-0 truncate">
-                    {text}
-                  </span>
-                ))}
-              </div>
-            )}
           </div>
           {activeSessionId && slashTriggerVisible && (
             <CommandSelector

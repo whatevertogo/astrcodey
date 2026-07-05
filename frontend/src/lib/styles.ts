@@ -11,7 +11,7 @@ export const chevronIcon =
   'inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-text-muted transition-transform duration-150 ease-out group-open:rotate-90'
 
 export const composerShell =
-  'rounded-[22px] border border-border bg-surface shadow-composer-shell transition-[border-color,box-shadow] duration-150 focus-within:border-border-strong focus-within:shadow-focus-accent'
+  'rounded-[28px] border border-border bg-surface shadow-[0_10px_34px_rgba(0,0,0,0.05)] transition-[border-color,box-shadow] duration-150 focus-within:border-border-strong focus-within:shadow-[0_12px_38px_rgba(0,0,0,0.08)]'
 export const composerSubmitButton =
   'inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-btn-primary-bg text-btn-primary-fg transition-[opacity,transform] duration-150 hover:opacity-90 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-30 [&_svg]:h-4 [&_svg]:w-4'
 export const composerInterruptButton =
