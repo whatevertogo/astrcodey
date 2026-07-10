@@ -101,13 +101,14 @@ impl AgentShared {
 const AGENT_TOOL_DESCRIPTION: &str =
     "Launch a specialized subagent. Types: [Agents].\n\nWhen NOT to use:\n- Simple or needle \
      tasks; known path → `read`; symbol/pattern → `grep`/`glob`; few direct tool calls \
-     enough\n\nTips:\n- One focused subtask per `agent` call; include all context in `prompt`\n- \
-     Multiple agents can run concurrently; call `agent` multiple times in one turn for parallel \
+     enough\n\nTips:\n- One focused subtask per call; pass the objective, scope, constraints, \
+     acceptance criteria, and known anchors — do not copy the parent transcript\n- Multiple \
+     agents can run concurrently; call `agent` multiple times in one turn for parallel \
      execution\n- `waitForResult` (default true): when false, the agent runs in the background \
      and completion arrives as `<background-agent-notification>` with `<output>` in a later turn \
      (do not poll or re-run the task)";
 
-const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Full task description for the subagent, with all context it needs."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
+const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Focused task packet: objective, scope, constraints, acceptance criteria, and known file/symbol anchors. Omit parent transcript and already-visible generic instructions."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
 
 fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -418,12 +419,16 @@ fn enhance_agent_prompt(agent_body: &str, working_dir: &str) -> String {
     let os = std::env::consts::OS;
     let shell = astrcode_extension_sdk::shell::resolve_shell().name;
     format!(
-        "{}\n\n---\n\nNotes:\n- Agent threads always have their cwd reset between bash calls; \
-         please only use absolute file paths.\n- In your final response, share file paths (always \
-         absolute, never relative) that are relevant to the task. Include code snippets only when \
-         the exact text is load-bearing.\n- For clear communication with the user, avoid using \
-         emojis.\n- Do not use a colon before tool calls.\n\nEnvironment: working directory is \
-         {working_dir}, OS is {os}, shell is {shell}.",
+        "{}\n\n---\n\nHandoff contract:\n- Return a decision packet, not a work diary. Put the \
+         conclusion first and keep the whole response within about 600 tokens unless correctness \
+         requires more.\n- Include only task-relevant conclusions, supporting evidence, completed \
+         work, validation status, and unresolved risks.\n- Omit the repeated task, routine \
+         searches, generic praise, and code excerpts unless exact text is necessary evidence.\n- \
+         If blocked or uncertain, say why and name the smallest missing input. Never trade \
+         correctness for brevity.\n\nRuntime notes:\n- Bash calls reset cwd; use absolute \
+         paths.\n- Relevant file references must be absolute. Avoid emojis and do not use a colon \
+         before tool calls.\n\nEnvironment: working directory is {working_dir}, OS is {os}, shell \
+         is {shell}.",
         agent_body.trim(),
     )
 }
@@ -508,6 +513,49 @@ mod tests {
         let input = json!({ "description": "test" });
         let result = serde_json::from_value::<AgentArgs>(input);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn builtin_agent_prompts_stay_within_attention_budget() {
+        for agent in agent::builtin_agents() {
+            assert!(
+                agent.body.len() <= 2_000,
+                "{} prompt is {} bytes; keep role guidance compact",
+                agent.name,
+                agent.body.len()
+            );
+        }
+    }
+
+    #[test]
+    fn explore_owns_the_delegated_investigation() {
+        let explore = agent::builtin_agents()
+            .into_iter()
+            .find(|agent| agent.id == "explore")
+            .expect("builtin explore agent");
+
+        assert!(
+            explore
+                .body
+                .contains("Take ownership of the delegated investigation")
+        );
+        assert!(
+            explore
+                .body
+                .contains("Do not suggest what the main agent should investigate next")
+        );
+        assert!(!explore.body.contains("Next action"));
+    }
+
+    #[test]
+    fn enhanced_agent_prompt_requires_a_compact_decision_packet() {
+        let prompt = enhance_agent_prompt("Role guidance.", "/workspace");
+
+        assert!(prompt.contains("Return a decision packet, not a work diary"));
+        assert!(prompt.contains("within about 600 tokens"));
+        assert!(prompt.contains("Never trade correctness for brevity"));
+        assert!(!prompt.contains("main agent's next action"));
+        assert!(prompt.contains("working directory is /workspace"));
     }
 
     #[test]
