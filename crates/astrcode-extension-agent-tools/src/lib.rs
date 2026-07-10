@@ -368,22 +368,22 @@ fn agent_tool_metadata()
     map.insert(
         "agent".to_string(),
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "For multi-step work that is not simple or local, pick the right approach:\n- Quick \
-             single lookup → use `read`/`grep`/`glob` directly, no agent needed\n- Scoped \
-             multi-step task → single agent (carries context across steps)\n- Multiple \
-             independent areas → parallel agents (faster than serial)\n\nWhen complexity warrants \
-             it, use `todoWrite` then delegate to agents; skip both for trivial edits.",
+            "Scale delegation to the work instead of forcing a fixed workflow:\n- Quick lookup or \
+             edit needing only a few direct tool calls → work directly\n- One clear, non-trivial \
+             subtask that benefits from isolation → use the matching single agent\n- Multiple \
+             independent subtasks → use matching agents in parallel\n- Dependent subtasks → \
+             sequence only the agents actually needed\n\nUse `explore` for missing codebase \
+             facts, `execute` for a self-contained implementation after the main agent has \
+             decided the design and acceptance criteria, and `reviewer` for independent \
+             verification when the change's risk or scope warrants it. Agent types may be used \
+             independently or combined. The main agent retains product, architecture, protocol, \
+             dependency, and scope decisions.",
         )
         .example(
-            "Add logging to 3 files in one module → `todoWrite` to plan, single `execute` agent.",
-        )
-        .example(
-            "Compare auth implementation vs test coverage → two parallel `explore` agents with \
-             focused prompts.",
-        )
-        .example(
-            "Fix a crash with unclear cause → serial: `explore` traces the issue, `execute` \
-             applies the fix.",
+            "Planned cross-module auth change with a known design → split independent, \
+             non-overlapping implementation slices across `execute` agents; use `reviewer` after \
+             implementation because the change is security-sensitive. For a small equivalent \
+             change, work directly.",
         )
         .caveat("Unknown `subagentType` → pick from [Agents].")
         .caveat("Don't parallel `execute` on overlapping files.")
@@ -516,15 +516,31 @@ mod tests {
     }
 
     #[test]
-    fn builtin_agent_prompts_stay_within_attention_budget() {
-        for agent in agent::builtin_agents() {
-            assert!(
-                agent.body.len() <= 2_000,
-                "{} prompt is {} bytes; keep role guidance compact",
-                agent.name,
-                agent.body.len()
-            );
-        }
+    fn builtin_agent_descriptions_define_distinct_workflow_stages() {
+        let agents = agent::builtin_agents();
+        let description = |id: &str| {
+            agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .map(|agent| agent.description.as_str())
+                .expect("builtin agent description")
+        };
+
+        assert!(description("explore").contains("before the main agent makes a design"));
+        assert!(description("execute").contains("concrete plan defined by the main agent"));
+        assert!(description("reviewer").contains("after implementation"));
+    }
+
+    #[test]
+    fn agent_guidance_scales_delegation_without_forcing_a_pipeline() {
+        let metadata = agent_tool_metadata();
+        let agent = metadata.get("agent").expect("agent prompt metadata");
+
+        assert!(agent.guide.contains("instead of forcing a fixed workflow"));
+        assert!(agent.guide.contains("used independently or combined"));
+        assert_eq!(agent.examples.len(), 1);
+        assert!(agent.examples[0].contains("execute"));
+        assert!(agent.examples[0].contains("work directly"));
     }
 
     #[test]
@@ -537,13 +553,9 @@ mod tests {
         assert!(
             explore
                 .body
-                .contains("Take ownership of the delegated investigation")
+                .contains("complete the delegated investigation")
         );
-        assert!(
-            explore
-                .body
-                .contains("Do not suggest what the main agent should investigate next")
-        );
+        assert!(explore.body.contains("report the concrete blocker"));
         assert!(!explore.body.contains("Next action"));
     }
 
