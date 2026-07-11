@@ -167,5 +167,13 @@ jobs:
           git push origin HEAD:${{ github.ref_name }}
           git push origin "$TAG"
 
-  # 触发 release.yml（由 tag push 触发）
-  # build-cli / build-desktop / publish-npm / release 全部由 release.yml 处理
+  publish-release:
+    name: Build and publish release
+    needs: prepare-release
+    if: needs.prepare-release.outputs.has_changes == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.prepare-release.outputs.tag }}
+    secrets: inherit
