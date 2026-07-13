@@ -1,18 +1,11 @@
-## v0.3.9
+## v0.3.10
 
-Released: 2026-07-06
+Released: 2026-07-13
 
 ### ✨ Features
 
-- feat(ui): 更新组件样式以优化布局和用户体验 (9912423c)
-- feat(ui): 调整 InputBar 组件样式以改善布局和用户体验 (8e2b25d8)
-- feat(ui): 使用 clamp 函数优化布局相关的 CSS 变量 (16f934ae)
-- feat(ui): 更新顶部栏样式以支持侧边栏状态 (0b800217)
-- feat(ui): 优化聊天过程折叠与自动滚动 (1be94199)
-
-### 📝 Other
-
-- [codex] Default to unconfigured model state (#37) (fc936c94)
+- feat(agent): 更新执行、探索和审查代理的描述，优化工作流程和使用场景 (8bfe000b)
+- feat(agent): 更新 Agent 工具描述和参数，优化提示信息以提高决策质量 (27dce170)
 
 ### Contributors
 
@@ -20,4 +13,4 @@ Released: 2026-07-06
 
 ---
 
-**Install:** `npm install -g @whatevertogo/astrcode@0.3.9`
+**Install:** `npm install -g @whatevertogo/astrcode@0.3.10`
