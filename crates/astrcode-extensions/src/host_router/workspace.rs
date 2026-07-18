@@ -2,6 +2,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -18,6 +19,7 @@ const MAX_LIST_ENTRIES: usize = 500;
 const MAX_SEARCH_MATCHES: usize = 1_000;
 const MAX_SEARCH_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 2_000;
+const MAX_SEARCH_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const IGNORED_DIRECTORIES: &[&str] = &[".git", "node_modules"];
 
 pub(super) fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
@@ -43,7 +45,15 @@ pub(super) fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
             format!("file size {} exceeds max_bytes {max_bytes}", metadata.len()),
         ));
     }
-    let content = std::fs::read_to_string(path)
+    let content = read_bounded_file(&path, max_bytes as usize)
+        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?
+        .ok_or_else(|| {
+            ErrorPayload::new(
+                "file_too_large",
+                format!("file size exceeds max_bytes {max_bytes}"),
+            )
+        })?;
+    let content = String::from_utf8(content)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     Ok(json!({ "content": content }))
 }
@@ -118,11 +128,27 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let max_matches = bounded_usize(input, "max_matches", 100, 1, MAX_SEARCH_MATCHES);
     let max_bytes = bounded_usize(input, "max_bytes", 64 * 1024, 1, MAX_SEARCH_OUTPUT_BYTES);
     let max_line_chars = bounded_usize(input, "max_line_chars", 500, 1, MAX_SEARCH_LINE_CHARS);
+    let searchable = searchable_files(&canonical_root, &search_root)?;
     let mut matches = Vec::new();
     let mut output_bytes = 0usize;
-    let mut truncated = false;
-    for path in searchable_files(&canonical_root, &search_root)? {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    let mut output_truncated = false;
+    let mut scanned_bytes = 0usize;
+    let mut scan_truncated = false;
+    for path in searchable.files {
+        let content = match read_bounded_file(&path, MAX_FILE_BYTES) {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                scan_truncated = true;
+                continue;
+            },
+            Err(_) => continue,
+        };
+        if scanned_bytes.saturating_add(content.len()) > MAX_SEARCH_SCAN_BYTES {
+            scan_truncated = true;
+            break;
+        }
+        scanned_bytes += content.len();
+        let Ok(content) = String::from_utf8(content) else {
             continue;
         };
         for (index, line) in content.lines().enumerate() {
@@ -131,7 +157,7 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
             }
             let (line, line_truncated) = truncate_chars(line, max_line_chars);
             if matches.len() >= max_matches || output_bytes.saturating_add(line.len()) > max_bytes {
-                truncated = true;
+                output_truncated = true;
                 break;
             }
             output_bytes += line.len();
@@ -142,7 +168,7 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
                 "line_truncated": line_truncated,
             }));
         }
-        if truncated {
+        if output_truncated {
             break;
         }
     }
@@ -150,7 +176,7 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
         "pattern": pattern,
         "root": relative_path_string(&canonical_root, &search_root),
         "matches": matches,
-        "truncated": truncated,
+        "truncated": searchable.truncated || scan_truncated || output_truncated,
     }))
 }
 
@@ -266,7 +292,7 @@ pub(super) fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let (parent, file_name, parent_created) = resolve_write_target(root, relative_path)?;
     let path = parent.join(file_name);
     reject_symlink_target(&path, "workspace.write")?;
-    std::fs::write(&path, content.as_bytes())
+    write_file_no_follow(&path, content.as_bytes())
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     Ok(json!({
         "path": relative_path,
@@ -293,7 +319,15 @@ pub(super) fn edit(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
             format!("workspace.edit supports regular files up to {MAX_FILE_BYTES} bytes"),
         ));
     }
-    let content = std::fs::read_to_string(&path)
+    let content = read_bounded_file(&path, MAX_FILE_BYTES)
+        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?
+        .ok_or_else(|| {
+            ErrorPayload::new(
+                "file_too_large",
+                format!("workspace.edit supports regular files up to {MAX_FILE_BYTES} bytes"),
+            )
+        })?;
+    let content = String::from_utf8(content)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     let replacements = content.matches(old_text).count();
     if replacements == 0 {
@@ -317,7 +351,7 @@ pub(super) fn edit(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
         content.replacen(old_text, new_text, 1)
     };
     enforce_content_limit(&edited)?;
-    std::fs::write(&path, edited.as_bytes())
+    write_file_no_follow(&path, edited.as_bytes())
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     Ok(json!({
         "path": relative_path,
@@ -331,20 +365,10 @@ fn resolve_existing_path(
     relative_path: &str,
     capability: &str,
 ) -> Result<PathBuf, ErrorPayload> {
+    let canonical_root = canonical_root(root)?;
+    reject_symlink_components(&canonical_root, Path::new(relative_path), capability)?;
     let path = resolve_under_workspace_root(root, relative_path)
         .map_err(|error| ErrorPayload::new(error.code, error.message))?;
-    let unresolved = std::fs::canonicalize(root)
-        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?
-        .join(relative_path);
-    if std::fs::symlink_metadata(unresolved)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(ErrorPayload::new(
-            "permission_denied",
-            format!("symlink paths are not accessible via {capability}"),
-        ));
-    }
     Ok(path)
 }
 
@@ -373,7 +397,9 @@ fn resolve_write_target(
         .to_owned();
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-    let parent = canonical_root.join(relative.parent().unwrap_or_else(|| Path::new("")));
+    let relative_parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    reject_symlink_components(&canonical_root, relative_parent, "workspace.write")?;
+    let parent = canonical_root.join(relative_parent);
     let parent_created = !parent.exists();
     std::fs::create_dir_all(&parent)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
@@ -386,6 +412,38 @@ fn resolve_write_target(
         ));
     }
     Ok((canonical_parent, file_name, parent_created))
+}
+
+fn reject_symlink_components(
+    canonical_root: &Path,
+    relative_path: &Path,
+    capability: &str,
+) -> Result<(), ErrorPayload> {
+    let mut current = canonical_root.to_path_buf();
+    for component in relative_path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Normal(name) => current.push(name),
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err(ErrorPayload::new(
+                    "permission_denied",
+                    "path must be relative to the workspace",
+                ));
+            },
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ErrorPayload::new(
+                    "permission_denied",
+                    format!("symlink paths are not accessible via {capability}"),
+                ));
+            },
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(ErrorPayload::new("io_error", error.to_string())),
+        }
+    }
+    Ok(())
 }
 
 fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPayload> {
@@ -419,7 +477,13 @@ fn reject_sensitive_path(relative_path: &str) -> Result<(), ErrorPayload> {
 
 fn is_sensitive_component(component: &str) -> bool {
     let name = component.to_ascii_lowercase();
-    name == ".ssh"
+    name == ".git"
+        || name == ".ssh"
+        || name == ".aws"
+        || name == ".azure"
+        || name == ".gcloud"
+        || name == ".gitconfig"
+        || name == ".npmrc"
         || name == ".env"
         || name.starts_with(".env.")
         || name.starts_with("credentials")
@@ -504,34 +568,71 @@ fn traversable_entry(root: &Path, entry: &DirEntry, include_ignored: bool) -> bo
         })
 }
 
-fn searchable_files(root: &Path, search_root: &Path) -> Result<Vec<PathBuf>, ErrorPayload> {
+struct SearchableFiles {
+    files: Vec<PathBuf>,
+    truncated: bool,
+}
+
+fn searchable_files(root: &Path, search_root: &Path) -> Result<SearchableFiles, ErrorPayload> {
+    searchable_files_with_limit(root, search_root, MAX_WALK_ENTRIES)
+}
+
+fn searchable_files_with_limit(
+    root: &Path,
+    search_root: &Path,
+    max_entries: usize,
+) -> Result<SearchableFiles, ErrorPayload> {
     if search_root.is_file() {
-        let metadata = std::fs::metadata(search_root)
-            .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-        return Ok((metadata.len() <= MAX_FILE_BYTES as u64)
-            .then(|| search_root.to_path_buf())
-            .into_iter()
-            .collect());
+        return Ok(SearchableFiles {
+            files: vec![search_root.to_path_buf()],
+            truncated: false,
+        });
     }
     let mut files = Vec::new();
+    let mut scanned = 0usize;
+    let mut truncated = false;
     for entry in WalkDir::new(search_root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| traversable_entry(root, entry, false))
-        .take(MAX_WALK_ENTRIES)
     {
         let entry = entry.map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-        if entry.file_type().is_file()
-            && entry
-                .metadata()
-                .map(|metadata| metadata.len() <= MAX_FILE_BYTES as u64)
-                .unwrap_or(false)
-        {
+        scanned += 1;
+        if scanned > max_entries {
+            truncated = true;
+            break;
+        }
+        if entry.file_type().is_file() {
             files.push(entry.into_path());
         }
     }
     files.sort();
-    Ok(files)
+    Ok(SearchableFiles { files, truncated })
+}
+
+fn read_bounded_file(path: &Path, max_bytes: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut options = no_follow_options();
+    options.read(true);
+    let file = options.open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= max_bytes).then_some(bytes))
+}
+
+fn write_file_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut options = no_follow_options();
+    let mut file = options.create(true).write(true).truncate(true).open(path)?;
+    file.write_all(content)
+}
+
+fn no_follow_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
@@ -594,6 +695,52 @@ mod tests {
         let sensitive_read =
             read(root, &json!({ "path": "secret.pem" })).expect_err("sensitive reads must fail");
         assert_eq!(sensitive_read.code, "permission_denied");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestors_before_reading_or_creating_paths() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside");
+        let root = workspace.path().to_str().expect("utf-8 workspace");
+
+        std::fs::create_dir(workspace.path().join(".ssh")).expect("create sensitive directory");
+        std::fs::write(workspace.path().join(".ssh/config"), "secret")
+            .expect("seed sensitive file");
+        symlink(
+            workspace.path().join(".ssh"),
+            workspace.path().join("alias"),
+        )
+        .expect("create internal symlink");
+        symlink(outside.path(), workspace.path().join("outside")).expect("create external symlink");
+
+        let read_error = read(root, &json!({ "path": "alias/config" }))
+            .expect_err("intermediate symlink read must fail");
+        assert_eq!(read_error.code, "permission_denied");
+
+        let write_error = write(
+            root,
+            &json!({ "path": "outside/new/file.txt", "content": "x" }),
+        )
+        .expect_err("intermediate symlink write must fail");
+        assert_eq!(write_error.code, "permission_denied");
+        assert!(!outside.path().join("new").exists());
+    }
+
+    #[test]
+    fn searchable_files_reports_walk_truncation() {
+        let workspace = tempdir().expect("workspace");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(workspace.path().join(name), name).expect("seed searchable file");
+        }
+
+        let result = searchable_files_with_limit(workspace.path(), workspace.path(), 2)
+            .expect("collect searchable files");
+
+        assert!(result.truncated);
+        assert!(result.files.len() < 3);
     }
 
     #[test]

@@ -1,20 +1,23 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use astrcode_extension_sdk::llm::{
-    LlmContent, LlmMessage, LlmProvider, LlmRole, collect_stream_text,
+use astrcode_extension_sdk::{
+    llm::{LlmContent, LlmMessage, LlmProvider, LlmRole, collect_stream_text},
+    network::{
+        NetworkRedirectPolicy, OutboundNetworkErrorKind, OutboundNetworkRequest,
+        OutboundNetworkResponse, OutboundNetworkService,
+    },
 };
 use parking_lot::Mutex;
-use reqwest::{
-    Client,
-    header::{ACCEPT, CONTENT_TYPE, HeaderMap, LOCATION},
-};
 use serde::Deserialize;
 use url::Url;
 
 use crate::{
     cache::{FetchCacheEntry, FetchUrlCache},
     config::FetchConfig,
-    http::build_fetch_client,
     preapproved::is_preapproved_url,
     url_guard::{UrlGuardError, is_permitted_redirect, upgrade_http_to_https, validate_fetch_url},
 };
@@ -82,6 +85,8 @@ pub(crate) enum FetchError {
     UnsupportedContentType(String),
     #[error("too many redirects (limit {limit})")]
     TooManyRedirects { limit: usize },
+    #[error("HTTP request timed out")]
+    Timeout,
     #[error("redirect response missing Location header")]
     MissingRedirectLocation,
     #[error("prompt processing failed: {0}")]
@@ -91,6 +96,7 @@ pub(crate) enum FetchError {
 pub(crate) async fn run_fetch_url(
     config: &FetchConfig,
     cache: &Arc<Mutex<FetchUrlCache>>,
+    network: Arc<dyn OutboundNetworkService>,
     small_llm: Option<Arc<dyn LlmProvider>>,
     args: FetchUrlArgs,
 ) -> Result<FetchUrlResult, FetchError> {
@@ -127,11 +133,11 @@ pub(crate) async fn run_fetch_url(
         }));
     }
 
-    let client = build_fetch_client(config.request_timeout_secs, &config.user_agent)
-        .map_err(|error| FetchError::Http(error.to_string()))?;
     let fetched = fetch_with_redirect_policy(
-        &client,
+        &*network,
         &request_url,
+        config.request_timeout_secs,
+        &config.user_agent,
         config.max_content_bytes,
         config.max_redirects,
     )
@@ -221,31 +227,55 @@ enum FetchResponse {
 }
 
 async fn fetch_with_redirect_policy(
-    client: &Client,
+    network: &dyn OutboundNetworkService,
     url: &Url,
+    timeout_secs: u64,
+    user_agent: &str,
     max_content_bytes: usize,
     max_redirects: usize,
 ) -> Result<FetchResponse, FetchError> {
     let mut current = url.clone();
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs.clamp(1, 60));
     for depth in 0..=max_redirects {
-        let response = client
-            .get(current.clone())
-            .header(
-                ACCEPT,
-                "text/markdown, text/html, text/plain, application/json, */*",
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(FetchError::Timeout);
+        }
+        let response = network
+            .request(
+                OutboundNetworkRequest {
+                    url: current.to_string(),
+                    method: "GET".into(),
+                    headers: BTreeMap::from([
+                        (
+                            "accept".into(),
+                            "text/markdown, text/html, text/plain, application/json, */*".into(),
+                        ),
+                        ("user-agent".into(), user_agent.into()),
+                    ]),
+                    body: Vec::new(),
+                    max_bytes: max_content_bytes,
+                    timeout: remaining,
+                    redirect_policy: NetworkRedirectPolicy::Manual,
+                },
+                None,
             )
-            .send()
             .await
-            .map_err(|error| FetchError::Http(error.to_string()))?;
+            .map_err(|error| match error.kind {
+                OutboundNetworkErrorKind::ResponseTooLarge => FetchError::ResponseTooLarge {
+                    limit: max_content_bytes,
+                },
+                _ => FetchError::Http(error.to_string()),
+            })?;
 
-        if response.status().is_redirection() {
+        if (300..400).contains(&response.status) {
             if depth == max_redirects {
                 return Err(FetchError::TooManyRedirects {
                     limit: max_redirects,
                 });
             }
-            let status_code = response.status().as_u16();
-            let redirect_url = resolve_redirect_location(response.headers(), current.as_str())?;
+            let status_code = response.status;
+            let redirect_url = resolve_redirect_location(&response.headers, current.as_str())?;
             let redirect_parsed =
                 Url::parse(&redirect_url).map_err(|error| FetchError::Http(error.to_string()))?;
             if is_permitted_redirect(&current, &redirect_parsed) {
@@ -259,33 +289,15 @@ async fn fetch_with_redirect_policy(
             });
         }
 
-        let status_code = response.status().as_u16();
-        let final_url = response.url().to_string();
-        let headers = response.headers().clone();
-        if let Some(content_length) = response.content_length() {
-            if content_length as usize > max_content_bytes {
-                return Err(FetchError::ResponseTooLarge {
-                    limit: max_content_bytes,
-                });
-            }
-        }
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| FetchError::Http(error.to_string()))?;
-        if body.len() > max_content_bytes {
-            return Err(FetchError::ResponseTooLarge {
-                limit: max_content_bytes,
-            });
-        }
-
-        let content_type = content_type(&headers);
-        let markdown = extract_markdown(&content_type, &body)?;
+        let status_code = response.status;
+        let content_type = content_type(&response);
+        let markdown = extract_markdown(&content_type, &response.body)?;
+        let final_url = response.final_url;
         return Ok(FetchResponse::Body {
             final_url,
             status_code,
             content_type,
-            bytes: body.len(),
+            bytes: response.body.len(),
             markdown,
         });
     }
@@ -295,10 +307,13 @@ async fn fetch_with_redirect_policy(
     })
 }
 
-fn resolve_redirect_location(headers: &HeaderMap, base_url: &str) -> Result<String, FetchError> {
+fn resolve_redirect_location(
+    headers: &BTreeMap<String, String>,
+    base_url: &str,
+) -> Result<String, FetchError> {
     let location = headers
-        .get(LOCATION)
-        .and_then(|value| value.to_str().ok())
+        .get("location")
+        .map(String::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or(FetchError::MissingRedirectLocation)?;
@@ -310,9 +325,10 @@ fn resolve_redirect_location(headers: &HeaderMap, base_url: &str) -> Result<Stri
 
 async fn finalize_result(input: FinalizeInput<'_>) -> Result<String, FetchError> {
     if input.status_code >= 400 {
+        let preview = truncate_markdown(input.markdown, input.max_output_chars);
         return Ok(format!(
             "Fetched `{}` returned HTTP {}.\nContent-Type: {}\nBytes: {}\n\n{}",
-            input.final_url, input.status_code, input.content_type, input.bytes, input.markdown
+            input.final_url, input.status_code, input.content_type, input.bytes, preview
         ));
     }
 
@@ -392,10 +408,11 @@ fn truncate_markdown(markdown: &str, max_chars: usize) -> String {
     format!("{truncated}\n\n[Content truncated due to length...]")
 }
 
-fn content_type(headers: &HeaderMap) -> String {
-    headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
+fn content_type(response: &OutboundNetworkResponse) -> String {
+    response
+        .headers
+        .get("content-type")
+        .map(String::as_str)
         .unwrap_or("application/octet-stream")
         .split(';')
         .next()
@@ -464,17 +481,9 @@ mod tests {
 
     #[test]
     fn resolve_redirect_location_supports_relative_paths() {
-        let mut headers = HeaderMap::new();
-        headers.insert(LOCATION, "/docs/page".parse().expect("header"));
+        let headers = BTreeMap::from([("location".into(), "/docs/page".into())]);
         let resolved =
             resolve_redirect_location(&headers, "https://example.com/start").expect("redirect");
         assert_eq!(resolved, "https://example.com/docs/page");
-    }
-
-    #[test]
-    fn redirect_status_codes_are_recognized() {
-        use reqwest::StatusCode;
-        assert!(StatusCode::FOUND.is_redirection());
-        assert!(StatusCode::TEMPORARY_REDIRECT.is_redirection());
     }
 }

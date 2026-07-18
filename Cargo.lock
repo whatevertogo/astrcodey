@@ -481,7 +481,6 @@ dependencies = [
  "chrono",
  "html2text",
  "parking_lot",
- "reqwest 0.12.28",
  "scraper",
  "serde",
  "serde_json",

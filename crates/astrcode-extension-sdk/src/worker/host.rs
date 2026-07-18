@@ -427,13 +427,13 @@ impl HostClient {
         deserialize_response(output, "workspace.glob")
     }
 
-    /// 列出宿主可见会话（manifest 须声明 `session_inspect`）。
+    /// 列出宿主可见的全部会话（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn list_sessions() -> Result<SessionInspectListOutput, ErrorPayload> {
         let output = Self::call("astrcode.session.inspect.list", serde_json::json!({})).await?;
         deserialize_response(output, "session.inspect.list")
     }
 
-    /// 读取轻量会话快照（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取轻量快照（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_session_snapshot(
         session_id: &str,
     ) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
@@ -445,7 +445,7 @@ impl HostClient {
         deserialize_response(output, "session.inspect.snapshot")
     }
 
-    /// 读取稳定映射后的完整会话投影（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取稳定映射后的完整投影（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_session_read_model(
         session_id: &str,
     ) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
@@ -457,7 +457,7 @@ impl HostClient {
         deserialize_response(output, "session.inspect.read_model")
     }
 
-    /// 读取 provider 可见消息（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取 provider 可见消息（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_provider_messages(
         session_id: &str,
     ) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {

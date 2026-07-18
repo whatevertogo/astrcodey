@@ -37,6 +37,9 @@ type SseCallback =
 pub fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+        // reqwest resets read_timeout whenever bytes arrive. Keep this idle-timeout
+        // semantic for long-lived SSE streams; a total request timeout would abort
+        // healthy model responses that continue producing chunks.
         .read_timeout(Duration::from_secs(config.read_timeout_secs))
         .pool_max_idle_per_host(8)
         .pool_idle_timeout(Duration::from_secs(90))

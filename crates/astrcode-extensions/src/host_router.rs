@@ -1,5 +1,6 @@
 //! 宿主能力路由 — 唯一实现 `astrcode.*` RPC 与扩展事件发射。
 
+mod capability_groups;
 mod network;
 mod process;
 mod session_inspect;
@@ -11,7 +12,8 @@ use astrcode_core::{
     event::EventPayload,
     extension::{
         ChildToolPolicy, ExtensionCapability, ExtensionError, ExtensionEventDecl,
-        ExtensionHostServices, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHostServices, ExtensionHttpRequest, ExtensionHttpResponse, NetworkRedirectPolicy,
+        OutboundNetworkErrorKind, OutboundNetworkRequest, OutboundNetworkService,
     },
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     tool::{
@@ -22,12 +24,13 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
     state,
+    worker::HostNetworkRequest,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use self::{network::NetworkClient, process::ProcessRunner};
+use self::capability_groups::{CapabilityGroupKind, HostCapabilityGroups};
 
 const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -130,6 +133,7 @@ pub struct HostBackends {
     pub session_read: Option<Arc<dyn astrcode_core::storage::EventReader>>,
     pub default_working_dir: Option<String>,
     pub public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
+    pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
 }
 
 #[async_trait::async_trait]
@@ -143,31 +147,27 @@ pub trait PublicHttpDispatcher: Send + Sync {
 
 /// 唯一 `astrcode.*` 能力实现。
 pub struct HostRouter {
-    backends: HostBackends,
-    network_client: Arc<NetworkClient>,
-    process_runner: Arc<ProcessRunner>,
+    groups: HostCapabilityGroups,
 }
 
 impl HostRouter {
     pub fn new(host_services: &ExtensionHostServices, default_working_dir: Option<String>) -> Self {
         Self {
-            backends: HostBackends {
+            groups: HostBackends {
                 main_llm: host_services.main_llm.clone(),
                 small_llm: host_services.small_llm.clone(),
                 session_read: host_services.session_read.clone(),
                 default_working_dir,
                 public_http_dispatcher: None,
-            },
-            network_client: Arc::new(NetworkClient::default()),
-            process_runner: Arc::new(ProcessRunner::default()),
+                outbound_network: host_services.outbound_network.clone(),
+            }
+            .into(),
         }
     }
 
     pub fn from_backends(backends: HostBackends) -> Self {
         Self {
-            backends,
-            network_client: Arc::new(NetworkClient::default()),
-            process_runner: Arc::new(ProcessRunner::default()),
+            groups: backends.into(),
         }
     }
 
@@ -175,7 +175,7 @@ impl HostRouter {
         mut self,
         dispatcher: Arc<dyn PublicHttpDispatcher>,
     ) -> Self {
-        self.backends.public_http_dispatcher = Some(dispatcher);
+        self.groups.public_http.dispatcher = Some(dispatcher);
         self
     }
 
@@ -233,9 +233,43 @@ impl HostRouter {
         let input: Value = serde_json::from_str(input)
             .map_err(|e| ErrorPayload::new("invalid_input", e.to_string()))?;
 
+        match CapabilityGroupKind::for_capability(cap, required_capability_for_astrcode(cap)) {
+            Some(CapabilityGroupKind::Llm) => self.invoke_llm_capability(cap, &input, ctx),
+            Some(CapabilityGroupKind::Session) => self.invoke_session_capability(cap, input, ctx),
+            Some(CapabilityGroupKind::Context) => self.invoke_context_capability(cap, &input, ctx),
+            Some(CapabilityGroupKind::Workspace) => {
+                self.invoke_workspace_capability(cap, &input, ctx)
+            },
+            Some(CapabilityGroupKind::Process) => self.invoke_process_spawn(input, ctx),
+            Some(CapabilityGroupKind::Network) => self.invoke_network_client(input, ctx),
+            Some(CapabilityGroupKind::Extension) => self.invoke_public_http_dispatch(input, ctx),
+            None => Err(ErrorPayload::new(
+                "not_implemented",
+                format!("capability not implemented: {cap}"),
+            )),
+        }
+    }
+
+    fn invoke_llm_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
         match cap {
-            "astrcode.llm.main_chat" => self.invoke_main_llm(&input, false, ctx),
-            "astrcode.llm.small_chat" => self.invoke_small_llm(&input, false, ctx),
+            "astrcode.llm.main_chat" => self.invoke_main_llm(input, false, ctx),
+            "astrcode.llm.small_chat" => self.invoke_small_llm(input, false, ctx),
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_session_capability(
+        &self,
+        cap: &str,
+        input: Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
             "astrcode.session.read_events" => self.invoke_read_events(&input, ctx),
             "astrcode.session.control.create" => self.invoke_session_create(&input, ctx),
             "astrcode.session.control.submit_turn" => self.invoke_session_submit(&input, ctx),
@@ -255,34 +289,46 @@ impl HostRouter {
             "astrcode.session.inspect.provider_messages" => {
                 self.invoke_session_inspect_provider_messages(input)
             },
-            "astrcode.session.state.read" => self.invoke_state_read(&input, ctx),
-            "astrcode.session.state.write" => self.invoke_state_write(&input, ctx),
-            "astrcode.event.emit" => self.invoke_emit(&input, ctx),
-            "astrcode.workspace.read" => {
-                run_blocking_io(|| self.invoke_workspace_read(&input, ctx))
-            },
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_context_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.session.state.read" => self.invoke_state_read(input, ctx),
+            "astrcode.session.state.write" => self.invoke_state_write(input, ctx),
+            "astrcode.event.emit" => self.invoke_emit(input, ctx),
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_workspace_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.workspace.read" => run_blocking_io(|| self.invoke_workspace_read(input, ctx)),
             "astrcode.workspace.list" => {
-                run_blocking_io(|| workspace::list(self.workspace_root(ctx)?, &input))
+                run_blocking_io(|| workspace::list(self.workspace_root(ctx)?, input))
             },
             "astrcode.workspace.grep" => {
-                run_blocking_io(|| workspace::grep(self.workspace_root(ctx)?, &input))
+                run_blocking_io(|| workspace::grep(self.workspace_root(ctx)?, input))
             },
             "astrcode.workspace.glob" => {
-                run_blocking_io(|| workspace::glob(self.workspace_root(ctx)?, &input))
+                run_blocking_io(|| workspace::glob(self.workspace_root(ctx)?, input))
             },
             "astrcode.workspace.write" => {
-                run_blocking_io(|| self.invoke_workspace_write(&input, ctx))
+                run_blocking_io(|| self.invoke_workspace_write(input, ctx))
             },
-            "astrcode.workspace.edit" => {
-                run_blocking_io(|| self.invoke_workspace_edit(&input, ctx))
-            },
-            "astrcode.process.spawn" => self.invoke_process_spawn(input, ctx),
-            "astrcode.network.client" => self.invoke_network_client(input, ctx),
-            "astrcode.extension.http.public" => self.invoke_public_http_dispatch(input, ctx),
-            _ => Err(ErrorPayload::new(
-                "not_implemented",
-                format!("capability not implemented: {cap}"),
-            )),
+            "astrcode.workspace.edit" => run_blocking_io(|| self.invoke_workspace_edit(input, ctx)),
+            _ => Err(capability_not_implemented(cap)),
         }
     }
 
@@ -366,7 +412,7 @@ impl HostRouter {
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let provider =
-            self.backends.main_llm.as_ref().ok_or_else(|| {
+            self.groups.llm.main.as_ref().ok_or_else(|| {
                 ErrorPayload::new("backend_unavailable", "main_llm not configured")
             })?;
         self.invoke_llm_chat(provider, "main_llm", input, collect_chunks, ctx)
@@ -379,7 +425,7 @@ impl HostRouter {
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let provider =
-            self.backends.small_llm.as_ref().ok_or_else(|| {
+            self.groups.llm.small.as_ref().ok_or_else(|| {
                 ErrorPayload::new("backend_unavailable", "small_llm not configured")
             })?;
         self.invoke_llm_chat(provider, "small_llm", input, collect_chunks, ctx)
@@ -447,7 +493,7 @@ impl HostRouter {
         input: &Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        let reader = self.backends.session_read.as_ref().ok_or_else(|| {
+        let reader = self.groups.session.reader.as_ref().ok_or_else(|| {
             ErrorPayload::new("backend_unavailable", "session_read not configured")
         })?;
         let target_session_id = input["session_id"]
@@ -606,7 +652,7 @@ impl HostRouter {
         block_on_async(async move {
             ops.inject_message(access.as_access(), content)
                 .await
-                .map(|()| json!({ "status": "accepted" }))
+                .map(session_delivery_outcome_json)
                 .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
         })?
     }
@@ -722,8 +768,9 @@ impl HostRouter {
     }
 
     fn session_reader(&self) -> Result<Arc<dyn astrcode_core::storage::EventReader>, ErrorPayload> {
-        self.backends
-            .session_read
+        self.groups
+            .session
+            .reader
             .as_ref()
             .map(Arc::clone)
             .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_read not configured"))
@@ -816,7 +863,7 @@ impl HostRouter {
     fn workspace_root<'a>(&'a self, ctx: &'a InvokeContext) -> Result<&'a str, ErrorPayload> {
         ctx.working_dir
             .as_deref()
-            .or(self.backends.default_working_dir.as_deref())
+            .or(self.groups.workspace.default_working_dir.as_deref())
             .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))
     }
 
@@ -828,9 +875,9 @@ impl HostRouter {
         let working_dir = ctx
             .working_dir
             .clone()
-            .or_else(|| self.backends.default_working_dir.clone());
+            .or_else(|| self.groups.process.default_working_dir.clone());
         let cancel_token = ctx.cancel_token.clone();
-        let runner = Arc::clone(&self.process_runner);
+        let runner = Arc::clone(&self.groups.process.runner);
         block_on_async(async move {
             runner
                 .spawn(input, working_dir.as_deref(), cancel_token.as_ref())
@@ -843,9 +890,48 @@ impl HostRouter {
         input: Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
+        let request = serde_json::from_value::<HostNetworkRequest>(input)
+            .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
+        let service = self
+            .groups
+            .network
+            .service
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ErrorPayload::new("backend_unavailable", "outbound network is not configured")
+            })?;
         let cancel_token = ctx.cancel_token.clone();
-        let client = Arc::clone(&self.network_client);
-        block_on_async(async move { client.request(input, cancel_token.as_ref()).await })?
+        block_on_async(async move {
+            let response = service
+                .request(
+                    OutboundNetworkRequest {
+                        url: request.url,
+                        method: request.method.unwrap_or_else(|| "GET".into()),
+                        headers: request.headers,
+                        body: request.body.unwrap_or_default().into_bytes(),
+                        max_bytes: request.max_bytes.unwrap_or(1024 * 1024).min(1024 * 1024)
+                            as usize,
+                        timeout: Duration::from_millis(request.timeout_ms.unwrap_or(30_000))
+                            .min(HOST_INVOKE_TIMEOUT),
+                        redirect_policy: NetworkRedirectPolicy::Follow,
+                    },
+                    cancel_token,
+                )
+                .await
+                .map_err(network_error_payload)?;
+            let body = String::from_utf8(response.body).map_err(|error| {
+                ErrorPayload::new(
+                    "invalid_response_encoding",
+                    format!("network response is not valid UTF-8: {error}"),
+                )
+            })?;
+            Ok(json!({
+                "status": response.status,
+                "headers": response.headers,
+                "body": body,
+            }))
+        })?
     }
 
     fn invoke_public_http_dispatch(
@@ -853,16 +939,12 @@ impl HostRouter {
         input: Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        let dispatcher = self
-            .backends
-            .public_http_dispatcher
-            .as_ref()
-            .ok_or_else(|| {
-                ErrorPayload::new(
-                    "backend_unavailable",
-                    "public HTTP dispatcher is not configured",
-                )
-            })?;
+        let dispatcher = self.groups.public_http.dispatcher.as_ref().ok_or_else(|| {
+            ErrorPayload::new(
+                "backend_unavailable",
+                "public HTTP dispatcher is not configured",
+            )
+        })?;
         let request = serde_json::from_value::<ExtensionHttpRequest>(input)
             .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
         let dispatcher = Arc::clone(dispatcher);
@@ -939,6 +1021,26 @@ fn session_access_from_input(
 
 fn capability_wire_name(cap: ExtensionCapability) -> &'static str {
     astrcode_extension_sdk::s5r::capability_to_wire(cap)
+}
+
+fn capability_not_implemented(capability: &str) -> ErrorPayload {
+    ErrorPayload::new(
+        "not_implemented",
+        format!("capability not implemented: {capability}"),
+    )
+}
+
+fn network_error_payload(error: astrcode_core::extension::OutboundNetworkError) -> ErrorPayload {
+    let code = match error.kind {
+        OutboundNetworkErrorKind::InvalidRequest => "invalid_input",
+        OutboundNetworkErrorKind::PermissionDenied => "permission_denied",
+        OutboundNetworkErrorKind::Unavailable => "backend_unavailable",
+        OutboundNetworkErrorKind::RequestFailed => "network_error",
+        OutboundNetworkErrorKind::Timeout => "timeout",
+        OutboundNetworkErrorKind::ResponseTooLarge => "response_too_large",
+        OutboundNetworkErrorKind::Cancelled => "cancelled",
+    };
+    ErrorPayload::new(code, error.message)
 }
 
 fn required_capability_for_astrcode(cap: &str) -> Option<ExtensionCapability> {
@@ -1061,22 +1163,22 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
         ExtensionCapability::SessionInspect => vec![
             session_inspect_descriptor(
                 "astrcode.session.inspect.list",
-                "List sessions visible to the host",
+                "List all sessions visible to the host (global privileged access)",
                 false,
             ),
             session_inspect_descriptor(
                 "astrcode.session.inspect.snapshot",
-                "Read a lightweight session snapshot",
+                "Read any host-visible session snapshot (global privileged access)",
                 true,
             ),
             session_inspect_descriptor(
                 "astrcode.session.inspect.read_model",
-                "Read the projected session model through a stable wire DTO",
+                "Read any host-visible projected session model through a stable wire DTO",
                 true,
             ),
             session_inspect_descriptor(
                 "astrcode.session.inspect.provider_messages",
-                "Read provider-visible messages for a session",
+                "Read provider-visible messages for any host-visible session",
                 true,
             ),
         ],
@@ -1446,6 +1548,11 @@ pub fn build_host_router(
     Arc::new(HostRouter::new(&host_services, default_working_dir))
 }
 
+/// 构造 trusted bundled extensions 与 worker 共用的受限出站网络服务。
+pub fn default_outbound_network_service() -> Arc<dyn OutboundNetworkService> {
+    Arc::new(network::RestrictedNetworkService::default())
+}
+
 pub fn build_host_router_with_public_http_dispatcher(
     host_services: Arc<ExtensionHostServices>,
     default_working_dir: Option<String>,
@@ -1571,7 +1678,10 @@ mod tests {
 
     #[test]
     fn network_capability_rejects_non_http_urls_when_declared() {
-        let router = HostRouter::from_backends(HostBackends::default());
+        let router = HostRouter::from_backends(HostBackends {
+            outbound_network: Some(default_outbound_network_service()),
+            ..Default::default()
+        });
         let ctx = InvokeContext {
             declared_capabilities: vec![ExtensionCapability::NetworkClient],
             ..Default::default()
@@ -1726,6 +1836,32 @@ mod tests {
     }
 
     #[test]
+    fn invoke_session_inject_returns_delivery_outcome() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(Arc::new(CapturingSessionOps::default())),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+
+        let output = router
+            .invoke_sync(
+                "astrcode.session.control.inject_or_start",
+                &json!({
+                    "target_session_id": "child",
+                    "content": "continue"
+                })
+                .to_string(),
+                &ctx,
+            )
+            .expect("inject session input");
+
+        assert_eq!(output["status"], "injected");
+        assert_eq!(output["turn_id"], "turn-injected");
+    }
+
+    #[test]
     fn invoke_stream_sync_rejects_precancelled_token() {
         let router = HostRouter::from_backends(HostBackends::default());
         let token = CancellationToken::new();
@@ -1778,8 +1914,10 @@ mod tests {
             &self,
             _access: SessionAccess<'_>,
             _content: String,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
+        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+            Ok(SessionDeliveryOutcome::Injected {
+                turn_id: "turn-injected".into(),
+            })
         }
 
         async fn submit_turn(

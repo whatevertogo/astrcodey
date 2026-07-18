@@ -269,7 +269,7 @@ pub trait SessionOperations: Send + Sync {
         &self,
         access: SessionAccess<'_>,
         content: String,
-    ) -> Result<(), SessionApiError>;
+    ) -> Result<SessionDeliveryOutcome, SessionApiError>;
 
     /// 中断目标会话的活跃 turn，并提交新的用户输入。
     async fn interrupt_and_submit(

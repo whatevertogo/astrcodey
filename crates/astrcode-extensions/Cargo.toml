@@ -10,7 +10,7 @@ astrcode-core = { path = "../astrcode-core" }
 astrcode-kernel = { path = "../astrcode-kernel" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["trusted-bundled"] }
 astrcode-support = { path = "../astrcode-support" }
-tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

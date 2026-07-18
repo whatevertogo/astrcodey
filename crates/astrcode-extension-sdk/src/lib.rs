@@ -31,6 +31,14 @@ pub mod extension {
     };
 }
 
+/// Typed access to the host's single restricted outbound-network service.
+pub mod network {
+    pub use astrcode_core::extension::{
+        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
+        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+    };
+}
+
 #[cfg(feature = "trusted-bundled")]
 pub mod trusted {
     /// Host services are only for trusted bundled extensions started in-process.
@@ -65,11 +73,12 @@ pub mod tool {
     pub use astrcode_core::{
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY,
-            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError, SessionHandle,
-            SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool,
-            ToolCallScope, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
-            ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin, ToolPromptMetadata,
-            ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths, tool_metadata,
+            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError,
+            SessionDeliveryOutcome, SessionHandle, SessionOperations, SessionStatus,
+            SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities,
+            ToolDefinition, ToolError, ToolExecutionContext, ToolFileServices, ToolHostServices,
+            ToolModelAccess, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+            ToolSessionControl, ToolSessionPaths, tool_metadata,
         },
         tool_ui::{
             TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire, ToolInputUiWire,

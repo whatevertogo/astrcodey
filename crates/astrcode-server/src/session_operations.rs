@@ -67,14 +67,15 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         access: SessionAccess<'_>,
         content: String,
-    ) -> Result<(), SessionApiError> {
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
         let (caller_sid, target_sid) = session_ids(access);
 
         self.child_sessions
             .verify_access(&caller_sid, &target_sid)
             .await?;
 
-        self.scheduler
+        let outcome = self
+            .scheduler
             .deliver_input(
                 target_sid.clone(),
                 crate::turn_scheduler::PromptInput::text_only(content),
@@ -84,7 +85,7 @@ impl SessionOperations for ServerSessionOperations {
             .map_err(SessionApiError::internal)?;
 
         self.session_manager.sync_durable_events(&target_sid).await;
-        Ok(())
+        Ok(delivery_outcome(outcome))
     }
 
     async fn interrupt_and_submit(

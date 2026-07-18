@@ -694,7 +694,9 @@ fn resolve_env_token(raw_env_name: &str) -> Result<String, ExtensionError> {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::tool::{SessionApiError, SessionHandle, SessionStatus};
+    use astrcode_extension_sdk::tool::{
+        SessionApiError, SessionDeliveryOutcome, SessionHandle, SessionStatus,
+    };
 
     use super::*;
 
@@ -797,8 +799,10 @@ mod tests {
             &self,
             _access: SessionAccess<'_>,
             _content: String,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
+        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+            Ok(SessionDeliveryOutcome::Started {
+                turn_id: "test-turn".into(),
+            })
         }
 
         async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
