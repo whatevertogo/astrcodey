@@ -1,6 +1,6 @@
 //! 受并发、时间和输出上限约束的扩展子进程执行器。
 
-use std::{future::Future, process::Stdio, time::Duration};
+use std::{future::Future, process::Stdio, sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::s5r::ErrorPayload;
 use astrcode_support::hostpaths::resolve_under_workspace_root;
@@ -11,6 +11,8 @@ use tokio::{
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
+
+use super::{block_on_async, capability::ProcessCapability};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TIMEOUT: Duration = Duration::from_secs(120);
@@ -40,6 +42,43 @@ const SAFE_INHERITED_ENV: &[&str] = &[
     "COMSPEC",
     "PATHEXT",
 ];
+
+pub(super) struct ProcessGroup {
+    runner: Arc<ProcessRunner>,
+    default_working_dir: Option<String>,
+}
+
+impl ProcessGroup {
+    pub(super) fn new(default_working_dir: Option<String>) -> Self {
+        Self {
+            runner: Arc::new(ProcessRunner::default()),
+            default_working_dir,
+        }
+    }
+
+    pub(super) fn invoke(
+        &self,
+        capability: ProcessCapability,
+        input: Value,
+        working_dir: Option<&str>,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<Value, ErrorPayload> {
+        match capability {
+            ProcessCapability::Spawn => {
+                let working_dir = working_dir
+                    .map(str::to_owned)
+                    .or_else(|| self.default_working_dir.clone());
+                let cancel_token = cancel_token.cloned();
+                let runner = Arc::clone(&self.runner);
+                block_on_async(async move {
+                    runner
+                        .spawn(input, working_dir.as_deref(), cancel_token.as_ref())
+                        .await
+                })?
+            },
+        }
+    }
+}
 
 pub(super) struct ProcessRunner {
     permits: Semaphore,

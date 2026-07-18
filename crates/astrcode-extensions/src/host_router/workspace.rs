@@ -13,6 +13,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use walkdir::{DirEntry, WalkDir};
 
+use super::{capability::WorkspaceCapability, run_blocking_io};
+
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_WALK_ENTRIES: usize = 5_000;
 const MAX_LIST_ENTRIES: usize = 500;
@@ -21,6 +23,41 @@ const MAX_SEARCH_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 2_000;
 const MAX_SEARCH_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const IGNORED_DIRECTORIES: &[&str] = &[".git", "node_modules"];
+
+pub(super) struct WorkspaceGroup {
+    default_working_dir: Option<String>,
+}
+
+impl WorkspaceGroup {
+    pub(super) fn new(default_working_dir: Option<String>) -> Self {
+        Self {
+            default_working_dir,
+        }
+    }
+
+    pub(super) fn invoke(
+        &self,
+        capability: WorkspaceCapability,
+        input: &Value,
+        working_dir: Option<&str>,
+    ) -> Result<Value, ErrorPayload> {
+        let root = self.root(working_dir)?;
+        run_blocking_io(|| match capability {
+            WorkspaceCapability::Read => read(root, input),
+            WorkspaceCapability::List => list(root, input),
+            WorkspaceCapability::Grep => grep(root, input),
+            WorkspaceCapability::Glob => glob(root, input),
+            WorkspaceCapability::Write => write(root, input),
+            WorkspaceCapability::Edit => edit(root, input),
+        })
+    }
+
+    fn root<'a>(&'a self, working_dir: Option<&'a str>) -> Result<&'a str, ErrorPayload> {
+        working_dir
+            .or(self.default_working_dir.as_deref())
+            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))
+    }
+}
 
 pub(super) fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let relative_path = required_string(input, "path")?;
