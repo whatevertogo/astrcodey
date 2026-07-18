@@ -15,7 +15,11 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{Event, EventPayload},
-    extension::ChildToolPolicy,
+    extension::{
+        ChildToolPolicy, Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
+    },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{
         EventReader, EventStore, SessionReadModel, SessionSummary, StorageError,
@@ -53,6 +57,45 @@ use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 struct ImmediateLlm;
+
+struct HttpRoutesExtension;
+
+struct HttpRoutesHandler;
+
+#[async_trait::async_trait]
+impl ExtensionHttpHandler for HttpRoutesHandler {
+    async fn handle(
+        &self,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        Ok(ExtensionHttpResponse::json(
+            201,
+            serde_json::json!({
+                "pathParams": request.path_params,
+                "query": request.query,
+                "body": request.body,
+            }),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for HttpRoutesExtension {
+    fn id(&self) -> &str {
+        "http-routes-test"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::PublicHttp]
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.http_route(
+            ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/plugin-probe/{id}"),
+            Arc::new(HttpRoutesHandler),
+        );
+    }
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for ImmediateLlm {
@@ -185,6 +228,70 @@ async fn http_routes_require_bearer_token() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn extension_http_routes_allow_only_declared_public_routes() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    runtime
+        .extension_runner()
+        .register(Arc::new(HttpRoutesExtension))
+        .await
+        .unwrap();
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, _token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    let public = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/plugin-probe/7?mode=public")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"public"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::CREATED);
+
+    let invalid_json = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/plugin-probe/7")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_json.status(), StatusCode::BAD_REQUEST);
+
+    let oversized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/plugin-probe/7")
+                .body(Body::from(vec![0; MAX_EXTENSION_HTTP_BODY_BYTES + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let unknown = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/not-a-plugin-route")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -400,18 +507,39 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 }
 
 #[tokio::test]
-async fn oversized_prompt_route_returns_bad_request() {
+async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
-    let prompt_uri = format!("/api/sessions/{session_id}/prompt");
+    let attachment_session_id = create_session(app.clone(), &token).await;
+    let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
+    let valid_attachment_body = serde_json::json!({
+        "text": "",
+        "attachments": [{
+            "filename": "large.txt",
+            "content": "x".repeat(MAX_EXTENSION_HTTP_BODY_BYTES + 1),
+            "mediaType": "text/plain"
+        }]
+    })
+    .to_string();
+
+    let accepted = post_json_owned(
+        app.clone(),
+        &attachment_prompt_uri,
+        valid_attachment_body,
+        &token,
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let oversized_session_id = create_session(app.clone(), &token).await;
+    let oversized_prompt_uri = format!("/api/sessions/{oversized_session_id}/prompt");
     let body = serde_json::json!({
         "text": "x".repeat(MAX_PROMPT_TEXT_BYTES + 1)
     })
     .to_string();
 
-    let response = post_json_owned(app, &prompt_uri, body, &token).await;
+    let response = post_json_owned(app, &oversized_prompt_uri, body, &token).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
@@ -660,25 +788,74 @@ async fn stream_replays_events_after_snapshot_cursor() {
 }
 
 #[tokio::test]
-async fn stream_invalid_cursor_requests_rehydrate() {
+async fn stream_invalid_cursors_request_rehydrate_and_close() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
     let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
     let session_id = create_session(app.clone(), &token).await;
+
+    for cursor in ["invalid", "999999"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .header("authorization", format!("Bearer {token}"))
+                    .uri(format!("/api/sessions/{session_id}/stream?cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = tokio::time::timeout(
+            Duration::from_secs(1),
+            to_bytes(response.into_body(), 64 * 1024),
+        )
+        .await
+        .expect("rehydrate stream should close")
+        .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("rehydrateRequired"));
+    }
+}
+
+#[tokio::test]
+async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+
+    for _ in 0..=1_000 {
+        runtime
+            .event_store()
+            .append_event(Event::new(sid.clone(), None, EventPayload::TurnStarted))
+            .await
+            .unwrap();
+    }
 
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::GET)
                 .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream?cursor=invalid"))
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    let body = read_sse_until(response.into_body(), "rehydrateRequired").await;
+    let body = tokio::time::timeout(
+        Duration::from_secs(1),
+        to_bytes(response.into_body(), 64 * 1024),
+    )
+    .await
+    .expect("over-limit replay stream should close")
+    .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
     assert!(body.contains("rehydrateRequired"));
 }
 

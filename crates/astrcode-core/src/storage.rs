@@ -98,6 +98,20 @@ pub trait EventReader: Send + Sync {
         cursor: &Cursor,
     ) -> Result<Vec<Event>, StorageError>;
 
+    /// 从游标后最多重放 `max_events` 条事件。
+    ///
+    /// 文件存储应覆盖此方法以在扫描阶段即停止；默认实现用于轻量或内存存储。
+    async fn replay_from_limited(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+        max_events: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let mut events = self.replay_from(session_id, cursor).await?;
+        events.truncate(max_events);
+        Ok(events)
+    }
+
     /// 列出所有会话 ID。
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;
 

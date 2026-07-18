@@ -18,7 +18,7 @@ const SENSITIVE_PATTERNS: &[&str] = &[
 ];
 
 pub struct SensitiveFileAskPolicy {
-    globset: GlobSet,
+    globset: Option<GlobSet>,
 }
 
 impl Default for SensitiveFileAskPolicy {
@@ -29,15 +29,22 @@ impl Default for SensitiveFileAskPolicy {
 
 impl SensitiveFileAskPolicy {
     pub fn new() -> Self {
-        let mut builder = GlobSetBuilder::new();
-        for pattern in SENSITIVE_PATTERNS {
-            let glob = Glob::new(pattern).expect("valid sensitive pattern");
-            builder.add(glob);
-        }
+        let globset = build_sensitive_globset().map_err(|error| {
+            tracing::error!(%error, "failed to build sensitive file policy");
+            error
+        });
         Self {
-            globset: builder.build().expect("valid sensitive globset"),
+            globset: globset.ok(),
         }
     }
+}
+
+fn build_sensitive_globset() -> Result<GlobSet, globset::Error> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in SENSITIVE_PATTERNS {
+        builder.add(Glob::new(pattern)?);
+    }
+    builder.build()
 }
 
 impl PermissionPolicy for SensitiveFileAskPolicy {
@@ -51,10 +58,19 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
         }
         for path in extract_tool_paths(ctx.tool_input) {
             let rel = path_for_matching(&path, ctx.working_dir);
-            if self.globset.is_match(&rel) || self.globset.is_match(path.to_string_lossy().as_ref())
-            {
+            let is_sensitive = self.globset.as_ref().is_none_or(|globset| {
+                globset.is_match(&rel) || globset.is_match(path.to_string_lossy().as_ref())
+            });
+            if is_sensitive {
                 return PermissionDecision::Ask {
-                    prompt: format!("Access sensitive path `{}`?", path.display()),
+                    prompt: if self.globset.is_some() {
+                        format!("Access sensitive path `{}`?", path.display())
+                    } else {
+                        format!(
+                            "Sensitive-file policy is unavailable; allow access to `{}`?",
+                            path.display()
+                        )
+                    },
                     rule_key: Some(format!("sensitive:{}", rel)),
                 };
             }

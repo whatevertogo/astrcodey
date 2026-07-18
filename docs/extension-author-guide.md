@@ -90,7 +90,55 @@ worker.capability("small_model");
 let out = HostClient::small_chat(serde_json::json!([
     { "role": "user", "content": "tag this line" }
 ])).await?;
+
+// 受限子进程（总超时包含并发排队，cwd 必须在 workspace 内）
+worker.capability("process_spawn");
+let output = HostClient::spawn_process(HostProcessRequest::new("rustc")).await?;
+
+// 受限出站 HTTP(S)
+worker.capability("network_client");
+let response = HostClient::network_request(
+    HostNetworkRequest::get("https://example.com")
+).await?;
+
+// 创建或精确编辑工作区内的非敏感文件
+worker.capability("workspace_write");
+let written = HostClient::write_workspace_file(HostWorkspaceWriteRequest {
+    path: "notes/result.txt".into(),
+    content: "done".into(),
+}).await?;
+
+// 跨会话检查（返回 SDK 定义的稳定 DTO，不暴露内部 SessionReadModel）
+worker.capability("session_inspect");
+let sessions = HostClient::list_sessions().await?;
+let model = HostClient::inspect_session_read_model(&sessions.sessions[0].session_id).await?;
+
+// 注册公开 JSON 路由；路由和 handler 从同一注册调用生成 manifest
+worker.capability("public_http");
+worker.http_route(
+    ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/my-plugin/{id}"),
+    http_handler(|request, _ctx| async move {
+        Ok(ExtensionHttpResponse::json(200, serde_json::json!({
+            "id": request.path_params.get("id"),
+            "body": request.body,
+        })))
+    }),
+)?;
+
+// 调用另一插件的公开路由
+worker.capability("public_http_dispatch");
+let response = HostClient::dispatch_public_http(
+    ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/other-plugin/run")
+        .json_body(serde_json::json!({ "job": 1 }))
+).await?;
 ```
+
+`workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。前者拒绝越界、symlink 和密钥类路径；进程执行不是
+操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和
+I/O 大小限制，并响应会话取消。
+
+扩展只支持公开 HTTP 路由，且不能注册在 `/api` 下。s5r handler 串行执行，因此
+`public_http_dispatch` 会拒绝同步调用自己的公开路由，避免重入死锁。
 
 进程内 bundled 工具还可读 `ToolExecutionContext.capabilities`：
 

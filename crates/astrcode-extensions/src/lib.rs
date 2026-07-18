@@ -10,4 +10,7 @@ pub mod remote_manifest;
 pub mod runner;
 pub mod s5r_ext;
 
-pub use host_router::{HostRouter, build_host_router};
+pub use host_router::{
+    HostRouter, PublicHttpDispatcher, build_host_router,
+    build_host_router_with_public_http_dispatcher,
+};

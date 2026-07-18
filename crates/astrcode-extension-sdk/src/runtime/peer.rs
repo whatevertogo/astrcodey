@@ -80,7 +80,7 @@ pub struct Peer<T: FrameTransport + 'static> {
     initialize_handler: Mutex<Option<InitializeHandler>>,
     invoke_handler: Mutex<Option<InvokeHandler>>,
     read_task: Mutex<Option<JoinHandle<()>>>,
-    inbound_cancel: Arc<AsyncMutex<HashMap<String, CancellationToken>>>,
+    inbound_cancel: Arc<AsyncMutex<HashMap<String, CancelToken>>>,
 }
 
 impl<T: FrameTransport + 'static> Peer<T> {
@@ -349,7 +349,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
         });
         let _ = self.send_message(&msg).await;
         if let Some(token) = self.inbound_cancel.lock().await.remove(request_id) {
-            token.cancel();
+            token.cancel(reason);
         }
     }
 
@@ -422,7 +422,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
             },
             WireMessage::Cancel(cancel) => {
                 if let Some(token) = self.inbound_cancel.lock().await.remove(&cancel.id) {
-                    token.cancel();
+                    token.cancel(cancel.reason);
                 }
             },
             WireMessage::Initialize(init) => {
@@ -495,17 +495,10 @@ impl<T: FrameTransport + 'static> Peer<T> {
         let invoke_id = invoke.id.clone();
         let invoke_stream = invoke.stream;
         let cancel_token = CancelToken::default();
-        let host_cancel = CancellationToken::new();
         self.inbound_cancel
             .lock()
             .await
-            .insert(invoke_id.clone(), host_cancel.clone());
-        let child_token = cancel_token.clone();
-        let watch = host_cancel.clone();
-        crate::runtime::task_utils::spawn_traced("peer_inbound_cancel_watch", async move {
-            watch.cancelled().await;
-            child_token.cancel("host_cancel");
-        });
+            .insert(invoke_id.clone(), cancel_token.clone());
         let result = handler(invoke, cancel_token).await;
         self.inbound_cancel.lock().await.remove(&invoke_id);
         match result {

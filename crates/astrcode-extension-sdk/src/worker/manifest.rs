@@ -2,7 +2,10 @@
 
 use serde_json::{Value, json};
 
-use crate::{extension::ContinueAfterStopLimit, tool::ToolDefinition};
+use crate::{
+    extension::{ContinueAfterStopLimit, ExtensionHttpRoute},
+    tool::ToolDefinition,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct HookManifestOptions {
@@ -22,11 +25,18 @@ pub struct CommandManifestEntry {
     pub description: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct HttpRouteManifestEntry {
+    pub route: ExtensionHttpRoute,
+    pub handler_id: String,
+}
+
 #[derive(Debug, Default)]
 pub struct ManifestCatalog {
     pub tools: Vec<ToolDefinition>,
     pub hooks: Vec<HookManifestEntry>,
     pub commands: Vec<CommandManifestEntry>,
+    pub http_routes: Vec<HttpRouteManifestEntry>,
     pub capabilities: Vec<String>,
     pub extension_events: Vec<Value>,
 }
@@ -64,6 +74,16 @@ impl ManifestCatalog {
             .iter()
             .map(|c| json!({ "name": c.name, "description": c.description }))
             .collect();
+        let http_routes: Vec<Value> = self
+            .http_routes
+            .iter()
+            .map(|entry| {
+                json!({
+                    "route": entry.route,
+                    "handler_id": entry.handler_id,
+                })
+            })
+            .collect();
         json!({
             "extension_id": extension_id,
             "version": version,
@@ -72,6 +92,7 @@ impl ManifestCatalog {
             "tools": tools,
             "hooks": hooks,
             "commands": commands,
+            "http_routes": http_routes,
             "extension_events": self.extension_events,
         })
     }

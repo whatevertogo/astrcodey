@@ -8,11 +8,21 @@ mod registry;
 use std::sync::Arc;
 
 pub use builder::{
-    command_handler, handler_err, hook_handler, hook_handler_args, parse_hook_input,
+    command_handler, handler_err, hook_handler, hook_handler_args, http_handler, parse_hook_input,
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
-pub use host::{HostApi, HostClient, inject_host_api};
-pub use registry::{CommandHandlerFn, HookHandlerFn, ToolHandlerFn, WorkerCallContext};
+pub use host::{
+    HostApi, HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+    HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
+    HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
+    HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+    HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+    HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, inject_host_api,
+};
+pub use registry::{
+    CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -105,6 +115,16 @@ impl Worker {
         handler: CommandHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry.register_command(name, description, handler)?;
+        Ok(self)
+    }
+
+    /// 注册 HTTP 路由；manifest 声明与 handler 保持同一数据源。
+    pub fn http_route(
+        &mut self,
+        route: crate::extension::ExtensionHttpRoute,
+        handler: HttpHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry.register_http_route(route, handler)?;
         Ok(self)
     }
 
@@ -220,6 +240,13 @@ fn build_handler_descriptors(
         out.push(HandlerDescriptor {
             handler_id: registry.handler_id_for("command", &cmd.name),
             description: cmd.description.clone(),
+            input_schema: json!({"type":"object"}),
+        });
+    }
+    for route in &catalog.http_routes {
+        out.push(HandlerDescriptor {
+            handler_id: route.handler_id.clone(),
+            description: route.route.description.clone(),
             input_schema: json!({"type":"object"}),
         });
     }

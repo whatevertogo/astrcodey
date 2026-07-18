@@ -12,18 +12,30 @@ pub mod extension {
         CommandHandler, CompactContext, CompactContributions, CompactEvent, CompactHandler,
         CompactResult, CompactStrategy, CompactTrigger, ContinueAfterStopContext,
         ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
-        ContinueAfterStopRegistration, ContinueAfterStopResult, DiscoveredTool,
-        EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionManifest,
-        ExtensionTasks, ExtensionToolOutcome, HookMode, HookResult, Keybinding, LifecycleContext,
-        LifecycleHandler, PostToolUseContext, PostToolUseFailureContext, PostToolUseFailureHandler,
-        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
-        PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
-        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-        StatusItem, StatusItemUpdatePayload, StopReason, ToolDiscoveryHandler, ToolHandler,
-        ToolHookRegistration, ToolHookTarget, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, UserMessageEnvelopeResult,
+        ContinueAfterStopRegistration, ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES,
+        DiscoveredTool, EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension,
+        ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError,
+        ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks,
+        ExtensionToolOutcome, HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
+        MAX_EXTENSION_HTTP_BODY_BYTES, PostToolUseContext, PostToolUseFailureContext,
+        PostToolUseFailureHandler, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
+        PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
+        Registrar, SlashCommand, StatusItem, StatusItemUpdatePayload, StopReason,
+        ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
+        UserMessageEnvelopeResult, extension_http_route_patterns_conflict,
+        match_extension_http_route,
+    };
+}
+
+/// Typed access to the host's single restricted outbound-network service.
+pub mod network {
+    pub use astrcode_core::extension::{
+        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
+        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
     };
 }
 
@@ -61,11 +73,12 @@ pub mod tool {
     pub use astrcode_core::{
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY,
-            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError, SessionHandle,
-            SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool,
-            ToolCallScope, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
-            ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin, ToolPromptMetadata,
-            ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths, tool_metadata,
+            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError,
+            SessionDeliveryOutcome, SessionHandle, SessionOperations, SessionStatus,
+            SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities,
+            ToolDefinition, ToolError, ToolExecutionContext, ToolFileServices, ToolHostServices,
+            ToolModelAccess, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+            ToolSessionControl, ToolSessionPaths, tool_metadata,
         },
         tool_ui::{
             TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire, ToolInputUiWire,
@@ -113,6 +126,7 @@ pub mod manifest;
 pub mod runtime;
 pub mod s5r;
 pub mod session;
+pub mod session_inspect;
 pub mod worker;
 
 /// Namespaced persistence locations for session-scoped extension data.
@@ -136,20 +150,36 @@ pub mod prelude {
             ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopLimit,
             ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
             ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-            ExtensionManifest, HookMode, HookResult, LifecycleContext, LifecycleHandler,
-            PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-            PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-            PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-            Registrar, SlashCommand, StatusItemUpdatePayload, StopReason, ToolHandler,
-            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+            ExtensionHttpRoute, ExtensionManifest, HookMode, HookResult, LifecycleContext,
+            LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+            PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
+            PromptBuildHandler, PromptContributions, ProviderContext, ProviderEvent,
+            ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItemUpdatePayload,
+            StopReason, ToolHandler, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
+            UserMessageEnvelopeResult,
         },
         manifest::validate_manifest,
         s5r::effects::HandlerResult,
+        session_inspect::{
+            SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
+            SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
+            SessionInspectSnapshotOutput,
+        },
         tool::{
             ExecutionMode, ToolCallScope, ToolCapabilities, ToolDefinition, ToolExecutionContext,
             ToolResult,
         },
-        worker::{HostClient, Worker, WorkerCallContext, tool_text},
+        worker::{
+            HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+            HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
+            HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
+            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+            HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+            HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+            HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, HttpHandlerFn, Worker,
+            WorkerCallContext, tool_text,
+        },
     };
 }
 
@@ -161,10 +191,22 @@ pub mod worker_prelude {
             ErrorPayload,
             effects::{CallContinuation, HandlerResult},
         },
+        session_inspect::{
+            SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
+            SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
+            SessionInspectSnapshotOutput,
+        },
         worker::{
-            HostApi, HostClient, Worker, WorkerCallContext, command_handler, handler_err,
-            hook_handler, hook_handler_args, inject_host_api, parse_hook_input,
-            parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
+            HostApi, HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+            HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
+            HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
+            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+            HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+            HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+            HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, HttpHandlerFn, Worker,
+            WorkerCallContext, command_handler, handler_err, hook_handler, hook_handler_args,
+            http_handler, inject_host_api, parse_hook_input, parse_tool_arguments, tool_handler,
+            tool_handler_args, tool_text,
         },
     };
 }

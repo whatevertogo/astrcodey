@@ -9,15 +9,18 @@ use std::{
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        CommandContext, Extension, ExtensionCommandResult, ExtensionEvent, ExtensionHostServices,
-        HookMode, LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, StopReason,
+        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionEvent, ExtensionHostServices, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
+        LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, StopReason,
     },
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
 };
 use astrcode_extension_sdk::config::ModelSelection;
 use astrcode_extensions::{
-    build_host_router, loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
+    build_host_router, build_host_router_with_public_http_dispatcher, loader::ExtensionLoader,
+    runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
 use async_trait::async_trait;
@@ -79,6 +82,45 @@ fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
 }
 
 struct MockLlm;
+
+struct DispatchTargetExtension;
+
+struct DispatchTargetHandler;
+
+#[async_trait]
+impl ExtensionHttpHandler for DispatchTargetHandler {
+    async fn handle(
+        &self,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        Ok(ExtensionHttpResponse::json(
+            200,
+            serde_json::json!({
+                "id": request.path_params.get("id"),
+                "query": request.query,
+                "body": request.body,
+            }),
+        ))
+    }
+}
+
+#[async_trait]
+impl Extension for DispatchTargetExtension {
+    fn id(&self) -> &str {
+        "dispatch-target"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::PublicHttp]
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.http_route(
+            ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/dispatch-target/{id}"),
+            Arc::new(DispatchTargetHandler),
+        );
+    }
+}
 
 #[async_trait]
 impl LlmProvider for MockLlm {
@@ -175,6 +217,10 @@ async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
             .iter()
             .any(|c| { matches!(c, astrcode_core::extension::ExtensionCapability::SmallModel) })
     );
+    assert!(ext.capabilities().iter().any(|capability| matches!(
+        capability,
+        astrcode_core::extension::ExtensionCapability::SessionInspect
+    )));
 
     let mut reg = Registrar::new();
     ext.register(&mut reg);
@@ -187,6 +233,77 @@ async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
         astrcode_core::extension::ToolHookTarget::All
     ));
     assert_eq!(reg.commands().len(), 1);
+    assert_eq!(reg.http_routes().len(), 1);
+    assert_eq!(reg.http_routes()[0].route.path, "/s5r-probe/{id}");
+}
+
+#[tokio::test]
+async fn s5r_http_route_dispatches_through_worker_handler() {
+    let ext = load_s5r(minimal_router()).await;
+    let runner = ExtensionRunner::new(Duration::from_secs(5));
+    runner.register(ext).await.unwrap();
+
+    let result = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest {
+                method: ExtensionHttpMethod::Post,
+                path: "/s5r-probe/99".into(),
+                path_params: Default::default(),
+                query: Some("source=e2e".into()),
+                body: serde_json::Value::Null,
+            },
+            br#"{"hello":"worker"}"#,
+        )
+        .await
+        .unwrap();
+
+    let astrcode_extensions::runner::ExtensionHttpDispatchResult::Response(response) = result
+    else {
+        panic!("expected HTTP response");
+    };
+    assert_eq!(response.status, 202);
+    assert_eq!(response.body["id"], "99");
+    assert_eq!(response.body["query"], "source=e2e");
+    assert_eq!(response.body["body"]["hello"], "worker");
+}
+
+#[tokio::test]
+async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    runner
+        .register(Arc::new(DispatchTargetExtension))
+        .await
+        .unwrap();
+    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let router = build_host_router_with_public_http_dispatcher(
+        Arc::new(ExtensionHostServices::new(store, None, None)),
+        None,
+        runner.clone(),
+    );
+    let ext = load_s5r(router).await;
+    let mut registrar = Registrar::new();
+    ext.register(&mut registrar);
+    let (_, handler) = registrar
+        .tools()
+        .iter()
+        .find(|(definition, _)| definition.name == "dispatch_public_http")
+        .expect("dispatch_public_http tool");
+
+    let result = handler
+        .execute(
+            "dispatch_public_http",
+            serde_json::json!({}),
+            "/tmp",
+            &tool_ctx("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error);
+    let body: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(body["id"], "42");
+    assert_eq!(body["query"], "source=s5r");
+    assert_eq!(body["body"]["from"], "guest");
 }
 
 #[tokio::test]
@@ -312,6 +429,30 @@ async fn s5r_workspace_read_via_host_invoke() {
         result.content
     );
     let _ = fs::remove_dir_all(&wd);
+}
+
+#[tokio::test]
+async fn s5r_session_inspect_via_typed_host_client() {
+    let ext = load_s5r(minimal_router()).await;
+    let mut reg = Registrar::new();
+    ext.register(&mut reg);
+    let (_, handler) = reg
+        .tools()
+        .iter()
+        .find(|(definition, _)| definition.name == "inspect_sessions")
+        .expect("inspect_sessions tool");
+
+    let result = handler
+        .execute(
+            "inspect_sessions",
+            serde_json::json!({}),
+            "/tmp",
+            &tool_ctx("/tmp"),
+        )
+        .await
+        .expect("invoke inspect_sessions");
+
+    assert_eq!(result.content, "session_count=0");
 }
 
 #[tokio::test]

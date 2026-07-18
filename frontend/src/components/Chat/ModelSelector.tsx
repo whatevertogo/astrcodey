@@ -42,19 +42,25 @@ export default function ModelSelector({
     let cancelled = false
     const load = async () => {
       setLoading(true)
-      try {
-        const [nextOptions, nextCurrent] = await Promise.all([
-          listAvailableModels(),
-          getCurrentModel(),
-        ])
-        if (cancelled) return
-        setOptions(nextOptions)
-        setCurrentModel(nextCurrent)
-      } catch {
-        if (!cancelled) setOptions([])
-      } finally {
-        if (!cancelled) setLoading(false)
+      const [optionsResult, currentResult] = await Promise.allSettled([
+        listAvailableModels(),
+        getCurrentModel(),
+      ])
+      if (cancelled) return
+
+      if (optionsResult.status === 'fulfilled') {
+        setOptions(optionsResult.value)
+      } else {
+        console.warn('Failed to load available models:', optionsResult.reason)
       }
+
+      if (currentResult.status === 'fulfilled') {
+        setCurrentModel(currentResult.value)
+      } else {
+        console.warn('Failed to load current model:', currentResult.reason)
+      }
+
+      setLoading(false)
     }
     void load()
     return () => {

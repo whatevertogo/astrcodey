@@ -1,43 +1,58 @@
 //! 宿主能力路由 — 唯一实现 `astrcode.*` RPC 与扩展事件发射。
 
+mod capability_groups;
+mod network;
+mod process;
+mod session_inspect;
+mod workspace;
+
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::EventPayload,
     extension::{
         ChildToolPolicy, ExtensionCapability, ExtensionError, ExtensionEventDecl,
-        ExtensionHostServices,
+        ExtensionHostServices, ExtensionHttpRequest, ExtensionHttpResponse, NetworkRedirectPolicy,
+        OutboundNetworkErrorKind, OutboundNetworkRequest, OutboundNetworkService,
     },
     llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRole},
     tool::{
-        CreateSessionRequest, SessionAccessPair, SessionOperations, SubmitTurnRequest,
-        SubmitTurnResult,
+        CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
+        SubmitTurnRequest, SubmitTurnResult,
     },
 };
 use astrcode_extension_sdk::{
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
     state,
+    worker::HostNetworkRequest,
 };
-use astrcode_support::hostpaths::{WorkspacePathError, resolve_under_workspace_root};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
-/// `workspace.read` 默认最大读取字节数（1 MiB）。
-const DEFAULT_WORKSPACE_READ_MAX_BYTES: u64 = 1024 * 1024;
+use self::capability_groups::{CapabilityGroupKind, HostCapabilityGroups};
 
-fn block_on_async<F: std::future::Future + Send + 'static>(future: F) -> F::Output
+const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn block_on_async<F>(future: F) -> Result<F::Output, ErrorPayload>
 where
+    F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
     let rt = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("host router tokio runtime")
+            .map_err(|error| error.to_string())
     });
+    let rt = rt.as_ref().map_err(|message| {
+        ErrorPayload::new(
+            "host_runtime_unavailable",
+            format!("failed to initialize host runtime: {message}"),
+        )
+    })?;
 
     // 从 tokio 异步任务里直接 block_on 会占满 test/runtime worker，嵌套 host invoke 会死锁。
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -45,14 +60,51 @@ where
             handle.runtime_flavor(),
             tokio::runtime::RuntimeFlavor::MultiThread
         ) {
-            return tokio::task::block_in_place(|| rt.block_on(future));
+            return tokio::task::block_in_place(|| run_on_host_runtime(rt, future));
         }
-        match std::thread::spawn(move || rt.block_on(future)).join() {
+        match std::thread::spawn(move || run_on_host_runtime(rt, future)).join() {
             Ok(output) => return output,
-            Err(payload) => std::panic::resume_unwind(payload),
+            Err(_) => {
+                return Err(ErrorPayload::new(
+                    "host_runtime_failed",
+                    "host runtime thread panicked",
+                ));
+            },
         }
     }
-    rt.block_on(future)
+    run_on_host_runtime(rt, future)
+}
+
+fn run_on_host_runtime<F>(
+    runtime: &tokio::runtime::Runtime,
+    future: F,
+) -> Result<F::Output, ErrorPayload>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    runtime.block_on(async move {
+        tokio::spawn(future).await.map_err(|error| {
+            ErrorPayload::new(
+                "host_runtime_failed",
+                format!("host runtime task failed: {error}"),
+            )
+        })
+    })
+}
+
+fn run_blocking_io<T>(operation: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ) =>
+        {
+            tokio::task::block_in_place(operation)
+        },
+        _ => operation(),
+    }
 }
 
 /// 单次 guest→host invoke 的运行时上下文。
@@ -80,59 +132,60 @@ pub struct HostBackends {
     pub small_llm: Option<Arc<dyn LlmProvider>>,
     pub session_read: Option<Arc<dyn astrcode_core::storage::EventReader>>,
     pub default_working_dir: Option<String>,
+    pub public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
+    pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
+}
+
+#[async_trait::async_trait]
+pub trait PublicHttpDispatcher: Send + Sync {
+    async fn dispatch_public_http(
+        &self,
+        caller_extension_id: &str,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError>;
 }
 
 /// 唯一 `astrcode.*` 能力实现。
 pub struct HostRouter {
-    backends: HostBackends,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostCapabilityStatus {
-    Implemented,
-    Reserved,
+    groups: HostCapabilityGroups,
 }
 
 impl HostRouter {
     pub fn new(host_services: &ExtensionHostServices, default_working_dir: Option<String>) -> Self {
         Self {
-            backends: HostBackends {
+            groups: HostBackends {
                 main_llm: host_services.main_llm.clone(),
                 small_llm: host_services.small_llm.clone(),
                 session_read: host_services.session_read.clone(),
                 default_working_dir,
-            },
+                public_http_dispatcher: None,
+                outbound_network: host_services.outbound_network.clone(),
+            }
+            .into(),
         }
     }
 
     pub fn from_backends(backends: HostBackends) -> Self {
-        Self { backends }
+        Self {
+            groups: backends.into(),
+        }
+    }
+
+    pub fn with_public_http_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn PublicHttpDispatcher>,
+    ) -> Self {
+        self.groups.public_http.dispatcher = Some(dispatcher);
+        self
     }
 
     /// 根据已声明能力生成握手 catalog。
     pub fn catalog_for_grants(caps: &[ExtensionCapability]) -> Vec<CapabilityDescriptor> {
         let mut out = Vec::new();
         for cap in caps {
-            if Self::capability_status(*cap) != HostCapabilityStatus::Implemented {
-                continue;
-            }
             out.extend(descriptors_for_capability(*cap));
         }
         out
-    }
-
-    pub fn capability_status(cap: ExtensionCapability) -> HostCapabilityStatus {
-        match cap {
-            ExtensionCapability::ProcessSpawn | ExtensionCapability::NetworkClient => {
-                HostCapabilityStatus::Reserved
-            },
-            ExtensionCapability::SessionControl
-            | ExtensionCapability::MainModel
-            | ExtensionCapability::SmallModel
-            | ExtensionCapability::SessionHistory
-            | ExtensionCapability::EmitEvents
-            | ExtensionCapability::WorkspaceRead => HostCapabilityStatus::Implemented,
-        }
     }
 
     pub fn authorize_astrcode(
@@ -180,29 +233,102 @@ impl HostRouter {
         let input: Value = serde_json::from_str(input)
             .map_err(|e| ErrorPayload::new("invalid_input", e.to_string()))?;
 
-        match cap {
-            "astrcode.llm.main_chat" => self.invoke_main_llm(&input, false, ctx),
-            "astrcode.llm.small_chat" => self.invoke_small_llm(&input, false, ctx),
-            "astrcode.session.read_events" => self.invoke_read_events(&input, ctx),
-            "astrcode.session.control.create" => self.invoke_session_create(&input, ctx),
-            "astrcode.session.control.submit_turn" => self.invoke_session_submit(&input, ctx),
-            "astrcode.session.control.dispose" => self.invoke_session_dispose(&input, ctx),
-            "astrcode.session.state.read" => self.invoke_state_read(&input, ctx),
-            "astrcode.session.state.write" => self.invoke_state_write(&input, ctx),
-            "astrcode.event.emit" => self.invoke_emit(&input, ctx),
-            "astrcode.workspace.read" => self.invoke_workspace_read(&input, ctx),
-            "astrcode.process.spawn" => Err(ErrorPayload::new(
-                "not_implemented",
-                "astrcode.process.spawn is reserved and not implemented in this host build",
-            )),
-            "astrcode.network.client" => Err(ErrorPayload::new(
-                "not_implemented",
-                "astrcode.network.client is reserved and not implemented in this host build",
-            )),
-            _ => Err(ErrorPayload::new(
+        match CapabilityGroupKind::for_capability(cap, required_capability_for_astrcode(cap)) {
+            Some(CapabilityGroupKind::Llm) => self.invoke_llm_capability(cap, &input, ctx),
+            Some(CapabilityGroupKind::Session) => self.invoke_session_capability(cap, input, ctx),
+            Some(CapabilityGroupKind::Context) => self.invoke_context_capability(cap, &input, ctx),
+            Some(CapabilityGroupKind::Workspace) => {
+                self.invoke_workspace_capability(cap, &input, ctx)
+            },
+            Some(CapabilityGroupKind::Process) => self.invoke_process_spawn(input, ctx),
+            Some(CapabilityGroupKind::Network) => self.invoke_network_client(input, ctx),
+            Some(CapabilityGroupKind::Extension) => self.invoke_public_http_dispatch(input, ctx),
+            None => Err(ErrorPayload::new(
                 "not_implemented",
                 format!("capability not implemented: {cap}"),
             )),
+        }
+    }
+
+    fn invoke_llm_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.llm.main_chat" => self.invoke_main_llm(input, false, ctx),
+            "astrcode.llm.small_chat" => self.invoke_small_llm(input, false, ctx),
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_session_capability(
+        &self,
+        cap: &str,
+        input: Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.session.read_events" => self.invoke_read_events(&input, ctx),
+            "astrcode.session.control.create" => self.invoke_session_create(&input, ctx),
+            "astrcode.session.control.submit_turn" => self.invoke_session_submit(&input, ctx),
+            "astrcode.session.control.interrupt_and_submit" => {
+                self.invoke_session_interrupt_and_submit(&input, ctx)
+            },
+            "astrcode.session.control.inject_input"
+            | "astrcode.session.control.inject_or_start" => self.invoke_session_inject(&input, ctx),
+            "astrcode.session.control.cancel_turn" => self.invoke_session_cancel(&input, ctx),
+            "astrcode.session.control.execution_view" => {
+                self.invoke_session_execution_view(&input, ctx)
+            },
+            "astrcode.session.control.dispose" => self.invoke_session_dispose(&input, ctx),
+            "astrcode.session.inspect.list" => self.invoke_session_inspect_list(),
+            "astrcode.session.inspect.snapshot" => self.invoke_session_inspect_snapshot(input),
+            "astrcode.session.inspect.read_model" => self.invoke_session_inspect_read_model(input),
+            "astrcode.session.inspect.provider_messages" => {
+                self.invoke_session_inspect_provider_messages(input)
+            },
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_context_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.session.state.read" => self.invoke_state_read(input, ctx),
+            "astrcode.session.state.write" => self.invoke_state_write(input, ctx),
+            "astrcode.event.emit" => self.invoke_emit(input, ctx),
+            _ => Err(capability_not_implemented(cap)),
+        }
+    }
+
+    fn invoke_workspace_capability(
+        &self,
+        cap: &str,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match cap {
+            "astrcode.workspace.read" => run_blocking_io(|| self.invoke_workspace_read(input, ctx)),
+            "astrcode.workspace.list" => {
+                run_blocking_io(|| workspace::list(self.workspace_root(ctx)?, input))
+            },
+            "astrcode.workspace.grep" => {
+                run_blocking_io(|| workspace::grep(self.workspace_root(ctx)?, input))
+            },
+            "astrcode.workspace.glob" => {
+                run_blocking_io(|| workspace::glob(self.workspace_root(ctx)?, input))
+            },
+            "astrcode.workspace.write" => {
+                run_blocking_io(|| self.invoke_workspace_write(input, ctx))
+            },
+            "astrcode.workspace.edit" => run_blocking_io(|| self.invoke_workspace_edit(input, ctx)),
+            _ => Err(capability_not_implemented(cap)),
         }
     }
 
@@ -286,7 +412,7 @@ impl HostRouter {
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let provider =
-            self.backends.main_llm.as_ref().ok_or_else(|| {
+            self.groups.llm.main.as_ref().ok_or_else(|| {
                 ErrorPayload::new("backend_unavailable", "main_llm not configured")
             })?;
         self.invoke_llm_chat(provider, "main_llm", input, collect_chunks, ctx)
@@ -299,7 +425,7 @@ impl HostRouter {
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         let provider =
-            self.backends.small_llm.as_ref().ok_or_else(|| {
+            self.groups.llm.small.as_ref().ok_or_else(|| {
                 ErrorPayload::new("backend_unavailable", "small_llm not configured")
             })?;
         self.invoke_llm_chat(provider, "small_llm", input, collect_chunks, ctx)
@@ -359,7 +485,7 @@ impl HostRouter {
             )
             .await
             .map_err(|_| ErrorPayload::new("timeout", format!("{label}.chat timed out")))?
-        })
+        })?
     }
 
     fn invoke_read_events(
@@ -367,7 +493,7 @@ impl HostRouter {
         input: &Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        let reader = self.backends.session_read.as_ref().ok_or_else(|| {
+        let reader = self.groups.session.reader.as_ref().ok_or_else(|| {
             ErrorPayload::new("backend_unavailable", "session_read not configured")
         })?;
         let target_session_id = input["session_id"]
@@ -402,7 +528,7 @@ impl HostRouter {
                         serde_json::json!({ "events": truncated })
                     })
                     .map_err(|e| ErrorPayload::new("read_failed", e.to_string()))
-            })
+            })?
         } else if caller_owned != target_owned {
             Err(ErrorPayload::new(
                 "permission_denied",
@@ -419,7 +545,7 @@ impl HostRouter {
                         serde_json::json!({ "events": truncated })
                     })
                     .map_err(|e| ErrorPayload::new("read_failed", e.to_string()))
-            })
+            })?
         }
     }
 
@@ -454,7 +580,7 @@ impl HostRouter {
                 .await
                 .map(|h| json!({ "session_id": h.session_id }))
                 .map_err(|e| ErrorPayload::new("session_error", e.to_string()))
-        })
+        })?
     }
 
     fn invoke_session_submit(
@@ -506,7 +632,87 @@ impl HostRouter {
                 .await
                 .map(submit_turn_result_json)
                 .map_err(|e| ErrorPayload::new("session_error", e.to_string()))
-        })
+        })?
+    }
+
+    fn invoke_session_inject(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let ops = required_session_ops(ctx)?;
+        let access = session_access_from_input(input, ctx)?;
+        let content = input
+            .get("content")
+            .or_else(|| input.get("user_prompt"))
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| ErrorPayload::new("invalid_input", "content required"))?
+            .to_string();
+        block_on_async(async move {
+            ops.inject_message(access.as_access(), content)
+                .await
+                .map(session_delivery_outcome_json)
+                .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+        })?
+    }
+
+    fn invoke_session_interrupt_and_submit(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let ops = required_session_ops(ctx)?;
+        let access = session_access_from_input(input, ctx)?;
+        let content = input
+            .get("content")
+            .or_else(|| input.get("user_prompt"))
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| ErrorPayload::new("invalid_input", "content required"))?
+            .to_string();
+        block_on_async(async move {
+            ops.interrupt_and_submit(access.as_access(), content)
+                .await
+                .map(session_delivery_outcome_json)
+                .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+        })?
+    }
+
+    fn invoke_session_cancel(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let ops = required_session_ops(ctx)?;
+        let access = session_access_from_input(input, ctx)?;
+        block_on_async(async move {
+            ops.cancel_turn(access.as_access())
+                .await
+                .map(|()| json!({ "ok": true }))
+                .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+        })?
+    }
+
+    fn invoke_session_execution_view(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let ops = required_session_ops(ctx)?;
+        let access = session_access_from_input(input, ctx)?;
+        block_on_async(async move {
+            ops.execution_view(access.as_access())
+                .await
+                .map(|view| {
+                    json!({
+                        "phase": view.phase,
+                        "active_turn_id": view.active_turn_id,
+                        "queued_inputs": view.queued_inputs,
+                    })
+                })
+                .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+        })?
     }
 
     fn invoke_session_dispose(
@@ -535,7 +741,39 @@ impl HostRouter {
                 .await
                 .map(|()| json!({ "ok": true }))
                 .map_err(|e| ErrorPayload::new("session_error", e.to_string()))
-        })
+        })?
+    }
+
+    fn invoke_session_inspect_list(&self) -> Result<Value, ErrorPayload> {
+        let reader = self.session_reader()?;
+        block_on_async(async move { session_inspect::list(reader).await })?
+    }
+
+    fn invoke_session_inspect_snapshot(&self, input: Value) -> Result<Value, ErrorPayload> {
+        let reader = self.session_reader()?;
+        block_on_async(async move { session_inspect::snapshot(reader, input).await })?
+    }
+
+    fn invoke_session_inspect_read_model(&self, input: Value) -> Result<Value, ErrorPayload> {
+        let reader = self.session_reader()?;
+        block_on_async(async move { session_inspect::read_model(reader, input).await })?
+    }
+
+    fn invoke_session_inspect_provider_messages(
+        &self,
+        input: Value,
+    ) -> Result<Value, ErrorPayload> {
+        let reader = self.session_reader()?;
+        block_on_async(async move { session_inspect::provider_messages(reader, input).await })?
+    }
+
+    fn session_reader(&self) -> Result<Arc<dyn astrcode_core::storage::EventReader>, ErrorPayload> {
+        self.groups
+            .session
+            .reader
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_read not configured"))
     }
 
     fn invoke_state_read(&self, input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
@@ -603,46 +841,128 @@ impl HostRouter {
         input: &Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        let root = ctx
-            .working_dir
-            .as_deref()
-            .or(self.backends.default_working_dir.as_deref())
-            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))?;
-        let rel = input["path"]
-            .as_str()
-            .ok_or_else(|| ErrorPayload::new("invalid_input", "path required"))?;
-        let path = resolve_under_workspace_root(root, rel).map_err(workspace_path_to_payload)?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|e| ErrorPayload::new("io_error", e.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(ErrorPayload::new(
-                "permission_denied",
-                "symlink paths are not readable via workspace.read",
-            ));
-        }
-        let max_bytes = input
-            .get("max_bytes")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(DEFAULT_WORKSPACE_READ_MAX_BYTES)
-            .min(DEFAULT_WORKSPACE_READ_MAX_BYTES);
-        if metadata.len() > max_bytes {
-            return Err(ErrorPayload::new(
-                "file_too_large",
-                format!(
-                    "file size {} exceeds max_bytes {}",
-                    metadata.len(),
-                    max_bytes
-                ),
-            ));
-        }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| ErrorPayload::new("io_error", e.to_string()))?;
-        Ok(serde_json::json!({ "content": content }))
+        workspace::read(self.workspace_root(ctx)?, input)
     }
-}
 
-fn workspace_path_to_payload(err: WorkspacePathError) -> ErrorPayload {
-    ErrorPayload::new(err.code, err.message)
+    fn invoke_workspace_write(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        workspace::write(self.workspace_root(ctx)?, input)
+    }
+
+    fn invoke_workspace_edit(
+        &self,
+        input: &Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        workspace::edit(self.workspace_root(ctx)?, input)
+    }
+
+    fn workspace_root<'a>(&'a self, ctx: &'a InvokeContext) -> Result<&'a str, ErrorPayload> {
+        ctx.working_dir
+            .as_deref()
+            .or(self.groups.workspace.default_working_dir.as_deref())
+            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))
+    }
+
+    fn invoke_process_spawn(
+        &self,
+        input: Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let working_dir = ctx
+            .working_dir
+            .clone()
+            .or_else(|| self.groups.process.default_working_dir.clone());
+        let cancel_token = ctx.cancel_token.clone();
+        let runner = Arc::clone(&self.groups.process.runner);
+        block_on_async(async move {
+            runner
+                .spawn(input, working_dir.as_deref(), cancel_token.as_ref())
+                .await
+        })?
+    }
+
+    fn invoke_network_client(
+        &self,
+        input: Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let request = serde_json::from_value::<HostNetworkRequest>(input)
+            .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
+        let service = self
+            .groups
+            .network
+            .service
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ErrorPayload::new("backend_unavailable", "outbound network is not configured")
+            })?;
+        let cancel_token = ctx.cancel_token.clone();
+        block_on_async(async move {
+            let response = service
+                .request(
+                    OutboundNetworkRequest {
+                        url: request.url,
+                        method: request.method.unwrap_or_else(|| "GET".into()),
+                        headers: request.headers,
+                        body: request.body.unwrap_or_default().into_bytes(),
+                        max_bytes: request.max_bytes.unwrap_or(1024 * 1024).min(1024 * 1024)
+                            as usize,
+                        timeout: Duration::from_millis(request.timeout_ms.unwrap_or(30_000))
+                            .min(HOST_INVOKE_TIMEOUT),
+                        redirect_policy: NetworkRedirectPolicy::Follow,
+                    },
+                    cancel_token,
+                )
+                .await
+                .map_err(network_error_payload)?;
+            let body = String::from_utf8(response.body).map_err(|error| {
+                ErrorPayload::new(
+                    "invalid_response_encoding",
+                    format!("network response is not valid UTF-8: {error}"),
+                )
+            })?;
+            Ok(json!({
+                "status": response.status,
+                "headers": response.headers,
+                "body": body,
+            }))
+        })?
+    }
+
+    fn invoke_public_http_dispatch(
+        &self,
+        input: Value,
+        ctx: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        let dispatcher = self.groups.public_http.dispatcher.as_ref().ok_or_else(|| {
+            ErrorPayload::new(
+                "backend_unavailable",
+                "public HTTP dispatcher is not configured",
+            )
+        })?;
+        let request = serde_json::from_value::<ExtensionHttpRequest>(input)
+            .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
+        let dispatcher = Arc::clone(dispatcher);
+        let caller_extension_id = ctx.extension_id.clone();
+        block_on_async(async move {
+            tokio::time::timeout(
+                HOST_INVOKE_TIMEOUT,
+                dispatcher.dispatch_public_http(&caller_extension_id, request),
+            )
+            .await
+            .map_err(|_| ErrorPayload::new("timeout", "public HTTP dispatch timed out"))?
+            .and_then(|response| {
+                serde_json::to_value(response)
+                    .map_err(|error| ExtensionError::Internal(error.to_string()))
+            })
+            .map_err(|error| ErrorPayload::new("dispatch_failed", error.to_string()))
+        })?
+    }
 }
 
 fn submit_turn_result_json(r: SubmitTurnResult) -> Value {
@@ -661,8 +981,66 @@ fn submit_turn_result_json(r: SubmitTurnResult) -> Value {
     }
 }
 
+fn session_delivery_outcome_json(outcome: SessionDeliveryOutcome) -> Value {
+    match outcome {
+        SessionDeliveryOutcome::Started { turn_id } => {
+            json!({ "status": "started", "turn_id": turn_id })
+        },
+        SessionDeliveryOutcome::Injected { turn_id } => {
+            json!({ "status": "injected", "turn_id": turn_id })
+        },
+        SessionDeliveryOutcome::Queued { queue_len } => {
+            json!({ "status": "queued", "queue_len": queue_len })
+        },
+    }
+}
+
+fn required_session_ops(ctx: &InvokeContext) -> Result<Arc<dyn SessionOperations>, ErrorPayload> {
+    ctx.session_ops
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_ops not available"))
+}
+
+fn session_access_from_input(
+    input: &Value,
+    ctx: &InvokeContext,
+) -> Result<SessionAccessPair, ErrorPayload> {
+    let caller = ctx
+        .session_id
+        .as_deref()
+        .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
+    let target = input
+        .get("target_session_id")
+        .or_else(|| input.get("session_id"))
+        .and_then(Value::as_str)
+        .filter(|target| !target.is_empty())
+        .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?;
+    Ok(SessionAccessPair::new(caller, target))
+}
+
 fn capability_wire_name(cap: ExtensionCapability) -> &'static str {
     astrcode_extension_sdk::s5r::capability_to_wire(cap)
+}
+
+fn capability_not_implemented(capability: &str) -> ErrorPayload {
+    ErrorPayload::new(
+        "not_implemented",
+        format!("capability not implemented: {capability}"),
+    )
+}
+
+fn network_error_payload(error: astrcode_core::extension::OutboundNetworkError) -> ErrorPayload {
+    let code = match error.kind {
+        OutboundNetworkErrorKind::InvalidRequest => "invalid_input",
+        OutboundNetworkErrorKind::PermissionDenied => "permission_denied",
+        OutboundNetworkErrorKind::Unavailable => "backend_unavailable",
+        OutboundNetworkErrorKind::RequestFailed => "network_error",
+        OutboundNetworkErrorKind::Timeout => "timeout",
+        OutboundNetworkErrorKind::ResponseTooLarge => "response_too_large",
+        OutboundNetworkErrorKind::Cancelled => "cancelled",
+    };
+    ErrorPayload::new(code, error.message)
 }
 
 fn required_capability_for_astrcode(cap: &str) -> Option<ExtensionCapability> {
@@ -671,10 +1049,18 @@ fn required_capability_for_astrcode(cap: &str) -> Option<ExtensionCapability> {
         "astrcode.llm.small_chat" => Some(ExtensionCapability::SmallModel),
         "astrcode.session.read_events" => Some(ExtensionCapability::SessionHistory),
         c if c.starts_with("astrcode.session.control") => Some(ExtensionCapability::SessionControl),
+        c if c.starts_with("astrcode.session.inspect") => Some(ExtensionCapability::SessionInspect),
         "astrcode.event.emit" => Some(ExtensionCapability::EmitEvents),
-        "astrcode.workspace.read" => Some(ExtensionCapability::WorkspaceRead),
+        "astrcode.workspace.read"
+        | "astrcode.workspace.list"
+        | "astrcode.workspace.grep"
+        | "astrcode.workspace.glob" => Some(ExtensionCapability::WorkspaceRead),
+        "astrcode.workspace.write" | "astrcode.workspace.edit" => {
+            Some(ExtensionCapability::WorkspaceWrite)
+        },
         "astrcode.process.spawn" => Some(ExtensionCapability::ProcessSpawn),
         "astrcode.network.client" => Some(ExtensionCapability::NetworkClient),
+        "astrcode.extension.http.public" => Some(ExtensionCapability::PublicHttpDispatch),
         _ => None,
     }
 }
@@ -717,6 +1103,30 @@ fn validate_child_tool_policy(policy: &ChildToolPolicy) -> Result<(), ErrorPaylo
     Ok(())
 }
 
+fn session_inspect_descriptor(
+    name: &str,
+    description: &str,
+    requires_session_id: bool,
+) -> CapabilityDescriptor {
+    let input_schema = if requires_session_id {
+        json!({
+            "type": "object",
+            "properties": { "session_id": { "type": "string" } },
+            "required": ["session_id"]
+        })
+    } else {
+        json!({ "type": "object" })
+    };
+    CapabilityDescriptor {
+        name: name.into(),
+        description: description.into(),
+        input_schema,
+        output_schema: json!({ "type": "object" }),
+        supports_stream: false,
+        cancelable: false,
+    }
+}
+
 fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescriptor> {
     let object_schema = serde_json::json!({ "type": "object" });
     match cap {
@@ -750,6 +1160,28 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
             supports_stream: false,
             cancelable: false,
         }],
+        ExtensionCapability::SessionInspect => vec![
+            session_inspect_descriptor(
+                "astrcode.session.inspect.list",
+                "List all sessions visible to the host (global privileged access)",
+                false,
+            ),
+            session_inspect_descriptor(
+                "astrcode.session.inspect.snapshot",
+                "Read any host-visible session snapshot (global privileged access)",
+                true,
+            ),
+            session_inspect_descriptor(
+                "astrcode.session.inspect.read_model",
+                "Read any host-visible projected session model through a stable wire DTO",
+                true,
+            ),
+            session_inspect_descriptor(
+                "astrcode.session.inspect.provider_messages",
+                "Read provider-visible messages for any host-visible session",
+                true,
+            ),
+        ],
         ExtensionCapability::SessionControl => vec![
             CapabilityDescriptor {
                 name: "astrcode.session.control.create".into(),
@@ -805,6 +1237,46 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
                 cancelable: false,
             },
             CapabilityDescriptor {
+                name: "astrcode.session.control.interrupt_and_submit".into(),
+                description: "Interrupt the active turn and submit new input".into(),
+                input_schema: object_schema.clone(),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: true,
+            },
+            CapabilityDescriptor {
+                name: "astrcode.session.control.inject_input".into(),
+                description: "Inject input into a running turn or start when idle".into(),
+                input_schema: object_schema.clone(),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
+            },
+            CapabilityDescriptor {
+                name: "astrcode.session.control.inject_or_start".into(),
+                description: "Inject input into a running turn or start when idle".into(),
+                input_schema: object_schema.clone(),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
+            },
+            CapabilityDescriptor {
+                name: "astrcode.session.control.cancel_turn".into(),
+                description: "Cancel the active turn".into(),
+                input_schema: object_schema.clone(),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: true,
+            },
+            CapabilityDescriptor {
+                name: "astrcode.session.control.execution_view".into(),
+                description: "Read active turn and queued-input state".into(),
+                input_schema: object_schema.clone(),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
+            },
+            CapabilityDescriptor {
                 name: "astrcode.session.control.dispose".into(),
                 description: "Dispose a session".into(),
                 input_schema: object_schema.clone(),
@@ -821,15 +1293,131 @@ fn descriptors_for_capability(cap: ExtensionCapability) -> Vec<CapabilityDescrip
             supports_stream: false,
             cancelable: false,
         }],
-        ExtensionCapability::WorkspaceRead => vec![CapabilityDescriptor {
-            name: "astrcode.workspace.read".into(),
-            description: "Read a file under the session working directory".into(),
+        ExtensionCapability::WorkspaceRead => [
+            (
+                "astrcode.workspace.read",
+                "Read a bounded UTF-8 workspace file",
+            ),
+            (
+                "astrcode.workspace.list",
+                "List a bounded workspace directory tree",
+            ),
+            (
+                "astrcode.workspace.grep",
+                "Regex-search bounded UTF-8 workspace files",
+            ),
+            (
+                "astrcode.workspace.glob",
+                "Match bounded workspace paths by glob",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, description)| CapabilityDescriptor {
+            name: name.into(),
+            description: description.into(),
             input_schema: object_schema.clone(),
-            output_schema: object_schema,
+            output_schema: object_schema.clone(),
             supports_stream: false,
             cancelable: false,
+        })
+        .collect(),
+        ExtensionCapability::WorkspaceWrite => vec![
+            CapabilityDescriptor {
+                name: "astrcode.workspace.write".into(),
+                description: "Create or replace a non-sensitive file under the working directory"
+                    .into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                }),
+                output_schema: object_schema.clone(),
+                supports_stream: false,
+                cancelable: false,
+            },
+            CapabilityDescriptor {
+                name: "astrcode.workspace.edit".into(),
+                description: "Replace an exact text fragment in a non-sensitive workspace file"
+                    .into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "old_text": { "type": "string" },
+                        "new_text": { "type": "string" },
+                        "replace_all": { "type": "boolean" }
+                    },
+                    "required": ["path", "old_text", "new_text"]
+                }),
+                output_schema: object_schema,
+                supports_stream: false,
+                cancelable: false,
+            },
+        ],
+        ExtensionCapability::ProcessSpawn => vec![CapabilityDescriptor {
+            name: "astrcode.process.spawn".into(),
+            description: "Run a bounded subprocess with an optional workspace-relative cwd".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "args": { "type": "array", "items": { "type": "string" } },
+                    "cwd": { "type": "string" },
+                    "stdin": { "type": "string" },
+                    "timeout_ms": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["command"]
+            }),
+            output_schema: object_schema,
+            supports_stream: false,
+            cancelable: true,
         }],
-        ExtensionCapability::ProcessSpawn | ExtensionCapability::NetworkClient => vec![],
+        ExtensionCapability::NetworkClient => vec![CapabilityDescriptor {
+            name: "astrcode.network.client".into(),
+            description: "Send a bounded outbound HTTP or HTTPS request".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string" },
+                    "url": { "type": "string" },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "body": { "type": "string" },
+                    "max_bytes": { "type": "integer", "minimum": 0 },
+                    "timeout_ms": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["url"]
+            }),
+            output_schema: object_schema,
+            supports_stream: false,
+            cancelable: true,
+        }],
+        ExtensionCapability::PublicHttpDispatch => vec![CapabilityDescriptor {
+            name: "astrcode.extension.http.public".into(),
+            description: "Dispatch a request to another extension's public HTTP route".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+                    "path": { "type": "string" },
+                    "query": { "type": "string" },
+                    "body": {}
+                },
+                "required": ["method", "path"]
+            }),
+            output_schema: object_schema,
+            supports_stream: false,
+            cancelable: true,
+        }],
+        ExtensionCapability::PublicHttp
+        | ExtensionCapability::ConsumeEvents
+        | ExtensionCapability::ProviderRequest
+        | ExtensionCapability::InputDelivery
+        | ExtensionCapability::ToolIntercept
+        | ExtensionCapability::TurnContinuationControl
+        | ExtensionCapability::LiveConversation => Vec::new(),
     }
 }
 
@@ -960,24 +1548,102 @@ pub fn build_host_router(
     Arc::new(HostRouter::new(&host_services, default_working_dir))
 }
 
+/// 构造 trusted bundled extensions 与 worker 共用的受限出站网络服务。
+pub fn default_outbound_network_service() -> Arc<dyn OutboundNetworkService> {
+    Arc::new(network::RestrictedNetworkService::default())
+}
+
+pub fn build_host_router_with_public_http_dispatcher(
+    host_services: Arc<ExtensionHostServices>,
+    default_working_dir: Option<String>,
+    dispatcher: Arc<dyn PublicHttpDispatcher>,
+) -> Arc<HostRouter> {
+    Arc::new(
+        HostRouter::new(&host_services, default_working_dir)
+            .with_public_http_dispatcher(dispatcher),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
     use astrcode_core::{
         permission::ApprovalDecision,
+        storage::{EventReader, EventStore},
         tool::{
             CreateRootSessionRequest, SessionAccess, SessionApiError, SessionHandle, SessionStatus,
         },
     };
+    use astrcode_storage::in_memory::InMemoryEventStore;
 
     use super::*;
+
+    #[test]
+    fn host_runtime_contains_extension_task_panics() {
+        let result = block_on_async(async {
+            panic!("extension task panic");
+            #[allow(unreachable_code)]
+            42
+        });
+
+        let error = result.expect_err("task panic should become a host error");
+        assert_eq!(error.code, "host_runtime_failed");
+    }
 
     #[test]
     fn catalog_includes_session_control_subcaps() {
         let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
         let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"astrcode.session.control.create"));
+    }
+
+    #[test]
+    fn catalog_includes_session_inspect_surface() {
+        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionInspect]);
+        let names = caps
+            .iter()
+            .map(|descriptor| descriptor.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"astrcode.session.inspect.list"));
+        assert!(names.contains(&"astrcode.session.inspect.snapshot"));
+        assert!(names.contains(&"astrcode.session.inspect.read_model"));
+        assert!(names.contains(&"astrcode.session.inspect.provider_messages"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_inspect_maps_storage_model_to_wire_contract() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let session_id = astrcode_core::types::SessionId::new("inspect-session");
+        store
+            .create_session(&session_id, "/workspace", "test-model", None, None, None)
+            .await
+            .expect("create session");
+        let reader: Arc<dyn EventReader> = store;
+        let router = HostRouter::from_backends(HostBackends {
+            session_read: Some(reader),
+            ..Default::default()
+        });
+        let ctx = InvokeContext {
+            declared_capabilities: vec![ExtensionCapability::SessionInspect],
+            ..Default::default()
+        };
+
+        let list = router
+            .invoke_sync("astrcode.session.inspect.list", "{}", &ctx)
+            .expect("list sessions");
+        assert_eq!(list["sessions"][0]["sessionId"], "inspect-session");
+
+        let model = router
+            .invoke_sync(
+                "astrcode.session.inspect.read_model",
+                &json!({ "session_id": "inspect-session" }).to_string(),
+                &ctx,
+            )
+            .expect("read session model");
+        assert_eq!(model["readModel"]["modelId"], "test-model");
+        assert_eq!(model["readModel"]["phase"], "idle");
     }
 
     #[test]
@@ -992,25 +1658,30 @@ mod tests {
     }
 
     #[test]
-    fn catalog_excludes_reserved_capabilities() {
+    fn catalog_includes_bounded_io_capabilities() {
         let caps = HostRouter::catalog_for_grants(&[
             ExtensionCapability::WorkspaceRead,
+            ExtensionCapability::WorkspaceWrite,
             ExtensionCapability::NetworkClient,
             ExtensionCapability::ProcessSpawn,
         ]);
         let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"astrcode.workspace.read"));
-        assert!(!names.contains(&"astrcode.network.client"));
-        assert!(!names.contains(&"astrcode.process.spawn"));
-        assert_eq!(
-            HostRouter::capability_status(ExtensionCapability::NetworkClient),
-            HostCapabilityStatus::Reserved
-        );
+        assert!(names.contains(&"astrcode.workspace.list"));
+        assert!(names.contains(&"astrcode.workspace.grep"));
+        assert!(names.contains(&"astrcode.workspace.glob"));
+        assert!(names.contains(&"astrcode.workspace.write"));
+        assert!(names.contains(&"astrcode.workspace.edit"));
+        assert!(names.contains(&"astrcode.network.client"));
+        assert!(names.contains(&"astrcode.process.spawn"));
     }
 
     #[test]
-    fn reserved_capability_returns_stable_error_when_declared() {
-        let router = HostRouter::from_backends(HostBackends::default());
+    fn network_capability_rejects_non_http_urls_when_declared() {
+        let router = HostRouter::from_backends(HostBackends {
+            outbound_network: Some(default_outbound_network_service()),
+            ..Default::default()
+        });
         let ctx = InvokeContext {
             declared_capabilities: vec![ExtensionCapability::NetworkClient],
             ..Default::default()
@@ -1018,11 +1689,11 @@ mod tests {
         let err = router
             .invoke_sync(
                 "astrcode.network.client",
-                &json!({ "url": "https://example.com" }).to_string(),
+                &json!({ "url": "file:///etc/passwd" }).to_string(),
                 &ctx,
             )
             .unwrap_err();
-        assert_eq!(err.code, "not_implemented");
+        assert_eq!(err.code, "permission_denied");
     }
 
     #[test]
@@ -1165,6 +1836,32 @@ mod tests {
     }
 
     #[test]
+    fn invoke_session_inject_returns_delivery_outcome() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(Arc::new(CapturingSessionOps::default())),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+
+        let output = router
+            .invoke_sync(
+                "astrcode.session.control.inject_or_start",
+                &json!({
+                    "target_session_id": "child",
+                    "content": "continue"
+                })
+                .to_string(),
+                &ctx,
+            )
+            .expect("inject session input");
+
+        assert_eq!(output["status"], "injected");
+        assert_eq!(output["turn_id"], "turn-injected");
+    }
+
+    #[test]
     fn invoke_stream_sync_rejects_precancelled_token() {
         let router = HostRouter::from_backends(HostBackends::default());
         let token = CancellationToken::new();
@@ -1217,8 +1914,10 @@ mod tests {
             &self,
             _access: SessionAccess<'_>,
             _content: String,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
+        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+            Ok(SessionDeliveryOutcome::Injected {
+                turn_id: "turn-injected".into(),
+            })
         }
 
         async fn submit_turn(

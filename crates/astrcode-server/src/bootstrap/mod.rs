@@ -11,7 +11,7 @@ use astrcode_core::{
     storage::EventStore, tool::SessionOperations,
 };
 use astrcode_extensions::{
-    build_host_router,
+    build_host_router_with_public_http_dispatcher,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
@@ -258,7 +258,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
             Some(capabilities.llm()),
             Some(capabilities.small_llm()),
         )
-        .with_session_ops(session_ops),
+        .with_session_ops(session_ops)
+        .with_outbound_network(
+            astrcode_extensions::host_router::default_outbound_network_service(),
+        ),
     );
     extension_runner.bind_host_services(Arc::clone(&host_services));
     let load_errors =
@@ -337,6 +340,11 @@ impl ServerRuntime {
         if let Some(session_ops) = caps.session_ops() {
             host_services = host_services.with_session_ops(session_ops);
         }
+        let outbound_network = self
+            .extension_runner()
+            .outbound_network_service()
+            .unwrap_or_else(astrcode_extensions::host_router::default_outbound_network_service);
+        host_services = host_services.with_outbound_network(outbound_network);
         let host_services = Arc::new(host_services);
         self.extension_runner()
             .bind_host_services(Arc::clone(&host_services));
@@ -378,9 +386,10 @@ async fn load_extensions_into_runner(
         runner,
         &ExtensionLoadContext {
             working_dir: Some(cwd.to_string_lossy().to_string()),
-            host_router: Some(build_host_router(
+            host_router: Some(build_host_router_with_public_http_dispatcher(
                 Arc::clone(host_services),
                 Some(cwd.to_string_lossy().to_string()),
+                runner.clone(),
             )),
         },
         &[&bundled_source, &disk_source],

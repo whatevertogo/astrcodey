@@ -7,7 +7,6 @@
 mod cache;
 mod config;
 mod fetch_url;
-mod http;
 mod preapproved;
 mod url_guard;
 mod web_search;
@@ -20,6 +19,7 @@ use astrcode_extension_sdk::{
         ToolHandler,
     },
     llm::LlmProvider,
+    network::OutboundNetworkService,
     render::{
         RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY, UI_SUMMARY_METADATA_KEY,
     },
@@ -74,6 +74,7 @@ struct WebToolsExtension {
 struct WebToolsShared {
     config: WebToolsConfig,
     small_llm: Option<Arc<dyn LlmProvider>>,
+    outbound_network: Option<Arc<dyn OutboundNetworkService>>,
     fetch_cache: Arc<Mutex<FetchUrlCache>>,
 }
 
@@ -88,6 +89,7 @@ impl Default for WebToolsShared {
             ))),
             config,
             small_llm: None,
+            outbound_network: None,
         }
     }
 }
@@ -122,6 +124,14 @@ impl Extension for WebToolsExtension {
         shared.small_llm = ctx
             .host_services()
             .and_then(|services| services.small_llm.clone());
+        shared.outbound_network = ctx
+            .host_services()
+            .and_then(|services| services.outbound_network.clone());
+        if shared.outbound_network.is_none() {
+            return Err(ExtensionError::Internal(
+                "outbound network service is unavailable".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -169,9 +179,17 @@ impl ToolHandler for WebSearchToolHandler {
             ))
         })?;
         let query = args.query.trim().to_string();
-        let config = self.shared.read().config.search.clone();
+        let (config, network) = {
+            let shared = self.shared.read();
+            (
+                shared.config.search.clone(),
+                shared.outbound_network.clone().ok_or_else(|| {
+                    ExtensionError::Internal("outbound network service is unavailable".into())
+                })?,
+            )
+        };
 
-        match run_web_search(&config, args).await {
+        match run_web_search(&config, network, args).await {
             Ok(outcome) => {
                 let content = render_search_results(&outcome);
                 let ui_render = build_search_render_spec(&outcome);
@@ -222,16 +240,19 @@ impl ToolHandler for FetchUrlToolHandler {
         })?;
         let requested_url = args.url.trim().to_string();
         let prompt = args.prompt.trim().to_string();
-        let (config, cache, small_llm) = {
+        let (config, cache, network, small_llm) = {
             let shared = self.shared.read();
             (
                 shared.config.fetch.clone(),
                 Arc::clone(&shared.fetch_cache),
+                shared.outbound_network.clone().ok_or_else(|| {
+                    ExtensionError::Internal("outbound network service is unavailable".into())
+                })?,
                 shared.small_llm.clone(),
             )
         };
 
-        match run_fetch_url(&config, &cache, small_llm, args).await {
+        match run_fetch_url(&config, &cache, network, small_llm, args).await {
             Ok(FetchUrlResult::Content(outcome)) => {
                 let content = render_fetch_content(&outcome);
                 let ui_render = build_fetch_render_spec(&outcome);

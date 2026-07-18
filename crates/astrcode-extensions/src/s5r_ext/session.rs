@@ -23,7 +23,6 @@ use astrcode_extension_sdk::{
 use parking_lot::{Mutex, RwLock};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     extension_manifest::ExtensionRegistration,
@@ -62,6 +61,7 @@ pub(crate) enum S5rSessionError {
 
 pub(crate) struct S5rSession {
     child: Mutex<Option<Child>>,
+    stderr_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     peer: Arc<Peer<StdioFrameTransport>>,
     registration: Arc<RwLock<Option<ExtensionRegistration>>>,
     active_invoke: Arc<RwLock<Option<InvokeContext>>>,
@@ -81,6 +81,7 @@ impl S5rSession {
         let mut cmd = Command::new(program);
         cmd.args(args)
             .current_dir(cwd)
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -94,7 +95,7 @@ impl S5rSession {
         let stdin = child.stdin.take().ok_or("s5r child missing stdin")?;
         let stdout = child.stdout.take().ok_or("s5r child missing stdout")?;
         let stderr = child.stderr.take().ok_or("s5r child missing stderr")?;
-        tokio::spawn(drain_stderr(stderr));
+        let stderr_task = tokio::spawn(drain_stderr(stderr));
 
         let transport = StdioFrameTransport::new(stdin, stdout);
         let peer = Peer::new(
@@ -144,13 +145,23 @@ impl S5rSession {
         });
         peer.set_invoke_handler(invoke_handler);
 
-        peer.start().await.map_err(|e| e.to_string())?;
-        peer.wait_remote_initialized(INIT_TIMEOUT)
-            .await
-            .map_err(|e| format!("s5r initialize: {e}"))?;
+        let initialize_result = async {
+            peer.start().await.map_err(|error| error.to_string())?;
+            peer.wait_remote_initialized(INIT_TIMEOUT)
+                .await
+                .map_err(|error| format!("s5r initialize: {error}"))
+        }
+        .await;
+        if let Err(error) = initialize_result {
+            peer.stop().await;
+            let _ = child.kill().await;
+            await_stderr_task(stderr_task).await;
+            return Err(error);
+        }
 
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
+            stderr_task: Mutex::new(Some(stderr_task)),
             peer,
             registration,
             active_invoke,
@@ -209,6 +220,10 @@ impl S5rSession {
         let child = self.child.lock().take();
         if let Some(mut child) = child {
             let _ = child.kill().await;
+        }
+        let stderr_task = self.stderr_task.lock().take();
+        if let Some(stderr_task) = stderr_task {
+            await_stderr_task(stderr_task).await;
         }
     }
 
@@ -278,6 +293,9 @@ impl Drop for S5rSession {
         if let Some(mut child) = self.child.lock().take() {
             let _ = child.start_kill();
         }
+        if let Some(stderr_task) = self.stderr_task.lock().take() {
+            stderr_task.abort();
+        }
     }
 }
 
@@ -303,6 +321,14 @@ fn configure_child_lifetime(command: &mut Command) {
 #[cfg(not(target_os = "linux"))]
 fn configure_child_lifetime(_command: &mut Command) {}
 
+async fn await_stderr_task(stderr_task: tokio::task::JoinHandle<()>) {
+    if let Err(error) = stderr_task.await {
+        if !error.is_cancelled() {
+            tracing::warn!(%error, "s5r stderr drain task failed");
+        }
+    }
+}
+
 fn handle_initialize(
     init: InitializeMsg,
     registration: &Arc<RwLock<Option<ExtensionRegistration>>>,
@@ -324,23 +350,6 @@ fn handle_initialize(
         capabilities: caps,
         metadata: json!({ "wire_codec": "json" }),
     })
-}
-
-fn bridge_peer_cancel_token(peer_token: &CancelToken) -> CancellationToken {
-    let host_token = CancellationToken::new();
-    if peer_token.is_cancelled() {
-        host_token.cancel();
-        return host_token;
-    }
-    let peer = peer_token.clone();
-    let host = host_token.clone();
-    tokio::spawn(async move {
-        while !peer.is_cancelled() {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        host.cancel();
-    });
-    host_token
 }
 
 async fn handle_host_invoke(
@@ -385,7 +394,7 @@ async fn handle_host_invoke(
     ctx.declared_capabilities = reg.capabilities.clone();
     ctx.event_declarations = decls_to_map(&reg.extension_events);
     ctx.on_peer_io_thread = true;
-    ctx.cancel_token = Some(bridge_peer_cancel_token(&token));
+    ctx.cancel_token = Some(token.cancellation_token());
 
     let result = if invoke.stream {
         router

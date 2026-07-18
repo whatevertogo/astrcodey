@@ -9,8 +9,9 @@ use astrcode_core::extension::{
     CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
     ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
     ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-    ExtensionError, ExtensionEvent, ExtensionEventDecl, HookMode, HookResult, LifecycleContext,
-    LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
+    ExtensionError, ExtensionEvent, ExtensionEventDecl, ExtensionHttpHandler, ExtensionHttpRequest,
+    ExtensionHttpResponse, HookMode, HookResult, LifecycleContext, LifecycleHandler,
+    PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
     PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
     PromptContributions, ProviderContext, ProviderHandler, ProviderResult, Registrar, SlashCommand,
     StopReason, ToolHandler,
@@ -23,13 +24,13 @@ pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::ExtensionRegistration,
+    extension_manifest::{ExtensionRegistration, manifest_types::ManifestHttpRoute},
     host_router::{HostRouter, InvokeContext},
     remote_manifest::{
         build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
-        parse_compact_result, parse_continue_after_stop_result, parse_lifecycle_result,
-        parse_post_tool_use_result, parse_pre_tool_use_result, parse_prompt_build_result,
-        parse_provider_result, parse_tool_result, validate_registration,
+        parse_compact_result, parse_continue_after_stop_result, parse_http_response,
+        parse_lifecycle_result, parse_post_tool_use_result, parse_pre_tool_use_result,
+        parse_prompt_build_result, parse_provider_result, parse_tool_result, validate_registration,
     },
     s5r_ext::session::S5rSession,
 };
@@ -42,6 +43,7 @@ pub struct S5rExtension {
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
+    http_routes: Vec<ManifestHttpRoute>,
 }
 
 impl S5rExtension {
@@ -71,6 +73,7 @@ fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<
         extension_id,
         capabilities,
         extension_events,
+        http_routes,
         ..
     } = reg;
     Arc::new(S5rExtension {
@@ -81,6 +84,7 @@ fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<
         tools,
         commands,
         subscriptions,
+        http_routes,
     })
 }
 
@@ -162,6 +166,16 @@ impl Extension for S5rExtension {
                 Arc::new(S5rCommandHandler {
                     session: Arc::clone(&self.session),
                     extension_id: self.id.clone(),
+                }),
+            );
+        }
+        for entry in &self.http_routes {
+            reg.http_route(
+                entry.route.clone(),
+                Arc::new(S5rHttpHandler {
+                    session: Arc::clone(&self.session),
+                    extension_id: self.id.clone(),
+                    handler_id: entry.handler_id.clone(),
                 }),
             );
         }
@@ -270,6 +284,38 @@ impl Extension for S5rExtension {
             .ping()
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))
+    }
+}
+
+struct S5rHttpHandler {
+    session: Arc<S5rSession>,
+    extension_id: String,
+    handler_id: String,
+}
+
+#[async_trait::async_trait]
+impl ExtensionHttpHandler for S5rHttpHandler {
+    async fn handle(
+        &self,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let invoke_ctx = hook_invoke_ctx(
+            &self.session,
+            &self.extension_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let event = serde_json::to_value(request).map_err(|error| {
+            ExtensionError::Internal(format!("serialize HTTP request: {error}"))
+        })?;
+        let response = self
+            .session
+            .invoke_handler(&self.handler_id, event, &invoke_ctx)
+            .await?;
+        parse_http_response(&response)
     }
 }
 

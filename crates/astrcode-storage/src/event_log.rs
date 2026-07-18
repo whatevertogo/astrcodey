@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File},
-    io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Seek, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -80,24 +80,46 @@ fn parse_event_line(path: &Path, line_number: usize, line: &str) -> Result<Event
     Ok(event)
 }
 
-fn replay_events_at_path(path: &Path, after_seq: Option<u64>) -> Result<Vec<Event>, StorageError> {
+fn replay_events_at_path(
+    path: &Path,
+    after_seq: Option<u64>,
+    max_events: Option<usize>,
+) -> Result<Vec<Event>, StorageError> {
+    if max_events == Some(0) {
+        return Ok(Vec::new());
+    }
     let file = File::open(path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut events = Vec::new();
     let mut line_number = 0usize;
-    for line in reader.lines() {
-        let line = line.map_err(|e| {
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
-        if line.is_empty() {
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            tracing::warn!(
+                path = %path.display(),
+                discarded_bytes = bytes_read,
+                "ignored incomplete trailing event log record while replaying"
+            );
+            break;
+        }
+        if line.trim().is_empty() {
             continue;
         }
         line_number += 1;
         let event = parse_event_line(path, line_number, &line)?;
         if after_seq.is_none_or(|seq| event.seq.is_some_and(|event_seq| event_seq > seq)) {
             events.push(event);
+            if max_events.is_some_and(|limit| events.len() >= limit) {
+                break;
+            }
         }
     }
     Ok(events)
@@ -110,19 +132,25 @@ fn read_first_event_at_path(path: &Path) -> Result<Option<Event>, StorageError> 
     let file = File::open(path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut line_number = 0usize;
-    for line in reader.lines() {
-        let line = line.map_err(|e| {
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
-        if line.is_empty() {
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+        if !line.ends_with('\n') {
+            return Ok(None);
+        }
+        if line.trim().is_empty() {
             continue;
         }
         line_number += 1;
         return Ok(Some(parse_event_line(path, line_number, &line)?));
     }
-    Ok(None)
 }
 
 fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError> {
@@ -132,16 +160,28 @@ fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError
     let file = File::open(path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut first: Option<Event> = None;
     let mut last: Option<Event> = None;
     let mut first_user: Option<String> = None;
     let mut line_number = 0usize;
-    for line in reader.lines() {
-        let line = line.map_err(|e| {
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
-        if line.is_empty() {
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            tracing::warn!(
+                path = %path.display(),
+                discarded_bytes = bytes_read,
+                "ignored incomplete trailing event log record while reading summary"
+            );
+            break;
+        }
+        if line.trim().is_empty() {
             continue;
         }
         line_number += 1;
@@ -179,10 +219,12 @@ enum WriteCommand {
 }
 
 struct WriterState {
-    writer: BufWriter<File>,
+    writer: File,
     next_seq: u64,
+    committed_len: u64,
     path: PathBuf,
     dirty: bool,
+    poisoned: Option<String>,
 }
 
 impl WriterState {
@@ -194,43 +236,82 @@ impl WriterState {
             .map_err(|e| {
                 StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
             })?;
+        let committed_len = file.metadata().map_err(StorageError::Io)?.len();
         Ok(Self {
-            writer: BufWriter::new(file),
+            writer: file,
             next_seq,
+            committed_len,
             path,
             dirty: false,
+            poisoned: None,
         })
     }
 
     fn append_one(&mut self, mut event: Box<Event>) -> Result<Event, StorageError> {
         event.seq = Some(self.next_seq);
+        let mut encoded = serde_json::to_vec(&*event)?;
+        encoded.push(b'\n');
+        self.write_committed_record(&encoded)?;
         self.next_seq += 1;
-        let line = serde_json::to_string(&*event)?;
-        writeln!(self.writer, "{line}")?;
-        self.writer.flush().map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                e.kind(),
-                enhance_flush_error(&self.path, e),
-            ))
-        })?;
         self.dirty = true;
         Ok(*event)
     }
 
     fn append_batch(&mut self, events: &mut [Event]) -> Result<(), StorageError> {
+        let mut next_seq = self.next_seq;
+        let mut encoded = Vec::new();
         for event in events.iter_mut() {
-            event.seq = Some(self.next_seq);
-            self.next_seq += 1;
-            let line = serde_json::to_string(event)?;
-            writeln!(self.writer, "{line}")?;
+            event.seq = Some(next_seq);
+            next_seq += 1;
+            serde_json::to_writer(&mut encoded, event)?;
+            encoded.push(b'\n');
         }
-        self.writer.flush().map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                e.kind(),
-                enhance_flush_error(&self.path, e),
-            ))
-        })?;
+        self.write_committed_record(&encoded)?;
+        self.next_seq = next_seq;
         self.dirty = true;
+        Ok(())
+    }
+
+    fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
+        if let Some(reason) = &self.poisoned {
+            return Err(StorageError::Io(std::io::Error::other(format!(
+                "event log writer is unavailable after failed recovery: {reason}"
+            ))));
+        }
+
+        let committed_len = self.committed_len;
+        if let Err(write_error) = self
+            .writer
+            .write_all(encoded)
+            .and_then(|_| self.writer.flush())
+        {
+            if let Err(rollback_error) = self.rollback_partial_write(committed_len) {
+                let reason = format!(
+                    "write failed: {write_error}; rollback to {committed_len} bytes failed: \
+                     {rollback_error}"
+                );
+                self.poisoned = Some(reason.clone());
+                return Err(StorageError::Io(std::io::Error::new(
+                    write_error.kind(),
+                    reason,
+                )));
+            }
+            return Err(StorageError::Io(std::io::Error::new(
+                write_error.kind(),
+                format!(
+                    "failed to append event log '{}'; partial write was rolled back: {write_error}",
+                    self.path.display()
+                ),
+            )));
+        }
+        self.committed_len = self.committed_len.saturating_add(encoded.len() as u64);
+        Ok(())
+    }
+
+    fn rollback_partial_write(&mut self, committed_len: u64) -> std::io::Result<()> {
+        self.writer.set_len(committed_len)?;
+        self.writer.seek(std::io::SeekFrom::Start(committed_len))?;
+        self.committed_len = committed_len;
         Ok(())
     }
 
@@ -244,7 +325,7 @@ impl WriterState {
                 enhance_flush_error(&self.path, e),
             ))
         })?;
-        self.writer.get_ref().sync_all().map_err(|e| {
+        self.writer.sync_all().map_err(|e| {
             StorageError::Io(std::io::Error::new(
                 e.kind(),
                 enhance_sync_error(&self.path, e),
@@ -302,21 +383,24 @@ fn create_at_path(
     let file = File::create(&path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
     })?;
-    let mut writer = BufWriter::new(file);
-    let line = serde_json::to_string(&initial_event)?;
-    writeln!(writer, "{}", line)?;
+    let mut writer = file;
+    let mut encoded = serde_json::to_vec(&initial_event)?;
+    encoded.push(b'\n');
+    writer.write_all(&encoded)?;
     writer.flush().map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_flush_error(&path, e)))
     })?;
-    writer.get_ref().sync_all().map_err(|e| {
+    writer.sync_all().map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_sync_error(&path, e)))
     })?;
     Ok((
         WriterState {
             writer,
             next_seq: 1,
+            committed_len: encoded.len() as u64,
             path,
             dirty: false,
+            poisoned: None,
         },
         initial_event,
     ))
@@ -330,8 +414,64 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         )
         .into());
     }
+    recover_incomplete_tail(&path)?;
     let next_seq = last_seq_from_path(&path)?.saturating_add(1);
     WriterState::open_append(path, next_seq)
+}
+
+/// Treat the terminating newline as the commit marker for a JSONL record.
+/// A process crash may leave only the final record incomplete; corruption in
+/// any earlier committed line is still rejected by normal replay validation.
+fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
+    let file_len = fs::metadata(path).map_err(StorageError::Io)?.len();
+    if file_len == 0 {
+        return Ok(());
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(StorageError::Io)?;
+    file.seek(std::io::SeekFrom::End(-1))
+        .map_err(StorageError::Io)?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).map_err(StorageError::Io)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    const SCAN_CHUNK_SIZE: u64 = 8 * 1024;
+    let mut end = file_len;
+    let mut chunk = vec![0u8; SCAN_CHUNK_SIZE as usize];
+    while end > 0 {
+        let start = end.saturating_sub(SCAN_CHUNK_SIZE);
+        let len = (end - start) as usize;
+        file.seek(std::io::SeekFrom::Start(start))
+            .map_err(StorageError::Io)?;
+        file.read_exact(&mut chunk[..len])
+            .map_err(StorageError::Io)?;
+        if let Some(index) = chunk[..len].iter().rposition(|byte| *byte == b'\n') {
+            let committed_len = start + index as u64 + 1;
+            file.set_len(committed_len).map_err(StorageError::Io)?;
+            file.sync_all().map_err(StorageError::Io)?;
+            tracing::warn!(
+                path = %path.display(),
+                discarded_bytes = file_len - committed_len,
+                "discarded incomplete trailing event log record"
+            );
+            return Ok(());
+        }
+        end = start;
+    }
+
+    Err(StorageError::Io(std::io::Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "event log '{}' has no committed newline-terminated record",
+            path.display()
+        ),
+    )))
 }
 
 /// An append-only JSONL event log backed by a dedicated writer thread.
@@ -345,7 +485,7 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
 /// EventLog
 ///   ├── tx (bounded channel, 1024 capacity)
 ///   │     └── write_loop (spawn_blocking)
-///   │           ├── BufWriter<File>
+///   │           ├── File (pre-encoded atomic batches)
 ///   │           └── dirty tracking (deferred fsync)
 ///   └── next_seq (AtomicU64, lock-free count)
 /// ```
@@ -426,7 +566,7 @@ impl EventLog {
     /// Append multiple events in a single writer-thread command.
     ///
     /// The writer thread assigns sequential `seq` numbers, serializes,
-    /// and writes all lines with a single `BufWriter::flush()`.
+    /// and writes the pre-encoded batch with one file write/flush transaction.
     pub async fn append_batch(&self, events: Vec<Event>) -> Result<Vec<Event>, StorageError> {
         if events.is_empty() {
             return Ok(events);
@@ -443,7 +583,7 @@ impl EventLog {
     /// Replay all events from the beginning.
     pub async fn replay_all(&self) -> Result<Vec<Event>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, None)).await
+        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
     }
 
     /// Replay events whose assigned seq is greater than `seq`.
@@ -452,7 +592,18 @@ impl EventLog {
     /// occurred after the snapshot point need to be replayed, not the whole log.
     pub async fn replay_after(&self, seq: u64) -> Result<Vec<Event>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, Some(seq))).await
+        run_blocking_io(move || replay_events_at_path(&path, Some(seq), None)).await
+    }
+
+    /// Replay at most `max_events` events after `seq`, stopping the file scan
+    /// once the limit is reached.
+    pub async fn replay_after_limited(
+        &self,
+        seq: u64,
+        max_events: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || replay_events_at_path(&path, Some(seq), Some(max_events))).await
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
@@ -759,6 +910,27 @@ mod tests {
         assert_eq!(events[1].seq, Some(1));
     }
 
+    #[test]
+    fn partial_write_rollback_repositions_new_file_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollback.jsonl");
+        let mut writer = WriterState {
+            writer: File::create(&path).unwrap(),
+            next_seq: 1,
+            committed_len: 9,
+            path: path.clone(),
+            dirty: false,
+            poisoned: None,
+        };
+        writer.writer.write_all(b"committedpartial").unwrap();
+
+        writer.rollback_partial_write(9).unwrap();
+        writer.writer.write_all(b"next").unwrap();
+        writer.writer.flush().unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), b"committednext");
+    }
+
     #[tokio::test]
     async fn event_log_writes_nested_payload_format() {
         let dir = tempdir().unwrap();
@@ -823,6 +995,34 @@ mod tests {
 
         assert_eq!(appended.seq, Some(2));
         assert_eq!(reopened.count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn open_discards_only_an_incomplete_trailing_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("interrupted-tail.jsonl");
+        let mut start = make_start_event("s1");
+        start.seq = Some(0);
+        let committed = serde_json::to_string(&start).unwrap();
+        std::fs::write(&path, format!("{committed}\n{{\"seq\":1")).unwrap();
+
+        let log = EventLog::open(path.clone()).await.unwrap();
+        let events = log.replay_all().await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, Some(0));
+
+        let appended = log
+            .append(Event::new(
+                "s1".into(),
+                Some("turn-1".into()),
+                EventPayload::TurnStarted,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(appended.seq, Some(1));
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert_eq!(content.lines().count(), 2);
     }
 
     #[tokio::test]
@@ -915,6 +1115,24 @@ mod tests {
             err,
             StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
         ));
+    }
+
+    #[tokio::test]
+    async fn readers_ignore_uncommitted_trailing_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("partial-summary.jsonl");
+        let mut start = make_start_event("s1");
+        start.seq = Some(0);
+        let committed = serde_json::to_string(&start).unwrap();
+        std::fs::write(&path, format!("{committed}\n\n{{\"seq\":1")).unwrap();
+
+        let (first, last, _) = EventLog::read_first_and_last(&path).await.unwrap();
+        assert_eq!(first.and_then(|event| event.seq), Some(0));
+        assert_eq!(last.and_then(|event| event.seq), Some(0));
+
+        let replayed = replay_events_at_path(&path, None, None).unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].seq, Some(0));
     }
 
     #[test]

@@ -103,15 +103,19 @@ impl ToolCallDeduplicator {
 
     /// 同 step 重复调用等待 Primary 的最终结果（含 PostToolUse 处理后的内容）。
     pub(crate) async fn await_same_step_result(&self, duplicate_call_id: &str) -> ToolResult {
-        let key = self
-            .call_key_by_call_id
-            .get(duplicate_call_id)
-            .expect("duplicate call must have registered call key");
+        let Some(key) = self.call_key_by_call_id.get(duplicate_call_id) else {
+            return deduplication_error(
+                duplicate_call_id,
+                "duplicate call was not registered in the current step",
+            );
+        };
 
-        let entry = self
-            .same_step_in_flight
-            .get(key)
-            .expect("duplicate call must have in-flight entry");
+        let Some(entry) = self.same_step_in_flight.get(key) else {
+            return deduplication_error(
+                duplicate_call_id,
+                "primary call is missing from the current step",
+            );
+        };
 
         let mut rx = entry.result_tx.subscribe();
         loop {
@@ -125,14 +129,7 @@ impl ToolCallDeduplicator {
             }
         }
 
-        ToolResult {
-            call_id: duplicate_call_id.to_string(),
-            content: "Tool deduplication failed: primary call did not produce a result".into(),
-            is_error: true,
-            error: Some("same-step deduplication primary missing".into()),
-            metadata: Default::default(),
-            duration_ms: None,
-        }
+        deduplication_error(duplicate_call_id, "primary call did not produce a result")
     }
 
     /// 每个含工具调用的 step 结束时调用，更新跨 step 连续重复计数。
@@ -175,6 +172,17 @@ impl ToolCallDeduplicator {
     #[cfg(test)]
     pub(crate) fn consecutive_count(&self) -> u32 {
         self.consecutive_count
+    }
+}
+
+fn deduplication_error(call_id: &str, reason: &str) -> ToolResult {
+    ToolResult {
+        call_id: call_id.to_string(),
+        content: format!("Tool deduplication failed: {reason}"),
+        is_error: true,
+        error: Some("same-step deduplication primary missing".into()),
+        metadata: Default::default(),
+        duration_ms: None,
     }
 }
 
@@ -365,5 +373,15 @@ mod tests {
         assert_eq!(duplicate.call_id, "duplicate");
         assert_eq!(duplicate.content, "file contents");
         assert_eq!(duplicate.duration_ms, Some(12));
+    }
+
+    #[tokio::test]
+    async fn missing_duplicate_state_returns_error_result() {
+        let dedup = ToolCallDeduplicator::new();
+
+        let result = dedup.await_same_step_result("missing").await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("was not registered"));
     }
 }

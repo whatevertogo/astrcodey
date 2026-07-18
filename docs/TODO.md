@@ -6,7 +6,9 @@
   - [ ] **宿主能力补齐（`HostRouter` / wire）**
     - [x] `astrcode.session.control.create` 透出 `tool_policy`（外置 agent 禁嵌套 `agent`）
     - [ ] 外置扩展安全路径下的同步子 Agent（`wait_for_result` 与 peer I/O 线程死锁方案）— 当前仅有 guard（peer 线程拒绝 `wait_for_result: true` 并降级为 `false`），外置扩展无法同步等待子 agent 结果
-    - [ ] 实现 `astrcode.process.spawn`、`astrcode.network.client`（当前 reserved，返回 `not_implemented`）
+    - [x] 实现 `astrcode.process.spawn`、`astrcode.network.client`（并发、总超时、取消与 I/O 大小均有上限）
+    - [x] 实现 public HTTP 路由与跨插件公开路由分发（含 s5r manifest/handler E2E）
+    - [x] 实现 workspace `list` / `grep` / `glob` 与 session 中断、注入、取消、执行视图
   - [ ] **外置扩展与内置能力对齐**
     - [x] `S5rToolHandler` 透传 turn 取消 → `InvokeContext.cancel_token`（`peer.rs` → `registry.rs` → `host_router.rs` → `session.rs` 全链路已打通）
     - [ ] s5r 支持 `tool_metadata` / `ToolDiscovery`（对标 MCP 动态工具、agent prompt 元数据）— 内置扩展完整支持，s5r wire 协议尚无 `tool_metadata` / `ToolDiscovery` 字段

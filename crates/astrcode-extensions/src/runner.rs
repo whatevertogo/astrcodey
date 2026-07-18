@@ -115,6 +115,16 @@ pub struct ExtensionDeclarationSnapshot {
     pub keybindings: Vec<astrcode_extension_sdk::extension::Keybinding>,
     pub status_items: Vec<astrcode_extension_sdk::extension::StatusItem>,
     pub events: Vec<ExtensionEventDecl>,
+    pub http_routes: Vec<ExtensionHttpRoute>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExtensionHttpDispatchResult {
+    NotFound,
+    MethodNotAllowed,
+    PayloadTooLarge { max_body_bytes: usize },
+    InvalidJson { message: String },
+    Response(ExtensionHttpResponse),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -243,6 +253,13 @@ type PrioritizedContinueAfterStopHandler<H> = (i32, String, ContinueAfterStopOpt
 type PrioritizedSimpleHandler<H> = (i32, String, Arc<H>);
 type PrioritizedEventHandler<K, H> = (K, i32, String, HookMode, Arc<H>);
 
+#[derive(Clone)]
+struct HttpRouteEntry {
+    extension_id: String,
+    route: ExtensionHttpRoute,
+    handler: Arc<dyn ExtensionHttpHandler>,
+}
+
 /// 预排序的 handler 索引。
 ///
 /// 在每次 `register()` 后从所有 records 重建，确保分发时无需遍历+排序。
@@ -281,6 +298,7 @@ struct HandlerIndex {
     extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
     extension_data_dir_extensions: std::collections::HashSet<String>,
     capabilities: HashMap<String, Vec<ExtensionCapability>>,
+    http_routes: Vec<HttpRouteEntry>,
 }
 
 impl HandlerIndex {
@@ -325,6 +343,7 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut extension_data_dir_extensions: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut capabilities = HashMap::new();
+    let mut http_routes = Vec::new();
 
     for record in records {
         capabilities.insert(record.id.clone(), record.capabilities.clone());
@@ -422,6 +441,17 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         if record.reg.needs_extension_data_dir() {
             extension_data_dir_extensions.insert(record.id.clone());
         }
+        http_routes.extend(
+            record
+                .reg
+                .http_routes()
+                .iter()
+                .map(|registration| HttpRouteEntry {
+                    extension_id: record.id.clone(),
+                    route: registration.route.clone(),
+                    handler: Arc::clone(&registration.handler),
+                }),
+        );
     }
 
     pre.sort_by_key(|b| std::cmp::Reverse(b.0));
@@ -466,6 +496,66 @@ fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         extension_event_decls,
         extension_data_dir_extensions,
         capabilities,
+        http_routes,
+    }
+}
+
+fn validate_http_route_registrations(
+    extension_id: &str,
+    capabilities: &[ExtensionCapability],
+    routes: &[ExtensionHttpRouteRegistration],
+    existing_records: &[ExtensionRecord],
+) -> Result<(), String> {
+    for (index, registration) in routes.iter().enumerate() {
+        let route = &registration.route;
+        route.validate()?;
+        if !capabilities.contains(&ExtensionCapability::PublicHttp) {
+            return Err(format!(
+                "extension {extension_id} route {} {} requires capability {}",
+                http_method_name(route.method),
+                route.path,
+                astrcode_extension_sdk::s5r::capability_to_wire(ExtensionCapability::PublicHttp),
+            ));
+        }
+        if route.path == "/api" || route.path.starts_with("/api/") {
+            return Err(format!(
+                "extension {extension_id} public route {} uses reserved /api namespace",
+                route.path
+            ));
+        }
+        if routes[..index].iter().any(|existing| {
+            existing.route.method == route.method
+                && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+        }) {
+            return Err(format!(
+                "extension {extension_id} has conflicting {} routes for {}",
+                http_method_name(route.method),
+                route.path
+            ));
+        }
+        if existing_records.iter().any(|record| {
+            record.reg.http_routes().iter().any(|existing| {
+                existing.route.method == route.method
+                    && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+            })
+        }) {
+            return Err(format!(
+                "extension {extension_id} public route conflicts with an existing {} route: {}",
+                http_method_name(route.method),
+                route.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn http_method_name(method: ExtensionHttpMethod) -> &'static str {
+    match method {
+        ExtensionHttpMethod::Get => "GET",
+        ExtensionHttpMethod::Post => "POST",
+        ExtensionHttpMethod::Put => "PUT",
+        ExtensionHttpMethod::Patch => "PATCH",
+        ExtensionHttpMethod::Delete => "DELETE",
     }
 }
 
@@ -602,6 +692,7 @@ impl ExtensionRunner {
                 extension_event_decls: HashMap::new(),
                 extension_data_dir_extensions: std::collections::HashSet::new(),
                 capabilities: HashMap::new(),
+                http_routes: Vec::new(),
             })),
             diagnostics: parking_lot::RwLock::new(BTreeMap::new()),
             session_ops: Arc::new(StdRwLock::new(None)),
@@ -645,6 +736,22 @@ impl ExtensionRunner {
         let register_started = std::time::Instant::now();
         let mut reg = Registrar::new();
         ext.register(&mut reg);
+        if let Err(message) = validate_http_route_registrations(
+            &id,
+            &capabilities,
+            reg.http_routes(),
+            &self.records.read().await,
+        ) {
+            let error = ExtensionError::Internal(message);
+            self.record_stage_result(
+                &id,
+                ExtensionDiagnosticStage::Register,
+                Some(register_started.elapsed()),
+                Some(error.to_string()),
+                ExtensionStageStatus::Failed,
+            );
+            return Err(error);
+        }
         if reg.needs_extension_data_dir() {
             let dir = astrcode_support::hostpaths::extensions_data_dir(&id);
             if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -683,34 +790,12 @@ impl ExtensionRunner {
             self.startup_event_tx.read().as_ref().and_then(|tx| {
                 bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
             });
-        let needs_host_services = capabilities.contains(&ExtensionCapability::SessionHistory)
-            || capabilities.contains(&ExtensionCapability::MainModel)
-            || capabilities.contains(&ExtensionCapability::SmallModel)
-            || capabilities.contains(&ExtensionCapability::SessionControl);
-        let host_services = needs_host_services
-            .then(|| {
-                self.host_services.read().as_ref().map(|services| {
-                    Arc::new(ExtensionHostServices {
-                        session_read: capabilities
-                            .contains(&ExtensionCapability::SessionHistory)
-                            .then(|| services.session_read.clone())
-                            .flatten(),
-                        main_llm: capabilities
-                            .contains(&ExtensionCapability::MainModel)
-                            .then(|| services.main_llm.clone())
-                            .flatten(),
-                        small_llm: capabilities
-                            .contains(&ExtensionCapability::SmallModel)
-                            .then(|| services.small_llm.clone())
-                            .flatten(),
-                        session_ops: capabilities
-                            .contains(&ExtensionCapability::SessionControl)
-                            .then(|| services.session_ops.clone())
-                            .flatten(),
-                    })
-                })
-            })
-            .flatten();
+        let host_services = self
+            .host_services
+            .read()
+            .as_ref()
+            .and_then(|services| services.scoped_to(&capabilities))
+            .map(Arc::new);
         let ctx = ExtensionCtx::with_host_services(
             tasks.clone(),
             ExtensionConfig(ext_config.clone()),
@@ -720,7 +805,11 @@ impl ExtensionRunner {
         );
         self.record_stage_running(&id, ExtensionDiagnosticStage::Start);
         let start_started = std::time::Instant::now();
-        if let Err(error) = ext.start(ctx).await {
+        let start_result = tokio::time::timeout(self.timeout, ext.start(ctx))
+            .await
+            .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))
+            .and_then(|result| result);
+        if let Err(error) = start_result {
             self.record_stage_result(
                 &id,
                 ExtensionDiagnosticStage::Start,
@@ -728,6 +817,20 @@ impl ExtensionRunner {
                 Some(error.to_string()),
                 ExtensionStageStatus::Failed,
             );
+            tasks.cancel();
+            tasks.wait(self.timeout).await;
+            let rollback_result =
+                tokio::time::timeout(self.timeout, ext.stop(StopReason::StartupFailed))
+                    .await
+                    .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))
+                    .and_then(|result| result);
+            if let Err(rollback_error) = rollback_result {
+                tracing::warn!(
+                    extension_id = %id,
+                    error = %rollback_error,
+                    "extension startup rollback failed"
+                );
+            }
             return Err(error);
         }
         self.record_stage_result(
@@ -834,6 +937,16 @@ impl ExtensionRunner {
     /// 绑定扩展在标准 `start()` 生命周期中可取得的宿主服务。
     pub fn bind_host_services(&self, services: Arc<ExtensionHostServices>) {
         *self.host_services.write() = Some(services);
+    }
+
+    /// 返回进程内稳定复用的宿主出站网络服务。
+    pub fn outbound_network_service(
+        &self,
+    ) -> Option<Arc<dyn astrcode_core::extension::OutboundNetworkService>> {
+        self.host_services
+            .read()
+            .as_ref()
+            .and_then(|services| services.outbound_network.clone())
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
@@ -1028,9 +1141,129 @@ impl ExtensionRunner {
                 keybindings: record.reg.keybindings().to_vec(),
                 status_items: record.reg.status_items().to_vec(),
                 events: record.reg.extension_event_decls().to_vec(),
+                http_routes: record
+                    .reg
+                    .http_routes()
+                    .iter()
+                    .map(|registration| registration.route.clone())
+                    .collect(),
             })
             .collect();
         ExtensionRegistrySnapshot { extensions }
+    }
+
+    pub async fn dispatch_public_http_route(
+        &self,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.dispatch_http_route(None, request, body).await
+    }
+
+    pub async fn dispatch_public_http_route_from(
+        &self,
+        caller_extension_id: &str,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.dispatch_http_route(Some(caller_extension_id), request, body)
+            .await
+    }
+
+    async fn dispatch_http_route(
+        &self,
+        caller_extension_id: Option<&str>,
+        mut request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        let index = self.load_index();
+        let mut path_matched = false;
+        let matched = index.http_routes.iter().find_map(|entry| {
+            let params = match_extension_http_route(&entry.route.path, &request.path)?;
+            path_matched = true;
+            (entry.route.method == request.method).then_some((entry.clone(), params))
+        });
+        let Some((entry, path_params)) = matched else {
+            return Ok(if path_matched {
+                ExtensionHttpDispatchResult::MethodNotAllowed
+            } else {
+                ExtensionHttpDispatchResult::NotFound
+            });
+        };
+        if caller_extension_id.is_some_and(|caller| caller == entry.extension_id) {
+            return Err(ExtensionError::Internal(
+                "an extension cannot synchronously dispatch its own public HTTP route".into(),
+            ));
+        }
+        if body.len() > entry.route.max_body_bytes {
+            return Ok(ExtensionHttpDispatchResult::PayloadTooLarge {
+                max_body_bytes: entry.route.max_body_bytes,
+            });
+        }
+        request.body = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            match serde_json::from_slice(body) {
+                Ok(body) => body,
+                Err(error) => {
+                    return Ok(ExtensionHttpDispatchResult::InvalidJson {
+                        message: error.to_string(),
+                    });
+                },
+            }
+        };
+        request.path_params = path_params;
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(self.timeout, entry.handler.handle(request)).await;
+        let response = match result {
+            Ok(Ok(response)) => {
+                self.record_hook_result(
+                    &entry.extension_id,
+                    "http_route",
+                    started.elapsed(),
+                    None,
+                    false,
+                );
+                response
+            },
+            Ok(Err(error)) => {
+                self.record_hook_result(
+                    &entry.extension_id,
+                    "http_route",
+                    started.elapsed(),
+                    Some(error.to_string()),
+                    false,
+                );
+                return Err(error);
+            },
+            Err(_) => {
+                let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
+                self.record_hook_result(
+                    &entry.extension_id,
+                    "http_route",
+                    started.elapsed(),
+                    Some(error.to_string()),
+                    true,
+                );
+                return Err(error);
+            },
+        };
+        if !(100..=599).contains(&response.status) {
+            return Err(ExtensionError::Internal(format!(
+                "extension {} returned invalid HTTP status {}",
+                entry.extension_id, response.status
+            )));
+        }
+        let response_bytes = serde_json::to_vec(&response.body)
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?
+            .len();
+        if response_bytes > MAX_EXTENSION_HTTP_BODY_BYTES {
+            return Err(ExtensionError::Internal(format!(
+                "extension {} HTTP response exceeds {} bytes",
+                entry.extension_id, MAX_EXTENSION_HTTP_BODY_BYTES
+            )));
+        }
+        Ok(ExtensionHttpDispatchResult::Response(response))
     }
 
     async fn spawn_extension_task<F>(&self, extension_id: &str, task_name: &'static str, fut: F)
@@ -2059,6 +2292,56 @@ struct HandlerTool {
     event_declarations: Vec<ExtensionEventDecl>,
 }
 
+// Providers occasionally stringify booleans despite the declared tool schema.
+// Normalize only schema-declared boolean fields at the plugin boundary so HTTP,
+// configuration and persistence DTOs remain strict.
+fn normalize_stringified_booleans(
+    arguments: &mut serde_json::Value,
+    schema: &serde_json::Value,
+) -> usize {
+    match arguments {
+        serde_json::Value::String(raw) if schema["type"] == "boolean" => {
+            let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                *arguments = serde_json::Value::Bool(normalized);
+                1
+            } else {
+                0
+            }
+        },
+        serde_json::Value::Object(values) => schema["properties"]
+            .as_object()
+            .map(|properties| {
+                values
+                    .iter_mut()
+                    .filter_map(|(name, value)| {
+                        properties
+                            .get(name)
+                            .map(|field_schema| normalize_stringified_booleans(value, field_schema))
+                    })
+                    .sum()
+            })
+            .unwrap_or_default(),
+        serde_json::Value::Array(values) => match &schema["items"] {
+            serde_json::Value::Array(item_schemas) => values
+                .iter_mut()
+                .zip(item_schemas)
+                .map(|(value, item_schema)| normalize_stringified_booleans(value, item_schema))
+                .sum(),
+            serde_json::Value::Object(_) => values
+                .iter_mut()
+                .map(|value| normalize_stringified_booleans(value, &schema["items"]))
+                .sum(),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 #[async_trait::async_trait]
 impl Tool for HandlerTool {
     fn definition(&self) -> ToolDefinition {
@@ -2091,9 +2374,19 @@ impl Tool for HandlerTool {
 
     async fn execute(
         &self,
-        arguments: serde_json::Value,
+        mut arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
+        let normalized_booleans =
+            normalize_stringified_booleans(&mut arguments, &self.definition.parameters);
+        if normalized_booleans > 0 {
+            tracing::debug!(
+                extension_id = %self.extension_id,
+                tool_name = %self.definition.name,
+                normalized_booleans,
+                "normalized stringified boolean extension tool arguments"
+            );
+        }
         let mut ctx = ctx.clone();
         if !self
             .capabilities
@@ -2194,6 +2487,49 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
     ToolResult::text(content, true, metadata)
 }
 
+#[async_trait::async_trait]
+impl crate::host_router::PublicHttpDispatcher for ExtensionRunner {
+    async fn dispatch_public_http(
+        &self,
+        caller_extension_id: &str,
+        mut request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let body = if request.body.is_null() {
+            Vec::new()
+        } else {
+            serde_json::to_vec(&request.body)
+                .map_err(|error| ExtensionError::Internal(error.to_string()))?
+        };
+        request.body = serde_json::Value::Null;
+        match self
+            .dispatch_public_http_route_from(caller_extension_id, request, &body)
+            .await?
+        {
+            ExtensionHttpDispatchResult::Response(response) => Ok(response),
+            ExtensionHttpDispatchResult::NotFound => Ok(ExtensionHttpResponse::error(
+                404,
+                "extension_route_not_found",
+                "extension public HTTP route not found",
+            )),
+            ExtensionHttpDispatchResult::MethodNotAllowed => Ok(ExtensionHttpResponse::error(
+                405,
+                "extension_http_method_not_allowed",
+                "extension public HTTP route does not support this method",
+            )),
+            ExtensionHttpDispatchResult::PayloadTooLarge { max_body_bytes } => {
+                Ok(ExtensionHttpResponse::error(
+                    413,
+                    "extension_http_body_too_large",
+                    format!("extension HTTP body exceeds {max_body_bytes} bytes"),
+                ))
+            },
+            ExtensionHttpDispatchResult::InvalidJson { message } => Ok(
+                ExtensionHttpResponse::error(400, "invalid_extension_http_json", message),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2212,10 +2548,12 @@ mod tests {
             AfterToolResultsResult, CommandCompletionItem, CommandCompletions, CommandContext,
             CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
             ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-            ExtensionCommandResult, ExtensionCtx, ExtensionError, HookMode, PreToolUseContext,
-            PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-            ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler, ToolHookTarget,
-            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            ExtensionCommandResult, ExtensionCtx, ExtensionError, ExtensionHttpHandler,
+            ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+            HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
+            ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason,
+            ToolHandler, ToolHookTarget, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
+            UserMessageEnvelopeResult,
         },
         tool::{
             ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
@@ -2225,7 +2563,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::mpsc;
 
-    use super::ExtensionRunner;
+    use super::{ExtensionHttpDispatchResult, ExtensionRunner, normalize_stringified_booleans};
 
     struct ManagedTaskExtension {
         started: Arc<AtomicUsize>,
@@ -2246,6 +2584,46 @@ mod tests {
 
     struct StateProbeTool;
 
+    struct HttpProbeExtension {
+        id: &'static str,
+        capabilities: Vec<ExtensionCapability>,
+        route: ExtensionHttpRoute,
+    }
+
+    struct HttpProbeHandler;
+
+    #[async_trait::async_trait]
+    impl ExtensionHttpHandler for HttpProbeHandler {
+        async fn handle(
+            &self,
+            request: ExtensionHttpRequest,
+        ) -> Result<ExtensionHttpResponse, ExtensionError> {
+            Ok(ExtensionHttpResponse::json(
+                201,
+                json!({
+                    "pathParams": request.path_params,
+                    "query": request.query,
+                    "body": request.body,
+                }),
+            ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for HttpProbeExtension {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn capabilities(&self) -> &[ExtensionCapability] {
+            &self.capabilities
+        }
+
+        fn register(&self, registrar: &mut Registrar) {
+            registrar.http_route(self.route.clone(), Arc::new(HttpProbeHandler));
+        }
+    }
+
     struct SmallModelProbeExtension {
         small_model_allowed: bool,
         session_control_allowed: bool,
@@ -2262,6 +2640,11 @@ mod tests {
     }
 
     struct StartFailingExtension;
+
+    struct StartupTimeoutExtension {
+        task_stopped: Arc<AtomicBool>,
+        stop_reason: Arc<Mutex<Option<StopReason>>>,
+    }
 
     struct BlockingProviderResponseExtension;
 
@@ -2496,6 +2879,28 @@ mod tests {
             Err(ExtensionError::Internal(
                 "startup dependency missing".into(),
             ))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Extension for StartupTimeoutExtension {
+        fn id(&self) -> &str {
+            "startup-timeout"
+        }
+
+        async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+            let shutdown = ctx.shutdown();
+            let task_stopped = Arc::clone(&self.task_stopped);
+            ctx.tasks().spawn("startup-task", async move {
+                shutdown.cancelled().await;
+                task_stopped.store(true, Ordering::SeqCst);
+            });
+            std::future::pending().await
+        }
+
+        async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
+            *self.stop_reason.lock().unwrap() = Some(reason);
+            Ok(())
         }
     }
 
@@ -2966,6 +3371,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_timeout_cleans_tasks_and_rolls_back_partial_start() {
+        let task_stopped = Arc::new(AtomicBool::new(false));
+        let stop_reason = Arc::new(Mutex::new(None));
+        let runner = ExtensionRunner::new(Duration::from_millis(20));
+
+        let error = runner
+            .register(Arc::new(StartupTimeoutExtension {
+                task_stopped: Arc::clone(&task_stopped),
+                stop_reason: Arc::clone(&stop_reason),
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ExtensionError::Timeout(20)));
+        assert!(task_stopped.load(Ordering::SeqCst));
+        assert_eq!(
+            *stop_reason.lock().unwrap(),
+            Some(StopReason::StartupFailed)
+        );
+        assert_eq!(runner.count().await, 0);
+    }
+
+    #[test]
+    fn stringified_boolean_normalization_follows_nested_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "label": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        let mut arguments = json!({
+            "items": [
+                {"enabled": "true", "label": "true"},
+                {"enabled": "FALSE", "label": "false"},
+                {"enabled": "yes", "label": "unchanged"}
+            ]
+        });
+
+        assert_eq!(normalize_stringified_booleans(&mut arguments, &schema), 2);
+        assert_eq!(arguments["items"][0]["enabled"], true);
+        assert_eq!(arguments["items"][1]["enabled"], false);
+        assert_eq!(arguments["items"][2]["enabled"], "yes");
+        assert_eq!(arguments["items"][0]["label"], "true");
+    }
+
+    #[tokio::test]
     async fn provider_response_hook_observes_without_blocking() {
         let runner = ExtensionRunner::new(Duration::from_secs(1));
         runner
@@ -3311,6 +3771,83 @@ mod tests {
                 .unwrap(),
             vec![ResourceAccess::all()]
         );
+    }
+
+    #[tokio::test]
+    async fn public_http_route_dispatches_with_path_params() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(HttpProbeExtension {
+                id: "public-http",
+                capabilities: vec![ExtensionCapability::PublicHttp],
+                route: ExtensionHttpRoute::public(
+                    ExtensionHttpMethod::Post,
+                    "/future-tasks/{jobId}",
+                ),
+            }))
+            .await
+            .expect("register public route");
+
+        let result = runner
+            .dispatch_public_http_route(
+                ExtensionHttpRequest {
+                    method: ExtensionHttpMethod::Post,
+                    path: "/future-tasks/job-1".into(),
+                    path_params: Default::default(),
+                    query: Some("run=true".into()),
+                    body: serde_json::Value::Null,
+                },
+                br#"{"name":"probe"}"#,
+            )
+            .await
+            .expect("dispatch route");
+
+        let ExtensionHttpDispatchResult::Response(response) = result else {
+            panic!("expected response");
+        };
+        assert_eq!(response.status, 201);
+        assert_eq!(response.body["pathParams"]["jobId"], "job-1");
+        assert_eq!(response.body["query"], "run=true");
+    }
+
+    #[tokio::test]
+    async fn http_route_registration_requires_public_http_capability() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        let error = runner
+            .register(Arc::new(HttpProbeExtension {
+                id: "missing-http-capability",
+                capabilities: Vec::new(),
+                route: ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/status"),
+            }))
+            .await
+            .expect_err("route without public_http must fail");
+
+        assert!(error.to_string().contains("public_http"));
+        assert_eq!(runner.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn conflicting_public_routes_are_rejected() {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(HttpProbeExtension {
+                id: "public-one",
+                capabilities: vec![ExtensionCapability::PublicHttp],
+                route: ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/items/{id}"),
+            }))
+            .await
+            .expect("register first route");
+
+        let error = runner
+            .register(Arc::new(HttpProbeExtension {
+                id: "public-two",
+                capabilities: vec![ExtensionCapability::PublicHttp],
+                route: ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/items/{name}"),
+            }))
+            .await
+            .expect_err("overlapping public route must fail");
+
+        assert!(error.to_string().contains("conflicts"));
     }
 
     fn command_ctx() -> CommandContext {

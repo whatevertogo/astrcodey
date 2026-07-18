@@ -526,3 +526,46 @@ async fn detached_task_tracking_prunes_finished_handles() {
         "tracking a new detached task should prune finished handles first"
     );
 }
+
+#[tokio::test]
+async fn interrupt_and_start_replaces_active_turn_under_delivery_gate() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let first = scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    let DeliveryOutcome::Started {
+        turn_id: first_turn,
+    } = first
+    else {
+        panic!("first input must start a turn");
+    };
+
+    let replacement = tokio::time::timeout(
+        Duration::from_secs(3),
+        scheduler.deliver_input(
+            sid.clone(),
+            "replacement".into(),
+            InputDelivery::InterruptAndStart,
+        ),
+    )
+    .await
+    .expect("interrupt must not deadlock")
+    .unwrap();
+    let DeliveryOutcome::Started {
+        turn_id: replacement_turn,
+    } = replacement
+    else {
+        panic!("replacement input must start a turn");
+    };
+    assert_ne!(first_turn, replacement_turn);
+    assert_eq!(
+        scheduler.registry().active_turn_id(&sid),
+        Some(replacement_turn)
+    );
+
+    scheduler.abort(&sid).await.unwrap();
+}

@@ -2,22 +2,29 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use astrcode_extensions::runner::{ExtensionStageDiagnostics, ExtensionStageStatus};
+use astrcode_core::extension::{ExtensionHttpMethod, ExtensionHttpRequest};
+use astrcode_extensions::runner::{
+    ExtensionHttpDispatchResult, ExtensionStageDiagnostics, ExtensionStageStatus,
+};
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
-        ExtensionDeclarationDto, ExtensionDiagnosticsDto, ExtensionListResponseDto,
-        ExtensionReloadResponseDto, ExtensionStageDiagnosticsDto, ExtensionStateDto,
-        SetExtensionEnabledRequest, SetExtensionEnabledResponseDto,
+        ExtensionDeclarationDto, ExtensionDiagnosticsDto, ExtensionHttpRouteDto,
+        ExtensionListResponseDto, ExtensionReloadResponseDto, ExtensionStageDiagnosticsDto,
+        ExtensionStateDto, SetExtensionEnabledRequest, SetExtensionEnabledResponseDto,
     },
 };
 use axum::{
     Json,
-    extract::State,
+    body::Bytes,
+    extract::{OriginalUri, State},
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
 
-use super::super::{HttpState, bad_request_response, internal_error_response};
+use super::super::{
+    HttpState, bad_request_response, error_response, internal_error_response, not_found_response,
+};
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
     Json(ExtensionListResponseDto {
@@ -96,6 +103,72 @@ pub(in crate::http) async fn set_enabled(
     .into_response()
 }
 
+pub(in crate::http) async fn dispatch_public_http(
+    State(state): State<HttpState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    let Some(method) = extension_http_method(&method) else {
+        return not_found_response("route_not_found", "route not found");
+    };
+    let request = ExtensionHttpRequest {
+        method,
+        path: uri.path().to_owned(),
+        path_params: BTreeMap::new(),
+        query: uri.query().map(str::to_owned),
+        body: serde_json::Value::Null,
+    };
+    let result = state
+        .runtime
+        .extension_runner()
+        .dispatch_public_http_route(request, &body)
+        .await;
+    extension_http_response(result)
+}
+
+fn extension_http_response(
+    result: Result<ExtensionHttpDispatchResult, astrcode_core::extension::ExtensionError>,
+) -> Response {
+    match result {
+        Ok(ExtensionHttpDispatchResult::Response(response)) => {
+            match StatusCode::from_u16(response.status) {
+                Ok(status) => (status, Json(response.body)).into_response(),
+                Err(error) => internal_error_response("invalid_extension_status", error),
+            }
+        },
+        Ok(ExtensionHttpDispatchResult::NotFound) => not_found_response(
+            "extension_route_not_found",
+            "extension HTTP route not found",
+        ),
+        Ok(ExtensionHttpDispatchResult::MethodNotAllowed) => error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "extension_http_method_not_allowed",
+            "extension HTTP route does not support this method",
+        ),
+        Ok(ExtensionHttpDispatchResult::PayloadTooLarge { max_body_bytes }) => error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "extension_http_body_too_large",
+            format!("extension HTTP body exceeds {max_body_bytes} bytes"),
+        ),
+        Ok(ExtensionHttpDispatchResult::InvalidJson { message }) => {
+            bad_request_response("invalid_extension_http_json", message)
+        },
+        Err(error) => internal_error_response("extension_http_failed", error),
+    }
+}
+
+fn extension_http_method(method: &Method) -> Option<ExtensionHttpMethod> {
+    match *method {
+        Method::GET => Some(ExtensionHttpMethod::Get),
+        Method::POST => Some(ExtensionHttpMethod::Post),
+        Method::PUT => Some(ExtensionHttpMethod::Put),
+        Method::PATCH => Some(ExtensionHttpMethod::Patch),
+        Method::DELETE => Some(ExtensionHttpMethod::Delete),
+        _ => None,
+    }
+}
+
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
     let effective = state.runtime.config_manager().read_effective();
     let runner = state.runtime.extension_runner();
@@ -161,6 +234,29 @@ fn extension_declaration_dto(
         keybindings: declaration.keybindings,
         status_items: declaration.status_items,
         events: declaration.events,
+        http_routes: declaration
+            .http_routes
+            .into_iter()
+            .map(extension_http_route_dto)
+            .collect(),
+    }
+}
+
+fn extension_http_route_dto(
+    route: astrcode_core::extension::ExtensionHttpRoute,
+) -> ExtensionHttpRouteDto {
+    ExtensionHttpRouteDto {
+        method: match route.method {
+            ExtensionHttpMethod::Get => "GET",
+            ExtensionHttpMethod::Post => "POST",
+            ExtensionHttpMethod::Put => "PUT",
+            ExtensionHttpMethod::Patch => "PATCH",
+            ExtensionHttpMethod::Delete => "DELETE",
+        }
+        .into(),
+        path: route.path,
+        description: route.description,
+        max_body_bytes: route.max_body_bytes,
     }
 }
 

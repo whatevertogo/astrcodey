@@ -108,6 +108,13 @@ function optionalNumber(source: JsonObject, name: string): number | undefined {
   return value
 }
 
+function requiredNumber(source: JsonObject, name: string): number {
+  const value = source[name]
+  if (typeof value !== 'number')
+    throw new ProtocolDecodeError(`expected number ${name}`)
+  return value
+}
+
 function decodeObject(value: unknown, context: string): JsonObject {
   if (!isObject(value))
     throw new ProtocolDecodeError(`expected object ${context}`)
@@ -818,6 +825,15 @@ function decodeExtensionDeclarationView(
     keybindings: arrayField(object, 'keybindings').filter(isRecord),
     statusItems: arrayField(object, 'statusItems').filter(isRecord),
     events: arrayField(object, 'events').filter(isRecord),
+    httpRoutes: optionalArrayField(object, 'httpRoutes').map((route) => {
+      const routeObject = decodeObject(route, 'extension HTTP route')
+      return {
+        method: requiredString(routeObject, 'method'),
+        path: requiredString(routeObject, 'path'),
+        description: requiredString(routeObject, 'description'),
+        maxBodyBytes: requiredNumber(routeObject, 'maxBodyBytes'),
+      }
+    }),
   }
 }
 
