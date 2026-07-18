@@ -402,6 +402,14 @@ export interface ExtensionDeclarationView {
   keybindings: Record<string, unknown>[]
   statusItems: Record<string, unknown>[]
   events: Record<string, unknown>[]
+  httpRoutes: ExtensionHttpRouteView[]
+}
+
+export interface ExtensionHttpRouteView {
+  method: string
+  path: string
+  description: string
+  maxBodyBytes: number
 }
 
 export interface ExtensionDiagnosticsView {

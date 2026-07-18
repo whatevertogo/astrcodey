@@ -86,6 +86,8 @@ pub enum InputDelivery {
     InjectIfRunningElseStart,
     /// running 时入队，当前 turn 结束后 FIFO 开新 turn；idle 时 start。
     QueueIfRunningElseStart,
+    /// 先中断当前 turn，再以新输入启动 turn。
+    InterruptAndStart,
 }
 
 /// 输入投递结果。
@@ -406,6 +408,21 @@ impl TurnScheduler {
                     turn_id: started.turn_id,
                 })
             },
+            InputDelivery::InterruptAndStart => {
+                self.abort(&session_id).await?;
+                let started = self
+                    .start_execution_locked(session_id.clone(), input)
+                    .await?;
+                self.watch_detached_turn(
+                    session_id,
+                    started.turn_id.clone(),
+                    started.handle,
+                    "deliver_input:interrupt",
+                );
+                Ok(DeliveryOutcome::Started {
+                    turn_id: started.turn_id,
+                })
+            },
         }
     }
 
@@ -484,6 +501,8 @@ impl TurnScheduler {
             .drain_completed(self, &completion.session_id)
             .await;
 
+        let gate = self.session_delivery_gate(&completion.session_id).await;
+        let _guard = gate.lock().await;
         if self.registry.has_active(&completion.session_id) {
             return None;
         }
@@ -492,8 +511,6 @@ impl TurnScheduler {
             session_id = %completion.session_id,
             "auto-submitting next queued message for new turn"
         );
-        let gate = self.session_delivery_gate(&completion.session_id).await;
-        let _guard = gate.lock().await;
         match self
             .start_execution_locked(completion.session_id.clone(), input)
             .await

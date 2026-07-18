@@ -214,7 +214,13 @@ impl Default for Utf8StreamDecoder {
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 fn valid_utf8_prefix(bytes: &[u8]) -> &str {
-    std::str::from_utf8(bytes).expect("valid_up_to prefix must be valid UTF-8")
+    match std::str::from_utf8(bytes) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            tracing::error!(%error, "Utf8Error::valid_up_to returned an invalid prefix");
+            ""
+        },
+    }
 }
 
 /// 格式化 UTF-8 字节片段用于日志输出。

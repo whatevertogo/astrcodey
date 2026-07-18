@@ -9,6 +9,7 @@ use std::{
 
 use astrcode_extension_sdk::{
     builder::tool,
+    extension::{ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute},
     s5r::{
         ErrorPayload,
         effects::{CallContinuation, HandlerResult},
@@ -64,6 +65,9 @@ async fn run() -> Result<(), ErrorPayload> {
         .capability("small_model")
         .capability("emit_events")
         .capability("workspace_read")
+        .capability("session_inspect")
+        .capability("public_http")
+        .capability("public_http_dispatch")
         .extension_event(json!({
             "event_type": "s5r_guest.probe",
             "schema_version": 1,
@@ -77,6 +81,20 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object", "properties": {} }))
             .build(),
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
+    )?;
+
+    worker.http_route(
+        ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/s5r-probe/{id}"),
+        http_handler(|request, _ctx| async move {
+            Ok(ExtensionHttpResponse::json(
+                202,
+                json!({
+                    "id": request.path_params.get("id"),
+                    "query": request.query,
+                    "body": request.body,
+                }),
+            ))
+        }),
     )?;
 
     worker.tool(
@@ -155,6 +173,39 @@ async fn run() -> Result<(), ErrorPayload> {
             .await?;
             let content = out["content"].as_str().unwrap_or("");
             Ok(tool_text(format!("read probe.txt: {content}"), false))
+        }),
+    )?;
+
+    worker.tool(
+        tool("inspect_sessions")
+            .description("List host-visible sessions")
+            .parameters(json!({ "type": "object" }))
+            .build(),
+        tool_handler(|_ctx| async move {
+            let output = HostClient::list_sessions().await?;
+            Ok(tool_text(
+                format!("session_count={}", output.sessions.len()),
+                false,
+            ))
+        }),
+    )?;
+
+    worker.tool(
+        tool("dispatch_public_http")
+            .description("Dispatch to another extension's public HTTP route")
+            .parameters(json!({ "type": "object" }))
+            .build(),
+        tool_handler(|_ctx| async move {
+            let response = HostClient::dispatch_public_http(
+                astrcode_extension_sdk::extension::ExtensionHttpRequest::new(
+                    ExtensionHttpMethod::Post,
+                    "/dispatch-target/42",
+                )
+                .query("source=s5r")
+                .json_body(json!({ "from": "guest" })),
+            )
+            .await?;
+            Ok(tool_text(response.body.to_string(), response.status >= 400))
         }),
     )?;
 

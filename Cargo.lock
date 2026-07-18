@@ -501,8 +501,12 @@ dependencies = [
  "astrcode-support",
  "async-trait",
  "dirs",
+ "futures-util",
+ "globset",
  "libc",
  "parking_lot",
+ "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -510,6 +514,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

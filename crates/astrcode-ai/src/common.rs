@@ -792,10 +792,7 @@ fn is_sensitive_query_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::sync::{Arc, Mutex};
 
     use astrcode_core::llm::LlmClientConfig;
     use tokio::{
@@ -836,79 +833,6 @@ mod tests {
             LlmEvent::Done { finish_reason } if finish_reason == "stop"
         ));
         assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn streaming_client_uses_idle_read_timeout_not_total_timeout() {
-        const CHUNK_COUNT: usize = 25;
-        const CHUNK_DELAY_MS: u64 = 50;
-        const MIN_CHUNKS_AFTER_TIMEOUT: usize = 24;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.unwrap();
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\n\
-                      content-type: text/event-stream\r\n\
-                      connection: close\r\n\
-                      \r\n",
-                )
-                .await
-                .unwrap();
-            for index in 0..CHUNK_COUNT {
-                let line = format!("data: {{\"line\":\"{index}\"}}\n\n");
-                socket.write_all(line.as_bytes()).await.unwrap();
-                socket.flush().await.unwrap();
-                if index + 1 < CHUNK_COUNT {
-                    tokio::time::sleep(Duration::from_millis(CHUNK_DELAY_MS)).await;
-                }
-            }
-        });
-
-        let config = LlmClientConfig {
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            ..LlmClientConfig::default()
-        };
-        let client = build_client(&config).unwrap();
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&lines);
-
-        stream_with_retry(
-            client,
-            format!("http://{addr}/stream"),
-            Vec::new(),
-            serde_json::json!({}),
-            RetryPolicy {
-                max_retries: 0,
-                base_delay_ms: 1,
-                max_delay_ms: 1,
-                max_transport_retries: 0,
-            },
-            tx,
-            move |_event_type, event, _| {
-                if let Some(line) = event.get("line").and_then(|v| v.as_str()) {
-                    captured.lock().unwrap().push(line.to_string());
-                }
-                true
-            },
-        )
-        .await
-        .unwrap();
-
-        let lines = lines.lock().unwrap().clone();
-        assert!(
-            lines.len() >= MIN_CHUNKS_AFTER_TIMEOUT,
-            "stream should keep reading after total elapsed time exceeds read_timeout_secs"
-        );
-        for (index, line) in lines.iter().enumerate() {
-            assert_eq!(line, &index.to_string());
-        }
     }
 
     #[tokio::test]

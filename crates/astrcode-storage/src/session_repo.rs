@@ -478,6 +478,19 @@ impl EventReader for FileSystemSessionRepository {
         meta.log.replay_after(seq).await
     }
 
+    async fn replay_from_limited(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+        max_events: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let Ok(seq) = cursor.parse::<u64>() else {
+            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
+        };
+        meta.log.replay_after_limited(seq, max_events).await
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         let mut ids: Vec<SessionId> = self
             .sessions

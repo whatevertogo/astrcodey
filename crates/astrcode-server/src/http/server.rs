@@ -6,6 +6,7 @@ use astrcode_protocol::events::ClientNotification;
 use astrcode_support::event_fanout::EventFanout;
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
     routing::{delete, get, post},
@@ -21,6 +22,11 @@ use super::{
 use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
 
 type RouterParts = (Router, String, Arc<ServerEventBus>);
+
+const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT_BYTES
+    + astrcode_core::message_attachment::MAX_ATTACHMENTS
+        * astrcode_core::message_attachment::MAX_ATTACHMENT_CONTENT_BYTES
+    + 64 * 1024;
 
 #[cfg(feature = "testing")]
 #[derive(Clone)]
@@ -81,14 +87,21 @@ fn router_parts(
     let allowed_origins = collect_allowed_origins();
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed_origins))
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
             header::CACHE_CONTROL,
         ]);
 
-    let app = Router::new()
+    let protected_api = Router::new()
         .route(
             "/api/sessions",
             post(sessions::create_session).get(sessions::list_sessions),
@@ -98,7 +111,10 @@ fn router_parts(
             get(sessions::conversation_snapshot),
         )
         .route("/api/sessions/{id}/stream", get(stream::session_stream))
-        .route("/api/sessions/{id}/prompt", post(sessions::submit_prompt))
+        .route(
+            "/api/sessions/{id}/prompt",
+            post(sessions::submit_prompt).layer(DefaultBodyLimit::max(MAX_PROMPT_HTTP_BODY_BYTES)),
+        )
         .route("/api/sessions/{id}/inject", post(sessions::inject_message))
         .route(
             "/api/sessions/{id}/approve",
@@ -161,7 +177,16 @@ fn router_parts(
         .layer(middleware::from_fn_with_state(
             expected_bearer,
             auth_middleware,
-        ))
+        ));
+
+    let public_extension_http = Router::new()
+        .fallback(extensions::dispatch_public_http)
+        .layer(DefaultBodyLimit::max(
+            astrcode_core::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
+        ));
+    let app = Router::new()
+        .merge(protected_api)
+        .merge(public_extension_http)
         .layer(cors)
         .with_state(state);
 

@@ -11,7 +11,7 @@ use astrcode_core::{
     storage::EventStore, tool::SessionOperations,
 };
 use astrcode_extensions::{
-    build_host_router,
+    build_host_router_with_public_http_dispatcher,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
@@ -378,9 +378,10 @@ async fn load_extensions_into_runner(
         runner,
         &ExtensionLoadContext {
             working_dir: Some(cwd.to_string_lossy().to_string()),
-            host_router: Some(build_host_router(
+            host_router: Some(build_host_router_with_public_http_dispatcher(
                 Arc::clone(host_services),
                 Some(cwd.to_string_lossy().to_string()),
+                runner.clone(),
             )),
         },
         &[&bundled_source, &disk_source],

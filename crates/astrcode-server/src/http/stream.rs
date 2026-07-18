@@ -40,6 +40,7 @@ use super::{
 use crate::bootstrap::ServerRuntime;
 
 type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
+const MAX_REPLAY_EVENTS: usize = 1_000;
 
 /// SSE live stream 的内部状态。
 ///
@@ -149,19 +150,7 @@ pub(in crate::http) async fn session_stream(
         .subscribe_conversation_events(&session_id);
     let notification_rx = http_state.event_bus.subscribe_global_notifications();
     let (missed_events, replay_error) = match query.cursor.as_ref() {
-        Some(cursor) if cursor.parse::<u64>().is_err() => (Vec::new(), true),
-        Some(cursor) => match http_state
-            .runtime
-            .session_manager
-            .replay_from(&session_id, &Cursor::from(cursor.as_str()))
-            .await
-        {
-            Ok(events) => (events, false),
-            Err(error) => {
-                tracing::warn!(session_id = %session_id, cursor, "failed to replay SSE cursor: {error}");
-                (Vec::new(), true)
-            },
-        },
+        Some(cursor) => replay_after_cursor(&http_state.runtime, &session_id, cursor).await,
         None => (Vec::new(), false),
     };
     let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
@@ -278,10 +267,68 @@ pub(in crate::http) async fn session_stream(
             }
         },
     );
+    // Rehydrate switches the client to a new snapshot/stream generation. Do not
+    // poll the old live receiver after sending the marker, otherwise it could
+    // deliver deltas while the replacement snapshot is being installed.
+    let live_stream = live_stream.take(if replay_error { 0 } else { usize::MAX });
     let stream = replay_error_stream.chain(replay_stream).chain(live_stream);
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+async fn replay_after_cursor(
+    runtime: &ServerRuntime,
+    session_id: &SessionId,
+    cursor: &str,
+) -> (Vec<Event>, bool) {
+    let Ok(requested_seq) = cursor.parse::<u64>() else {
+        return (Vec::new(), true);
+    };
+    let latest_seq = match runtime.session_manager.latest_cursor(session_id).await {
+        Ok(Some(latest)) => match latest.parse::<u64>() {
+            Ok(latest) => latest,
+            Err(error) => {
+                tracing::warn!(session_id = %session_id, latest, %error, "stored SSE cursor is invalid");
+                return (Vec::new(), true);
+            },
+        },
+        Ok(None) => 0,
+        Err(error) => {
+            tracing::warn!(session_id = %session_id, cursor, "failed to validate SSE cursor: {error}");
+            return (Vec::new(), true);
+        },
+    };
+    if requested_seq > latest_seq {
+        tracing::info!(
+            session_id = %session_id,
+            cursor,
+            latest_seq,
+            "SSE cursor is ahead of the session; requesting rehydrate"
+        );
+        return (Vec::new(), true);
+    }
+
+    match runtime
+        .session_manager
+        .replay_from_limited(session_id, &Cursor::from(cursor), MAX_REPLAY_EVENTS + 1)
+        .await
+    {
+        Ok(events) if events.len() > MAX_REPLAY_EVENTS => {
+            tracing::info!(
+                session_id = %session_id,
+                cursor,
+                replay_limit = MAX_REPLAY_EVENTS,
+                "SSE replay limit exceeded; requesting rehydrate"
+            );
+            (Vec::new(), true)
+        },
+        Ok(events) => (events, false),
+        Err(error) => {
+            tracing::warn!(session_id = %session_id, cursor, "failed to replay SSE cursor: {error}");
+            (Vec::new(), true)
+        },
+    }
 }
 
 async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {

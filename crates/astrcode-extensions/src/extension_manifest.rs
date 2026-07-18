@@ -1,6 +1,8 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
-use astrcode_core::extension::{ContinueAfterStopLimit, ExtensionCapability, ExtensionEventDecl};
+use astrcode_core::extension::{
+    ContinueAfterStopLimit, ExtensionCapability, ExtensionEventDecl, ExtensionHttpRoute,
+};
 use astrcode_extension_sdk::s5r::capability_from_wire;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,6 +16,7 @@ pub struct ExtensionRegistration {
     pub tools: Vec<ManifestTool>,
     pub commands: Vec<ManifestCommand>,
     pub hooks: Vec<ManifestHook>,
+    pub http_routes: Vec<ManifestHttpRoute>,
     pub extension_events: Vec<ExtensionEventDecl>,
 }
 
@@ -55,6 +58,12 @@ pub mod manifest_types {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ManifestHttpRoute {
+        pub route: ExtensionHttpRoute,
+        pub handler_id: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ManifestExtensionEvent {
         pub event_type: String,
         #[serde(default = "default_schema_version")]
@@ -76,7 +85,9 @@ pub mod manifest_types {
     }
 }
 
-use manifest_types::{ManifestCommand, ManifestExtensionEvent, ManifestHook, ManifestTool};
+use manifest_types::{
+    ManifestCommand, ManifestExtensionEvent, ManifestHook, ManifestHttpRoute, ManifestTool,
+};
 
 /// 从 s5r `InitializeMessage.metadata` 解析注册信息。
 pub fn registration_from_s5r_metadata(
@@ -132,6 +143,10 @@ fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistrati
         .get("hooks")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let http_routes: Vec<ManifestHttpRoute> = value
+        .get("http_routes")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
     let extension_events: Vec<ExtensionEventDecl> = value
         .get("extension_events")
         .and_then(|v| serde_json::from_value::<Vec<ManifestExtensionEvent>>(v.clone()).ok())
@@ -154,6 +169,7 @@ fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistrati
         tools,
         commands,
         hooks,
+        http_routes,
         extension_events,
     })
 }

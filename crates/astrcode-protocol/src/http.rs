@@ -547,6 +547,17 @@ pub struct ExtensionDeclarationDto {
     pub keybindings: Vec<Keybinding>,
     pub status_items: Vec<StatusItem>,
     pub events: Vec<ExtensionEventDecl>,
+    #[serde(default)]
+    pub http_routes: Vec<ExtensionHttpRouteDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionHttpRouteDto {
+    pub method: String,
+    pub path: String,
+    pub description: String,
+    pub max_body_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -6,8 +6,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
+    extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     s5r::{ErrorPayload, HandlerResult},
-    worker::registry::{CommandHandlerFn, HookHandlerFn, ToolHandlerFn, WorkerCallContext},
+    worker::registry::{
+        CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
+    },
 };
 
 /// 从 tool 事件 JSON 反序列化 LLM 传入的 `arguments`。
@@ -80,6 +83,15 @@ where
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+}
+
+/// 类型化 HTTP handler。
+pub fn http_handler<F, Fut>(f: F) -> HttpHandlerFn
+where
+    F: Fn(ExtensionHttpRequest, WorkerCallContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<ExtensionHttpResponse, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |request, ctx| Box::pin(f(request, ctx)))
 }
 
 /// 将 [`ErrorPayload`] 转为失败的 [`HandlerResult`]（保留 code 于 data）。

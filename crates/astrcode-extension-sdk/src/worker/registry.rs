@@ -5,11 +5,15 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use serde_json::Value;
 
 use crate::{
-    extension::ContinueAfterStopOptions,
+    extension::{
+        ContinueAfterStopOptions, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        extension_http_route_patterns_conflict,
+    },
     runtime::CancelToken,
     s5r::{CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg},
     worker::manifest::{
-        CommandManifestEntry, HookManifestEntry, HookManifestOptions, ManifestCatalog,
+        CommandManifestEntry, HookManifestEntry, HookManifestOptions, HttpRouteManifestEntry,
+        ManifestCatalog,
     },
 };
 
@@ -33,6 +37,15 @@ pub type CommandHandlerFn = Arc<
         + Sync,
 >;
 
+pub type HttpHandlerFn = Arc<
+    dyn Fn(
+            ExtensionHttpRequest,
+            WorkerCallContext,
+        ) -> BoxFuture<Result<ExtensionHttpResponse, ErrorPayload>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct WorkerCallContext {
     pub extension_id: String,
@@ -45,6 +58,7 @@ pub(crate) struct HandlerRegistry {
     tools: HashMap<String, ToolHandlerFn>,
     hooks: HashMap<String, HookHandlerFn>,
     commands: HashMap<String, CommandHandlerFn>,
+    http_routes: HashMap<String, HttpHandlerFn>,
 }
 
 impl HandlerRegistry {
@@ -55,6 +69,7 @@ impl HandlerRegistry {
             tools: HashMap::new(),
             hooks: HashMap::new(),
             commands: HashMap::new(),
+            http_routes: HashMap::new(),
         }
     }
 
@@ -153,6 +168,32 @@ impl HandlerRegistry {
         Ok(())
     }
 
+    pub(crate) fn register_http_route(
+        &mut self,
+        route: ExtensionHttpRoute,
+        handler: HttpHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        route
+            .validate()
+            .map_err(|error| ErrorPayload::new("invalid_http_route", error))?;
+        if self.catalog.http_routes.iter().any(|entry| {
+            entry.route.method == route.method
+                && extension_http_route_patterns_conflict(&entry.route.path, &route.path)
+        }) {
+            return Err(ErrorPayload::new(
+                "duplicate_registration",
+                format!("conflicting HTTP route registration: {}", route.path),
+            ));
+        }
+        let handler_name = format!("route_{}", self.catalog.http_routes.len());
+        let handler_id = self.handler_id_for("http", &handler_name);
+        self.catalog
+            .http_routes
+            .push(HttpRouteManifestEntry { route, handler_id });
+        self.http_routes.insert(handler_name, handler);
+        Ok(())
+    }
+
     pub fn handler_id_for(&self, kind: &str, name: &str) -> String {
         format!("{}:{kind}:{name}", self.extension_id)
     }
@@ -217,6 +258,25 @@ impl HandlerRegistry {
                     ErrorPayload::new("unknown_handler", format!("unknown command: {name}"))
                 })?;
                 handler(event, ctx).await
+            },
+            "http" => {
+                let handler = self.http_routes.get(name).ok_or_else(|| {
+                    ErrorPayload::new("unknown_handler", format!("unknown HTTP route: {name}"))
+                })?;
+                let request = serde_json::from_value(event).map_err(|error| {
+                    ErrorPayload::new(
+                        "invalid_input",
+                        format!("invalid HTTP request payload: {error}"),
+                    )
+                })?;
+                let response = handler(request, ctx).await?;
+                let data = serde_json::to_value(response).map_err(|error| {
+                    ErrorPayload::new(
+                        "serialization_failed",
+                        format!("serialize HTTP response: {error}"),
+                    )
+                })?;
+                Ok(HandlerResult::effect("http_response", data))
             },
             _ => {
                 return Err(ErrorPayload::new(

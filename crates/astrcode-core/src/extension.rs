@@ -9,7 +9,7 @@
 //! - 类型化的处理器 trait 和上下文结构体
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{Arc, Mutex},
     time::Duration,
@@ -57,6 +57,9 @@ pub trait Extension: Send + Sync {
     }
 
     /// 扩展退出运行态。默认 no-op。
+    ///
+    /// [`StopReason::StartupFailed`] 可能在 `start` 只完成部分初始化时调用；
+    /// 实现必须容忍资源尚未创建，并保持清理幂等。
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
         Ok(())
     }
@@ -84,6 +87,12 @@ pub trait Extension: Send + Sync {
 pub enum ExtensionCapability {
     /// 创建子 session、提交 turn 与回收 session。
     SessionControl,
+    /// 跨会话读取宿主可见的 session 投影。
+    SessionInspect,
+    /// 注册无需宿主 bearer token 的公开 HTTP 路由。
+    PublicHttp,
+    /// 从插件内部调用其他插件的公开 HTTP 路由。
+    PublicHttpDispatch,
     /// 调用宿主配置的主模型（当前 session 的 active model）。
     MainModel,
     /// 调用宿主配置的小模型。
@@ -92,12 +101,26 @@ pub enum ExtensionCapability {
     SessionHistory,
     /// 发射已声明的扩展事件。
     EmitEvents,
+    /// 消费其他扩展发射的事件。
+    ConsumeEvents,
     /// 读取工作区或扩展发现目录。
     WorkspaceRead,
+    /// 写入或编辑工作区内的非敏感文件。
+    WorkspaceWrite,
     /// 启动受扩展管理的子进程。
     ProcessSpawn,
     /// 发起网络客户端请求。
     NetworkClient,
+    /// 读取或改写 provider 请求边界。
+    ProviderRequest,
+    /// 决定外部输入的投递策略。
+    InputDelivery,
+    /// 阻断或改写工具执行。
+    ToolIntercept,
+    /// 决定工具结果或自然停止后 turn 是否继续。
+    TurnContinuationControl,
+    /// 观察临时的实时会话增量。
+    LiveConversation,
 }
 
 /// 扩展专有配置的包装类型。
@@ -226,6 +249,8 @@ pub enum StopReason {
     Disabled,
     /// 宿主进程关闭。
     Shutdown,
+    /// `start` 失败或超时，回滚已经取得的资源。
+    StartupFailed,
 }
 
 /// 宿主管理的插件后台任务集合。
@@ -233,7 +258,13 @@ pub enum StopReason {
 pub struct ExtensionTasks {
     extension_id: Arc<str>,
     shutdown: CancellationToken,
-    handles: Arc<Mutex<Vec<ExtensionTask>>>,
+    state: Arc<Mutex<ExtensionTaskState>>,
+}
+
+#[derive(Default)]
+struct ExtensionTaskState {
+    shutdown: bool,
+    tasks: Vec<ExtensionTask>,
 }
 
 struct ExtensionTask {
@@ -246,7 +277,7 @@ impl ExtensionTasks {
         Self {
             extension_id: Arc::from(extension_id.into()),
             shutdown: CancellationToken::new(),
-            handles: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(Mutex::new(ExtensionTaskState::default())),
         }
     }
 
@@ -258,7 +289,8 @@ impl ExtensionTasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        if self.shutdown.is_cancelled() {
+        let mut state = self.lock_state();
+        if state.shutdown {
             tracing::debug!(
                 extension_id = %self.extension_id,
                 "skip spawning extension task after shutdown"
@@ -268,19 +300,17 @@ impl ExtensionTasks {
 
         let name = name.into();
         let handle = tokio::spawn(fut);
-        let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-        handles.push(ExtensionTask { name, handle });
+        state.tasks.push(ExtensionTask { name, handle });
     }
 
     pub fn cancel(&self) {
+        let mut state = self.lock_state();
+        state.shutdown = true;
         self.shutdown.cancel();
     }
 
     pub async fn wait(&self, timeout: Duration) {
-        let tasks = {
-            let mut handles = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *handles)
-        };
+        let tasks = std::mem::take(&mut self.lock_state().tasks);
 
         let deadline = tokio::time::Instant::now() + timeout;
         for task in tasks {
@@ -340,6 +370,10 @@ impl ExtensionTasks {
         );
         handle.abort();
         let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ExtensionTaskState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 
@@ -487,6 +521,249 @@ pub struct ExtensionManifest {
     /// 宿主必须授予此扩展的能力。
     #[serde(default)]
     pub capabilities: Vec<ExtensionCapability>,
+}
+
+// ─── Extension HTTP ─────────────────────────────────────────────────────
+
+pub const DEFAULT_EXTENSION_HTTP_BODY_BYTES: usize = 64 * 1024;
+pub const MAX_EXTENSION_HTTP_BODY_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ExtensionHttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionHttpRoute {
+    pub method: ExtensionHttpMethod,
+    pub path: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_extension_http_body_bytes")]
+    pub max_body_bytes: usize,
+}
+
+const fn default_extension_http_body_bytes() -> usize {
+    DEFAULT_EXTENSION_HTTP_BODY_BYTES
+}
+
+impl ExtensionHttpRoute {
+    pub fn public(method: ExtensionHttpMethod, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            description: String::new(),
+            max_body_bytes: DEFAULT_EXTENSION_HTTP_BODY_BYTES,
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub fn max_body_bytes(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !valid_extension_http_route_path(&self.path) {
+            return Err(format!("invalid extension HTTP route path: {}", self.path));
+        }
+        if self.max_body_bytes == 0 || self.max_body_bytes > MAX_EXTENSION_HTTP_BODY_BYTES {
+            return Err(format!(
+                "extension HTTP max_body_bytes must be between 1 and \
+                 {MAX_EXTENSION_HTTP_BODY_BYTES}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionHttpRequest {
+    pub method: ExtensionHttpMethod,
+    pub path: String,
+    #[serde(default)]
+    pub path_params: BTreeMap<String, String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+impl ExtensionHttpRequest {
+    pub fn new(method: ExtensionHttpMethod, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            path_params: BTreeMap::new(),
+            query: None,
+            body: serde_json::Value::Null,
+        }
+    }
+
+    pub fn query(mut self, query: impl Into<String>) -> Self {
+        self.query = Some(query.into());
+        self
+    }
+
+    pub fn json_body(mut self, body: serde_json::Value) -> Self {
+        self.body = body;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionHttpResponse {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+impl ExtensionHttpResponse {
+    pub fn json(status: u16, body: serde_json::Value) -> Self {
+        Self { status, body }
+    }
+
+    pub fn error(status: u16, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::json(
+            status,
+            serde_json::json!({
+                "error": { "code": code.into(), "message": message.into() }
+            }),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ExtensionHttpHandler: Send + Sync {
+    async fn handle(
+        &self,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError>;
+}
+
+#[derive(Clone)]
+pub struct ExtensionHttpRouteRegistration {
+    pub route: ExtensionHttpRoute,
+    pub handler: Arc<dyn ExtensionHttpHandler>,
+}
+
+pub fn match_extension_http_route(pattern: &str, path: &str) -> Option<BTreeMap<String, String>> {
+    let pattern_segments = extension_http_path_segments(pattern);
+    let path_segments = extension_http_path_segments(path);
+    if pattern_segments.len() != path_segments.len() {
+        return None;
+    }
+    let mut params = BTreeMap::new();
+    for (pattern_segment, path_segment) in pattern_segments.iter().zip(path_segments) {
+        if let Some(name) = extension_http_param_name(pattern_segment) {
+            params.insert(name.to_string(), path_segment.to_string());
+        } else if pattern_segment != &path_segment {
+            return None;
+        }
+    }
+    Some(params)
+}
+
+pub fn extension_http_route_patterns_conflict(left: &str, right: &str) -> bool {
+    let left_segments = extension_http_path_segments(left);
+    let right_segments = extension_http_path_segments(right);
+    left_segments.len() == right_segments.len()
+        && left_segments
+            .iter()
+            .zip(right_segments)
+            .all(|(left, right)| {
+                left == &right
+                    || extension_http_param_name(left).is_some()
+                    || extension_http_param_name(right).is_some()
+            })
+}
+
+fn valid_extension_http_route_path(path: &str) -> bool {
+    if !path.starts_with('/') || path.ends_with('/') || path.contains("//") || path.contains("..") {
+        return false;
+    }
+    let mut params = BTreeSet::new();
+    path.split('/').skip(1).all(|segment| {
+        if segment.is_empty() {
+            return false;
+        }
+        let starts_param = segment.starts_with('{');
+        let ends_param = segment.ends_with('}');
+        match (starts_param, ends_param) {
+            (false, false) => !segment.contains('{') && !segment.contains('}'),
+            (true, true) => {
+                let name = &segment[1..segment.len() - 1];
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                    && params.insert(name)
+            },
+            _ => false,
+        }
+    })
+}
+
+fn extension_http_path_segments(path: &str) -> Vec<&str> {
+    path.trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn extension_http_param_name(segment: &str) -> Option<&str> {
+    segment
+        .strip_prefix('{')
+        .and_then(|segment| segment.strip_suffix('}'))
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(test)]
+mod extension_http_tests {
+    use super::*;
+
+    #[test]
+    fn route_validation_and_matching_are_segment_scoped() {
+        let route = ExtensionHttpRoute::public(ExtensionHttpMethod::Patch, "/future-tasks/{jobId}");
+        route.validate().expect("valid route");
+
+        let params =
+            match_extension_http_route(&route.path, "/future-tasks/job-1").expect("matching route");
+        assert_eq!(params.get("jobId").map(String::as_str), Some("job-1"));
+        assert!(match_extension_http_route(&route.path, "/future-tasks/job-1/run").is_none());
+    }
+
+    #[test]
+    fn route_validation_rejects_traversal_and_duplicate_params() {
+        let traversal = ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/files/../secret");
+        assert!(traversal.validate().is_err());
+
+        let duplicate = ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/{id}/{id}");
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn overlapping_parameter_routes_conflict() {
+        assert!(extension_http_route_patterns_conflict(
+            "/future-tasks/{id}",
+            "/future-tasks/{jobId}"
+        ));
+        assert!(!extension_http_route_patterns_conflict(
+            "/future-tasks/{id}",
+            "/notes/{id}"
+        ));
+    }
 }
 
 // ─── extension Event System ────────────────────────────────────────────────
@@ -1448,6 +1725,7 @@ pub struct Registrar {
     tool_ui: std::collections::HashMap<String, ToolUiWire>,
     commands: Vec<(SlashCommand, std::sync::Arc<dyn CommandHandler>)>,
     command_discovery: Vec<std::sync::Arc<dyn CommandDiscoveryHandler>>,
+    http_routes: Vec<ExtensionHttpRouteRegistration>,
     keybindings: Vec<Keybinding>,
     status_items: Vec<StatusItem>,
     pre_tool_use: Vec<ToolHookRegistration<dyn PreToolUseHandler>>,
@@ -1483,6 +1761,7 @@ impl Registrar {
             tool_ui: std::collections::HashMap::new(),
             commands: Vec::new(),
             command_discovery: Vec::new(),
+            http_routes: Vec::new(),
             keybindings: Vec::new(),
             status_items: Vec::new(),
             pre_tool_use: Vec::new(),
@@ -1523,6 +1802,15 @@ impl Registrar {
 
     pub fn command_discovery(&mut self, handler: std::sync::Arc<dyn CommandDiscoveryHandler>) {
         self.command_discovery.push(handler);
+    }
+
+    pub fn http_route(
+        &mut self,
+        route: ExtensionHttpRoute,
+        handler: std::sync::Arc<dyn ExtensionHttpHandler>,
+    ) {
+        self.http_routes
+            .push(ExtensionHttpRouteRegistration { route, handler });
     }
 
     pub fn keybinding(&mut self, binding: Keybinding) {
@@ -1707,6 +1995,7 @@ impl Registrar {
             && self.tool_metadata.is_empty()
             && self.commands.is_empty()
             && self.command_discovery.is_empty()
+            && self.http_routes.is_empty()
             && self.keybindings.is_empty()
             && self.status_items.is_empty()
             && self.pre_tool_use.is_empty()
@@ -1763,6 +2052,10 @@ impl Registrar {
 
     pub fn command_discoveries(&self) -> &[std::sync::Arc<dyn CommandDiscoveryHandler>] {
         &self.command_discovery
+    }
+
+    pub fn http_routes(&self) -> &[ExtensionHttpRouteRegistration] {
+        &self.http_routes
     }
 
     pub fn pre_tool_use(&self) -> &[ToolHookRegistration<dyn PreToolUseHandler>] {

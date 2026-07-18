@@ -10,7 +10,7 @@ fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("workspace");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("secret.txt"), "inside").unwrap();
+    std::fs::write(root.join("note.txt"), "inside").unwrap();
     (dir, root)
 }
 
@@ -83,7 +83,7 @@ fn workspace_read_allows_file_under_root() {
     let out = router
         .invoke_sync(
             "astrcode.workspace.read",
-            &json!({ "path": "secret.txt" }).to_string(),
+            &json!({ "path": "note.txt" }).to_string(),
             &ctx,
         )
         .unwrap();

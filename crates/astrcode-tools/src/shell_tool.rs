@@ -864,11 +864,19 @@ pub(crate) fn preprocess_shell_command(command: &str, shell: &ShellInfo) -> Stri
     if !cfg!(windows) || shell.family != ShellFamily::Posix {
         return command.to_string();
     }
-    static NUL_REDIRECT: OnceLock<Regex> = OnceLock::new();
+    static NUL_REDIRECT: OnceLock<Option<Regex>> = OnceLock::new();
     let re = NUL_REDIRECT.get_or_init(|| {
-        Regex::new(r"(\d?&?>+\s*)[Nn][Uu][Ll](\s|$|[|&;)\n\r])")
-            .expect("nul redirect regex must compile")
+        match Regex::new(r"(\d?&?>+\s*)[Nn][Uu][Ll](\s|$|[|&;)\n\r])") {
+            Ok(regex) => Some(regex),
+            Err(error) => {
+                tracing::error!(%error, "failed to compile nul redirect regex");
+                None
+            },
+        }
     });
+    let Some(re) = re else {
+        return command.to_string();
+    };
     re.replace_all(command, "${1}/dev/null${2}").into_owned()
 }
 

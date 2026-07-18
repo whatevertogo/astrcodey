@@ -205,18 +205,31 @@ export default function SettingsPage({
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([api.getConfig(), api.getProviderCatalog()])
-      .then(([config, catalog]) => {
-        if (cancelled) return
-        applyConfig(config)
-        setProviderCatalog(catalog.providers)
-      })
-      .catch((err) => {
-        if (!cancelled) setErrorMessage(String(err))
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
+    const loadSettings = async () => {
+      const [configResult, catalogResult] = await Promise.allSettled([
+        api.getConfig(),
+        api.getProviderCatalog(),
+      ])
+      if (cancelled) return
+
+      const errors: string[] = []
+      if (configResult.status === 'fulfilled') {
+        applyConfig(configResult.value)
+      } else {
+        errors.push(`加载配置失败：${String(configResult.reason)}`)
+      }
+
+      if (catalogResult.status === 'fulfilled') {
+        setProviderCatalog(catalogResult.value.providers)
+      } else {
+        errors.push(`加载 Provider 列表失败：${String(catalogResult.reason)}`)
+      }
+
+      setErrorMessage(errors.length > 0 ? errors.join('\n') : null)
+      setLoading(false)
+    }
+
+    void loadSettings()
     return () => {
       cancelled = true
     }

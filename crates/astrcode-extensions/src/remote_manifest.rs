@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use astrcode_core::extension::{
     CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
     EXTENSION_TOOL_OUTCOME_KEY, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-    ExtensionEventDecl, ExtensionToolOutcome, HookMode, HookResult, PostToolUseResult,
-    PreToolUseResult, PromptContributions, ProviderResult,
+    ExtensionEventDecl, ExtensionHttpResponse, ExtensionToolOutcome, HookMode, HookResult,
+    PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
 };
 use astrcode_extension_sdk::{
     extension::SlashCommand,
@@ -33,7 +33,32 @@ pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> 
             }
         }
     }
+    for entry in &reg.http_routes {
+        entry.route.validate()?;
+        if entry.handler_id.trim().is_empty() {
+            return Err(format!(
+                "HTTP route {} is missing handler_id",
+                entry.route.path
+            ));
+        }
+    }
     Ok(())
+}
+
+pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse, ExtensionError> {
+    if !resp.ok {
+        return Err(ExtensionError::Internal(
+            resp.error.clone().unwrap_or_default(),
+        ));
+    }
+    if resp.effect_name() != "http_response" {
+        return Err(ExtensionError::Internal(format!(
+            "expected http_response effect, got {}",
+            resp.effect_name()
+        )));
+    }
+    serde_json::from_value(resp.data.clone().unwrap_or_default())
+        .map_err(|error| ExtensionError::Internal(format!("parse HTTP response: {error}")))
 }
 
 pub fn build_tools(reg: &ExtensionRegistration) -> Vec<ToolDefinition> {
@@ -280,6 +305,7 @@ mod tests {
                 mode: mode.into(),
                 options: ManifestHookOptions::default(),
             }],
+            http_routes: Vec::new(),
             extension_events: Vec::new(),
         }
     }

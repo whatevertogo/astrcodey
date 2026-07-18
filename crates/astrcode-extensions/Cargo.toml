@@ -19,6 +19,11 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+futures-util = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
+walkdir = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

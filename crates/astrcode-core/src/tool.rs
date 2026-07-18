@@ -271,6 +271,34 @@ pub trait SessionOperations: Send + Sync {
         content: String,
     ) -> Result<(), SessionApiError>;
 
+    /// 中断目标会话的活跃 turn，并提交新的用户输入。
+    async fn interrupt_and_submit(
+        &self,
+        _access: SessionAccess<'_>,
+        _content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "interrupt_and_submit is not supported by this host".into(),
+        ))
+    }
+
+    /// 取消目标会话的活跃 turn。
+    async fn cancel_turn(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "cancel_turn is not supported by this host".into(),
+        ))
+    }
+
+    /// 查询目标会话的热执行状态。
+    async fn execution_view(
+        &self,
+        _access: SessionAccess<'_>,
+    ) -> Result<SessionExecutionView, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "execution_view is not supported by this host".into(),
+        ))
+    }
+
     /// 向目标 session 提交一个 turn。
     async fn submit_turn(
         &self,
@@ -486,6 +514,20 @@ pub struct SessionStatus {
     pub message_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionDeliveryOutcome {
+    Started { turn_id: String },
+    Injected { turn_id: String },
+    Queued { queue_len: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionExecutionView {
+    pub phase: crate::event::Phase,
+    pub active_turn_id: Option<String>,
+    pub queued_inputs: usize,
+}
+
 /// Session API 错误。
 #[derive(Debug, thiserror::Error)]
 pub enum SessionApiError {
@@ -497,6 +539,8 @@ pub enum SessionApiError {
     SessionBusy(String),
     #[error("max depth exceeded: current={current}, max={max}")]
     MaxDepthExceeded { current: usize, max: usize },
+    #[error("unsupported session operation: {0}")]
+    Unsupported(String),
     #[error(transparent)]
     Internal(#[from] SessionApiInternalError),
 }

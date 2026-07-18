@@ -112,6 +112,36 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 
 `session_state` 不是有效 capability，插件不要在 manifest 中声明它。
 
+须在 manifest 声明后才可调用：
+
+| Manifest capability | API | 说明 |
+|------|------|------|
+| `main_model` | `astrcode.llm.main_chat` | 调用当前会话主模型。 |
+| `small_model` | `astrcode.llm.small_chat` | 调用宿主小模型。 |
+| `session_history` | `astrcode.session.read_events` | 按会话权限读取事件。 |
+| `session_control` | `astrcode.session.control.*` | 创建、提交、注入、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
+| `session_inspect` | `astrcode.session.inspect.*` | 列出宿主可见会话，读取轻量快照、稳定映射后的完整投影或 provider 可见消息。 |
+| `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
+| `public_http_dispatch` | `astrcode.extension.http.public` | 从插件内部调用另一插件的公开路由；同步自调用会被拒绝以避免 s5r 重入死锁。 |
+| `emit_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
+| `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
+| `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
+| `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
+| `network_client` | `astrcode.network.client` | 发起 HTTP(S) 请求。并发、总时长、重定向次数和响应体大小均受限。 |
+
+`workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；`network_client` 是原始出站网络授权，
+可访问的地址仍取决于宿主网络环境。只应给确实需要这些权限的插件声明相应 capability。
+Worker 可使用 `HostClient::spawn_process` / `HostClient::network_request` 的类型化边界，
+也可直接调用通用 `HostClient::call`。
+
+`session_inspect.read_model` 不会直接暴露核心的 `SessionReadModel`。宿主在
+`host_router::session_inspect` 边界显式映射到 SDK DTO，内部 enum 的调整不会静默改变
+插件线缆契约。
+
+HTTP 路由由 `Worker::http_route(route, http_handler(...))` 同时写入握手 manifest 与
+handler 注册表。宿主在安装时校验 scope capability、路径格式、全局公开路由冲突和
+每路由请求体上限（默认 64 KiB，最高 1 MiB）；handler 响应体与执行时间同样有界。
+
 ---
 
 ## 6. 编写插件

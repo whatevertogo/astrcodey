@@ -343,13 +343,14 @@ impl SessionManager {
             .map_err(SessionManagerError::from)
     }
 
-    pub(crate) async fn replay_from(
+    pub(crate) async fn replay_from_limited(
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
+        max_events: usize,
     ) -> Result<Vec<Event>, SessionManagerError> {
         self.event_store
-            .replay_from(session_id, cursor)
+            .replay_from_limited(session_id, cursor, max_events)
             .await
             .map_err(SessionManagerError::from)
     }

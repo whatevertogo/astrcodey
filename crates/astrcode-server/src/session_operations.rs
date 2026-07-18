@@ -5,7 +5,8 @@ use std::sync::Arc;
 use astrcode_core::{
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-        SessionHandle, SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
+        SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
+        SessionStatus, SubmitTurnRequest, SubmitTurnResult,
     },
     types::SessionId,
 };
@@ -84,6 +85,59 @@ impl SessionOperations for ServerSessionOperations {
 
         self.session_manager.sync_durable_events(&target_sid).await;
         Ok(())
+    }
+
+    async fn interrupt_and_submit(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
+        self.child_sessions
+            .verify_access(&caller_sid, &target_sid)
+            .await?;
+        let outcome = self
+            .scheduler
+            .deliver_input(
+                target_sid.clone(),
+                crate::turn_scheduler::PromptInput::text_only(content),
+                InputDelivery::InterruptAndStart,
+            )
+            .await
+            .map_err(SessionApiError::internal)?;
+        self.session_manager.sync_durable_events(&target_sid).await;
+        Ok(delivery_outcome(outcome))
+    }
+
+    async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
+        self.child_sessions
+            .verify_access(&caller_sid, &target_sid)
+            .await?;
+        self.scheduler
+            .abort(&target_sid)
+            .await
+            .map_err(SessionApiError::internal)
+    }
+
+    async fn execution_view(
+        &self,
+        access: SessionAccess<'_>,
+    ) -> Result<SessionExecutionView, SessionApiError> {
+        let (caller_sid, target_sid) = session_ids(access);
+        self.child_sessions
+            .verify_access(&caller_sid, &target_sid)
+            .await?;
+        let view = self
+            .scheduler
+            .execution_view(&target_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
+        Ok(SessionExecutionView {
+            phase: view.phase,
+            active_turn_id: view.active_turn_id.map(|turn_id| turn_id.into_string()),
+            queued_inputs: view.queued_inputs,
+        })
     }
 
     async fn submit_turn(
@@ -260,5 +314,23 @@ impl SessionOperations for ServerSessionOperations {
                 } => SessionApiError::SessionBusy(error.to_string()),
             }
             })
+    }
+}
+
+fn delivery_outcome(outcome: crate::turn_scheduler::DeliveryOutcome) -> SessionDeliveryOutcome {
+    match outcome {
+        crate::turn_scheduler::DeliveryOutcome::Started { turn_id } => {
+            SessionDeliveryOutcome::Started {
+                turn_id: turn_id.into_string(),
+            }
+        },
+        crate::turn_scheduler::DeliveryOutcome::Injected { turn_id } => {
+            SessionDeliveryOutcome::Injected {
+                turn_id: turn_id.into_string(),
+            }
+        },
+        crate::turn_scheduler::DeliveryOutcome::Queued { queue_len } => {
+            SessionDeliveryOutcome::Queued { queue_len }
+        },
     }
 }

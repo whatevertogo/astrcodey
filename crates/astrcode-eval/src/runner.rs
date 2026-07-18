@@ -93,10 +93,18 @@ impl EvalRunner {
             let case_id = case.id.clone();
 
             handles.push(tokio::spawn(async move {
-                let _permit = permit
-                    .acquire()
-                    .await
-                    .expect("semaphore should not be closed");
+                let _permit = match permit.acquire().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        return failed_eval_result(
+                            case.id.clone(),
+                            String::new(),
+                            "eval concurrency controller stopped".into(),
+                            error.to_string(),
+                            0,
+                        );
+                    },
+                };
                 run_single_case(&case, &server_addr, &auth_token, &cases_dir, keep_workdir).await
             }));
             case_ids.push(case_id);
@@ -107,18 +115,13 @@ impl EvalRunner {
             match handle.await {
                 Ok(result) => results.push(result),
                 Err(e) => {
-                    results.push(EvalResult {
+                    results.push(failed_eval_result(
                         case_id,
-                        session_id: String::new(),
-                        passed: false,
-                        verdicts: vec![Verdict::Fail {
-                            reason: format!("task panicked: {e}"),
-                        }],
-                        metrics: Metrics::default(),
-                        duration_ms: 0,
-                        swe_bench_prediction: None,
-                        error: Some(format!("panic: {e}")),
-                    });
+                        String::new(),
+                        format!("task panicked: {e}"),
+                        format!("panic: {e}"),
+                        0,
+                    ));
                 },
             }
         }
@@ -141,18 +144,13 @@ async fn run_single_case(
     let work_dir = match setup::setup_workspace(&case.setup, cases_dir).await {
         Ok(dir) => dir,
         Err(e) => {
-            return EvalResult {
+            return failed_eval_result(
                 case_id,
-                session_id: String::new(),
-                passed: false,
-                verdicts: vec![Verdict::Fail {
-                    reason: format!("setup failed: {e}"),
-                }],
-                metrics: Metrics::default(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                swe_bench_prediction: None,
-                error: Some(e.to_string()),
-            };
+                String::new(),
+                format!("setup failed: {e}"),
+                e.to_string(),
+                started.elapsed().as_millis() as u64,
+            );
         },
     };
 
@@ -162,50 +160,35 @@ async fn run_single_case(
     let session_id = match client.create_session(&work_dir.display().to_string()).await {
         Ok(id) => id,
         Err(e) => {
-            return EvalResult {
+            return failed_eval_result(
                 case_id,
-                session_id: String::new(),
-                passed: false,
-                verdicts: vec![Verdict::Fail {
-                    reason: format!("create_session: {e}"),
-                }],
-                metrics: Metrics::default(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                swe_bench_prediction: None,
-                error: Some(e.to_string()),
-            };
+                String::new(),
+                format!("create_session: {e}"),
+                e.to_string(),
+                started.elapsed().as_millis() as u64,
+            );
         },
     };
 
     // Submit prompts
     for prompt in &case.prompts {
         if let Err(e) = client.submit_prompt(&session_id, prompt).await {
-            return EvalResult {
+            return failed_eval_result(
                 case_id,
                 session_id,
-                passed: false,
-                verdicts: vec![Verdict::Fail {
-                    reason: format!("submit_prompt: {e}"),
-                }],
-                metrics: Metrics::default(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                swe_bench_prediction: None,
-                error: Some(e.to_string()),
-            };
+                format!("submit_prompt: {e}"),
+                e.to_string(),
+                started.elapsed().as_millis() as u64,
+            );
         }
         if let Err(e) = client.wait_completion(&session_id, case.timeout_secs).await {
-            return EvalResult {
+            return failed_eval_result(
                 case_id,
                 session_id,
-                passed: false,
-                verdicts: vec![Verdict::Fail {
-                    reason: format!("wait_completion: {e}"),
-                }],
-                metrics: Metrics::default(),
-                duration_ms: started.elapsed().as_millis() as u64,
-                swe_bench_prediction: None,
-                error: Some(e.to_string()),
-            };
+                format!("wait_completion: {e}"),
+                e.to_string(),
+                started.elapsed().as_millis() as u64,
+            );
         }
     }
 
@@ -240,6 +223,25 @@ async fn run_single_case(
         duration_ms: started.elapsed().as_millis() as u64,
         swe_bench_prediction,
         error: None,
+    }
+}
+
+fn failed_eval_result(
+    case_id: String,
+    session_id: String,
+    reason: String,
+    error: String,
+    duration_ms: u64,
+) -> EvalResult {
+    EvalResult {
+        case_id,
+        session_id,
+        passed: false,
+        verdicts: vec![Verdict::Fail { reason }],
+        metrics: Metrics::default(),
+        duration_ms,
+        swe_bench_prediction: None,
+        error: Some(error),
     }
 }
 
