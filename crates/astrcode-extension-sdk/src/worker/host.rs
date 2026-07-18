@@ -154,8 +154,14 @@ impl HostNetworkRequest {
 }
 
 /// `astrcode.network.client` 的线缆响应。
+///
+/// `body` 仅承载 UTF-8 文本，不提供二进制/base64 表示；二进制响应由宿主拒绝。
+/// `headers` 不保留同名响应头的重复值。宿主限制全局共享并发，但线缆协议不承诺
+/// extension 级公平配额。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostNetworkResponse {
+    /// 完成所有受限重定向后的最终 URL。
+    pub final_url: String,
     pub status: u16,
     pub headers: BTreeMap<String, String>,
     pub body: String,
@@ -528,10 +534,16 @@ mod host_tests {
         assert_eq!(value["timeout_ms"], 1_000);
 
         let response = deserialize_response::<HostNetworkResponse>(
-            json!({ "status": 200, "headers": {}, "body": "ok" }),
+            json!({
+                "final_url": "https://example.com/final",
+                "status": 200,
+                "headers": {},
+                "body": "ok"
+            }),
             "network.client",
         )
         .expect("deserialize network response");
+        assert_eq!(response.final_url, "https://example.com/final");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "ok");
     }

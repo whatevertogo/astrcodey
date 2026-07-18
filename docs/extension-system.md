@@ -103,6 +103,10 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 见 `HostRouter`；除默认 session state API 外，子进程 invoke 的 capability 须以
 `astrcode.` 开头，且 manifest 中已声明对应 capability。
 
+宿主通过单一 capability registry 生成握手 catalog、校验 grant 并选择类型化能力域；
+LLM、session、context、workspace、process、network 与公开扩展 HTTP 各自持有窄后端并实现行为，
+`HostRouter` 仅负责解析、授权和分发。
+
 默认可用、无需 manifest capability：
 
 | API | 说明 |
@@ -131,7 +135,7 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
 | `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
-| `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 请求。worker 与 trusted bundled web-tools 共用同一个宿主出站网络服务；并发、总时长、重定向次数和响应体大小均受限，且统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。 |
+| `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 文本请求。worker 与 trusted bundled web-tools 共用同一个宿主出站网络服务；并发、总时长、重定向次数和响应体大小均受限，且统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。worker 响应 body 必须为 UTF-8（无二进制/base64 表示），同名响应头不保留重复值，并通过 `final_url` 返回重定向后的最终地址。并发上限全局共享，当前不承诺 extension 级公平配额。 |
 
 `workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；`network_client` 仅提供受限公网访问，
 不用于调用宿主本机或内网服务。只应给确实需要这些权限的插件声明相应 capability。

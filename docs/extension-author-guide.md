@@ -100,6 +100,7 @@ worker.capability("network_client");
 let response = HostClient::network_request(
     HostNetworkRequest::get("https://example.com")
 ).await?;
+// response.final_url 是完成受限重定向后的地址。
 
 // 创建或精确编辑工作区内的非敏感文件
 worker.capability("workspace_write");
@@ -132,6 +133,10 @@ let response = HostClient::dispatch_public_http(
         .json_body(serde_json::json!({ "job": 1 }))
 ).await?;
 ```
+
+`network.client` 的响应 body 仅承载 UTF-8 文本，不提供二进制/base64 表示；同名响应头的
+重复值不会保留。worker 与 web-tools 共享宿主的全局并发上限，当前协议不提供 extension 级
+公平配额。
 
 `workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。前者拒绝越界、symlink 和密钥类路径；进程执行不是
 操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和

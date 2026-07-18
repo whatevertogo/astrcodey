@@ -13,6 +13,10 @@ use astrcode_core::extension::{
     NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind, OutboundNetworkRequest,
     OutboundNetworkResponse, OutboundNetworkService,
 };
+use astrcode_extension_sdk::{
+    s5r::ErrorPayload,
+    worker::{HostNetworkRequest, HostNetworkResponse},
+};
 use futures_util::StreamExt;
 use reqwest::{
     Method, Url,
@@ -26,6 +30,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::{HOST_INVOKE_TIMEOUT, block_on_async, capability::NetworkCapability};
+
 #[cfg(test)]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TIMEOUT: Duration = Duration::from_secs(60);
@@ -34,6 +40,85 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 const MAX_REDIRECTS: usize = 10;
 
 type DnsError = Box<dyn Error + Send + Sync>;
+
+pub(super) struct NetworkGroup {
+    service: Option<Arc<dyn OutboundNetworkService>>,
+}
+
+impl NetworkGroup {
+    pub(super) fn new(service: Option<Arc<dyn OutboundNetworkService>>) -> Self {
+        Self { service }
+    }
+
+    pub(super) fn invoke(
+        &self,
+        capability: NetworkCapability,
+        input: serde_json::Value,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<serde_json::Value, ErrorPayload> {
+        match capability {
+            NetworkCapability::Client => self.request(input, cancel_token),
+        }
+    }
+
+    fn request(
+        &self,
+        input: serde_json::Value,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<serde_json::Value, ErrorPayload> {
+        let request = serde_json::from_value::<HostNetworkRequest>(input)
+            .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
+        let service = self.service.as_ref().map(Arc::clone).ok_or_else(|| {
+            ErrorPayload::new("backend_unavailable", "outbound network is not configured")
+        })?;
+        let cancel_token = cancel_token.cloned();
+        block_on_async(async move {
+            let response = service
+                .request(
+                    OutboundNetworkRequest {
+                        url: request.url,
+                        method: request.method.unwrap_or_else(|| "GET".into()),
+                        headers: request.headers,
+                        body: request.body.unwrap_or_default().into_bytes(),
+                        max_bytes: request.max_bytes.unwrap_or(1024 * 1024).min(1024 * 1024)
+                            as usize,
+                        timeout: Duration::from_millis(request.timeout_ms.unwrap_or(30_000))
+                            .min(HOST_INVOKE_TIMEOUT),
+                        redirect_policy: NetworkRedirectPolicy::Follow,
+                    },
+                    cancel_token,
+                )
+                .await
+                .map_err(network_error_payload)?;
+            let body = String::from_utf8(response.body).map_err(|error| {
+                ErrorPayload::new(
+                    "invalid_response_encoding",
+                    format!("network response is not valid UTF-8: {error}"),
+                )
+            })?;
+            serde_json::to_value(HostNetworkResponse {
+                final_url: response.final_url,
+                status: response.status,
+                headers: response.headers,
+                body,
+            })
+            .map_err(|error| ErrorPayload::new("serialization_failed", error.to_string()))
+        })?
+    }
+}
+
+fn network_error_payload(error: OutboundNetworkError) -> ErrorPayload {
+    let code = match error.kind {
+        OutboundNetworkErrorKind::InvalidRequest => "invalid_input",
+        OutboundNetworkErrorKind::PermissionDenied => "permission_denied",
+        OutboundNetworkErrorKind::Unavailable => "backend_unavailable",
+        OutboundNetworkErrorKind::RequestFailed => "network_error",
+        OutboundNetworkErrorKind::Timeout => "timeout",
+        OutboundNetworkErrorKind::ResponseTooLarge => "response_too_large",
+        OutboundNetworkErrorKind::Cancelled => "cancelled",
+    };
+    ErrorPayload::new(code, error.message)
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
