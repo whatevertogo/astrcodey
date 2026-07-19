@@ -16,6 +16,7 @@ use crate::wire::{
 };
 
 /// 新建会话请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
@@ -23,22 +24,65 @@ pub struct CreateSessionRequest {
 }
 
 /// 新建会话响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponseDto {
     pub session_id: String,
 }
 
+/// Prompt 和 conversation block 共用的附件线缆形状。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptAttachmentDto {
+    pub filename: String,
+    pub content: String,
+    pub media_type: String,
+}
+
+impl From<MessageAttachment> for PromptAttachmentDto {
+    fn from(attachment: MessageAttachment) -> Self {
+        Self {
+            filename: attachment.filename,
+            content: attachment.content,
+            media_type: attachment.media_type,
+        }
+    }
+}
+
+impl From<&MessageAttachment> for PromptAttachmentDto {
+    fn from(attachment: &MessageAttachment) -> Self {
+        Self {
+            filename: attachment.filename.clone(),
+            content: attachment.content.clone(),
+            media_type: attachment.media_type.clone(),
+        }
+    }
+}
+
+impl From<PromptAttachmentDto> for MessageAttachment {
+    fn from(attachment: PromptAttachmentDto) -> Self {
+        Self {
+            filename: attachment.filename,
+            content: attachment.content,
+            media_type: attachment.media_type,
+        }
+    }
+}
+
 /// 提交 prompt 或 mid-turn 注入请求（二者共用 `text` 字段）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptRequest {
     pub text: String,
-    #[serde(default)]
-    pub attachments: Vec<MessageAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<PromptAttachmentDto>,
 }
 
 /// 工具审批决议请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolApprovalRequest {
@@ -47,6 +91,7 @@ pub struct ToolApprovalRequest {
 }
 
 /// Tool Approval UI 提交（如 askUser 问卷答案）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolUiRespondRequest {
@@ -55,6 +100,7 @@ pub struct ToolUiRespondRequest {
 }
 
 /// Tool Approval UI 提交响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolUiRespondResponse {
@@ -62,6 +108,7 @@ pub struct ToolUiRespondResponse {
 }
 
 /// prompt 提交结果。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -74,7 +121,7 @@ pub enum PromptSubmitResponse {
         session_id: String,
         turn_id: String,
         /// 如果该请求隐式 fork，则记录来源。v1 总是 None。
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         branched_from_session_id: Option<String>,
     },
     /// 请求已同步处理完成。
@@ -82,38 +129,42 @@ pub enum PromptSubmitResponse {
 }
 
 /// 手动 compact 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionRequest {
     /// 额外 compact 指令，v1 暂不接入生产链路。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// 保留最近 N 个完整 user turn group。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_recent_turns: Option<usize>,
 }
 
 /// 手动 compact 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionResponse {
     pub accepted: bool,
     pub deferred: bool,
     /// compact continuation 创建的子会话 ID。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_session_id: Option<String>,
     pub message: String,
 }
 
 /// 执行会话斜杠命令请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandInvokeRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub arguments: String,
 }
 
 /// 执行会话斜杠命令响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -137,16 +188,18 @@ pub enum CommandInvokeResponse {
 }
 
 /// 斜杠命令参数补全请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandCompletionRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub argument: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<usize>,
 }
 
 /// 斜杠命令参数补全响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandCompletionResponse {
@@ -155,16 +208,18 @@ pub struct CommandCompletionResponse {
 }
 
 /// 斜杠命令参数补全项。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandCompletionItemDto {
     pub label: String,
     pub insert_text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
 /// 斜杠命令列表响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandListResponseDto {
@@ -181,6 +236,7 @@ pub struct SlashCommandListResponseDto {
 }
 
 /// 快捷键绑定 DTO。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeybindingDto {
@@ -195,7 +251,19 @@ pub struct KeybindingDto {
     pub description: String,
 }
 
+impl From<Keybinding> for KeybindingDto {
+    fn from(binding: Keybinding) -> Self {
+        Self {
+            key: binding.key,
+            command: binding.command,
+            arguments: binding.arguments,
+            description: binding.description,
+        }
+    }
+}
+
 /// 状态栏项 DTO。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusItemDto {
@@ -206,9 +274,23 @@ pub struct StatusItemDto {
     /// 排序优先级。
     #[serde(default)]
     pub priority: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
+}
+
+impl From<StatusItem> for StatusItemDto {
+    fn from(item: StatusItem) -> Self {
+        Self {
+            id: item.id,
+            text: item.text,
+            priority: item.priority,
+            tooltip: item.tooltip,
+        }
+    }
 }
 
 /// 可执行斜杠命令信息。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandInfoDto {
@@ -238,6 +320,7 @@ impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
 }
 
 /// 被遮蔽的命令诊断。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShadowedSlashCommandDto {
@@ -250,17 +333,19 @@ pub struct ShadowedSlashCommandDto {
 }
 
 /// fork 请求的冻结线缆形状。v1 route 返回 501。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkSessionRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     /// 可选来源 durable seq。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_seq: Option<u64>,
 }
 
 /// 会话列表项。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionListItemDto {
@@ -270,21 +355,22 @@ pub struct SessionListItemDto {
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// 父会话 seq，v1 未接线。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_storage_seq: Option<u64>,
     pub phase: PhaseDto,
     /// 首条用户消息内容，无消息时为 None。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_user_message: Option<String>,
     /// 创建该子 session 的扩展 ID。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_extension: Option<String>,
 }
 
 /// 会话列表响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionListResponseDto {
@@ -292,6 +378,7 @@ pub struct SessionListResponseDto {
 }
 
 /// conversation cursor。v1 中它是 snapshot 最新 durable seq 的十进制字符串。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationCursorDto {
@@ -299,6 +386,7 @@ pub struct ConversationCursorDto {
 }
 
 /// conversation 全量快照响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSnapshotResponseDto {
@@ -313,6 +401,7 @@ pub struct ConversationSnapshotResponseDto {
 }
 
 /// conversation 控制状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationControlStateDto {
@@ -322,14 +411,15 @@ pub struct ConversationControlStateDto {
     pub compact_pending: bool,
     pub compacting: bool,
     /// 当前模式 ID，v1 暂无。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_mode_id: Option<String>,
     /// 活跃 turn ID，v1 snapshot 暂无。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
 }
 
 /// conversation 块。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -341,14 +431,14 @@ pub enum ConversationBlockDto {
         id: String,
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        attachments: Vec<MessageAttachment>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments: Vec<PromptAttachmentDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
     },
     Assistant {
         id: String,
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
         status: ConversationBlockStatusDto,
     },
@@ -361,7 +451,7 @@ pub enum ConversationBlockDto {
         text: String,
         status: ConversationBlockStatusDto,
         /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,12 +471,13 @@ pub enum ConversationBlockDto {
         trigger: String,
         pre_tokens: usize,
         post_tokens: usize,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         transcript_path: Option<String>,
     },
 }
 
 /// conversation 块状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationBlockStatusDto {
@@ -395,7 +486,12 @@ pub enum ConversationBlockStatusDto {
     Error,
 }
 
+impl ConversationBlockStatusDto {
+    pub const ALL: &'static [Self] = &[Self::Streaming, Self::Complete, Self::Error];
+}
+
 /// SSE 信封。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationStreamEnvelopeDto {
@@ -405,6 +501,7 @@ pub struct ConversationStreamEnvelopeDto {
 }
 
 /// SSE conversation 增量。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     rename_all = "camelCase",
@@ -480,6 +577,7 @@ pub enum ConversationDeltaDto {
 }
 
 /// HTTP 错误响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationErrorEnvelopeDto {
@@ -488,6 +586,7 @@ pub struct ConversationErrorEnvelopeDto {
 }
 
 /// 删除项目响应（删除某工作目录下所有会话）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteProjectResponseDto {
@@ -497,15 +596,16 @@ pub struct DeleteProjectResponseDto {
 // ── Config / Models DTOs ──
 
 /// GET /api/config 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigViewResponseDto {
     pub config_path: String,
     pub active_profile: String,
     pub active_model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_profile: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
     #[serde(default)]
     pub extension_states: std::collections::BTreeMap<String, bool>,
@@ -521,6 +621,7 @@ fn default_approval_mode() -> String {
 }
 
 /// GET /api/extensions 响应中的单个扩展状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionStateDto {
@@ -535,6 +636,56 @@ pub struct ExtensionStateDto {
     pub diagnostics: Option<ExtensionDiagnosticsDto>,
 }
 
+/// 扩展注册的斜杠命令声明。
+///
+/// 字段保留既有 snake_case 嵌套 wire 形状，避免改变现有 HTTP 契约。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionSlashCommandDto {
+    pub name: String,
+    pub description: String,
+    pub args_schema: Option<serde_json::Value>,
+    pub requires_idle: bool,
+    pub argument_completions: bool,
+    pub priority: i32,
+}
+
+impl From<SlashCommand> for ExtensionSlashCommandDto {
+    fn from(command: SlashCommand) -> Self {
+        Self {
+            name: command.name,
+            description: command.description,
+            args_schema: command.args_schema,
+            requires_idle: command.requires_idle,
+            argument_completions: command.argument_completions,
+            priority: command.priority,
+        }
+    }
+}
+
+/// 扩展可发射事件的声明。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionEventDeclDto {
+    pub event_type: String,
+    pub schema_version: u32,
+    pub durable: bool,
+    pub max_payload_bytes: usize,
+}
+
+impl From<ExtensionEventDecl> for ExtensionEventDeclDto {
+    fn from(event: ExtensionEventDecl) -> Self {
+        Self {
+            event_type: event.event_type,
+            schema_version: event.schema_version,
+            durable: event.durable,
+            max_payload_bytes: event.max_payload_bytes,
+        }
+    }
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionDeclarationDto {
@@ -543,16 +694,17 @@ pub struct ExtensionDeclarationDto {
     pub tools: Vec<ToolDefinitionDto>,
     #[serde(default)]
     pub dynamic_tools: bool,
-    pub commands: Vec<SlashCommand>,
+    pub commands: Vec<ExtensionSlashCommandDto>,
     #[serde(default)]
     pub dynamic_commands: bool,
-    pub keybindings: Vec<Keybinding>,
-    pub status_items: Vec<StatusItem>,
-    pub events: Vec<ExtensionEventDecl>,
+    pub keybindings: Vec<KeybindingDto>,
+    pub status_items: Vec<StatusItemDto>,
+    pub events: Vec<ExtensionEventDeclDto>,
     #[serde(default)]
     pub http_routes: Vec<ExtensionHttpRouteDto>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinitionDto {
     pub name: String,
@@ -575,6 +727,7 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
     }
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionHttpRouteDto {
@@ -584,6 +737,7 @@ pub struct ExtensionHttpRouteDto {
     pub max_body_bytes: usize,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionDiagnosticsDto {
@@ -605,6 +759,7 @@ pub struct ExtensionDiagnosticsDto {
     pub last_error: Option<String>,
 }
 
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionStageDiagnosticsDto {
@@ -622,6 +777,7 @@ fn default_extension_stage_status() -> String {
 }
 
 /// GET /api/extensions 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionListResponseDto {
@@ -629,6 +785,7 @@ pub struct ExtensionListResponseDto {
 }
 
 /// POST /api/extensions/reload 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionReloadResponseDto {
@@ -637,6 +794,7 @@ pub struct ExtensionReloadResponseDto {
 }
 
 /// POST /api/extensions/set-enabled 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetExtensionEnabledRequest {
@@ -645,6 +803,7 @@ pub struct SetExtensionEnabledRequest {
 }
 
 /// POST /api/extensions/set-enabled 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetExtensionEnabledResponseDto {
@@ -654,6 +813,7 @@ pub struct SetExtensionEnabledResponseDto {
 }
 
 /// 配置文件中的 Profile 信息。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDto {
@@ -667,6 +827,7 @@ pub struct ProfileDto {
 }
 
 /// GET /api/config/provider-catalog 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCatalogResponseDto {
@@ -674,6 +835,7 @@ pub struct ProviderCatalogResponseDto {
 }
 
 /// Provider catalog 中的单个 provider spec。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSpecDto {
@@ -689,17 +851,19 @@ pub struct ProviderSpecDto {
 }
 
 /// Provider catalog 中的 endpoint preset。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderEndpointPresetDto {
     pub id: String,
     pub label: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     pub is_default: bool,
 }
 
 /// Provider catalog 暴露给 UI 的能力摘要。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSpecCapabilitiesDto {
@@ -709,25 +873,31 @@ pub struct ProviderSpecCapabilitiesDto {
 }
 
 /// POST /api/config/provider-preset/apply 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyProviderPresetRequest {
     pub provider_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub activate: bool,
 }
 
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// POST /api/config/provider-preset/apply 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyProviderPresetResponseDto {
@@ -735,11 +905,12 @@ pub struct ApplyProviderPresetResponseDto {
     pub profile_name: String,
     pub model_id: String,
     pub activated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
 
 /// POST /api/config/provider-preset/remove 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveProviderPresetRequest {
@@ -747,6 +918,7 @@ pub struct RemoveProviderPresetRequest {
 }
 
 /// POST /api/config/provider-preset/remove 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveProviderPresetResponseDto {
@@ -754,11 +926,12 @@ pub struct RemoveProviderPresetResponseDto {
     pub removed_profile_name: String,
     pub active_profile: String,
     pub active_model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
 
 /// Profile 中的模型选项（与 config.toml 的 `modelOptions` 对齐）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionsDto {
@@ -767,31 +940,34 @@ pub struct ModelOptionsDto {
 }
 
 /// Profile 中的模型信息。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {
     pub id: String,
     pub max_tokens: Option<u32>,
     pub context_limit: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_options: Option<ModelOptionsDto>,
 }
 
 /// POST /api/config/active-selection 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateActiveSelectionRequest {
     pub active_profile: String,
     pub active_model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_profile: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
     /// 工具审批模式：`manual` 或 `yolo`。
     pub approval_mode: String,
 }
 
 /// POST /api/config/active-selection 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateActiveSelectionResponseDto {
@@ -800,18 +976,20 @@ pub struct UpdateActiveSelectionResponseDto {
 }
 
 /// POST /api/config/reload 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigReloadResponseDto {
     pub active_profile: String,
     pub active_model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_profile: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
 }
 
 /// GET /api/models/current 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentModelResponseDto {
@@ -822,6 +1000,7 @@ pub struct CurrentModelResponseDto {
 }
 
 /// GET /api/models 响应中的单个模型。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableModelDto {
@@ -832,6 +1011,7 @@ pub struct AvailableModelDto {
 }
 
 /// GET /api/models 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelListResponseDto {
@@ -839,6 +1019,7 @@ pub struct ModelListResponseDto {
 }
 
 /// POST /api/models/test 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelTestResponseDto {

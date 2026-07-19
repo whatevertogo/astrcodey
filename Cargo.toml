@@ -95,6 +95,7 @@ tauri-plugin-http = "2.5.9"
 scraper = "0.27.0"
 html2text = "0.17.1"
 url = "2.5.8"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 
 # --- Profiles ---
 

@@ -125,34 +125,6 @@ fn replay_events_at_path(
     Ok(events)
 }
 
-fn read_first_event_at_path(path: &Path) -> Result<Option<Event>, StorageError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let file = File::open(path).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
-    })?;
-    let mut reader = BufReader::new(file);
-    let mut line_number = 0usize;
-    loop {
-        let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
-        })?;
-        if bytes_read == 0 {
-            return Ok(None);
-        }
-        if !line.ends_with('\n') {
-            return Ok(None);
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        line_number += 1;
-        return Ok(Some(parse_event_line(path, line_number, &line)?));
-    }
-}
-
 fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError> {
     if !path.exists() {
         return Ok((None, None, None));
@@ -625,22 +597,6 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
-    /// Get the file path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Read only the first event from the log file.
-    ///
-    /// This is significantly faster than `replay_all()` for large logs
-    /// because it stops after reading the first non-empty line.
-    /// Useful for extracting session metadata (SessionStarted event)
-    /// without replaying the entire history.
-    pub async fn read_first_event(path: &Path) -> Result<Option<Event>, StorageError> {
-        let path = path.to_path_buf();
-        run_blocking_io(move || read_first_event_at_path(&path)).await
-    }
-
     /// Read the first event, last event, and first user message from the log
     /// in a single pass. Returns `(first, last, first_user_message)`.
     pub async fn read_first_and_last(path: &Path) -> Result<EventLogEnds, StorageError> {
@@ -719,7 +675,7 @@ fn last_seq_from_path(path: &Path) -> Result<u64, StorageError> {
 
 fn scan_full_file_for_last_seq(path: &Path) -> Result<u64, StorageError> {
     let mut last_seq: Option<u64> = None;
-    let iterator = EventLogIterator::new(&path.to_path_buf())?;
+    let iterator = EventLogIterator::new(path)?;
     for event_result in iterator {
         let (_line_number, event) = event_result?;
         last_seq = event.seq;
@@ -809,7 +765,7 @@ fn enhance_metadata_error(path: &Path, e: std::io::Error) -> String {
 }
 
 /// 事件日志的流式迭代器，逐行读取并解析事件。
-pub struct EventLogIterator {
+struct EventLogIterator {
     reader: BufReader<File>,
     /// 当前读取的行号（从 1 开始，含空行），用于错误定位。
     line_number: usize,
@@ -819,14 +775,14 @@ pub struct EventLogIterator {
 
 impl EventLogIterator {
     /// 从指定路径创建事件日志迭代器。
-    pub fn new(path: &PathBuf) -> Result<Self, StorageError> {
+    fn new(path: &Path) -> Result<Self, StorageError> {
         let file = File::open(path).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
         })?;
         Ok(Self {
             reader: BufReader::new(file),
             line_number: 0,
-            path: path.clone(),
+            path: path.to_path_buf(),
         })
     }
 }
@@ -958,7 +914,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
+        let mut iter = EventLogIterator::new(&path).unwrap();
         let err = iter.next().unwrap().unwrap_err();
         assert!(matches!(
             err,
@@ -1136,34 +1092,29 @@ mod tests {
     }
 
     #[test]
-    fn iterator_rejects_malformed_jsonl_lines() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("corrupt.jsonl");
-        let valid = serde_json::to_string(&make_start_event("s1")).unwrap();
-        std::fs::write(&path, format!("{valid}\nnot-json\n")).unwrap();
-        let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
-        assert!(iter.next().unwrap().is_ok());
-        let err = iter.next().unwrap().unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
-        ));
-    }
-
-    #[test]
     fn iterator_malformed_line_table() {
         let cases = [
-            "{",
-            "{\"session_id\":",
-            "[]",
-            "null",
-            "{\"not\":\"an_event\"}",
+            ("{", false),
+            ("{\"session_id\":", false),
+            ("[]", false),
+            ("null", false),
+            ("{\"not\":\"an_event\"}", false),
+            ("not-json", true),
         ];
-        for (idx, line) in cases.iter().enumerate() {
+        for (idx, (line, has_valid_prefix)) in cases.iter().enumerate() {
             let dir = tempdir().unwrap();
             let path = dir.path().join(format!("bad-{idx}.jsonl"));
-            std::fs::write(&path, format!("{line}\n")).unwrap();
-            let mut iter = EventLogIterator::new(&path.to_path_buf()).unwrap();
+            let prefix =
+                has_valid_prefix.then(|| serde_json::to_string(&make_start_event("s1")).unwrap());
+            let content = prefix.map_or_else(
+                || format!("{line}\n"),
+                |prefix| format!("{prefix}\n{line}\n"),
+            );
+            std::fs::write(&path, content).unwrap();
+            let mut iter = EventLogIterator::new(&path).unwrap();
+            if *has_valid_prefix {
+                assert!(iter.next().unwrap().is_ok());
+            }
             let err = iter.next().unwrap().unwrap_err();
             assert!(
                 matches!(err, StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),

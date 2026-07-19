@@ -5,8 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Wire protocol: JSON-RPC 2.0 types, commands, events, UI sub-protocol"
 
+[features]
+typescript = ["dep:ts-rs"]
+
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ts-rs = { workspace = true, optional = true }
+
+[[example]]
+name = "generate-typescript"
+required-features = ["typescript"]

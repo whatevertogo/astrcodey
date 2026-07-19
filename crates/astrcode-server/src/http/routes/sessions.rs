@@ -188,9 +188,8 @@ pub(in crate::http) async fn submit_prompt(
     Path(session_id): Path<String>,
     Json(request): Json<PromptRequest>,
 ) -> Response {
-    if let Err(error) =
-        astrcode_core::message_attachment::validate_attachments(&request.attachments)
-    {
+    let attachments: Vec<_> = request.attachments.into_iter().map(Into::into).collect();
+    if let Err(error) = astrcode_core::message_attachment::validate_attachments(&attachments) {
         return handler_error_response(
             HandlerError::InvalidRequest(error.to_string()),
             "prompt_failed",
@@ -199,7 +198,7 @@ pub(in crate::http) async fn submit_prompt(
     tracing::info!(
         session_id = %session_id,
         text_len = request.text.len(),
-        attachment_count = request.attachments.len(),
+        attachment_count = attachments.len(),
         "POST prompt submit"
     );
     let session_id = SessionId::from(session_id);
@@ -209,7 +208,7 @@ pub(in crate::http) async fn submit_prompt(
             session_id.clone(),
             crate::turn_scheduler::PromptInput {
                 text: request.text,
-                attachments: request.attachments,
+                attachments,
             },
         )
         .await;
@@ -320,23 +319,14 @@ pub(in crate::http) async fn list_commands(
                 .extension_runner()
                 .collect_keybindings()
                 .into_iter()
-                .map(|kb| KeybindingDto {
-                    key: kb.key,
-                    command: kb.command,
-                    arguments: kb.arguments,
-                    description: kb.description,
-                })
+                .map(Into::into)
                 .collect();
             let status_items: Vec<StatusItemDto> = state
                 .runtime
                 .extension_runner()
                 .collect_status_items()
                 .into_iter()
-                .map(|item| StatusItemDto {
-                    id: item.id,
-                    text: item.text,
-                    priority: item.priority,
-                })
+                .map(Into::into)
                 .collect();
             Json(SlashCommandListResponseDto {
                 commands: command_list.commands.into_iter().map(Into::into).collect(),

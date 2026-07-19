@@ -160,10 +160,6 @@ impl Session {
         &self.caps
     }
 
-    pub fn caps_arc(&self) -> Arc<SessionRuntimeServices> {
-        Arc::clone(&self.caps)
-    }
-
     pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
         self.store.session_store_dir(&self.id).await.ok().flatten()
     }

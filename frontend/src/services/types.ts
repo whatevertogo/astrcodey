@@ -1,30 +1,76 @@
-// Types aligned with astrcode-protocol/src/http.rs DTOs
+// HTTP wire contracts come from Rust-generated bindings. Local interfaces are
+// limited to frontend state and the strictly decoded conversation/SSE model.
 
-export type Phase =
-  | 'idle'
-  | 'thinking'
-  | 'streaming'
-  | 'calling_tool'
-  | 'compacting'
-  | 'error'
-export type ToolOutputStream = 'stdout' | 'stderr'
-export type BlockStatus = 'streaming' | 'complete' | 'error'
+import type {
+  AgentSessionStatusDto,
+  ApplyProviderPresetRequest,
+  ApplyProviderPresetResponseDto,
+  AvailableModelDto,
+  CommandCompletionItemDto,
+  CommandCompletionResponse as CommandCompletionResponseDto,
+  CommandInvokeResponse,
+  CompactSessionResponse as CompactSessionResponseDto,
+  ConfigViewResponseDto,
+  ConversationBlockStatusDto,
+  ConversationCursorDto,
+  CreateSessionRequest,
+  CreateSessionResponseDto,
+  CurrentModelResponseDto,
+  ExtensionDeclarationDto,
+  ExtensionDiagnosticsDto,
+  ExtensionHttpRouteDto,
+  ExtensionStageDiagnosticsDto,
+  ExtensionStateDto,
+  KeybindingDto,
+  ModelDto,
+  ModelTestResponseDto,
+  PhaseDto,
+  ProfileDto,
+  PromptAttachmentDto,
+  PromptRequest,
+  PromptSubmitResponse as PromptSubmitResponseDto,
+  ProviderAuthSchemeDto,
+  ProviderCatalogResponseDto,
+  ProviderEndpointPresetDto,
+  ProviderSpecCapabilitiesDto,
+  ProviderSpecDto,
+  ProviderWireFormatDto,
+  RemoveProviderPresetRequest,
+  RemoveProviderPresetResponseDto,
+  SessionListItemDto,
+  SessionListResponseDto,
+  ShadowedSlashCommandDto,
+  SlashCommandInfoDto,
+  SlashCommandListResponseDto,
+  StatusItemDto,
+  ToolOutputStreamDto,
+} from './generated'
+
+export {
+  AGENT_SESSION_STATUSES,
+  BLOCK_STATUSES,
+  PHASES,
+  PROVIDER_AUTH_SCHEMES,
+  PROVIDER_WIRE_FORMATS,
+  TOOL_OUTPUT_STREAMS,
+} from './generated'
+
+export type Phase = PhaseDto
+export type ToolOutputStream = ToolOutputStreamDto
+export type BlockStatus = ConversationBlockStatusDto
+export type {
+  ApplyProviderPresetRequest,
+  CommandInvokeResponse,
+  CreateSessionRequest,
+  PromptRequest,
+  RemoveProviderPresetRequest,
+}
 
 // ── Request/Response ──
 
-export interface CreateSessionRequest {
-  workingDir: string
-}
+export type CreateSessionResponse = CreateSessionResponseDto
 
-export interface CreateSessionResponse {
-  sessionId: string
-}
-
-export interface PromptAttachmentWire {
-  filename: string
-  content: string
-  mediaType: string
-}
+export type PromptAttachmentWire = PromptAttachmentDto
 
 export interface PromptAttachment {
   id: string
@@ -34,122 +80,33 @@ export interface PromptAttachment {
   previewUrl: string
 }
 
-export interface PromptRequest {
-  text: string
-  attachments?: PromptAttachmentWire[]
-}
+export type PromptSubmitResponse = PromptSubmitResponseDto
 
-export type PromptSubmitResponse =
-  | {
-      kind: 'accepted'
-      sessionId: string
-      turnId: string
-      branchedFromSessionId?: string
-    }
-  | {
-      kind: 'handled'
-      sessionId: string
-      message: string
-    }
+export type CompactSessionResponse = CompactSessionResponseDto
 
-export interface CompactSessionResponse {
-  accepted: boolean
-  deferred: boolean
-  newSessionId?: string
-  message: string
-}
+export type SlashCommandInfo = SlashCommandInfoDto
 
-export interface SlashCommandInfo {
-  name: string
-  description: string
-  needsArgument: boolean
-  requiresIdle: boolean
-  argumentCompletions: boolean
-  priority: number
-  source: 'builtin' | 'plugin' | 'skill' | string
-}
+export type CommandCompletionItem = CommandCompletionItemDto
 
-export type CommandInvokeResponse =
-  | {
-      kind: 'display'
-      sessionId: string
-      content: string
-      isError: boolean
-    }
-  | {
-      kind: 'handled'
-      sessionId: string
-      message: string
-    }
-  | {
-      kind: 'started'
-      sessionId: string
-      turnId: string
-    }
+export type CommandCompletionResponse = CommandCompletionResponseDto
 
-export interface CommandCompletionItem {
-  label: string
-  insertText: string
-  detail?: string
-}
+export type KeybindingInfo = KeybindingDto
 
-export interface CommandCompletionResponse {
-  items: CommandCompletionItem[]
-  truncated: boolean
-}
+export type StatusItemInfo = StatusItemDto
 
-export interface KeybindingInfo {
-  key: string
-  command: string
-  arguments: string
-  description: string
-}
+export type SlashCommandListResponse = SlashCommandListResponseDto
 
-export interface StatusItemInfo {
-  id: string
-  text: string
-  priority: number
-}
-
-export interface SlashCommandListResponse {
-  commands: SlashCommandInfo[]
-  shadowedCommands: ShadowedSlashCommandInfo[]
-  keybindings: KeybindingInfo[]
-  statusItems: StatusItemInfo[]
-}
-
-export interface ShadowedSlashCommandInfo {
-  name: string
-  activeSource: string
-  activePriority: number
-  shadowedSource: string
-  shadowedPriority: number
-  shadowedExtensionId: string
-}
+export type ShadowedSlashCommandInfo = ShadowedSlashCommandDto
 
 // ── Session List ──
 
-export interface SessionListItem {
-  sessionId: string
-  workingDir: string
-  displayName: string
-  title: string
-  createdAt: string
-  updatedAt: string
-  parentSessionId?: string
-  parentStorageSeq?: number
-  phase: Phase
-  firstUserMessage?: string
-  sourceExtension?: string
-}
+export type SessionListItem = SessionListItemDto
 
-export interface SessionListResponse {
-  sessions: SessionListItem[]
-}
+export type SessionListResponse = SessionListResponseDto
 
 // ── Conversation Snapshot ──
 
-export type AgentSessionStatus = 'running' | 'completed' | 'failed'
+export type AgentSessionStatus = AgentSessionStatusDto
 
 export interface AgentSessionLink {
   childSessionId: string
@@ -165,9 +122,7 @@ export interface AgentSessionLink {
   currentTool?: string
 }
 
-export interface ConversationCursor {
-  value: string
-}
+export type ConversationCursor = ConversationCursorDto
 
 export interface ConversationControlState {
   phase: Phase
@@ -284,173 +239,39 @@ export interface ConnectionState {
 
 // ── Config / Models ──
 
-export interface ProfileView {
-  name: string
-  providerKind: string
-  wireFormat: ProviderWireFormat
-  authScheme: ProviderAuthScheme
-  baseUrl: string
-  hasApiKey: boolean
-  models: ModelView[]
-}
+export type ProfileView = ProfileDto
 
-export type ProviderWireFormat =
-  | 'openai_chat_completions'
-  | 'openai_responses'
-  | 'anthropic_messages'
-  | 'google_genai'
+export type ProviderWireFormat = ProviderWireFormatDto
+export type ProviderAuthScheme = ProviderAuthSchemeDto
 
-export type ProviderAuthScheme =
-  | 'none'
-  | 'bearer'
-  | 'x_api_key'
-  | 'x_goog_api_key'
+export type ModelView = ModelDto
 
-export interface ModelView {
-  id: string
-  maxTokens?: number
-  contextLimit?: number
-}
-
-export interface ConfigView {
-  configPath: string
-  activeProfile: string
-  activeModel: string
-  activeSmallProfile?: string
-  activeSmallModel?: string
+export type ConfigView = Omit<ConfigViewResponseDto, 'approvalMode'> & {
   approvalMode: 'manual' | 'yolo'
-  extensionStates: Record<string, boolean>
-  profiles: ProfileView[]
-  warning?: string
 }
 
-export interface ProviderCatalogView {
-  providers: ProviderSpecView[]
-}
+export type ProviderCatalogView = ProviderCatalogResponseDto
 
-export interface ProviderSpecView {
-  id: string
-  displayName: string
-  providerKind: string
-  wireFormat: ProviderWireFormat
-  authScheme: ProviderAuthScheme
-  defaultModel: string
-  apiKeyEnvVars: string[]
-  endpoints: ProviderEndpointPresetView[]
-  capabilities: ProviderSpecCapabilitiesView
-}
+export type ProviderSpecView = ProviderSpecDto
 
-export interface ProviderEndpointPresetView {
-  id: string
-  label: string
-  baseUrl?: string
-  isDefault: boolean
-}
+export type ProviderEndpointPresetView = ProviderEndpointPresetDto
 
-export interface ProviderSpecCapabilitiesView {
-  promptCacheKey: boolean
-  streamUsage: boolean
-  reasoningEffort: boolean
-}
+export type ProviderSpecCapabilitiesView = ProviderSpecCapabilitiesDto
 
-export interface ApplyProviderPresetRequest {
-  providerId: string
-  endpointId?: string
-  profileName?: string
-  baseUrl?: string
-  apiKey?: string
-  modelId?: string
-  activate?: boolean
-}
+export type ApplyProviderPresetResponse = ApplyProviderPresetResponseDto
 
-export interface ApplyProviderPresetResponse {
-  success: boolean
-  profileName: string
-  modelId: string
-  activated: boolean
-  warning?: string
-}
+export type RemoveProviderPresetResponse = RemoveProviderPresetResponseDto
 
-export interface RemoveProviderPresetRequest {
-  profileName: string
-}
+export type ExtensionStateView = ExtensionStateDto
 
-export interface RemoveProviderPresetResponse {
-  success: boolean
-  removedProfileName: string
-  activeProfile: string
-  activeModel: string
-  warning?: string
-}
+export type ExtensionDeclarationView = ExtensionDeclarationDto
 
-export interface ExtensionStateView {
-  extensionId: string
-  enabled: boolean
-  loaded: boolean
-  source: 'builtin' | 'disk' | 'unknown'
-  declaration?: ExtensionDeclarationView
-  diagnostics?: ExtensionDiagnosticsView
-}
+export type ExtensionHttpRouteView = ExtensionHttpRouteDto
 
-export interface ExtensionDeclarationView {
-  id: string
-  capabilities: string[]
-  tools: Record<string, unknown>[]
-  dynamicTools: boolean
-  commands: Record<string, unknown>[]
-  dynamicCommands: boolean
-  keybindings: Record<string, unknown>[]
-  statusItems: Record<string, unknown>[]
-  events: Record<string, unknown>[]
-  httpRoutes: ExtensionHttpRouteView[]
-}
+export type ExtensionDiagnosticsView = ExtensionDiagnosticsDto
 
-export interface ExtensionHttpRouteView {
-  method: string
-  path: string
-  description: string
-  maxBodyBytes: number
-}
+export type ExtensionStageDiagnosticsView = ExtensionStageDiagnosticsDto
 
-export interface ExtensionDiagnosticsView {
-  load: ExtensionStageDiagnosticsView
-  register: ExtensionStageDiagnosticsView
-  start: ExtensionStageDiagnosticsView
-  hookCalls: number
-  hookTimeouts: number
-  lastHook?: string
-  lastDurationMs?: number
-  lastError?: string
-}
-
-export type ExtensionStageStatusView =
-  | 'unknown'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'skipped'
-
-export interface ExtensionStageDiagnosticsView {
-  status: ExtensionStageStatusView
-  durationMs?: number
-  error?: string
-}
-
-export interface CurrentModelInfo {
-  profileName: string
-  modelId: string
-  providerKind: string
-  wireFormat: ProviderWireFormat
-}
-
-export interface AvailableModel {
-  profileName: string
-  modelId: string
-  providerKind: string
-  wireFormat: ProviderWireFormat
-}
-
-export interface ModelTestResult {
-  success: boolean
-  message: string
-}
+export type CurrentModelInfo = CurrentModelResponseDto
+export type AvailableModel = AvailableModelDto
+export type ModelTestResult = ModelTestResponseDto

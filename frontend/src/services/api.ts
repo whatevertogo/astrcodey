@@ -1,27 +1,16 @@
 import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
-import {
-  decodeActiveSelectionResponse,
-  decodeApplyProviderPresetResponse,
-  decodeAvailableModels,
-  decodeCommandCompletionResponse,
-  decodeCommandInvokeResponse,
-  decodeConfigReloadResponse,
-  decodeConfigView,
-  decodeConversationSnapshot,
-  decodeCreateSessionResponse,
-  decodeCurrentModelInfo,
-  decodeDeleteProjectResponse,
-  decodeExtensionListResponse,
-  decodeExtensionReloadResponse,
-  decodeModelTestResult,
-  decodeProviderCatalog,
-  decodePromptSubmitResponse,
-  decodeRemoveProviderPresetResponse,
-  decodeSetExtensionEnabledResponse,
-  decodeSlashCommandListResponse,
-  decodeSessionListResponse,
-} from './protocol'
+import { decodeConversationSnapshot } from './protocol'
+import type {
+  ConfigReloadResponseDto,
+  DeleteProjectResponseDto,
+  ExtensionListResponseDto,
+  ExtensionReloadResponseDto,
+  ModelListResponseDto,
+  SetExtensionEnabledResponseDto,
+  ToolUiRespondResponse,
+  UpdateActiveSelectionResponseDto,
+} from './generated'
 import type {
   CreateSessionResponse,
   CommandCompletionResponse,
@@ -34,12 +23,10 @@ import type {
   ApplyProviderPresetResponse,
   ConfigView,
   CurrentModelInfo,
-  AvailableModel,
   ModelTestResult,
   ProviderCatalogView,
   RemoveProviderPresetResponse,
   SlashCommandListResponse,
-  ExtensionStateView,
 } from './types'
 
 let baseUrl = ''
@@ -101,7 +88,7 @@ async function formatRequestError(
   return `${response.status} ${response.statusText}: ${body}`
 }
 
-async function request(path: string, init?: RequestInit): Promise<unknown> {
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const fetchFn = await resolveFetch()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -121,39 +108,31 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
     throw new Error(await formatRequestError(response, body))
   }
   if (response.status === 204) {
-    return undefined
+    return undefined as T
   }
-  return response.json()
+  return response.json() as Promise<T>
 }
 
 export async function createSession(
   workingDir: string
 ): Promise<CreateSessionResponse> {
-  console.log('[api] createSession → POST /api/sessions', { workingDir })
-  try {
-    const result = decodeCreateSessionResponse(
-      await request('/api/sessions', {
-        method: 'POST',
-        body: JSON.stringify({ workingDir }),
-      })
-    )
-    console.log('[api] createSession ←', result)
-    return result
-  } catch (err) {
-    console.error('[api] createSession FAILED', err)
-    throw err
-  }
+  return request<CreateSessionResponse>('/api/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ workingDir }),
+  })
 }
 
 export async function listSessions(): Promise<SessionListResponse> {
-  return decodeSessionListResponse(await request('/api/sessions'))
+  return request<SessionListResponse>('/api/sessions')
 }
 
 export async function getConversation(
   sessionId: string
 ): Promise<ConversationSnapshot> {
   return decodeConversationSnapshot(
-    await request(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`)
+    await request<unknown>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
+    )
   )
 }
 
@@ -162,11 +141,12 @@ export async function injectMessage(
   sessionId: string,
   text: string
 ): Promise<PromptSubmitResponse> {
-  return decodePromptSubmitResponse(
-    await request(`/api/sessions/${encodeURIComponent(sessionId)}/inject`, {
+  return request<PromptSubmitResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/inject`,
+    {
       method: 'POST',
       body: JSON.stringify({ text }),
-    })
+    }
   )
 }
 
@@ -175,31 +155,20 @@ export async function submitPrompt(
   text: string,
   attachments: PromptAttachmentWire[] = []
 ): Promise<PromptSubmitResponse> {
-  console.log('[api] submitPrompt →', {
-    sessionId,
-    text,
-    attachmentCount: attachments.length,
-  })
-  try {
-    const result = decodePromptSubmitResponse(
-      await request(`/api/sessions/${encodeURIComponent(sessionId)}/prompt`, {
-        method: 'POST',
-        body: JSON.stringify({ text, attachments }),
-      })
-    )
-    console.log('[api] submitPrompt ←', result)
-    return result
-  } catch (err) {
-    console.error('[api] submitPrompt FAILED', err)
-    throw err
-  }
+  return request<PromptSubmitResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/prompt`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ text, attachments }),
+    }
+  )
 }
 
 export async function listCommands(
   sessionId: string
 ): Promise<SlashCommandListResponse> {
-  return decodeSlashCommandListResponse(
-    await request(`/api/sessions/${encodeURIComponent(sessionId)}/commands`)
+  return request<SlashCommandListResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/commands`
   )
 }
 
@@ -209,14 +178,12 @@ export async function executeExtensionCommand(
   command: string,
   argumentsText = ''
 ): Promise<CommandInvokeResponse> {
-  return decodeCommandInvokeResponse(
-    await request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ arguments: argumentsText }),
-      }
-    )
+  return request<CommandInvokeResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ arguments: argumentsText }),
+    }
   )
 }
 
@@ -226,14 +193,12 @@ export async function completeExtensionCommand(
   argument = '',
   cursor?: number
 ): Promise<CommandCompletionResponse> {
-  return decodeCommandCompletionResponse(
-    await request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}/complete`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ argument, cursor }),
-      }
-    )
+  return request<CommandCompletionResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(command)}/complete`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ argument, cursor }),
+    }
   )
 }
 
@@ -251,14 +216,10 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
 export async function deleteProject(
   workingDir: string
-): Promise<{ deletedCount: number }> {
-  return decodeDeleteProjectResponse(
-    await request(
-      `/api/projects?workingDir=${encodeURIComponent(workingDir)}`,
-      {
-        method: 'DELETE',
-      }
-    )
+): Promise<DeleteProjectResponseDto> {
+  return request<DeleteProjectResponseDto>(
+    `/api/projects?workingDir=${encodeURIComponent(workingDir)}`,
+    { method: 'DELETE' }
   )
 }
 
@@ -277,46 +238,39 @@ export async function healthCheck(): Promise<boolean> {
 // ── Config / Models ──
 
 export async function getConfig(): Promise<ConfigView> {
-  return decodeConfigView(await request('/api/config'))
+  return request<ConfigView>('/api/config')
 }
 
 export async function getProviderCatalog(): Promise<ProviderCatalogView> {
-  return decodeProviderCatalog(await request('/api/config/provider-catalog'))
+  return request<ProviderCatalogView>('/api/config/provider-catalog')
 }
 
 export async function applyProviderPreset(
   preset: ApplyProviderPresetRequest
 ): Promise<ApplyProviderPresetResponse> {
-  return decodeApplyProviderPresetResponse(
-    await request('/api/config/provider-preset/apply', {
+  return request<ApplyProviderPresetResponse>(
+    '/api/config/provider-preset/apply',
+    {
       method: 'POST',
       body: JSON.stringify(preset),
-    })
+    }
   )
 }
 
 export async function removeProviderPreset(
   profileName: string
 ): Promise<RemoveProviderPresetResponse> {
-  return decodeRemoveProviderPresetResponse(
-    await request('/api/config/provider-preset/remove', {
+  return request<RemoveProviderPresetResponse>(
+    '/api/config/provider-preset/remove',
+    {
       method: 'POST',
       body: JSON.stringify({ profileName }),
-    })
+    }
   )
 }
 
-export async function reloadConfig(): Promise<{
-  activeProfile: string
-  activeModel: string
-  activeSmallProfile?: string
-  activeSmallModel?: string
-}> {
-  return decodeConfigReloadResponse(
-    await request('/api/config/reload', {
-      method: 'POST',
-    })
-  )
+export async function reloadConfig(): Promise<ConfigReloadResponseDto> {
+  return request('/api/config/reload', { method: 'POST' })
 }
 
 export async function updateActiveSelection(
@@ -325,7 +279,7 @@ export async function updateActiveSelection(
   activeSmallProfile?: string,
   activeSmallModel?: string,
   approvalMode: 'manual' | 'yolo' = 'manual'
-): Promise<{ success: boolean; warning?: string }> {
+): Promise<UpdateActiveSelectionResponseDto> {
   const body: Record<string, unknown> = {
     activeProfile,
     activeModel,
@@ -333,49 +287,44 @@ export async function updateActiveSelection(
   }
   if (activeSmallProfile) body.activeSmallProfile = activeSmallProfile
   if (activeSmallModel) body.activeSmallModel = activeSmallModel
-  return decodeActiveSelectionResponse(
-    await request('/api/config/active-selection', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-  )
+  return request('/api/config/active-selection', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 }
 
 export async function getCurrentModel(): Promise<CurrentModelInfo> {
-  return decodeCurrentModelInfo(await request('/api/models/current'))
+  return request<CurrentModelInfo>('/api/models/current')
 }
 
-export async function listModels(): Promise<AvailableModel[]> {
-  return decodeAvailableModels(await request('/api/models'))
+export async function listModels(): Promise<ModelListResponseDto['models']> {
+  const response = await request<ModelListResponseDto>('/api/models')
+  return response.models
 }
 
 export async function testModel(): Promise<ModelTestResult> {
-  return decodeModelTestResult(
-    await request('/api/models/test', { method: 'POST' })
-  )
+  return request<ModelTestResult>('/api/models/test', { method: 'POST' })
 }
 
-export async function listExtensions(): Promise<ExtensionStateView[]> {
-  const response = decodeExtensionListResponse(await request('/api/extensions'))
+export async function listExtensions(): Promise<
+  ExtensionListResponseDto['extensions']
+> {
+  const response = await request<ExtensionListResponseDto>('/api/extensions')
   return response.extensions
 }
 
-export async function reloadExtensions(): Promise<{ reloadErrors: string[] }> {
-  return decodeExtensionReloadResponse(
-    await request('/api/extensions/reload', { method: 'POST' })
-  )
+export async function reloadExtensions(): Promise<ExtensionReloadResponseDto> {
+  return request('/api/extensions/reload', { method: 'POST' })
 }
 
 export async function setExtensionEnabled(
   extensionId: string,
   enabled: boolean
-): Promise<{ success: boolean; reloadErrors: string[] }> {
-  return decodeSetExtensionEnabledResponse(
-    await request('/api/extensions/set-enabled', {
-      method: 'POST',
-      body: JSON.stringify({ extensionId, enabled }),
-    })
-  )
+): Promise<SetExtensionEnabledResponseDto> {
+  return request('/api/extensions/set-enabled', {
+    method: 'POST',
+    body: JSON.stringify({ extensionId, enabled }),
+  })
 }
 
 /** Tool Approval UI 提交（如 askUser 问卷）。 */
@@ -384,7 +333,7 @@ export async function submitToolUiRespond(
   callId: string,
   toolName: string,
   answers: Record<string, string>
-): Promise<{ accepted: boolean }> {
+): Promise<ToolUiRespondResponse> {
   const response = await (
     await resolveFetch()
   )(
@@ -415,7 +364,7 @@ export async function submitToolUiRespond(
     throw new Error(await formatRequestError(response, body))
   }
 
-  return (await response.json()) as { accepted: boolean }
+  return (await response.json()) as ToolUiRespondResponse
 }
 
 export type ToolGateApprovalDecision =

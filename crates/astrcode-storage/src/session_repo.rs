@@ -32,6 +32,22 @@ use crate::{
     tool_artifacts::{slice_tool_result, write_tool_result_file},
 };
 
+fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
+    validate_session_id(id.as_str()).map_err(|error| StorageError::InvalidId(error.to_string()))
+}
+
+async fn directory_exists(path: &Path) -> bool {
+    tokio::fs::metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+}
+
+fn parse_cursor(cursor: &Cursor) -> Result<u64, StorageError> {
+    cursor
+        .parse()
+        .map_err(|_| StorageError::InvalidId(format!("Invalid cursor: {cursor}")))
+}
+
 fn source_extension_dir_component(source_extension: &str) -> Result<String, StorageError> {
     if source_extension.is_empty() {
         return Err(StorageError::InvalidId(
@@ -195,10 +211,7 @@ impl FileSystemSessionRepository {
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let sessions_dir = entry.path().join("sessions");
-            if tokio::fs::metadata(&sessions_dir)
-                .await
-                .is_ok_and(|m| m.is_dir())
-            {
+            if directory_exists(&sessions_dir).await {
                 roots.push(sessions_dir);
             }
         }
@@ -215,7 +228,7 @@ impl FileSystemSessionRepository {
 
         for root in self.all_session_roots().await {
             let dir = root.join(id.as_str());
-            if tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
+            if directory_exists(&dir).await {
                 return Some(dir);
             }
             if let Some(found) = self.search_subagents_tree(&root, id).await {
@@ -234,10 +247,7 @@ impl FileSystemSessionRepository {
             };
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let subagents = entry.path().join("subagents");
-                if !tokio::fs::metadata(&subagents)
-                    .await
-                    .is_ok_and(|m| m.is_dir())
-                {
+                if !directory_exists(&subagents).await {
                     continue;
                 }
                 let Ok(mut extension_entries) = tokio::fs::read_dir(&subagents).await else {
@@ -250,10 +260,7 @@ impl FileSystemSessionRepository {
                     }
                     let extension_dir = extension_entry.path();
                     let candidate = extension_dir.join(id.as_str());
-                    if tokio::fs::metadata(&candidate)
-                        .await
-                        .is_ok_and(|m| m.is_dir())
-                    {
+                    if directory_exists(&candidate).await {
                         return Some(candidate);
                     }
                     stack.push(extension_dir);
@@ -261,11 +268,6 @@ impl FileSystemSessionRepository {
             }
         }
         None
-    }
-
-    /// 获取指定会话的目录路径。
-    async fn session_dir(&self, id: &SessionId) -> Option<PathBuf> {
-        self.find_session_dir(id).await
     }
 
     async fn existing_session_dir(&self, id: &SessionId) -> Result<PathBuf, StorageError> {
@@ -288,8 +290,7 @@ impl FileSystemSessionRepository {
         &self,
         session_id: &SessionId,
     ) -> Result<Arc<SessionMeta>, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        validate_storage_session_id(session_id)?;
 
         if let Some(meta) = self.sessions.read().await.get(session_id).cloned() {
             return Ok(meta);
@@ -472,9 +473,7 @@ impl EventReader for FileSystemSessionRepository {
     ) -> Result<Vec<Event>, StorageError> {
         // session_id 验证由 get_or_open_meta 统一守卫
         let meta = self.get_or_open_meta(session_id).await?;
-        let Ok(seq) = cursor.parse::<u64>() else {
-            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
-        };
+        let seq = parse_cursor(cursor)?;
         meta.log.replay_after(seq).await
     }
 
@@ -485,27 +484,12 @@ impl EventReader for FileSystemSessionRepository {
         max_events: usize,
     ) -> Result<Vec<Event>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let Ok(seq) = cursor.parse::<u64>() else {
-            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
-        };
+        let seq = parse_cursor(cursor)?;
         meta.log.replay_after_limited(seq, max_events).await
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-        let mut ids: Vec<SessionId> = self
-            .sessions
-            .read()
-            .await
-            .iter()
-            .filter(|(_, meta)| !is_subagent_dir(&meta.dir))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for base_path in self.session_roots().await {
-            self.collect_session_ids_from_dir(&base_path, &mut ids)
-                .await;
-        }
-        ids.sort();
-        Ok(ids)
+        self.list_session_dirs().await
     }
 
     async fn read_tool_result_artifact_by_path(
@@ -540,7 +524,7 @@ impl EventReader for FileSystemSessionRepository {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        Ok(self.session_dir(session_id).await)
+        Ok(self.find_session_dir(session_id).await)
     }
 }
 
@@ -555,8 +539,7 @@ impl EventStore for FileSystemSessionRepository {
         tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        validate_storage_session_id(session_id)?;
 
         let dir = match parent_session_id {
             Some(parent_id) => {
@@ -646,8 +629,7 @@ impl EventStore for FileSystemSessionRepository {
     }
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        validate_storage_session_id(session_id)?;
 
         if let Some(dir) = self.find_session_dir(session_id).await {
             self.sessions
@@ -662,8 +644,7 @@ impl EventStore for FileSystemSessionRepository {
     }
 
     async fn recycle_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        validate_storage_session_id(session_id)?;
 
         let dir = self
             .find_session_dir(session_id)
@@ -704,8 +685,7 @@ impl EventStore for FileSystemSessionRepository {
     }
 
     async fn restore_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        validate_session_id(session_id.as_str())
-            .map_err(|e| StorageError::InvalidId(e.to_string()))?;
+        validate_storage_session_id(session_id)?;
 
         // 在所有 .recycled/{extension}/{session_id} 目录中搜索
         let recycled_path = self
@@ -812,10 +792,6 @@ fn is_subagent_dir(dir: &Path) -> bool {
 }
 
 impl FileSystemSessionRepository {
-    async fn session_roots(&self) -> Vec<PathBuf> {
-        self.all_session_roots().await
-    }
-
     /// 在所有项目的 subagents/.recycled/{extension}/ 目录中搜索指定 session。
     async fn find_recycled_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
         for root in self.all_session_roots().await {
@@ -852,27 +828,18 @@ impl FileSystemSessionRepository {
                 }
                 let session_dir = entry.path();
                 let recycled_dir = session_dir.join("subagents").join(".recycled");
-                if tokio::fs::metadata(&recycled_dir)
-                    .await
-                    .is_ok_and(|m| m.is_dir())
-                {
+                if directory_exists(&recycled_dir).await {
                     if let Ok(mut extension_entries) = tokio::fs::read_dir(&recycled_dir).await {
                         while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
                             let candidate = extension_entry.path().join(id.as_str());
-                            if tokio::fs::metadata(&candidate)
-                                .await
-                                .is_ok_and(|m| m.is_dir())
-                            {
+                            if directory_exists(&candidate).await {
                                 return Some(candidate);
                             }
                         }
                     }
                 }
                 let subagents = session_dir.join("subagents");
-                if tokio::fs::metadata(&subagents)
-                    .await
-                    .is_ok_and(|m| m.is_dir())
-                {
+                if directory_exists(&subagents).await {
                     let Ok(mut extension_entries) = tokio::fs::read_dir(&subagents).await else {
                         continue;
                     };
@@ -901,7 +868,7 @@ impl FileSystemSessionRepository {
             .filter(|(_, meta)| !is_subagent_dir(&meta.dir))
             .map(|(id, _)| id.clone())
             .collect();
-        for base_path in self.session_roots().await {
+        for base_path in self.all_session_roots().await {
             self.collect_session_ids_from_dir(&base_path, &mut ids)
                 .await;
         }
@@ -947,7 +914,7 @@ impl FileSystemSessionRepository {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
-        let Some(dir) = self.session_dir(session_id).await else {
+        let Some(dir) = self.find_session_dir(session_id).await else {
             return Ok(None);
         };
         let log_path = Self::event_log_path(&dir, session_id);

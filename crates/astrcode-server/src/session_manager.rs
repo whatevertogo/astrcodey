@@ -102,10 +102,6 @@ impl SessionManager {
         self.get_or_create_runtime_with_state(session_id).0
     }
 
-    fn get_runtime_if_present(&self, session_id: &SessionId) -> Option<Arc<SessionRuntimeState>> {
-        self.runtime_registry.get(session_id)
-    }
-
     fn get_or_create_runtime_with_state(
         &self,
         session_id: &SessionId,
@@ -120,23 +116,6 @@ impl SessionManager {
                     model_id,
                 ))
             })
-    }
-
-    fn remove_runtime_if_same(&self, session_id: &SessionId, expected: &Arc<SessionRuntimeState>) {
-        self.runtime_registry.remove_if_same(session_id, expected);
-    }
-
-    fn open_lock(&self, session_id: &SessionId) -> Arc<tokio::sync::Mutex<()>> {
-        self.runtime_registry.open_lock(session_id)
-    }
-
-    fn remove_open_lock_if_idle(
-        &self,
-        session_id: &SessionId,
-        expected: &Arc<tokio::sync::Mutex<()>>,
-    ) {
-        self.runtime_registry
-            .remove_open_lock_if_idle(session_id, expected);
     }
 
     pub(crate) fn config(&self) -> &Arc<ConfigManager> {
@@ -208,7 +187,7 @@ impl SessionManager {
 
             // Fast-path: runtime 已存在且 SessionResume 已完成时，不需要 open_lock 串行化
             // （避免慢盘/慢扩展导致“同一 session 的并发 reopen 全部排队”）。
-            if let Some(runtime) = self.get_runtime_if_present(&session_id) {
+            if let Some(runtime) = self.runtime_registry.get(&session_id) {
                 let session = Session::open(
                     Arc::clone(&self.event_store),
                     session_id.clone(),
@@ -223,11 +202,12 @@ impl SessionManager {
             // Cold open：仅在本进程首次打开时使用 open_lock 做短暂串行化，避免重复创建 runtime。
             // 注意：生命周期事件派发（可能被慢扩展阻塞）放在锁外；并发 open 通过 pending gate
             // 等待。
-            let open_lock = self.open_lock(&session_id);
+            let open_lock = self.runtime_registry.open_lock(&session_id);
             let opening = open_lock.lock().await;
             if let Some(pending) = self.runtime_registry.pending_session_resume(&session_id) {
                 drop(opening);
-                self.remove_open_lock_if_idle(&session_id, &open_lock);
+                self.runtime_registry
+                    .remove_open_lock_if_idle(&session_id, &open_lock);
                 pending.wait().await;
                 continue;
             }
@@ -238,7 +218,8 @@ impl SessionManager {
                     .begin_pending_session_resume(&session_id);
             }
             drop(opening);
-            self.remove_open_lock_if_idle(&session_id, &open_lock);
+            self.runtime_registry
+                .remove_open_lock_if_idle(&session_id, &open_lock);
 
             let session = match Session::open(
                 Arc::clone(&self.event_store),
@@ -253,7 +234,7 @@ impl SessionManager {
                     if resumed {
                         self.runtime_registry
                             .finish_pending_session_resume(&session_id);
-                        self.remove_runtime_if_same(&session_id, &runtime);
+                        self.runtime_registry.remove_if_same(&session_id, &runtime);
                     }
                     return Err(error.into());
                 },
@@ -264,7 +245,7 @@ impl SessionManager {
                 self.runtime_registry
                     .finish_pending_session_resume(&session_id);
                 if let Err(error) = resume_result {
-                    self.remove_runtime_if_same(&session_id, &runtime);
+                    self.runtime_registry.remove_if_same(&session_id, &runtime);
                     return Err(error.into());
                 }
             } else if let Some(pending) = self.runtime_registry.pending_session_resume(&session_id)
@@ -277,6 +258,18 @@ impl SessionManager {
     }
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
+        self.emit_session_shutdown(session_id).await?;
+        self.event_store.delete_session(session_id).await?;
+        self.cleanup_session_resources(session_id);
+        // 清理本 session 关联的持久化终端。
+        // 已通过 SessionResourceCleanup trait 注入，见 TerminalCleanup。
+        Ok(())
+    }
+
+    async fn emit_session_shutdown(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
         emit_lifecycle_for_read_model(
             &self.capabilities,
@@ -284,12 +277,8 @@ impl SessionManager {
             &model,
             ExtensionEvent::SessionShutdown,
         )
-        .await?;
-        self.event_store.delete_session(session_id).await?;
-        self.cleanup_session_resources(session_id);
-        // 清理本 session 关联的持久化终端。
-        // 已通过 SessionResourceCleanup trait 注入，见 TerminalCleanup。
-        Ok(())
+        .await
+        .map_err(SessionManagerError::from)
     }
 
     /// 释放 session 占用的进程内资源。
@@ -399,14 +388,7 @@ impl SessionManager {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
-        let model = self.event_store.session_read_model(session_id).await?;
-        emit_lifecycle_for_read_model(
-            &self.capabilities,
-            session_id,
-            &model,
-            ExtensionEvent::SessionShutdown,
-        )
-        .await?;
+        self.emit_session_shutdown(session_id).await?;
         self.event_store
             .recycle_session(session_id)
             .await

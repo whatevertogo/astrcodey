@@ -280,8 +280,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       await api.updateActiveSelection(
         configView.activeProfile,
         configView.activeModel,
-        configView.activeSmallProfile,
-        configView.activeSmallModel,
+        configView.activeSmallProfile ?? undefined,
+        configView.activeSmallModel ?? undefined,
         nextApprovalMode
       )
       setConfigView({ ...configView, approvalMode: nextApprovalMode })
@@ -535,8 +535,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                       await api.updateActiveSelection(
                         profileName,
                         model,
-                        configView?.activeSmallProfile,
-                        configView?.activeSmallModel,
+                        configView?.activeSmallProfile ?? undefined,
+                        configView?.activeSmallModel ?? undefined,
                         configView?.approvalMode ?? 'manual'
                       )
                       bumpModelRefreshKey()

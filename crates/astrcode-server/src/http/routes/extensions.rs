@@ -233,11 +233,19 @@ fn extension_declaration_dto(
             .collect(),
         tools: declaration.tools.into_iter().map(Into::into).collect(),
         dynamic_tools: declaration.dynamic_tools,
-        commands: declaration.commands,
+        commands: declaration.commands.into_iter().map(Into::into).collect(),
         dynamic_commands: declaration.dynamic_commands,
-        keybindings: declaration.keybindings,
-        status_items: declaration.status_items,
-        events: declaration.events,
+        keybindings: declaration
+            .keybindings
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        status_items: declaration
+            .status_items
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        events: declaration.events.into_iter().map(Into::into).collect(),
         http_routes: declaration
             .http_routes
             .into_iter()

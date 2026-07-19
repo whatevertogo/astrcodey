@@ -102,12 +102,8 @@ mod error {
 /// Each pooled client serializes its requests while independent servers may
 /// run in parallel.
 pub(crate) struct McpProcessPool {
-    pool: AsyncMutex<PoolInner>,
+    pool: AsyncMutex<HashMap<ServerId, Arc<PooledClient>>>,
     timeout: Duration,
-}
-
-struct PoolInner {
-    entries: HashMap<ServerId, Arc<PooledClient>>,
 }
 
 /// Unique identifier for a server config (transport + connection params).
@@ -166,9 +162,7 @@ struct StdioPooledClient {
 impl McpProcessPool {
     pub(crate) fn new(timeout: Duration) -> Self {
         Self {
-            pool: AsyncMutex::new(PoolInner {
-                entries: HashMap::new(),
-            }),
+            pool: AsyncMutex::new(HashMap::new()),
             timeout,
         }
     }
@@ -179,13 +173,12 @@ impl McpProcessPool {
         &self,
         servers: &[McpServerConfig],
     ) -> Vec<(String, Result<(), McpPoolError>)> {
-        let results = futures_util::future::join_all(servers.iter().map(|server| async {
+        futures_util::future::join_all(servers.iter().map(|server| async {
             let name = server.name.clone();
             let result = self.ensure_pooled(server).await;
             (name, result)
         }))
-        .await;
-        results
+        .await
     }
 
     /// Execute `tools/list`, restoring a dead pooled process if needed.
@@ -196,7 +189,7 @@ impl McpProcessPool {
         let (id, entry) = self.pooled_entry(server).await?;
         match list_tools_from_entry(&entry).await {
             Ok(tools) => Ok(tools),
-            Err(error) if should_retry_after_reconnect(&error) => {
+            Err(error) if error_invalidates_client(&error) => {
                 self.evict_entry_if_current(&id, &entry).await;
                 let (retry_id, retry_entry) = self.pooled_entry(server).await?;
                 match list_tools_from_entry(&retry_entry).await {
@@ -256,10 +249,7 @@ impl McpProcessPool {
     ) -> Result<(ServerId, Arc<PooledClient>), McpPoolError> {
         self.ensure_pooled(server).await?;
         let id = ServerId::from_config(server);
-        let entry = {
-            let pool = self.pool.lock().await;
-            pool.entries.get(&id).cloned()
-        };
+        let entry = self.pool.lock().await.get(&id).cloned();
         let entry = entry.ok_or_else(|| McpPoolError::ServerNotFound {
             server: server.name.clone(),
         })?;
@@ -270,7 +260,7 @@ impl McpProcessPool {
     pub(crate) async fn health(&self) -> Result<(), McpPoolError> {
         let entries: Vec<_> = {
             let pool = self.pool.lock().await;
-            pool.entries.values().cloned().collect()
+            pool.values().cloned().collect()
         };
         for entry in entries {
             match entry.as_ref() {
@@ -300,10 +290,7 @@ impl McpProcessPool {
     pub(crate) async fn shutdown(&self) {
         let entries = {
             let mut pool = self.pool.lock().await;
-            pool.entries
-                .drain()
-                .map(|(_, entry)| entry)
-                .collect::<Vec<_>>()
+            pool.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
         for entry in entries {
             shutdown_pooled(entry).await;
@@ -319,14 +306,13 @@ impl McpProcessPool {
         let stale = {
             let mut pool = self.pool.lock().await;
             let stale_ids = pool
-                .entries
                 .keys()
                 .filter(|id| !active.contains(*id))
                 .cloned()
                 .collect::<Vec<_>>();
             stale_ids
                 .into_iter()
-                .filter_map(|id| pool.entries.remove(&id))
+                .filter_map(|id| pool.remove(&id))
                 .collect::<Vec<_>>()
         };
         for client in stale {
@@ -338,10 +324,9 @@ impl McpProcessPool {
         let removed = {
             let mut pool = self.pool.lock().await;
             let is_current = pool
-                .entries
                 .get(id)
                 .is_some_and(|entry| Arc::ptr_eq(entry, expected));
-            is_current.then(|| pool.entries.remove(id)).flatten()
+            is_current.then(|| pool.remove(id)).flatten()
         };
         if let Some(entry) = removed {
             shutdown_pooled(entry).await;
@@ -354,10 +339,10 @@ impl McpProcessPool {
         let id = ServerId::from_config(server);
         let removed = {
             let mut pool = self.pool.lock().await;
-            match pool.entries.get(&id) {
+            match pool.get(&id) {
                 Some(entry) => match entry.as_ref() {
                     PooledClient::Stdio(client) if client_healthy(client) => return Ok(()),
-                    PooledClient::Stdio(_) => pool.entries.remove(&id),
+                    PooledClient::Stdio(_) => pool.remove(&id),
                     PooledClient::Http(_) => {
                         // HTTP health is validated by requests; session-expired responses
                         // evict the entry and force a fresh initialize on retry.
@@ -383,7 +368,7 @@ impl McpProcessPool {
         };
         let discarded = {
             let mut pool = self.pool.lock().await;
-            match pool.entries.entry(id) {
+            match pool.entry(id) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(candidate);
                     None
@@ -433,10 +418,6 @@ async fn call_tool_from_entry(
     }
 }
 
-fn should_retry_after_reconnect(error: &McpPoolError) -> bool {
-    error_invalidates_client(error)
-}
-
 fn should_retry_call_after_reconnect(error: &McpPoolError) -> bool {
     matches!(error, McpPoolError::HttpSessionExpired { .. })
 }
@@ -456,7 +437,7 @@ fn error_invalidates_client(error: &McpPoolError) -> bool {
 
 // ─── Stdio helpers ─────────────────────────────────────────────────────
 
-async fn shutdown_stdio_ref(client: &StdioPooledClient) {
+async fn shutdown_stdio(client: &StdioPooledClient) {
     let child_opt = {
         let Ok(mut guard) = client.child.lock() else {
             return;
@@ -476,11 +457,11 @@ async fn shutdown_stdio_ref(client: &StdioPooledClient) {
 
 async fn shutdown_pooled(client: Arc<PooledClient>) {
     match Arc::try_unwrap(client) {
-        Ok(PooledClient::Stdio(client)) => shutdown_stdio(*client).await,
+        Ok(PooledClient::Stdio(client)) => shutdown_stdio(&client).await,
         Ok(PooledClient::Http(_)) => {},
         Err(client) => {
             if let PooledClient::Stdio(client) = client.as_ref() {
-                shutdown_stdio_ref(client).await;
+                shutdown_stdio(client).await;
             }
         },
     }
@@ -632,25 +613,6 @@ async fn stderr_tail_stdio(client: &StdioPooledClient) -> String {
     client.stderr_buffer.lock().await.as_string()
 }
 
-async fn shutdown_stdio(client: StdioPooledClient) {
-    // Take the child out of the Mutex and drop the guard before any await
-    let child_opt = {
-        let Ok(mut guard) = client.child.lock() else {
-            return;
-        };
-        guard.take()
-    };
-    if let Some(mut child) = child_opt {
-        if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait())
-            .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
-    }
-}
-
 // ─── Stdio I/O helpers ───────────────────────────────────────────────────
 
 async fn read_stdout(
@@ -776,8 +738,7 @@ mod tests {
 
         let entry = {
             let pool = pool.pool.lock().await;
-            pool.entries
-                .get(&ServerId::from_config(&server.config))
+            pool.get(&ServerId::from_config(&server.config))
                 .cloned()
                 .unwrap()
         };

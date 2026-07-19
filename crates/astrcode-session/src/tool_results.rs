@@ -1,6 +1,8 @@
 //! Tool result budgeting and LLM-facing persisted-result summaries.
 
-use astrcode_core::storage::ToolResultArtifactRef;
+use astrcode_core::{storage::ToolResultArtifactRef, tool::ToolResult};
+
+pub const PERSISTED_TOOL_RESULT_METADATA_KEY: &str = "persistedToolResult";
 
 /// 默认允许内联到 LLM history 的工具结果字节数。
 pub const DEFAULT_TOOL_RESULT_INLINE_LIMIT: usize = 50_000;
@@ -61,6 +63,31 @@ pub fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
     }
 }
 
+/// 是否可以把结果自动替换为持久化 artifact 摘要。
+///
+/// read 自身的结果、已经持久化的结果，以及读取 artifact 得到的内容都必须保持原样，
+/// 避免产生循环引用或重复写盘。
+pub fn should_auto_persist_tool_result(tool_name: &str, result: &ToolResult) -> bool {
+    let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
+        return false;
+    };
+    should_persist_tool_result(&result.content, inline_limit)
+        && !result
+            .metadata
+            .contains_key(PERSISTED_TOOL_RESULT_METADATA_KEY)
+        && result
+            .metadata
+            .get("source")
+            .and_then(|value| value.as_str())
+            != Some("toolResultArtifact")
+        && !result
+            .metadata
+            .get("path")
+            .and_then(|value| value.as_str())
+            .is_some_and(is_tool_result_artifact_path)
+        && !is_persisted_tool_result_summary(&result.content)
+}
+
 /// 为大工具结果生成摘要预览。
 pub fn tool_result_preview(content: &str, max_chars: usize) -> ToolResultPreview {
     let mut chars = content.chars();
@@ -99,6 +126,8 @@ pub fn persisted_tool_result_summary(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     #[test]
@@ -129,6 +158,53 @@ mod tests {
             tool_result_inline_limit("unknown"),
             Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT)
         );
+    }
+
+    #[test]
+    fn auto_persist_eligibility_excludes_inline_and_artifact_results() {
+        let large_content = "a".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
+        let metadata = |key: &str, value| BTreeMap::from([(key.into(), value)]);
+        let cases = [
+            ("eligible", "example", BTreeMap::new(), true),
+            ("read result", "read", BTreeMap::new(), false),
+            (
+                "already persisted",
+                "example",
+                metadata(PERSISTED_TOOL_RESULT_METADATA_KEY, serde_json::json!(true)),
+                false,
+            ),
+            (
+                "artifact read",
+                "example",
+                metadata("source", serde_json::json!("toolResultArtifact")),
+                false,
+            ),
+            (
+                "artifact path",
+                "example",
+                metadata(
+                    "path",
+                    serde_json::json!("/sessions/1/tool-results/call-1.txt"),
+                ),
+                false,
+            ),
+        ];
+
+        for (name, tool_name, metadata, expected) in cases {
+            let result = ToolResult {
+                call_id: "call-1".into(),
+                content: large_content.clone(),
+                is_error: false,
+                error: None,
+                metadata,
+                duration_ms: None,
+            };
+            assert_eq!(
+                should_auto_persist_tool_result(tool_name, &result),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

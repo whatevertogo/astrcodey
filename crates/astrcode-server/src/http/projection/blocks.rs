@@ -47,7 +47,7 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
         } => Some(ConversationBlockDto::User {
             id: message_id.to_string(),
             text: text.clone(),
-            attachments: attachments.clone(),
+            attachments: attachments.iter().map(Into::into).collect(),
             source: None,
         }),
         EventPayload::AssistantMessageCompleted {
@@ -133,7 +133,10 @@ pub(in crate::http) fn messages_to_blocks(
             LlmRole::User => blocks.push(ConversationBlockDto::User {
                 id,
                 text: visible_message_text(message),
-                attachments: attachments_from_user_message(message),
+                attachments: attachments_from_user_message(message)
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
                 source: source.clone(),
             }),
             LlmRole::Assistant => {
