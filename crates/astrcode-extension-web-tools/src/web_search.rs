@@ -1,15 +1,17 @@
-use std::time::Instant;
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use reqwest::Client;
+use astrcode_extension_sdk::network::{
+    NetworkRedirectPolicy, OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+};
 use scraper::{Html, Selector};
 use serde::Deserialize;
-use serde_json::json;
 use url::Url;
 
-use crate::{
-    config::{SearchConfig, SearchProvider, resolve_api_key},
-    http::build_client,
-};
+use crate::config::{SearchConfig, SearchProvider, resolve_api_key};
 
 const MAX_RESULTS_LIMIT: usize = 20;
 const MIN_QUERY_LEN: usize = 2;
@@ -62,6 +64,7 @@ pub(crate) struct WebSearchOutcome {
 
 pub(crate) async fn run_web_search(
     config: &SearchConfig,
+    network: Arc<dyn OutboundNetworkService>,
     args: WebSearchArgs,
 ) -> Result<WebSearchOutcome, SearchError> {
     let started = Instant::now();
@@ -72,13 +75,15 @@ pub(crate) async fn run_web_search(
         .max_results
         .unwrap_or(config.default_max_results)
         .clamp(1, MAX_RESULTS_LIMIT);
-    let client = build_client(config.request_timeout_secs, HTML_SEARCH_USER_AGENT)
-        .map_err(|error| SearchError::Http(error.to_string()))?;
+    let backend = SearchNetworkBackend {
+        service: &*network,
+        timeout: Duration::from_secs(config.request_timeout_secs.max(1)),
+    };
 
     let mut hits = match effective_provider(config) {
-        SearchProvider::Brave => search_brave(&client, config, &query, max_results).await?,
-        SearchProvider::Serper => search_serper(&client, config, &query, max_results).await?,
-        SearchProvider::DuckDuckGo => search_duckduckgo(&client, &query, max_results).await?,
+        SearchProvider::Brave => search_brave(&backend, config, &query, max_results).await?,
+        SearchProvider::Serper => search_serper(&backend, config, &query, max_results).await?,
+        SearchProvider::DuckDuckGo => search_duckduckgo(&backend, &query, max_results).await?,
     };
     apply_domain_filters(&mut hits, &args);
 
@@ -87,6 +92,39 @@ pub(crate) async fn run_web_search(
         hits,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+struct SearchNetworkBackend<'a> {
+    service: &'a dyn OutboundNetworkService,
+    timeout: Duration,
+}
+
+impl SearchNetworkBackend<'_> {
+    async fn send(
+        &self,
+        method: &str,
+        url: String,
+        mut headers: BTreeMap<String, String>,
+        body: Vec<u8>,
+        redirect_policy: NetworkRedirectPolicy,
+    ) -> Result<OutboundNetworkResponse, SearchError> {
+        headers.insert("user-agent".into(), HTML_SEARCH_USER_AGENT.into());
+        self.service
+            .request(
+                OutboundNetworkRequest {
+                    url,
+                    method: method.into(),
+                    headers,
+                    body,
+                    max_bytes: 1024 * 1024,
+                    timeout: self.timeout,
+                    redirect_policy,
+                },
+                None,
+            )
+            .await
+            .map_err(|error| SearchError::Http(error.to_string()))
+    }
 }
 
 fn validate_search_args(args: &WebSearchArgs) -> Result<(), SearchError> {
@@ -133,7 +171,7 @@ fn effective_provider(config: &SearchConfig) -> SearchProvider {
 }
 
 async fn search_brave(
-    client: &Client,
+    backend: &SearchNetworkBackend<'_>,
     config: &SearchConfig,
     query: &str,
     max_results: usize,
@@ -144,24 +182,29 @@ async fn search_brave(
     )
     .ok_or(SearchError::MissingApiKey("brave"))?;
 
-    let response = client
-        .get(BRAVE_SEARCH_URL)
-        .header("X-Subscription-Token", api_key)
-        .query(&[("q", query), ("count", &max_results.to_string())])
-        .send()
-        .await
-        .map_err(|error| SearchError::Http(error.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+    let mut url =
+        Url::parse(BRAVE_SEARCH_URL).map_err(|error| SearchError::Http(error.to_string()))?;
+    url.query_pairs_mut()
+        .append_pair("q", query)
+        .append_pair("count", &max_results.to_string());
+    let response = backend
+        .send(
+            "GET",
+            url.to_string(),
+            BTreeMap::from([("x-subscription-token".into(), api_key)]),
+            Vec::new(),
+            NetworkRedirectPolicy::Manual,
+        )
+        .await?;
+    if !(200..300).contains(&response.status) {
+        let status = response.status;
+        let body = response_preview(&response.body);
         return Err(SearchError::Http(format!(
             "Brave search returned HTTP {status}: {body}"
         )));
     }
 
-    let payload: serde_json::Value = response
-        .json()
-        .await
+    let payload: serde_json::Value = serde_json::from_slice(&response.body)
         .map_err(|error| SearchError::Parse(error.to_string()))?;
     Ok(parse_provider_hits(
         payload.pointer("/web/results"),
@@ -173,7 +216,7 @@ async fn search_brave(
 }
 
 async fn search_serper(
-    client: &Client,
+    backend: &SearchNetworkBackend<'_>,
     config: &SearchConfig,
     query: &str,
     max_results: usize,
@@ -184,24 +227,29 @@ async fn search_serper(
     )
     .ok_or(SearchError::MissingApiKey("serper"))?;
 
-    let response = client
-        .post(SERPER_SEARCH_URL)
-        .header("X-API-KEY", api_key)
-        .json(&json!({ "q": query, "num": max_results }))
-        .send()
-        .await
-        .map_err(|error| SearchError::Http(error.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+    let body = serde_json::to_vec(&serde_json::json!({ "q": query, "num": max_results }))
+        .map_err(|error| SearchError::Parse(error.to_string()))?;
+    let response = backend
+        .send(
+            "POST",
+            SERPER_SEARCH_URL.into(),
+            BTreeMap::from([
+                ("x-api-key".into(), api_key),
+                ("content-type".into(), "application/json".into()),
+            ]),
+            body,
+            NetworkRedirectPolicy::Manual,
+        )
+        .await?;
+    if !(200..300).contains(&response.status) {
+        let status = response.status;
+        let body = response_preview(&response.body);
         return Err(SearchError::Http(format!(
             "Serper search returned HTTP {status}: {body}"
         )));
     }
 
-    let payload: serde_json::Value = response
-        .json()
-        .await
+    let payload: serde_json::Value = serde_json::from_slice(&response.body)
         .map_err(|error| SearchError::Parse(error.to_string()))?;
     Ok(parse_provider_hits(
         payload.pointer("/organic"),
@@ -244,30 +292,36 @@ fn parse_provider_hits(
 }
 
 async fn search_duckduckgo(
-    client: &Client,
+    backend: &SearchNetworkBackend<'_>,
     query: &str,
     max_results: usize,
 ) -> Result<Vec<SearchHit>, SearchError> {
-    let response = client
-        .post(DUCKDUCKGO_HTML_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("q={}", urlencoding(query)))
-        .send()
-        .await
-        .map_err(|error| SearchError::Http(error.to_string()))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+    let response = backend
+        .send(
+            "POST",
+            DUCKDUCKGO_HTML_URL.into(),
+            BTreeMap::from([(
+                "content-type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )]),
+            format!("q={}", urlencoding(query)).into_bytes(),
+            NetworkRedirectPolicy::Follow,
+        )
+        .await?;
+    if !(200..300).contains(&response.status) {
+        let status = response.status;
+        let body = response_preview(&response.body);
         return Err(SearchError::Http(format!(
             "DuckDuckGo search returned HTTP {status}: {body}"
         )));
     }
 
-    let html = response
-        .text()
-        .await
-        .map_err(|error| SearchError::Http(error.to_string()))?;
+    let html = String::from_utf8_lossy(&response.body);
     Ok(parse_duckduckgo_html(&html, max_results))
+}
+
+fn response_preview(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).chars().take(4096).collect()
 }
 
 fn parse_duckduckgo_html(html: &str, max_results: usize) -> Vec<SearchHit> {

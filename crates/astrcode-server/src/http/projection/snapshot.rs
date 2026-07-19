@@ -50,7 +50,7 @@ pub(in crate::http) fn conversation_to_dto(
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
-        phase: session.phase,
+        phase: session.phase.into(),
         control: control_from_phase(session.phase, !session.messages.is_empty()),
         blocks,
         agent_sessions: session

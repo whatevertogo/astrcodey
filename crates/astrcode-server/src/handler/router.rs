@@ -162,7 +162,7 @@ impl CommandHandler {
                     return Ok(());
                 };
                 if let Err(error) = ops
-                    .resolve_tool_approval(&sid.into_string(), &call_id, decision)
+                    .resolve_tool_approval(&sid.into_string(), &call_id, decision.into())
                     .await
                 {
                     self.send_error(40400, &error.to_string());

@@ -19,6 +19,8 @@
 use astrcode_core::message_attachment::MessageAttachment;
 use serde::{Deserialize, Serialize};
 
+use crate::wire::ApprovalDecisionDto;
+
 /// 提示中附带的文件/图片（与 core [`MessageAttachment`] 同型）。
 pub type Attachment = MessageAttachment;
 
@@ -145,7 +147,7 @@ pub enum ClientCommand {
     /// 解析挂起的工具审批（Tool Gate）。
     ResolveToolApproval {
         call_id: String,
-        decision: astrcode_core::permission::ApprovalDecision,
+        decision: ApprovalDecisionDto,
     },
 }
 

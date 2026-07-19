@@ -790,42 +790,12 @@ impl ExtensionRunner {
             self.startup_event_tx.read().as_ref().and_then(|tx| {
                 bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
             });
-        let needs_host_services = capabilities.contains(&ExtensionCapability::SessionHistory)
-            || capabilities.contains(&ExtensionCapability::SessionInspect)
-            || capabilities.contains(&ExtensionCapability::MainModel)
-            || capabilities.contains(&ExtensionCapability::SmallModel)
-            || capabilities.contains(&ExtensionCapability::SessionControl);
-        let host_services = needs_host_services
-            .then(|| {
-                self.host_services.read().as_ref().map(|services| {
-                    Arc::new(ExtensionHostServices {
-                        session_read: capabilities
-                            .iter()
-                            .any(|capability| {
-                                matches!(
-                                    capability,
-                                    ExtensionCapability::SessionHistory
-                                        | ExtensionCapability::SessionInspect
-                                )
-                            })
-                            .then(|| services.session_read.clone())
-                            .flatten(),
-                        main_llm: capabilities
-                            .contains(&ExtensionCapability::MainModel)
-                            .then(|| services.main_llm.clone())
-                            .flatten(),
-                        small_llm: capabilities
-                            .contains(&ExtensionCapability::SmallModel)
-                            .then(|| services.small_llm.clone())
-                            .flatten(),
-                        session_ops: capabilities
-                            .contains(&ExtensionCapability::SessionControl)
-                            .then(|| services.session_ops.clone())
-                            .flatten(),
-                    })
-                })
-            })
-            .flatten();
+        let host_services = self
+            .host_services
+            .read()
+            .as_ref()
+            .and_then(|services| services.scoped_to(&capabilities))
+            .map(Arc::new);
         let ctx = ExtensionCtx::with_host_services(
             tasks.clone(),
             ExtensionConfig(ext_config.clone()),
@@ -967,6 +937,16 @@ impl ExtensionRunner {
     /// 绑定扩展在标准 `start()` 生命周期中可取得的宿主服务。
     pub fn bind_host_services(&self, services: Arc<ExtensionHostServices>) {
         *self.host_services.write() = Some(services);
+    }
+
+    /// 返回进程内稳定复用的宿主出站网络服务。
+    pub fn outbound_network_service(
+        &self,
+    ) -> Option<Arc<dyn astrcode_core::extension::OutboundNetworkService>> {
+        self.host_services
+            .read()
+            .as_ref()
+            .and_then(|services| services.outbound_network.clone())
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。

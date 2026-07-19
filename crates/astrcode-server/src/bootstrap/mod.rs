@@ -258,7 +258,10 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
             Some(capabilities.llm()),
             Some(capabilities.small_llm()),
         )
-        .with_session_ops(session_ops),
+        .with_session_ops(session_ops)
+        .with_outbound_network(
+            astrcode_extensions::host_router::default_outbound_network_service(),
+        ),
     );
     extension_runner.bind_host_services(Arc::clone(&host_services));
     let load_errors =
@@ -337,6 +340,11 @@ impl ServerRuntime {
         if let Some(session_ops) = caps.session_ops() {
             host_services = host_services.with_session_ops(session_ops);
         }
+        let outbound_network = self
+            .extension_runner()
+            .outbound_network_service()
+            .unwrap_or_else(astrcode_extensions::host_router::default_outbound_network_service);
+        host_services = host_services.with_outbound_network(outbound_network);
         let host_services = Arc::new(host_services);
         self.extension_runner()
             .bind_host_services(Arc::clone(&host_services));

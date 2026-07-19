@@ -689,7 +689,7 @@ fn child_phase_delta(
     ConversationDeltaDto::AgentSessionUpdated {
         agent_session: AgentSessionLinkDto::phase_only(
             initial_child_id,
-            projection.phase,
+            projection.phase.into(),
             projection.current_tool,
         ),
     }

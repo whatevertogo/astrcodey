@@ -142,7 +142,7 @@ pub(in crate::http) async fn resolve_tool_approval(
         );
     };
     match ops
-        .resolve_tool_approval(&session_id_str, &request.call_id, request.decision)
+        .resolve_tool_approval(&session_id_str, &request.call_id, request.decision.into())
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -451,7 +451,7 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
         updated_at: summary.updated_at,
         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
         parent_storage_seq: None,
-        phase: summary.phase,
+        phase: summary.phase.into(),
         first_user_message: summary.first_user_message,
         source_extension: summary.source_extension,
     }

@@ -11,8 +11,8 @@ use astrcode_core::{
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{AgentSessionStatus, EventStore},
     tool::{
-        CreateSessionRequest, SessionAccess, SessionOperations, SubmitTurnRequest,
-        SubmitTurnResult, ToolDefinition,
+        CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionOperations,
+        SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
     },
     types::{SessionId, new_session_id},
 };
@@ -246,12 +246,13 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         "child turn should be active before inject"
     );
 
-    ops.inject_message(
-        SessionAccess::new(parent_id.as_str(), child_id.as_str()),
-        "mid-turn inject".into(),
-    )
-    .await
-    .unwrap();
+    let outcome = ops
+        .inject_message(
+            SessionAccess::new(parent_id.as_str(), child_id.as_str()),
+            "mid-turn inject".into(),
+        )
+        .await
+        .unwrap();
 
     let events = store.replay_events(&child_id).await.unwrap();
     let injected = events
@@ -266,6 +267,12 @@ async fn inject_message_during_active_turn_binds_turn_id() {
     assert!(
         injected.turn_id.is_some(),
         "active-turn inject must bind turn_id (same as TurnScheduler::inject)"
+    );
+    assert_eq!(
+        outcome,
+        SessionDeliveryOutcome::Injected {
+            turn_id: injected.turn_id.as_ref().unwrap().to_string(),
+        }
     );
 
     release.notify_one();
@@ -293,12 +300,14 @@ async fn inject_message_when_idle_starts_turn() {
         "session should start idle"
     );
 
-    ops.inject_message(
-        SessionAccess::same(session_id.as_str()),
-        "mid-turn injected user message".into(),
-    )
-    .await
-    .unwrap();
+    let outcome = ops
+        .inject_message(
+            SessionAccess::same(session_id.as_str()),
+            "mid-turn injected user message".into(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, SessionDeliveryOutcome::Started { .. }));
 
     for _ in 0..50 {
         if ops.scheduler.registry().has_active(&session_id) {

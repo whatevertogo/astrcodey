@@ -103,6 +103,10 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 见 `HostRouter`；除默认 session state API 外，子进程 invoke 的 capability 须以
 `astrcode.` 开头，且 manifest 中已声明对应 capability。
 
+宿主通过单一 capability registry 生成握手 catalog、校验 grant 并选择类型化能力域；
+LLM、session、context、workspace、process、network 与公开扩展 HTTP 各自持有窄后端并实现行为，
+`HostRouter` 仅负责解析、授权和分发。
+
 默认可用、无需 manifest capability：
 
 | API | 说明 |
@@ -114,23 +118,27 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 
 须在 manifest 声明后才可调用：
 
+安装并启用扩展表示宿主接受其 manifest 中声明的能力；运行时不允许扩展再动态提升能力。
+因此第三方扩展启用前必须审查 `session_inspect`、`session_control`、`network_client`、
+`process_spawn` 与 workspace 写能力，其中 `session_inspect` 是明确的全局读取权限。
+
 | Manifest capability | API | 说明 |
 |------|------|------|
 | `main_model` | `astrcode.llm.main_chat` | 调用当前会话主模型。 |
 | `small_model` | `astrcode.llm.small_chat` | 调用宿主小模型。 |
 | `session_history` | `astrcode.session.read_events` | 按会话权限读取事件。 |
 | `session_control` | `astrcode.session.control.*` | 创建、提交、注入、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
-| `session_inspect` | `astrcode.session.inspect.*` | 列出宿主可见会话，读取轻量快照、稳定映射后的完整投影或 provider 可见消息。 |
+| `session_inspect` | `astrcode.session.inspect.*` | 宿主级全局读取权限：跨 session lineage 列出所有宿主可见会话，读取快照、完整投影或 provider 可见消息。只应授予需要全局观察或后台接续会话的扩展。 |
 | `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
 | `public_http_dispatch` | `astrcode.extension.http.public` | 从插件内部调用另一插件的公开路由；同步自调用会被拒绝以避免 s5r 重入死锁。 |
 | `emit_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
 | `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
-| `network_client` | `astrcode.network.client` | 发起 HTTP(S) 请求。并发、总时长、重定向次数和响应体大小均受限。 |
+| `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 文本请求。worker 与 trusted bundled web-tools 共用同一个宿主出站网络服务；并发、总时长、重定向次数和响应体大小均受限，且统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。worker 响应 body 必须为 UTF-8（无二进制/base64 表示），同名响应头不保留重复值，并通过 `final_url` 返回重定向后的最终地址。并发上限全局共享，当前不承诺 extension 级公平配额。 |
 
-`workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；`network_client` 是原始出站网络授权，
-可访问的地址仍取决于宿主网络环境。只应给确实需要这些权限的插件声明相应 capability。
+`workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；`network_client` 仅提供受限公网访问，
+不用于调用宿主本机或内网服务。只应给确实需要这些权限的插件声明相应 capability。
 Worker 可使用 `HostClient::spawn_process` / `HostClient::network_request` 的类型化边界，
 也可直接调用通用 `HostClient::call`。
 

@@ -87,7 +87,9 @@ pub trait Extension: Send + Sync {
 pub enum ExtensionCapability {
     /// 创建子 session、提交 turn 与回收 session。
     SessionControl,
-    /// 跨会话读取宿主可见的 session 投影。
+    /// 宿主级全局读取授权：跨会话读取宿主可见的 session 投影。
+    ///
+    /// 此能力不受当前 session lineage 限制，只应授予需要全局观察或后台接续会话的扩展。
     SessionInspect,
     /// 注册无需宿主 bearer token 的公开 HTTP 路由。
     PublicHttp,
@@ -379,6 +381,74 @@ impl ExtensionTasks {
 
 // ─── Host Services ──────────────────────────────────────────────────────
 
+/// 宿主出站网络请求的跳转处理方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkRedirectPolicy {
+    /// 由统一网络服务在每次跳转前重新执行目标地址校验。
+    Follow,
+    /// 返回 3xx 响应，由调用方实现产品层的跳转规则。
+    Manual,
+}
+
+/// 可信内置扩展调用宿主出站网络服务时使用的请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundNetworkRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+    pub max_bytes: usize,
+    pub timeout: Duration,
+    pub redirect_policy: NetworkRedirectPolicy,
+}
+
+/// 宿主出站网络服务的响应。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundNetworkResponse {
+    pub final_url: String,
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+/// 宿主出站网络服务的稳定错误分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundNetworkErrorKind {
+    InvalidRequest,
+    PermissionDenied,
+    Unavailable,
+    RequestFailed,
+    Timeout,
+    ResponseTooLarge,
+    Cancelled,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct OutboundNetworkError {
+    pub kind: OutboundNetworkErrorKind,
+    pub message: String,
+}
+
+impl OutboundNetworkError {
+    pub fn new(kind: OutboundNetworkErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// 宿主唯一的受限出站网络执行边界。
+#[async_trait::async_trait]
+pub trait OutboundNetworkService: Send + Sync {
+    async fn request(
+        &self,
+        request: OutboundNetworkRequest,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<OutboundNetworkResponse, OutboundNetworkError>;
+}
+
 /// 扩展运行时可用的宿主服务。
 ///
 /// 只注入给 trusted bundled extension，不暴露给 untrusted source（磁盘 IPC 扩展）。
@@ -397,6 +467,8 @@ pub struct ExtensionHostServices {
     /// 只注入给声明了 [`ExtensionCapability::SessionControl`] 的 trusted bundled
     /// extension。磁盘 IPC 扩展仍通过 HostRouter 的能力门控访问子集。
     pub session_ops: Option<Arc<dyn SessionOperations>>,
+    /// 统一的受限出站网络服务。
+    pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
 }
 
 impl ExtensionHostServices {
@@ -411,12 +483,60 @@ impl ExtensionHostServices {
             main_llm,
             small_llm,
             session_ops: None,
+            outbound_network: None,
         }
     }
 
     pub fn with_session_ops(mut self, session_ops: Arc<dyn SessionOperations>) -> Self {
         self.session_ops = Some(session_ops);
         self
+    }
+
+    pub fn with_outbound_network(
+        mut self,
+        outbound_network: Arc<dyn OutboundNetworkService>,
+    ) -> Self {
+        self.outbound_network = Some(outbound_network);
+        self
+    }
+
+    /// 按扩展已声明的能力裁剪 trusted host services。
+    pub fn scoped_to(&self, capabilities: &[ExtensionCapability]) -> Option<Self> {
+        let session_read = capabilities
+            .iter()
+            .any(|capability| {
+                matches!(
+                    capability,
+                    ExtensionCapability::SessionHistory | ExtensionCapability::SessionInspect
+                )
+            })
+            .then(|| self.session_read.clone())
+            .flatten();
+        let scoped = Self {
+            session_read,
+            main_llm: capabilities
+                .contains(&ExtensionCapability::MainModel)
+                .then(|| self.main_llm.clone())
+                .flatten(),
+            small_llm: capabilities
+                .contains(&ExtensionCapability::SmallModel)
+                .then(|| self.small_llm.clone())
+                .flatten(),
+            session_ops: capabilities
+                .contains(&ExtensionCapability::SessionControl)
+                .then(|| self.session_ops.clone())
+                .flatten(),
+            outbound_network: capabilities
+                .contains(&ExtensionCapability::NetworkClient)
+                .then(|| self.outbound_network.clone())
+                .flatten(),
+        };
+        (scoped.session_read.is_some()
+            || scoped.main_llm.is_some()
+            || scoped.small_llm.is_some()
+            || scoped.session_ops.is_some()
+            || scoped.outbound_network.is_some())
+        .then_some(scoped)
     }
 }
 

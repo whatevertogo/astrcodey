@@ -4,14 +4,16 @@
 //! storage 不依赖也不返回这些 DTO。
 
 use astrcode_core::{
-    event::{Phase, ToolOutputStream},
-    extension::{ExtensionCapability, ExtensionEventDecl, Keybinding, SlashCommand, StatusItem},
+    extension::{ExtensionEventDecl, Keybinding, SlashCommand, StatusItem},
     message_attachment::MessageAttachment,
-    tool::ToolDefinition,
 };
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
+use crate::wire::{
+    ApprovalDecisionDto, ExecutionModeDto, ExtensionCapabilityDto, PhaseDto, ProviderAuthSchemeDto,
+    ProviderWireFormatDto, ThinkingLevelDto, ToolOriginDto, ToolOutputStreamDto,
+};
 
 /// 新建会话请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +43,7 @@ pub struct PromptRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ToolApprovalRequest {
     pub call_id: String,
-    pub decision: astrcode_core::permission::ApprovalDecision,
+    pub decision: ApprovalDecisionDto,
 }
 
 /// Tool Approval UI 提交（如 askUser 问卷答案）。
@@ -273,7 +275,7 @@ pub struct SessionListItemDto {
     /// 父会话 seq，v1 未接线。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_storage_seq: Option<u64>,
-    pub phase: Phase,
+    pub phase: PhaseDto,
     /// 首条用户消息内容，无消息时为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_user_message: Option<String>,
@@ -303,7 +305,7 @@ pub struct ConversationSnapshotResponseDto {
     pub session_id: String,
     pub session_title: String,
     pub cursor: ConversationCursorDto,
-    pub phase: Phase,
+    pub phase: PhaseDto,
     pub control: ConversationControlStateDto,
     pub blocks: Vec<ConversationBlockDto>,
     #[serde(default)]
@@ -314,7 +316,7 @@ pub struct ConversationSnapshotResponseDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationControlStateDto {
-    pub phase: Phase,
+    pub phase: PhaseDto,
     pub can_submit_prompt: bool,
     pub can_request_compact: bool,
     pub compact_pending: bool,
@@ -441,7 +443,7 @@ pub enum ConversationDeltaDto {
     },
     ToolOutput {
         call_id: String,
-        stream: ToolOutputStream,
+        stream: ToolOutputStreamDto,
         delta: String,
     },
     ThinkingDelta {
@@ -537,8 +539,8 @@ pub struct ExtensionStateDto {
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionDeclarationDto {
     pub id: String,
-    pub capabilities: Vec<ExtensionCapability>,
-    pub tools: Vec<ToolDefinition>,
+    pub capabilities: Vec<ExtensionCapabilityDto>,
+    pub tools: Vec<ToolDefinitionDto>,
     #[serde(default)]
     pub dynamic_tools: bool,
     pub commands: Vec<SlashCommand>,
@@ -549,6 +551,28 @@ pub struct ExtensionDeclarationDto {
     pub events: Vec<ExtensionEventDecl>,
     #[serde(default)]
     pub http_routes: Vec<ExtensionHttpRouteDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinitionDto {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub origin: ToolOriginDto,
+    #[serde(default)]
+    pub execution_mode: ExecutionModeDto,
+}
+
+impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
+    fn from(value: astrcode_core::tool::ToolDefinition) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            parameters: value.parameters,
+            origin: value.origin.into(),
+            execution_mode: value.execution_mode.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -635,8 +659,8 @@ pub struct SetExtensionEnabledResponseDto {
 pub struct ProfileDto {
     pub name: String,
     pub provider_kind: String,
-    pub wire_format: astrcode_core::config::ProviderWireFormat,
-    pub auth_scheme: astrcode_core::config::ProviderAuthScheme,
+    pub wire_format: ProviderWireFormatDto,
+    pub auth_scheme: ProviderAuthSchemeDto,
     pub base_url: String,
     pub has_api_key: bool,
     pub models: Vec<ModelDto>,
@@ -656,8 +680,8 @@ pub struct ProviderSpecDto {
     pub id: String,
     pub display_name: String,
     pub provider_kind: String,
-    pub wire_format: astrcode_core::config::ProviderWireFormat,
-    pub auth_scheme: astrcode_core::config::ProviderAuthScheme,
+    pub wire_format: ProviderWireFormatDto,
+    pub auth_scheme: ProviderAuthSchemeDto,
     pub default_model: String,
     pub api_key_env_vars: Vec<String>,
     pub endpoints: Vec<ProviderEndpointPresetDto>,
@@ -739,7 +763,7 @@ pub struct RemoveProviderPresetResponseDto {
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionsDto {
     pub reasoning: Option<bool>,
-    pub thinking_level: Option<astrcode_core::llm::ThinkingLevel>,
+    pub thinking_level: Option<ThinkingLevelDto>,
 }
 
 /// Profile 中的模型信息。
@@ -794,7 +818,7 @@ pub struct CurrentModelResponseDto {
     pub profile_name: String,
     pub model_id: String,
     pub provider_kind: String,
-    pub wire_format: astrcode_core::config::ProviderWireFormat,
+    pub wire_format: ProviderWireFormatDto,
 }
 
 /// GET /api/models 响应中的单个模型。
@@ -804,7 +828,7 @@ pub struct AvailableModelDto {
     pub profile_name: String,
     pub model_id: String,
     pub provider_kind: String,
-    pub wire_format: astrcode_core::config::ProviderWireFormat,
+    pub wire_format: ProviderWireFormatDto,
 }
 
 /// GET /api/models 响应。
@@ -901,5 +925,28 @@ mod tests {
             },
             other => panic!("unexpected delta: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_definition_dto_preserves_legacy_wire_shape() {
+        let dto: ToolDefinitionDto = astrcode_core::tool::ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            origin: astrcode_core::tool::ToolOrigin::Bundled,
+            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
+        }
+        .into();
+
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            serde_json::json!({
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {"type": "object"},
+                "origin": "bundled",
+                "execution_mode": "parallel"
+            })
+        );
     }
 }

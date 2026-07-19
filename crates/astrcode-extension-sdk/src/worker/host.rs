@@ -154,8 +154,14 @@ impl HostNetworkRequest {
 }
 
 /// `astrcode.network.client` 的线缆响应。
+///
+/// `body` 仅承载 UTF-8 文本，不提供二进制/base64 表示；二进制响应由宿主拒绝。
+/// `headers` 不保留同名响应头的重复值。宿主限制全局共享并发，但线缆协议不承诺
+/// extension 级公平配额。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostNetworkResponse {
+    /// 完成所有受限重定向后的最终 URL。
+    pub final_url: String,
     pub status: u16,
     pub headers: BTreeMap<String, String>,
     pub body: String,
@@ -427,13 +433,13 @@ impl HostClient {
         deserialize_response(output, "workspace.glob")
     }
 
-    /// 列出宿主可见会话（manifest 须声明 `session_inspect`）。
+    /// 列出宿主可见的全部会话（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn list_sessions() -> Result<SessionInspectListOutput, ErrorPayload> {
         let output = Self::call("astrcode.session.inspect.list", serde_json::json!({})).await?;
         deserialize_response(output, "session.inspect.list")
     }
 
-    /// 读取轻量会话快照（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取轻量快照（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_session_snapshot(
         session_id: &str,
     ) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
@@ -445,7 +451,7 @@ impl HostClient {
         deserialize_response(output, "session.inspect.snapshot")
     }
 
-    /// 读取稳定映射后的完整会话投影（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取稳定映射后的完整投影（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_session_read_model(
         session_id: &str,
     ) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
@@ -457,7 +463,7 @@ impl HostClient {
         deserialize_response(output, "session.inspect.read_model")
     }
 
-    /// 读取 provider 可见消息（manifest 须声明 `session_inspect`）。
+    /// 跨会话读取 provider 可见消息（manifest 须声明宿主级全局权限 `session_inspect`）。
     pub async fn inspect_provider_messages(
         session_id: &str,
     ) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
@@ -528,10 +534,16 @@ mod host_tests {
         assert_eq!(value["timeout_ms"], 1_000);
 
         let response = deserialize_response::<HostNetworkResponse>(
-            json!({ "status": 200, "headers": {}, "body": "ok" }),
+            json!({
+                "final_url": "https://example.com/final",
+                "status": 200,
+                "headers": {},
+                "body": "ok"
+            }),
             "network.client",
         )
         .expect("deserialize network response");
+        assert_eq!(response.final_url, "https://example.com/final");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "ok");
     }

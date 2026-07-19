@@ -221,6 +221,7 @@ enum WriteCommand {
 struct WriterState {
     writer: File,
     next_seq: u64,
+    committed_len: u64,
     path: PathBuf,
     dirty: bool,
     poisoned: Option<String>,
@@ -235,9 +236,11 @@ impl WriterState {
             .map_err(|e| {
                 StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
             })?;
+        let committed_len = file.metadata().map_err(StorageError::Io)?.len();
         Ok(Self {
             writer: file,
             next_seq,
+            committed_len,
             path,
             dirty: false,
             poisoned: None,
@@ -276,13 +279,13 @@ impl WriterState {
             ))));
         }
 
-        let committed_len = self.writer.metadata().map_err(StorageError::Io)?.len();
+        let committed_len = self.committed_len;
         if let Err(write_error) = self
             .writer
             .write_all(encoded)
             .and_then(|_| self.writer.flush())
         {
-            if let Err(rollback_error) = self.writer.set_len(committed_len) {
+            if let Err(rollback_error) = self.rollback_partial_write(committed_len) {
                 let reason = format!(
                     "write failed: {write_error}; rollback to {committed_len} bytes failed: \
                      {rollback_error}"
@@ -301,6 +304,14 @@ impl WriterState {
                 ),
             )));
         }
+        self.committed_len = self.committed_len.saturating_add(encoded.len() as u64);
+        Ok(())
+    }
+
+    fn rollback_partial_write(&mut self, committed_len: u64) -> std::io::Result<()> {
+        self.writer.set_len(committed_len)?;
+        self.writer.seek(std::io::SeekFrom::Start(committed_len))?;
+        self.committed_len = committed_len;
         Ok(())
     }
 
@@ -386,6 +397,7 @@ fn create_at_path(
         WriterState {
             writer,
             next_seq: 1,
+            committed_len: encoded.len() as u64,
             path,
             dirty: false,
             poisoned: None,
@@ -896,6 +908,27 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].seq, Some(0));
         assert_eq!(events[1].seq, Some(1));
+    }
+
+    #[test]
+    fn partial_write_rollback_repositions_new_file_writer() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rollback.jsonl");
+        let mut writer = WriterState {
+            writer: File::create(&path).unwrap(),
+            next_seq: 1,
+            committed_len: 9,
+            path: path.clone(),
+            dirty: false,
+            poisoned: None,
+        };
+        writer.writer.write_all(b"committedpartial").unwrap();
+
+        writer.rollback_partial_write(9).unwrap();
+        writer.writer.write_all(b"next").unwrap();
+        writer.writer.flush().unwrap();
+
+        assert_eq!(std::fs::read(path).unwrap(), b"committednext");
     }
 
     #[tokio::test]
