@@ -10,6 +10,7 @@ use crate::{
     common::{
         HttpPostRequest, SharedStreamSink, StreamEventSink, apply_auth_header, build_client,
         ensure_header, retry_policy_from_config, send_event, stream_with_retry,
+        token_usage_has_value,
     },
     wire::google_genai as google_wire,
 };
@@ -238,15 +239,6 @@ fn extract_gemini_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage
         source: Some(LlmTokenUsageSource::ProviderUsage),
     };
     token_usage_has_value(&token_usage).then_some(token_usage)
-}
-
-fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
-    usage.input_tokens.is_some()
-        || usage.cached_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.output_tokens.is_some()
-        || usage.reasoning_output_tokens.is_some()
-        || usage.total_tokens.is_some()
 }
 
 #[cfg(test)]

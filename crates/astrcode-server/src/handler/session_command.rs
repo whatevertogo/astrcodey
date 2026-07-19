@@ -5,7 +5,10 @@ use astrcode_core::{
     extension::{CommandCompletions, ExtensionCommandResult, ExtensionError},
     types::SessionId,
 };
-use astrcode_protocol::{events::ExtensionCommandInfo, http::ShadowedSlashCommandDto};
+use astrcode_extensions::runner::CommandSource;
+use astrcode_protocol::{
+    events::ExtensionCommandInfo, http::ShadowedSlashCommandDto, wire::CommandSourceDto,
+};
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
 
@@ -197,15 +200,16 @@ impl CommandHandler {
             .resolve_commands_for_typed(working_dir)
             .await
         {
+            let source = command_source_dto(resolved.source);
             if let Some(active) = commands
                 .iter()
                 .find(|command| command.name == resolved.command.name)
             {
                 shadowed_commands.push(ShadowedSlashCommandDto {
                     name: resolved.command.name,
-                    active_source: active.source.clone(),
+                    active_source: active.source,
                     active_priority: active.priority,
-                    shadowed_source: resolved.source,
+                    shadowed_source: source,
                     shadowed_priority: resolved.command.priority,
                     shadowed_extension_id: resolved.extension_id,
                 });
@@ -215,9 +219,9 @@ impl CommandHandler {
             for shadowed in resolved.shadowed {
                 shadowed_commands.push(ShadowedSlashCommandDto {
                     name: resolved.command.name.clone(),
-                    active_source: resolved.source.clone(),
+                    active_source: source,
                     active_priority: resolved.command.priority,
-                    shadowed_source: shadowed.source,
+                    shadowed_source: command_source_dto(shadowed.source),
                     shadowed_priority: shadowed.priority,
                     shadowed_extension_id: shadowed.extension_id,
                 });
@@ -230,7 +234,7 @@ impl CommandHandler {
                 requires_idle: resolved.command.requires_idle,
                 argument_completions: resolved.command.argument_completions,
                 priority: resolved.command.priority,
-                source: resolved.source,
+                source,
             });
         }
 
@@ -306,6 +310,13 @@ fn normalize_command_name(name: &str) -> String {
     name.trim().trim_start_matches('/').to_ascii_lowercase()
 }
 
+fn command_source_dto(source: CommandSource) -> CommandSourceDto {
+    match source {
+        CommandSource::Extension => CommandSourceDto::Extension,
+        CommandSource::Skill => CommandSourceDto::Skill,
+    }
+}
+
 fn builtin_commands() -> Vec<ExtensionCommandInfo> {
     vec![
         ExtensionCommandInfo {
@@ -315,7 +326,7 @@ fn builtin_commands() -> Vec<ExtensionCommandInfo> {
             requires_idle: true,
             argument_completions: false,
             priority: 0,
-            source: "builtin".into(),
+            source: CommandSourceDto::Builtin,
         },
         ExtensionCommandInfo {
             name: "model".into(),
@@ -324,7 +335,7 @@ fn builtin_commands() -> Vec<ExtensionCommandInfo> {
             requires_idle: false,
             argument_completions: false,
             priority: 0,
-            source: "builtin".into(),
+            source: CommandSourceDto::Builtin,
         },
     ]
 }

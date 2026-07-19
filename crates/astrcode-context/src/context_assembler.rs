@@ -330,7 +330,8 @@ mod tests {
                 && message
                     .content
                     .iter()
-                    .any(|content| matches!(content, astrcode_core::llm::LlmContent::Text { text } if text.contains("<compact_summary>")))
+                    .filter_map(astrcode_core::llm::LlmContent::as_text)
+                    .any(|text| text.contains("<compact_summary>"))
         }));
     }
 

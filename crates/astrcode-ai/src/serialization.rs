@@ -137,14 +137,7 @@ fn chat_content_to_json(content: &[LlmContent]) -> serde_json::Value {
         .iter()
         .any(|p| matches!(p, LlmContent::Image { .. }));
     if !has_image {
-        let text = content
-            .iter()
-            .filter_map(|p| match p {
-                LlmContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let text = LlmContent::join_text(content, "");
         return serde_json::json!(text);
     }
     serde_json::Value::Array(
@@ -241,16 +234,13 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
 // ─── Prompt cache 辅助 ─────────────────────────────────────────────────
 
 pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
-    messages
-        .iter()
-        .filter(|m| matches!(m.role, LlmRole::System))
-        .flat_map(|m| m.content.iter())
-        .filter_map(|c| match c {
-            LlmContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    LlmContent::join_text(
+        messages
+            .iter()
+            .filter(|message| message.role == LlmRole::System)
+            .flat_map(|message| &message.content),
+        "\n\n",
+    )
 }
 
 pub(crate) fn stable_hash_hex(parts: &[&str]) -> String {

@@ -7,7 +7,10 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use astrcode_core::tool::ToolError;
+use astrcode_core::{
+    llm::token_estimate::{estimate_char_budget, estimate_char_tokens},
+    tool::ToolError,
+};
 use astrcode_support::shell::ShellInfo;
 use parking_lot::Mutex;
 use tokio::{
@@ -597,7 +600,8 @@ async fn read_new_output(
 
 fn preview_output_by_tokens(content: &str, max_output_tokens: Option<usize>) -> OutputPreview {
     let max_tokens = normalize_status_output_max_tokens(max_output_tokens);
-    let original_tokens = estimate_text_tokens(content);
+    let total_chars = content.chars().count();
+    let original_tokens = estimate_char_tokens(total_chars);
     if original_tokens <= max_tokens {
         return OutputPreview {
             content: content.to_string(),
@@ -609,13 +613,11 @@ fn preview_output_by_tokens(content: &str, max_output_tokens: Option<usize>) -> 
         };
     }
 
-    let max_chars = max_tokens.saturating_mul(4);
+    let max_chars = estimate_char_budget(max_tokens);
     let marker_reserve_chars = 512.min(max_chars / 3);
     let content_budget_chars = max_chars.saturating_sub(marker_reserve_chars).max(64);
     let head_chars = (content_budget_chars / 4).max(32);
     let tail_chars = content_budget_chars.saturating_sub(head_chars).max(32);
-    let total_chars = content.chars().count();
-
     let head = take_chars(content, head_chars);
     let tail = take_last_chars(content, tail_chars);
     let kept_chars = head.chars().count().saturating_add(tail.chars().count());
@@ -626,7 +628,7 @@ fn preview_output_by_tokens(content: &str, max_output_tokens: Option<usize>) -> 
          this poll; full output is available in the output file ...]\n\n"
     );
     let preview = format!("{head}{marker}{tail}");
-    let returned_tokens = estimate_text_tokens(&preview);
+    let returned_tokens = estimate_char_tokens(kept_chars.saturating_add(marker.chars().count()));
 
     OutputPreview {
         content: preview,
@@ -642,19 +644,6 @@ fn normalize_status_output_max_tokens(max_output_tokens: Option<usize>) -> usize
     max_output_tokens
         .unwrap_or(DEFAULT_STATUS_OUTPUT_MAX_TOKENS)
         .clamp(MIN_STATUS_OUTPUT_MAX_TOKENS, MAX_STATUS_OUTPUT_MAX_TOKENS)
-}
-
-fn estimate_text_tokens(text: &str) -> usize {
-    let chars = text.chars().count();
-    if chars == 0 {
-        0
-    } else {
-        estimate_char_tokens(chars)
-    }
-}
-
-fn estimate_char_tokens(chars: usize) -> usize {
-    chars.div_ceil(4)
 }
 
 fn take_chars(text: &str, count: usize) -> String {

@@ -9,6 +9,7 @@
 //! - 项目标识符派生函数 [`project_key_from_path`]
 
 use std::{
+    borrow::Borrow,
     convert::Infallible,
     fmt,
     path::{Path, PathBuf},
@@ -61,6 +62,12 @@ macro_rules! id_newtype {
 
         impl AsRef<str> for $name {
             fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
                 self.as_str()
             }
         }
@@ -247,10 +254,12 @@ mod tests {
     #[test]
     fn typed_id_serializes_as_plain_string() {
         let session_id = SessionId::from("session-1");
+        let by_id = std::collections::BTreeMap::from([(session_id.clone(), 1)]);
 
         assert_eq!(serde_json::to_string(&session_id).unwrap(), "\"session-1\"");
         assert_eq!(session_id.to_string(), "session-1");
         assert_eq!(session_id.as_str(), "session-1");
+        assert_eq!(by_id.get("session-1"), Some(&1));
         assert_eq!(session_id.into_string(), "session-1");
     }
 

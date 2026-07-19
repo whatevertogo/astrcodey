@@ -484,7 +484,7 @@ struct GoalUsage {
     elapsed_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct GoalReport {
     goal: Option<GoalState>,
@@ -492,7 +492,17 @@ struct GoalReport {
     automation: GoalAutomation,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+impl GoalReport {
+    fn for_goal(goal: GoalState, usage: GoalUsage) -> Self {
+        Self {
+            automation: automation_for_goal(Some(&goal)),
+            goal: Some(goal),
+            usage: Some(usage),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct GoalAutomation {
     automatic_continuation_enabled: bool,
@@ -540,18 +550,15 @@ async fn handle_create_goal(
     match store.create(args.objective, args.token_budget, baseline) {
         Ok(goal) => {
             let usage = runtime.usage_for_goal(session_id, &goal).await;
-            let report = GoalReport {
-                automation: automation_for_goal(Some(&goal)),
-                goal: Some(goal.clone()),
-                usage: Some(usage),
-            };
+            let content = format!(
+                "Goal created: {}\n\nContinue working toward this objective. Call \
+                 {UPDATE_GOAL_TOOL_NAME} with status complete only when it is fully achieved, or \
+                 blocked only after the strict repeated-blocker audit is satisfied.",
+                goal.objective
+            );
+            let report = GoalReport::for_goal(goal, usage);
             ToolResult::text(
-                format!(
-                    "Goal created: {}\n\nContinue working toward this objective. Call \
-                     {UPDATE_GOAL_TOOL_NAME} with status complete only when it is fully achieved, \
-                     or blocked only after the strict repeated-blocker audit is satisfied.",
-                    goal.objective
-                ),
+                content,
                 false,
                 tool_metadata([("goalReport", json!(report))]),
             )
@@ -585,12 +592,8 @@ async fn handle_update_goal(
     match store.update_status(args.status) {
         Ok(goal) => {
             let usage = runtime.usage_for_goal(session_id, &goal).await;
-            let report = GoalReport {
-                automation: automation_for_goal(Some(&goal)),
-                goal: Some(goal.clone()),
-                usage: Some(usage.clone()),
-            };
             let content = goal_status_updated_text(&goal, &usage);
+            let report = GoalReport::for_goal(goal, usage);
             ToolResult::text(
                 content,
                 false,
@@ -613,17 +616,9 @@ async fn build_goal_report(
     match store.load() {
         Ok(Some(goal)) => {
             let usage = runtime.usage_for_goal(session_id, &goal).await;
-            GoalReport {
-                automation: automation_for_goal(Some(&goal)),
-                goal: Some(goal),
-                usage: Some(usage),
-            }
+            GoalReport::for_goal(goal, usage)
         },
-        _ => GoalReport {
-            goal: None,
-            usage: None,
-            automation: automation_for_goal(None),
-        },
+        _ => GoalReport::default(),
     }
 }
 
@@ -1079,96 +1074,28 @@ mod tests {
     }
 
     #[test]
-    fn goal_token_count_excludes_cached_input_and_reasoning() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: Some(10),
-            cached_input_tokens: Some(5),
-            cache_creation_input_tokens: None,
-            output_tokens: Some(7),
-            reasoning_output_tokens: Some(3),
-            total_tokens: Some(20),
-            source: None,
-        };
+    fn goal_token_count_uses_parts_or_provider_fallback() {
+        let cases = [
+            (Some(10), Some(5), Some(7), Some(3), Some(20), Some(12)),
+            (None, None, None, Some(3), Some(20), Some(17)),
+            (Some(10), None, None, Some(2), Some(30), Some(28)),
+            (None, None, Some(8), None, Some(25), Some(25)),
+            (None, None, None, None, None, None),
+            (Some(10), Some(10), Some(5), Some(99), Some(200), Some(5)),
+        ];
 
-        // 主口径：non-cached input (10-5=5) + output (7) = 12，排除 reasoning。
-        assert_eq!(goal_token_count(&usage), Some(12));
-    }
+        for (input, cached, output, reasoning, total, expected) in cases {
+            let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
+                input_tokens: input,
+                cached_input_tokens: cached,
+                cache_creation_input_tokens: None,
+                output_tokens: output,
+                reasoning_output_tokens: reasoning,
+                total_tokens: total,
+                source: None,
+            };
 
-    #[test]
-    fn goal_token_count_falls_back_to_provider_total_without_parts() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            output_tokens: None,
-            reasoning_output_tokens: Some(3),
-            total_tokens: Some(20),
-            source: None,
-        };
-
-        // 缺分项回退到 total_tokens，并扣除 reasoning 保持口径一致：20-3=17。
-        assert_eq!(goal_token_count(&usage), Some(17));
-    }
-
-    #[test]
-    fn goal_token_count_falls_back_when_output_missing() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: Some(10),
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            output_tokens: None,
-            reasoning_output_tokens: Some(2),
-            total_tokens: Some(30),
-            source: None,
-        };
-
-        // output 缺失，整体回退：30-2=28，而不是只计 input(10)。
-        assert_eq!(goal_token_count(&usage), Some(28));
-    }
-
-    #[test]
-    fn goal_token_count_falls_back_when_input_missing() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            output_tokens: Some(8),
-            reasoning_output_tokens: None,
-            total_tokens: Some(25),
-            source: None,
-        };
-
-        assert_eq!(goal_token_count(&usage), Some(25));
-    }
-
-    #[test]
-    fn goal_token_count_returns_none_when_nothing_available() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            output_tokens: None,
-            reasoning_output_tokens: None,
-            total_tokens: None,
-            source: None,
-        };
-
-        assert_eq!(goal_token_count(&usage), None);
-    }
-
-    #[test]
-    fn goal_token_count_zero_non_cached_input() {
-        let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-            input_tokens: Some(10),
-            cached_input_tokens: Some(10),
-            cache_creation_input_tokens: None,
-            output_tokens: Some(5),
-            reasoning_output_tokens: Some(99),
-            total_tokens: Some(200),
-            source: None,
-        };
-
-        // input 全部命中缓存，只剩 output：0 + 5 = 5。
-        assert_eq!(goal_token_count(&usage), Some(5));
+            assert_eq!(goal_token_count(&usage), expected);
+        }
     }
 }

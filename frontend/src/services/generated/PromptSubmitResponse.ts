@@ -3,8 +3,4 @@
 /**
  * prompt 提交结果。
  */
-export type PromptSubmitResponse = { "kind": "accepted", sessionId: string, turnId: string,
-/**
- * 如果该请求隐式 fork，则记录来源。v1 总是 None。
- */
-branchedFromSessionId?: string | null, } | { "kind": "handled", sessionId: string, message: string, };
+export type PromptSubmitResponse = { "kind": "accepted", sessionId: string, turnId: string, } | { "kind": "handled", sessionId: string, message: string, };

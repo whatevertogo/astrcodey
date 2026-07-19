@@ -2,12 +2,10 @@
 //!
 //! 提供基于文本长度的粗略 token 估算，并据此判断上下文是否达到压缩阈值。
 
-use astrcode_core::llm::{LlmContent, LlmMessage, ModelLimits};
-
-const MESSAGE_BASE_TOKENS: usize = 6;
-const TOOL_CALL_BASE_TOKENS: usize = 12;
-const REQUEST_ESTIMATE_PADDING_NUMERATOR: usize = 4;
-const REQUEST_ESTIMATE_PADDING_DENOMINATOR: usize = 3;
+pub use astrcode_core::llm::token_estimate::{
+    estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
+};
+use astrcode_core::llm::{LlmMessage, ModelLimits, token_estimate::estimate_char_budget};
 
 /// 一次 provider 请求的 token 快照。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,65 +85,16 @@ pub fn should_compact_predictive(
     snapshot.context_tokens.saturating_add(growth_estimate) >= effective_budget
 }
 
-/// 估算完整 provider request 的输入 token。
-///
-/// 这是轻量启发式估算，不追求 tokenizer 级精确；额外 padding 用来降低
-/// 低估上下文长度导致 prompt-too-long 的概率。
-pub fn estimate_request_tokens(messages: &[LlmMessage], system_prompt: Option<&str>) -> usize {
-    let system_tokens = system_prompt.map_or(0, estimate_text_tokens);
-    let raw_total = system_tokens + messages.iter().map(estimate_message_tokens).sum::<usize>();
-    raw_total
-        .saturating_mul(REQUEST_ESTIMATE_PADDING_NUMERATOR)
-        .div_ceil(REQUEST_ESTIMATE_PADDING_DENOMINATOR)
-}
-
-/// 估算单条 LLM message 的 token。
-pub fn estimate_message_tokens(message: &LlmMessage) -> usize {
-    MESSAGE_BASE_TOKENS
-        + message
-            .content
-            .iter()
-            .map(estimate_content_tokens)
-            .sum::<usize>()
-}
-
-/// 粗略按 4 chars ~= 1 token 估算文本 token。
-pub fn estimate_text_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4).max(1)
-}
-
 /// 按同一套粗略 token 估算裁剪文本，并追加调用方指定的截断标记。
 pub fn truncate_text_to_tokens(content: &str, max_tokens: usize, marker: &str) -> String {
     if estimate_text_tokens(content) <= max_tokens {
         return content.to_string();
     }
-    let max_chars = max_tokens.saturating_mul(4);
+    let max_chars = estimate_char_budget(max_tokens);
     let content_budget = max_chars.saturating_sub(marker.chars().count());
     let mut truncated = content.chars().take(content_budget).collect::<String>();
     truncated.push_str(marker);
     truncated
-}
-
-fn estimate_content_tokens(content: &LlmContent) -> usize {
-    match content {
-        LlmContent::Text { text } => estimate_text_tokens(text),
-        LlmContent::Image { base64, .. } => estimate_text_tokens(base64),
-        LlmContent::ToolCall {
-            call_id,
-            name,
-            arguments,
-        } => {
-            TOOL_CALL_BASE_TOKENS
-                + estimate_text_tokens(call_id)
-                + estimate_text_tokens(name)
-                + estimate_text_tokens(&arguments.to_string())
-        },
-        LlmContent::ToolResult {
-            tool_call_id,
-            content,
-            ..
-        } => estimate_text_tokens(tool_call_id) + estimate_text_tokens(content),
-    }
 }
 
 fn turn_token_totals(messages: &[LlmMessage]) -> Vec<usize> {

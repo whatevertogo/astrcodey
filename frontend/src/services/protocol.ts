@@ -201,7 +201,6 @@ export function decodeConversationControlState(
     canRequestCompact: requiredBoolean(object, 'canRequestCompact'),
     compactPending: requiredBoolean(object, 'compactPending'),
     compacting: requiredBoolean(object, 'compacting'),
-    currentModeId: optionalString(object, 'currentModeId'),
     activeTurnId: optionalString(object, 'activeTurnId'),
   }
 }

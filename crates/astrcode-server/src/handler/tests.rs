@@ -24,7 +24,9 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
 };
-use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
+use astrcode_protocol::{
+    commands::ClientCommand, events::ClientNotification, wire::CommandSourceDto,
+};
 use astrcode_session::{compact_boundary_payload, session_continued_from_compaction_payload};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use astrcode_support::event_fanout::EventFanout;
@@ -1234,6 +1236,45 @@ async fn concurrent_open_waits_for_initial_session_resume() {
 }
 
 #[tokio::test]
+async fn cancelled_initial_resume_allows_retry() {
+    let runtime = test_runtime();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    runtime
+        .extension_runner
+        .register(Arc::new(BlockingSessionResumeExtension {
+            calls: Arc::clone(&calls),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }))
+        .await
+        .unwrap();
+    let sid = new_session_id();
+    runtime
+        .event_store()
+        .create_session(&sid, ".", "mock-model", None, None, None)
+        .await
+        .unwrap();
+
+    let first_runtime = Arc::clone(&runtime);
+    let first_sid = sid.clone();
+    let first = tokio::spawn(async move { first_runtime.session_manager().open(first_sid).await });
+    entered.notified().await;
+    first.abort();
+    assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+
+    release.notify_one();
+    let reopened =
+        tokio::time::timeout(Duration::from_secs(1), runtime.session_manager().open(sid))
+            .await
+            .unwrap();
+
+    assert!(reopened.is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn submit_prompt_reuses_session_system_prompt() {
     let runtime = test_runtime();
     let event_tx = Arc::new(EventFanout::new(1024));
@@ -2212,12 +2253,12 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         .filter(|command| command.name == "compact")
         .collect::<Vec<_>>();
     assert_eq!(compact_commands.len(), 1);
-    assert_eq!(compact_commands[0].source, "builtin");
+    assert_eq!(compact_commands[0].source, CommandSourceDto::Builtin);
     let reviewnow = commands
         .iter()
         .find(|command| command.name == "reviewnow")
         .expect("reviewnow command");
-    assert_eq!(reviewnow.source, "extension");
+    assert_eq!(reviewnow.source, CommandSourceDto::Extension);
     let _ = fs::remove_dir_all(workspace);
 }
 

@@ -190,25 +190,17 @@ pub(in crate::http) async fn session_stream(
                 let cursor = event_cursor(&runtime, &event).await;
                 deltas
                     .into_iter()
-                    .map(|delta| {
-                        Ok(sse_event(&ConversationStreamEnvelopeDto {
-                            session_id: replay_sid.to_string(),
-                            cursor: ConversationCursorDto {
-                                value: cursor.clone(),
-                            },
-                            delta,
-                        }))
-                    })
+                    .map(|delta| conversation_sse_item(&replay_sid, cursor.clone(), delta))
                     .collect::<Vec<_>>()
             }
         })
         .flat_map(stream::iter);
     let replay_error_stream = stream::iter(replay_error.then(|| {
-        Ok(sse_event(&ConversationStreamEnvelopeDto {
-            session_id: session_id.to_string(),
-            cursor: ConversationCursorDto { value: "0".into() },
-            delta: ConversationDeltaDto::RehydrateRequired,
-        }))
+        conversation_sse_item(
+            &session_id,
+            "0".into(),
+            ConversationDeltaDto::RehydrateRequired,
+        )
     }));
 
     let live_runtime = Arc::clone(&http_state.runtime);
@@ -450,15 +442,7 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
 
             deltas
                 .into_iter()
-                .map(|delta| {
-                    Ok(sse_event(&ConversationStreamEnvelopeDto {
-                        session_id: state.session_id.to_string(),
-                        cursor: ConversationCursorDto {
-                            value: cursor.clone(),
-                        },
-                        delta,
-                    }))
-                })
+                .map(|delta| conversation_sse_item(&state.session_id, cursor.clone(), delta))
                 .collect()
         },
         event => {
@@ -467,11 +451,7 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
             };
             // 子事件的 seq 属于子会话，不能用来更新父会话的 cursor
             let cursor = get_or_fetch_cursor(state).await;
-            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
-                session_id: state.session_id.to_string(),
-                cursor: ConversationCursorDto { value: cursor },
-                delta,
-            }))]
+            vec![conversation_sse_item(&state.session_id, cursor, delta)]
         },
     }
 }
@@ -480,30 +460,19 @@ async fn notification_to_sse_items(
     state: &mut LiveStreamState,
     notification: ClientNotification,
 ) -> Vec<SseItem> {
-    match notification {
-        ClientNotification::Event(_) => Vec::new(),
+    let delta = match notification {
+        ClientNotification::Event(_) => return Vec::new(),
         ClientNotification::StatusItemUpdate { id, text } => {
-            let cursor = get_or_fetch_cursor(state).await;
-            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
-                session_id: state.session_id.to_string(),
-                cursor: ConversationCursorDto { value: cursor },
-                delta: ConversationDeltaDto::StatusItemUpdate { id, text },
-            }))]
+            ConversationDeltaDto::StatusItemUpdate { id, text }
         },
         ClientNotification::ExtensionRegistryChanged => {
-            let cursor = get_or_fetch_cursor(state).await;
-            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
-                session_id: state.session_id.to_string(),
-                cursor: ConversationCursorDto { value: cursor },
-                delta: ConversationDeltaDto::ExtensionRegistryChanged,
-            }))]
+            ConversationDeltaDto::ExtensionRegistryChanged
         },
         ClientNotification::ExtensionCommandResult {
             command_name,
             content,
             is_error,
         } => {
-            let cursor = get_or_fetch_cursor(state).await;
             let block_id = format!("cmd-{}", Uuid::new_v4());
             let block = if is_error {
                 ConversationBlockDto::Error {
@@ -520,14 +489,13 @@ async fn notification_to_sse_items(
                     text: content,
                 }
             };
-            vec![Ok(sse_event(&ConversationStreamEnvelopeDto {
-                session_id: state.session_id.to_string(),
-                cursor: ConversationCursorDto { value: cursor },
-                delta: ConversationDeltaDto::AppendBlock { block },
-            }))]
+            ConversationDeltaDto::AppendBlock { block }
         },
-        _ => Vec::new(),
-    }
+        _ => return Vec::new(),
+    };
+
+    let cursor = get_or_fetch_cursor(state).await;
+    vec![conversation_sse_item(&state.session_id, cursor, delta)]
 }
 
 /// 获取 cursor：优先使用缓存，缓存缺失时查询存储。
@@ -700,6 +668,18 @@ fn event_adds_message(event: &Event) -> bool {
         event.payload,
         EventPayload::UserMessage { .. } | EventPayload::AssistantMessageCompleted { .. }
     )
+}
+
+fn conversation_sse_item(
+    session_id: &SessionId,
+    cursor: String,
+    delta: ConversationDeltaDto,
+) -> SseItem {
+    Ok(sse_event(&ConversationStreamEnvelopeDto {
+        session_id: session_id.to_string(),
+        cursor: ConversationCursorDto { value: cursor },
+        delta,
+    }))
 }
 
 fn sse_event<T: serde::Serialize>(value: &T) -> SseEvent {

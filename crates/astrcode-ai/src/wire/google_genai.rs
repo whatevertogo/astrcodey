@@ -83,15 +83,7 @@ fn convert_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<serde_json:
     for msg in messages {
         match msg.role {
             LlmRole::System => {
-                let text = msg
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        LlmContent::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let text = msg.joined_text("\n");
                 if !text.trim().is_empty() {
                     system_texts.push(text);
                 }

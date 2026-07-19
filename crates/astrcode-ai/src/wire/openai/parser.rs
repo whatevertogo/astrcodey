@@ -9,7 +9,7 @@ use astrcode_core::{
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{send_event, stream_text_delta},
+    common::{send_event, stream_text_delta, token_usage_has_value},
     stream_decoder::clean_json_fragment,
 };
 
@@ -621,15 +621,6 @@ fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
     } else {
         None
     }
-}
-
-fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
-    usage.input_tokens.is_some()
-        || usage.cached_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.output_tokens.is_some()
-        || usage.reasoning_output_tokens.is_some()
-        || usage.total_tokens.is_some()
 }
 
 #[cfg(test)]

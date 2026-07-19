@@ -18,9 +18,15 @@ pub enum ApprovalMode {
 }
 
 impl ApprovalMode {
-    /// 解析配置/API 中的审批模式字符串。
     pub fn parse(raw: &str) -> Option<Self> {
         raw.parse().ok()
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Yolo => "yolo",
+        }
     }
 }
 

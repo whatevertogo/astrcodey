@@ -15,9 +15,9 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, CompletionParams, ConfigManager, DeliveryOutcome, InputDelivery,
+    ChildSessionCoordinator, ConfigManager, DeliveryOutcome, InputDelivery,
     MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry,
-    TurnScheduleError, TurnScheduler,
+    TurnScheduleError, TurnScheduler, recycle_completed_session_for_test,
 };
 use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::in_memory::InMemoryEventStore;
@@ -178,10 +178,7 @@ async fn idle_submit_emits_turn_started_and_user_message() {
         .unwrap();
     let _ = started.handle.wait().await;
     scheduler
-        .finish_and_maybe_start_next(CompletionParams {
-            session_id: sid.clone(),
-            turn_id: started.turn_id,
-        })
+        .finish_and_maybe_start_next(&sid, &started.turn_id)
         .await;
 
     let events = store.replay_events(&sid).await.unwrap();
@@ -397,7 +394,7 @@ fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String>
 }
 
 #[tokio::test]
-async fn release_completed_execution_does_not_emit_aborted_turn() {
+async fn release_completed_execution_is_non_destructive() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
@@ -406,20 +403,47 @@ async fn release_completed_execution_does_not_emit_aborted_turn() {
         .start_with_completion(sid.clone(), "done".into())
         .await
         .unwrap();
+    let turn_id = started.turn_id;
     let _ = started.handle.wait().await;
 
-    let before = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
-    assert_eq!(before, vec!["stop"]);
+    scheduler.release_completed_execution(&sid, &turn_id).await;
 
-    scheduler.release_completed_execution(&sid).await;
-
-    let after = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(
-        after,
-        vec!["stop"],
-        "release_completed_execution must not append TurnCompleted(aborted)"
+        turn_completed_reasons(&store.replay_events(&sid).await.unwrap()),
+        vec!["stop"]
     );
     assert!(!scheduler.registry().has_active(&sid));
+}
+
+#[tokio::test]
+async fn stale_completion_does_not_recycle_newer_turn() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+
+    let first = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    let first_turn_id = first.turn_id;
+    let _ = first.handle.wait().await;
+
+    let outcome = scheduler
+        .deliver_input(
+            sid.clone(),
+            "second".into(),
+            InputDelivery::InjectIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DeliveryOutcome::Started { .. }));
+
+    assert!(
+        !recycle_completed_session_for_test(&scheduler, &sid, &first_turn_id)
+            .await
+            .unwrap()
+    );
+    assert!(store.list_sessions().await.unwrap().contains(&sid));
 }
 
 #[tokio::test]
@@ -434,7 +458,7 @@ async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal(
         .unwrap();
     let _ = started.handle.wait().await;
 
-    scheduler.abort_and_cleanup(&sid).await;
+    scheduler.cleanup_execution(&sid).await;
 
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(
@@ -483,12 +507,7 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         Err(astrcode_session::TurnError::Aborted)
     ));
 
-    scheduler
-        .finish_and_maybe_start_next(CompletionParams {
-            session_id: sid.clone(),
-            turn_id,
-        })
-        .await;
+    scheduler.finish_and_maybe_start_next(&sid, &turn_id).await;
     assert!(!scheduler.registry().has_active(&sid));
 
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());

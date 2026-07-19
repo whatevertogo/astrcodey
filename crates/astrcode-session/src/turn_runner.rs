@@ -14,7 +14,7 @@ use astrcode_core::{
     },
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
-        provider_visible_messages,
+        provider_visible_messages, token_estimate,
     },
     storage::SessionReadModel,
     tool::ToolDefinition,
@@ -574,7 +574,10 @@ impl TurnLoop {
                      local estimate fallback"
                 );
                 Some(LlmTokenUsage {
-                    input_tokens: Some(local_estimate_request_tokens(&request_messages) as u64),
+                    input_tokens: Some(token_estimate::estimate_request_tokens(
+                        &request_messages,
+                        None,
+                    ) as u64),
                     cached_input_tokens: None,
                     cache_creation_input_tokens: None,
                     output_tokens: None,
@@ -854,69 +857,11 @@ fn extract_last_assistant_text(messages: &[LlmMessage]) -> Option<String> {
         .iter()
         .rev()
         .find(|m| m.role == LlmRole::Assistant)
-        .map(|msg| {
-            msg.content
-                .iter()
-                .filter_map(|c| match c {
-                    LlmContent::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
-        })
+        .map(|message| message.joined_text(""))
 }
 
 fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
-    messages
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|c| match c {
-            LlmContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-fn local_estimate_request_tokens(messages: &[LlmMessage]) -> usize {
-    // Last-resort fallback only: keep this lightweight heuristic aligned with
-    // astrcode-context token budgeting without adding a session -> context dependency.
-    let raw_total = messages
-        .iter()
-        .map(|message| {
-            6 + message
-                .content
-                .iter()
-                .map(local_estimate_content_tokens)
-                .sum::<usize>()
-        })
-        .sum::<usize>();
-    raw_total.saturating_mul(4).div_ceil(3)
-}
-
-fn local_estimate_content_tokens(content: &LlmContent) -> usize {
-    match content {
-        LlmContent::Text { text } => local_estimate_text_tokens(text),
-        LlmContent::Image { base64, .. } => local_estimate_text_tokens(base64),
-        LlmContent::ToolCall {
-            call_id,
-            name,
-            arguments,
-        } => {
-            12 + local_estimate_text_tokens(call_id)
-                + local_estimate_text_tokens(name)
-                + local_estimate_text_tokens(&arguments.to_string())
-        },
-        LlmContent::ToolResult {
-            tool_call_id,
-            content,
-            ..
-        } => local_estimate_text_tokens(tool_call_id) + local_estimate_text_tokens(content),
-    }
-}
-
-fn local_estimate_text_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4).max(1)
+    LlmContent::join_text(messages.iter().flat_map(|message| &message.content), "")
 }
 
 enum ToolStageDecision {

@@ -70,11 +70,14 @@ fn latest_previous_summary(messages: &[LlmMessage]) -> Option<String> {
         if message.role != LlmRole::User {
             return None;
         }
-        message.content.iter().find_map(|content| match content {
-            LlmContent::Text { text } => parse_compact_summary_message(text)
-                .map(|envelope| sanitize_compact_summary(&envelope.summary)),
-            _ => None,
-        })
+        message
+            .content
+            .iter()
+            .filter_map(LlmContent::as_text)
+            .find_map(|text| {
+                parse_compact_summary_message(text)
+                    .map(|envelope| sanitize_compact_summary(&envelope.summary))
+            })
     })
 }
 

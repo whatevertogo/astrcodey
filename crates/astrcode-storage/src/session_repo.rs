@@ -4,7 +4,7 @@
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs::File,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, Weak},
@@ -860,7 +860,7 @@ impl FileSystemSessionRepository {
 
     /// 仅扫描磁盘上的会话目录名，不打开任何文件。
     async fn list_session_dirs(&self) -> Result<Vec<SessionId>, StorageError> {
-        let mut ids: Vec<SessionId> = self
+        let mut ids: BTreeSet<SessionId> = self
             .sessions
             .read()
             .await
@@ -872,15 +872,14 @@ impl FileSystemSessionRepository {
             self.collect_session_ids_from_dir(&base_path, &mut ids)
                 .await;
         }
-        ids.sort();
-        Ok(ids)
+        Ok(ids.into_iter().collect())
     }
 
     /// 收集 `base` 下一层会话目录名（不含 `subagents/` 等元数据目录）。
     ///
     /// 子 agent 会话存放在 `subagents/<id>/`，由 `find_session_dir` 按需解析，
     /// 不出现在 `list_sessions` 结果中。
-    async fn collect_session_ids_from_dir(&self, base: &Path, ids: &mut Vec<SessionId>) {
+    async fn collect_session_ids_from_dir(&self, base: &Path, ids: &mut BTreeSet<SessionId>) {
         let Ok(mut entries) = tokio::fs::read_dir(base).await else {
             return;
         };
@@ -899,9 +898,7 @@ impl FileSystemSessionRepository {
                 continue;
             }
             let id = SessionId::from(name_str.to_string());
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
+            ids.insert(id);
         }
     }
 

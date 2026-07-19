@@ -4,11 +4,7 @@ import type { PhaseDto } from "./PhaseDto";
 /**
  * 会话列表项。
  */
-export type SessionListItemDto = { sessionId: string, workingDir: string, displayName: string, title: string, createdAt: string, updatedAt: string, parentSessionId?: string | null,
-/**
- * 父会话 seq，v1 未接线。
- */
-parentStorageSeq?: number | null, phase: PhaseDto,
+export type SessionListItemDto = { sessionId: string, workingDir: string, displayName: string, title: string, createdAt: string, updatedAt: string, parentSessionId?: string | null, phase: PhaseDto,
 /**
  * 首条用户消息内容，无消息时为 None。
  */

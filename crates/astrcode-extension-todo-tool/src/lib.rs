@@ -655,9 +655,11 @@ mod tests {
 
     fn text_exists(messages: &[LlmMessage], needle: &str) -> bool {
         messages.iter().any(|message| {
-            message.content.iter().any(
-                |content| matches!(content, LlmContent::Text { text } if text.contains(needle)),
-            )
+            message
+                .content
+                .iter()
+                .filter_map(LlmContent::as_text)
+                .any(|text| text.contains(needle))
         })
     }
 

@@ -1,9 +1,4 @@
 //! 扩展运行器 — 将生命周期事件分发到已注册的扩展。
-//!
-//! 负责管理扩展注册、事件分发，并强制执行 HookMode 语义：
-//! - Blocking: 同步执行，可返回 Block 或 ModifiedInput/ModifiedResult
-//! - NonBlocking: 以即发即弃方式派生任务，使用快照上下文
-//! - Advisory: 结果仅记录日志，不强制执行
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -27,8 +22,12 @@ mod index;
 mod snapshot;
 mod tool_adapter;
 
-pub use commands::{RegisteredSlashCommand, ResolvedSlashCommand, ShadowedSlashCommand};
-use diagnostics::ExtensionDiagnosticStage;
+pub use commands::{
+    CommandSource, RegisteredSlashCommand, ResolvedSlashCommand, ShadowedSlashCommand,
+};
+use diagnostics::{
+    ExtensionDiagnosticStage as DiagnosticStage, ExtensionStageOutcome as StageOutcome,
+};
 pub use diagnostics::{
     ExtensionDiagnostics, ExtensionHealthReport, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
@@ -78,6 +77,8 @@ struct ExtensionRecord {
     pub(super) capabilities: Vec<ExtensionCapability>,
     /// 注册时的配置快照，用于 diff 检测热更新。
     config: serde_json::Value,
+    /// 串行化同一扩展的配置回调与 stop，不阻塞其他扩展。
+    operation_gate: Arc<AsyncMutex<()>>,
 }
 
 // ─── BoundExtensionEventSink ──────────────────────────────────────────────
@@ -185,16 +186,15 @@ impl ExtensionRunner {
             tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
             self.record_stage_result(
                 &id,
-                ExtensionDiagnosticStage::Register,
+                DiagnosticStage::Register,
                 Some(Duration::ZERO),
-                None,
-                ExtensionStageStatus::Skipped,
+                StageOutcome::Skipped,
             );
             return Ok(false);
         }
 
         // register() 只收集声明；start() 才进入运行态。
-        self.record_stage_running(&id, ExtensionDiagnosticStage::Register);
+        self.record_stage_running(&id, DiagnosticStage::Register);
         let register_started = std::time::Instant::now();
         let mut reg = Registrar::new();
         ext.register(&mut reg);
@@ -207,10 +207,9 @@ impl ExtensionRunner {
             let error = ExtensionError::Internal(message);
             self.record_stage_result(
                 &id,
-                ExtensionDiagnosticStage::Register,
+                DiagnosticStage::Register,
                 Some(register_started.elapsed()),
-                Some(error.to_string()),
-                ExtensionStageStatus::Failed,
+                StageOutcome::Failed(error.to_string()),
             );
             return Err(error);
         }
@@ -222,31 +221,22 @@ impl ExtensionRunner {
                 ));
                 self.record_stage_result(
                     &id,
-                    ExtensionDiagnosticStage::Register,
+                    DiagnosticStage::Register,
                     Some(register_started.elapsed()),
-                    Some(error.to_string()),
-                    ExtensionStageStatus::Failed,
+                    StageOutcome::Failed(error.to_string()),
                 );
                 return Err(error);
             }
         }
         self.record_stage_result(
             &id,
-            ExtensionDiagnosticStage::Register,
+            DiagnosticStage::Register,
             Some(register_started.elapsed()),
-            None,
-            ExtensionStageStatus::Succeeded,
+            StageOutcome::Succeeded,
         );
 
         let tasks = ExtensionTasks::new(id.clone());
-
-        // 查找该扩展的专有配置，回退到空对象
-        let ext_config = self
-            .extension_configs
-            .read()
-            .get(&id)
-            .cloned()
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let ext_config = extension_config(&self.extension_configs.read(), &id);
 
         let event_sink =
             self.startup_event_tx.read().as_ref().and_then(|tx| {
@@ -265,27 +255,21 @@ impl ExtensionRunner {
             event_sink,
             host_services,
         );
-        self.record_stage_running(&id, ExtensionDiagnosticStage::Start);
+        self.record_stage_running(&id, DiagnosticStage::Start);
         let start_started = std::time::Instant::now();
-        let start_result = tokio::time::timeout(self.timeout, ext.start(ctx))
-            .await
-            .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))
-            .and_then(|result| result);
+        let start_result = self.run_with_timeout(ext.start(ctx)).await;
         if let Err(error) = start_result {
             self.record_stage_result(
                 &id,
-                ExtensionDiagnosticStage::Start,
+                DiagnosticStage::Start,
                 Some(start_started.elapsed()),
-                Some(error.to_string()),
-                ExtensionStageStatus::Failed,
+                StageOutcome::Failed(error.to_string()),
             );
             tasks.cancel();
             tasks.wait(self.timeout).await;
-            let rollback_result =
-                tokio::time::timeout(self.timeout, ext.stop(StopReason::StartupFailed))
-                    .await
-                    .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))
-                    .and_then(|result| result);
+            let rollback_result = self
+                .run_with_timeout(ext.stop(StopReason::StartupFailed))
+                .await;
             if let Err(rollback_error) = rollback_result {
                 tracing::warn!(
                     extension_id = %id,
@@ -297,10 +281,9 @@ impl ExtensionRunner {
         }
         self.record_stage_result(
             &id,
-            ExtensionDiagnosticStage::Start,
+            DiagnosticStage::Start,
             Some(start_started.elapsed()),
-            None,
-            ExtensionStageStatus::Succeeded,
+            StageOutcome::Succeeded,
         );
 
         self.extensions.write().await.push(ext);
@@ -313,11 +296,9 @@ impl ExtensionRunner {
                 reg,
                 capabilities,
                 config: ext_config,
+                operation_gate: Arc::new(AsyncMutex::new(())),
             });
-            log_handler_dispatch_order(&records);
-            let new_index = Arc::new(build_handler_index(&records));
-            self.ensure_extensions_data_dir_dirs(&new_index);
-            *self.index.write() = new_index;
+            self.rebuild_index(&records);
         }
 
         Ok(true)
@@ -331,7 +312,31 @@ impl ExtensionRunner {
         extension_id: &str,
         reason: StopReason,
     ) -> Result<bool, ExtensionError> {
-        let _lifecycle = self.lifecycle_lock.lock().await;
+        let (_operation_guard, _lifecycle) = loop {
+            let operation_gate = self.records.read().await.iter().find_map(|record| {
+                (record.id == extension_id).then(|| Arc::clone(&record.operation_gate))
+            });
+            let operation_guard = match &operation_gate {
+                Some(gate) => Some(Arc::clone(gate).lock_owned().await),
+                None => None,
+            };
+            let lifecycle = self.lifecycle_lock.lock().await;
+            let operation_gate_is_current = self
+                .records
+                .read()
+                .await
+                .iter()
+                .find(|record| record.id == extension_id)
+                .map(|record| {
+                    operation_gate
+                        .as_ref()
+                        .is_some_and(|gate| Arc::ptr_eq(gate, &record.operation_gate))
+                })
+                .unwrap_or(operation_gate.is_none());
+            if operation_gate_is_current {
+                break (operation_guard, lifecycle);
+            }
+        };
         let mut exts = self.extensions.write().await;
         let Some(pos) = exts.iter().position(|ext| ext.id() == extension_id) else {
             return Ok(false);
@@ -341,10 +346,7 @@ impl ExtensionRunner {
 
         let mut records = self.records.write().await;
         records.retain(|record| record.id != extension_id);
-        log_handler_dispatch_order(&records);
-        let new_index = Arc::new(build_handler_index(&records));
-        self.ensure_extensions_data_dir_dirs(&new_index);
-        *self.index.write() = new_index;
+        self.rebuild_index(&records);
         drop(records);
 
         let tasks = self.extension_tasks.write().await.remove(extension_id);
@@ -391,6 +393,13 @@ impl ExtensionRunner {
         }
     }
 
+    fn rebuild_index(&self, records: &[ExtensionRecord]) {
+        log_handler_dispatch_order(records);
+        let index = Arc::new(build_handler_index(records));
+        self.ensure_extensions_data_dir_dirs(&index);
+        *self.index.write() = index;
+    }
+
     /// 绑定会话原子操作能力。
     pub fn bind_session_ops(&self, ops: Arc<dyn SessionOperations>) {
         *self.session_ops.write().unwrap_or_else(|e| e.into_inner()) = Some(ops);
@@ -431,38 +440,75 @@ impl ExtensionRunner {
     /// 返回每个扩展的 notify 结果（仅记录错误，不中断）。
     pub async fn notify_config_changed(&self) -> Vec<String> {
         let current_configs = self.extension_configs.read().clone();
-        let mut records = self.records.write().await;
+        let pending: Vec<_> = self
+            .records
+            .read()
+            .await
+            .iter()
+            .filter_map(|record| {
+                let config = extension_config(&current_configs, &record.id);
+                (record.config != config).then(|| {
+                    (
+                        record.id.clone(),
+                        config,
+                        Arc::clone(&record.operation_gate),
+                    )
+                })
+            })
+            .collect();
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        let changes: Vec<_> = {
+            let extensions = self.extensions.read().await;
+            pending
+                .into_iter()
+                .filter_map(|(extension_id, config, operation_gate)| {
+                    extensions
+                        .iter()
+                        .find(|extension| extension.id() == extension_id)
+                        .map(|extension| {
+                            (extension_id, Arc::clone(extension), config, operation_gate)
+                        })
+                })
+                .collect()
+        };
+
         let mut errors = Vec::new();
-
-        for record in records.iter_mut() {
-            let new_config = current_configs
-                .get(&record.id)
-                .cloned()
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-
-            if record.config == new_config {
+        for (extension_id, extension, new_config, operation_gate) in changes {
+            let _operation = operation_gate.lock().await;
+            let record_is_current = self.records.read().await.iter().any(|record| {
+                record.id == extension_id
+                    && Arc::ptr_eq(&record.operation_gate, &operation_gate)
+                    && record.config != new_config
+            });
+            let extension_is_current =
+                self.extensions.read().await.iter().any(|current| {
+                    current.id() == extension_id && Arc::ptr_eq(current, &extension)
+                });
+            if !record_is_current
+                || !extension_is_current
+                || extension_config(&self.extension_configs.read(), &extension_id) != new_config
+            {
                 continue;
             }
 
-            let ext = {
-                let extensions = self.extensions.read().await;
-                extensions
-                    .iter()
-                    .find(|e| e.id() == record.id)
-                    .map(Arc::clone)
-            };
-
-            if let Some(ext) = ext {
-                if let Err(e) = ext
-                    .on_config_changed(ExtensionConfig(new_config.clone()))
-                    .await
-                {
-                    errors.push(format!(
-                        "config changed handler failed for {}: {e}",
-                        record.id
-                    ));
-                } else {
-                    record.config = new_config;
+            if let Err(error) = self
+                .run_with_timeout(extension.on_config_changed(ExtensionConfig(new_config.clone())))
+                .await
+            {
+                errors.push(format!(
+                    "config changed handler failed for {extension_id}: {error}"
+                ));
+            } else {
+                let mut records = self.records.write().await;
+                if extension_config(&self.extension_configs.read(), &extension_id) == new_config {
+                    if let Some(record) = records.iter_mut().find(|record| {
+                        record.id == extension_id
+                            && Arc::ptr_eq(&record.operation_gate, &operation_gate)
+                    }) {
+                        record.config = new_config;
+                    }
                 }
             }
         }
@@ -481,7 +527,6 @@ impl ExtensionRunner {
         *self.startup_event_tx.write() = Some(event_tx);
     }
 
-
     async fn spawn_extension_task<F>(&self, extension_id: &str, task_name: &'static str, fut: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -496,6 +541,65 @@ impl ExtensionRunner {
                 "skip spawning task for stopped extension"
             );
         }
+    }
+
+    async fn run_recorded_blocking_hook<T>(
+        &self,
+        extension_id: &str,
+        hook_name: &'static str,
+        future: impl std::future::Future<Output = Result<T, ExtensionError>>,
+    ) -> Result<T, ExtensionError> {
+        let started = std::time::Instant::now();
+        match tokio::time::timeout(self.timeout, future).await {
+            Ok(result) => {
+                self.record_hook_result(
+                    extension_id,
+                    hook_name,
+                    started.elapsed(),
+                    result.as_ref().err().map(ToString::to_string),
+                    false,
+                );
+                result
+            },
+            Err(_) => {
+                let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
+                self.record_hook_result(
+                    extension_id,
+                    hook_name,
+                    started.elapsed(),
+                    Some(error.to_string()),
+                    true,
+                );
+                Err(error)
+            },
+        }
+    }
+
+    async fn run_with_timeout<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, ExtensionError>>,
+    ) -> Result<T, ExtensionError> {
+        tokio::time::timeout(self.timeout, future)
+            .await
+            .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))?
+    }
+
+    async fn run_recorded_advisory<T>(
+        &self,
+        extension_id: &str,
+        hook_name: &'static str,
+        future: impl std::future::Future<Output = Result<T, ExtensionError>>,
+    ) -> Result<T, ExtensionError> {
+        let started = std::time::Instant::now();
+        let result = future.await;
+        self.record_hook_result(
+            extension_id,
+            hook_name,
+            started.elapsed(),
+            result.as_ref().err().map(ToString::to_string),
+            false,
+        );
+        result
     }
 
     // ─── 类型化分发方法 ──────────────────────────────────────────────
@@ -518,43 +622,13 @@ impl ExtensionRunner {
                 attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let started = std::time::Instant::now();
-                    let result =
-                        match tokio::time::timeout(self.timeout, handler.handle(handler_ctx)).await
-                        {
-                            Ok(Ok(result)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    "pre_tool_use",
-                                    started.elapsed(),
-                                    None,
-                                    false,
-                                );
-                                result
-                            },
-                            Ok(Err(error)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    "pre_tool_use",
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    false,
-                                );
-                                return Err(error);
-                            },
-                            Err(_) => {
-                                let error =
-                                    ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                                self.record_hook_result(
-                                    extension_id,
-                                    "pre_tool_use",
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    true,
-                                );
-                                return Err(error);
-                            },
-                        };
+                    let result = self
+                        .run_recorded_blocking_hook(
+                            extension_id,
+                            "pre_tool_use",
+                            handler.handle(handler_ctx),
+                        )
+                        .await?;
                     match result {
                         PreToolUseResult::Block { reason } => {
                             return Ok(PreToolUseResult::Block { reason });
@@ -570,24 +644,15 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    let started = std::time::Instant::now();
-                    if let Err(e) = handler.handle(handler_ctx).await {
-                        self.record_hook_result(
+                    if let Err(e) = self
+                        .run_recorded_advisory(
                             extension_id,
                             "pre_tool_use",
-                            started.elapsed(),
-                            Some(e.to_string()),
-                            false,
-                        );
+                            handler.handle(handler_ctx),
+                        )
+                        .await
+                    {
                         tracing::warn!(error = %e, "advisory pre_tool_use handler failed");
-                    } else {
-                        self.record_hook_result(
-                            extension_id,
-                            "pre_tool_use",
-                            started.elapsed(),
-                            None,
-                            false,
-                        );
                     }
                 },
                 HookMode::NonBlocking => {
@@ -628,43 +693,13 @@ impl ExtensionRunner {
                 attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let started = std::time::Instant::now();
-                    let result =
-                        match tokio::time::timeout(self.timeout, handler.handle(handler_ctx)).await
-                        {
-                            Ok(Ok(result)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    "post_tool_use",
-                                    started.elapsed(),
-                                    None,
-                                    false,
-                                );
-                                result
-                            },
-                            Ok(Err(error)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    "post_tool_use",
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    false,
-                                );
-                                return Err(error);
-                            },
-                            Err(_) => {
-                                let error =
-                                    ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                                self.record_hook_result(
-                                    extension_id,
-                                    "post_tool_use",
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    true,
-                                );
-                                return Err(error);
-                            },
-                        };
+                    let result = self
+                        .run_recorded_blocking_hook(
+                            extension_id,
+                            "post_tool_use",
+                            handler.handle(handler_ctx),
+                        )
+                        .await?;
                     match result {
                         PostToolUseResult::Block { reason } => {
                             return Ok(PostToolUseResult::Block { reason });
@@ -679,24 +714,15 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    let started = std::time::Instant::now();
-                    if let Err(e) = handler.handle(handler_ctx).await {
-                        self.record_hook_result(
+                    if let Err(e) = self
+                        .run_recorded_advisory(
                             extension_id,
                             "post_tool_use",
-                            started.elapsed(),
-                            Some(e.to_string()),
-                            false,
-                        );
+                            handler.handle(handler_ctx),
+                        )
+                        .await
+                    {
                         tracing::warn!(error = %e, "advisory post_tool_use handler failed");
-                    } else {
-                        self.record_hook_result(
-                            extension_id,
-                            "post_tool_use",
-                            started.elapsed(),
-                            None,
-                            false,
-                        );
                     }
                 },
                 HookMode::NonBlocking => {
@@ -738,43 +764,13 @@ impl ExtensionRunner {
             let handler_ctx = ctx.clone();
             match mode {
                 HookMode::Blocking => {
-                    let started = std::time::Instant::now();
-                    let result =
-                        match tokio::time::timeout(self.timeout, handler.handle(handler_ctx)).await
-                        {
-                            Ok(Ok(result)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    provider_hook_name(event),
-                                    started.elapsed(),
-                                    None,
-                                    false,
-                                );
-                                result
-                            },
-                            Ok(Err(error)) => {
-                                self.record_hook_result(
-                                    extension_id,
-                                    provider_hook_name(event),
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    false,
-                                );
-                                return Err(error);
-                            },
-                            Err(_) => {
-                                let error =
-                                    ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                                self.record_hook_result(
-                                    extension_id,
-                                    provider_hook_name(event),
-                                    started.elapsed(),
-                                    Some(error.to_string()),
-                                    true,
-                                );
-                                return Err(error);
-                            },
-                        };
+                    let result = self
+                        .run_recorded_blocking_hook(
+                            extension_id,
+                            provider_hook_name(event),
+                            handler.handle(handler_ctx),
+                        )
+                        .await?;
                     match result {
                         ProviderResult::Block { reason } => {
                             return Ok(ProviderResult::Block { reason });
@@ -796,24 +792,15 @@ impl ExtensionRunner {
                     }
                 },
                 HookMode::Advisory => {
-                    let started = std::time::Instant::now();
-                    if let Err(e) = handler.handle(handler_ctx).await {
-                        self.record_hook_result(
+                    if let Err(e) = self
+                        .run_recorded_advisory(
                             extension_id,
                             provider_hook_name(event),
-                            started.elapsed(),
-                            Some(e.to_string()),
-                            false,
-                        );
+                            handler.handle(handler_ctx),
+                        )
+                        .await
+                    {
                         tracing::warn!(error = %e, "advisory provider handler failed");
-                    } else {
-                        self.record_hook_result(
-                            extension_id,
-                            provider_hook_name(event),
-                            started.elapsed(),
-                            None,
-                            false,
-                        );
                     }
                 },
                 HookMode::NonBlocking => {
@@ -845,9 +832,7 @@ impl ExtensionRunner {
 
         let mut collected = PromptContributions::default();
         for handler in &index.prompt_build {
-            let contributions = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
-                .await
-                .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+            let contributions = self.run_with_timeout(handler.handle(ctx.clone())).await?;
             collected.merge(contributions);
         }
         Ok(collected)
@@ -868,9 +853,7 @@ impl ExtensionRunner {
 
         let mut collected = CompactContributions::default();
         for handler in handlers {
-            let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
-                .await
-                .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+            let result = self.run_with_timeout(handler.handle(ctx.clone())).await?;
             match result {
                 CompactResult::Block { reason } => {
                     return Ok(CompactResult::Block { reason });
@@ -914,10 +897,6 @@ impl ExtensionRunner {
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         let index = self.load_index();
-        if index.continue_after_stop.is_empty() {
-            return Ok(ContinueAfterStopResult::EndTurn);
-        }
-
         for (extension_id, options, handler) in &index.continue_after_stop {
             if !options.allows(ctx.continuations_this_turn) {
                 tracing::debug!(
@@ -927,9 +906,7 @@ impl ExtensionRunner {
                 );
                 continue;
             }
-            let result = tokio::time::timeout(self.timeout, handler.handle(ctx.clone()))
-                .await
-                .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+            let result = self.run_with_timeout(handler.handle(ctx.clone())).await?;
             if result == ContinueAfterStopResult::ContinueOneStep {
                 tracing::debug!(
                     extension_id = %extension_id,
@@ -947,48 +924,16 @@ impl ExtensionRunner {
         ctx: UserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         let index = self.load_index();
-        if index.user_message_envelope.is_empty() {
-            return Ok(UserMessageEnvelopeResult::Allow);
-        }
-
         let mut ctx = ctx;
         let mut modified = false;
         for (extension_id, handler) in &index.user_message_envelope {
-            let started = std::time::Instant::now();
-            let result = match tokio::time::timeout(self.timeout, handler.handle(ctx.clone())).await
-            {
-                Ok(Ok(result)) => {
-                    self.record_hook_result(
-                        extension_id,
-                        "user_message_envelope",
-                        started.elapsed(),
-                        None,
-                        false,
-                    );
-                    result
-                },
-                Ok(Err(error)) => {
-                    self.record_hook_result(
-                        extension_id,
-                        "user_message_envelope",
-                        started.elapsed(),
-                        Some(error.to_string()),
-                        false,
-                    );
-                    return Err(error);
-                },
-                Err(_) => {
-                    let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                    self.record_hook_result(
-                        extension_id,
-                        "user_message_envelope",
-                        started.elapsed(),
-                        Some(error.to_string()),
-                        true,
-                    );
-                    return Err(error);
-                },
-            };
+            let result = self
+                .run_recorded_blocking_hook(
+                    extension_id,
+                    "user_message_envelope",
+                    handler.handle(ctx.clone()),
+                )
+                .await?;
 
             match result {
                 UserMessageEnvelopeResult::Allow => {},
@@ -1019,46 +964,14 @@ impl ExtensionRunner {
         ctx: AfterToolResultsContext,
     ) -> Result<AfterToolResultsResult, ExtensionError> {
         let index = self.load_index();
-        if index.after_tool_results.is_empty() {
-            return Ok(AfterToolResultsResult::Continue);
-        }
-
         for (extension_id, handler) in &index.after_tool_results {
-            let started = std::time::Instant::now();
-            let result = match tokio::time::timeout(self.timeout, handler.handle(ctx.clone())).await
-            {
-                Ok(Ok(result)) => {
-                    self.record_hook_result(
-                        extension_id,
-                        "after_tool_results",
-                        started.elapsed(),
-                        None,
-                        false,
-                    );
-                    result
-                },
-                Ok(Err(error)) => {
-                    self.record_hook_result(
-                        extension_id,
-                        "after_tool_results",
-                        started.elapsed(),
-                        Some(error.to_string()),
-                        false,
-                    );
-                    return Err(error);
-                },
-                Err(_) => {
-                    let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                    self.record_hook_result(
-                        extension_id,
-                        "after_tool_results",
-                        started.elapsed(),
-                        Some(error.to_string()),
-                        true,
-                    );
-                    return Err(error);
-                },
-            };
+            let result = self
+                .run_recorded_blocking_hook(
+                    extension_id,
+                    "after_tool_results",
+                    handler.handle(ctx.clone()),
+                )
+                .await?;
 
             if let AfterToolResultsResult::EndTurn { reason } = result {
                 return Ok(AfterToolResultsResult::EndTurn { reason });
@@ -1090,9 +1003,7 @@ impl ExtensionRunner {
                 attach_extension_event_sink(&index, extension_id, &ctx.event_tx);
             match mode {
                 HookMode::Blocking => {
-                    let result = tokio::time::timeout(self.timeout, handler.handle(handler_ctx))
-                        .await
-                        .map_err(|_| ExtensionError::Timeout(self.timeout.as_millis() as u64))??;
+                    let result = self.run_with_timeout(handler.handle(handler_ctx)).await?;
                     if let HookResult::Block { reason } = result {
                         return Err(ExtensionError::Blocked { reason });
                     }
@@ -1115,9 +1026,6 @@ impl ExtensionRunner {
         }
         Ok(())
     }
-
-    // ─── 收集方法（仍从 records 读取，注册时不变） ──────────────────
-
 
     /// 从 HandlerIndex 缓存收集工具提示词元数据。
     pub async fn collect_tool_prompt_metadata_typed(
@@ -1250,7 +1158,6 @@ impl ExtensionRuntime for ExtensionRunner {
     }
 }
 
-
 fn provider_hook_name(event: ProviderEvent) -> &'static str {
     match event {
         ProviderEvent::BeforeRequest => "before_provider_request",
@@ -1268,6 +1175,15 @@ fn append_user_message_text(base: &mut String, addition: &str) {
     base.push_str(addition);
 }
 
+fn extension_config(
+    configs: &BTreeMap<String, serde_json::Value>,
+    extension_id: &str,
+) -> serde_json::Value {
+    configs
+        .get(extension_id)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}))
+}
 
 #[cfg(test)]
 mod tests;

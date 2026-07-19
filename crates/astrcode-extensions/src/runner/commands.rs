@@ -10,11 +10,34 @@ pub struct RegisteredSlashCommand {
     pub command: SlashCommand,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    Extension,
+    Skill,
+}
+
+impl CommandSource {
+    fn for_extension(extension_id: &str) -> Self {
+        if extension_id == "astrcode-skill" {
+            Self::Skill
+        } else {
+            Self::Extension
+        }
+    }
+
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Extension => 2,
+            Self::Skill => 1,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ResolvedSlashCommand {
     pub extension_id: String,
     pub command: astrcode_extension_sdk::extension::SlashCommand,
-    pub source: String,
+    pub source: CommandSource,
     pub shadowed: Vec<ShadowedSlashCommand>,
     handler: Arc<dyn CommandHandler>,
 }
@@ -33,7 +56,7 @@ impl fmt::Debug for ResolvedSlashCommand {
 #[derive(Debug, Clone)]
 pub struct ShadowedSlashCommand {
     pub extension_id: String,
-    pub source: String,
+    pub source: CommandSource,
     pub priority: i32,
 }
 
@@ -71,7 +94,7 @@ impl ExtensionRunner {
 
         let mut resolved = Vec::<ResolvedSlashCommand>::new();
         for (extension_id, command, handler) in commands {
-            let source = command_source(&extension_id).to_string();
+            let source = CommandSource::for_extension(&extension_id);
             if let Some(active) = resolved
                 .iter_mut()
                 .find(|resolved| resolved.command.name == command.name)
@@ -79,10 +102,10 @@ impl ExtensionRunner {
                 tracing::warn!(
                     command = %command.name,
                     extension_id = %extension_id,
-                    source = %source,
+                    source = ?source,
                     priority = command.priority,
                     active_extension_id = %active.extension_id,
-                    active_source = %active.source,
+                    active_source = ?active.source,
                     active_priority = active.command.priority,
                     "slash command shadowed by higher priority command"
                 );
@@ -169,28 +192,13 @@ impl ExtensionRunner {
     }
 }
 
-fn command_source(extension_id: &str) -> &'static str {
-    if extension_id == "astrcode-skill" {
-        "skill"
-    } else {
-        "extension"
-    }
-}
-
-fn command_source_precedence(extension_id: &str) -> u8 {
-    match command_source(extension_id) {
-        "extension" => 2,
-        "skill" => 1,
-        _ => 0,
-    }
-}
-
 fn compare_command_registration(
     left: &(String, SlashCommand, Arc<dyn CommandHandler>),
     right: &(String, SlashCommand, Arc<dyn CommandHandler>),
 ) -> std::cmp::Ordering {
-    command_source_precedence(&right.0)
-        .cmp(&command_source_precedence(&left.0))
+    CommandSource::for_extension(&right.0)
+        .precedence()
+        .cmp(&CommandSource::for_extension(&left.0).precedence())
         .then_with(|| right.1.priority.cmp(&left.1.priority))
         .then_with(|| left.0.cmp(&right.0))
         .then_with(|| left.1.name.cmp(&right.1.name))

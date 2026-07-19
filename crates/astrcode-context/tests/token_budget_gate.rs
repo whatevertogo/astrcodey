@@ -3,7 +3,7 @@
 use astrcode_context::token_budget::{
     build_prompt_snapshot, compact_threshold_tokens, should_compact,
 };
-use astrcode_core::llm::{LlmMessage, ModelLimits};
+use astrcode_core::llm::{LlmMessage, ModelLimits, token_estimate::estimate_char_budget};
 
 #[test]
 fn compact_gate_triggers_at_configured_fraction() {
@@ -12,7 +12,8 @@ fn compact_gate_triggers_at_configured_fraction() {
         max_output_tokens: 1_024,
     };
     let threshold = compact_threshold_tokens(limits.max_input_tokens, 80.0);
-    let messages = vec![LlmMessage::user("x".repeat(threshold.saturating_mul(4)))];
+    let prompt = "x".repeat(estimate_char_budget(threshold));
+    let messages = vec![LlmMessage::user(prompt)];
     let snapshot = build_prompt_snapshot(&messages, None, limits, 80.0);
     assert!(should_compact(snapshot));
     assert_eq!(snapshot.threshold_tokens, threshold);

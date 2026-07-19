@@ -19,26 +19,17 @@ impl ToolSnapshot {
     }
 }
 
-pub fn provider_visible_tool_indexes(
+pub(crate) fn provider_visible_tools(
     tools: &[ToolSnapshot],
     active_deferred_tools: &HashSet<String>,
-) -> Vec<usize> {
+) -> Vec<ToolSnapshot> {
     tools
         .iter()
-        .enumerate()
-        .filter(|(_, tool)| {
+        .filter(|tool| {
             !is_deferred_tool(tool)
                 || active_deferred_tools.contains(&tool.definition.name)
                 || is_deferred_gate(tool)
         })
-        .map(|(index, _)| index)
-        .collect()
-}
-
-pub fn clone_tools_by_index(tools: &[ToolSnapshot], indexes: &[usize]) -> Vec<ToolSnapshot> {
-    indexes
-        .iter()
-        .filter_map(|index| tools.get(*index))
         .cloned()
         .collect()
 }
@@ -235,45 +226,47 @@ mod tests {
     }
 
     #[test]
-    fn visible_indexes_normal_tools_always_shown() {
-        let tools = vec![plain_snapshot("read"), plain_snapshot("write")];
-        let active = HashSet::new();
-        let indexes = provider_visible_tool_indexes(&tools, &active);
-        assert_eq!(indexes, vec![0, 1]);
-    }
-
-    #[test]
-    fn visible_indexes_deferred_tools_hidden_by_default() {
-        let tools = vec![
-            plain_snapshot("read"),
-            deferred_snapshot("mcp_tool", "group-a"),
+    fn provider_visible_tools_follow_visibility_rules() {
+        let cases = [
+            (
+                vec![plain_snapshot("read"), plain_snapshot("write")],
+                HashSet::new(),
+                vec!["read", "write"],
+            ),
+            (
+                vec![
+                    plain_snapshot("read"),
+                    deferred_snapshot("mcp_tool", "group-a"),
+                ],
+                HashSet::new(),
+                vec!["read"],
+            ),
+            (
+                vec![
+                    plain_snapshot("read"),
+                    deferred_snapshot("mcp_tool", "group-a"),
+                ],
+                HashSet::from(["mcp_tool".to_string()]),
+                vec!["read", "mcp_tool"],
+            ),
+            (
+                vec![
+                    deferred_snapshot("mcp_tool", "group-a"),
+                    gate_snapshot("discover", "group-a"),
+                ],
+                HashSet::new(),
+                vec!["discover"],
+            ),
         ];
-        let active = HashSet::new();
-        let indexes = provider_visible_tool_indexes(&tools, &active);
-        assert_eq!(indexes, vec![0]);
-    }
 
-    #[test]
-    fn visible_indexes_deferred_tools_shown_when_activated() {
-        let tools = vec![
-            plain_snapshot("read"),
-            deferred_snapshot("mcp_tool", "group-a"),
-        ];
-        let mut active = HashSet::new();
-        active.insert("mcp_tool".into());
-        let indexes = provider_visible_tool_indexes(&tools, &active);
-        assert_eq!(indexes, vec![0, 1]);
-    }
-
-    #[test]
-    fn visible_indexes_gate_always_visible() {
-        let tools = vec![
-            deferred_snapshot("mcp_tool", "group-a"),
-            gate_snapshot("discover", "group-a"),
-        ];
-        let active = HashSet::new();
-        let indexes = provider_visible_tool_indexes(&tools, &active);
-        assert_eq!(indexes, vec![1]);
+        for (tools, active, expected) in cases {
+            let visible = provider_visible_tools(&tools, &active);
+            let names = visible
+                .iter()
+                .map(|tool| tool.definition.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected);
+        }
     }
 
     #[test]

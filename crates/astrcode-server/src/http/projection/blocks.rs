@@ -9,7 +9,7 @@ use astrcode_core::{
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
 
-use super::args::format_args_inline;
+use super::{args::format_args_inline, non_empty_metadata};
 
 /// 对话 UI 中 compact 卡片的稳定 block id（多次 compact 时 upsert / 刷新替换）。
 pub(in crate::http) const COMPACT_SUMMARY_BLOCK_ID: &str = "compact-current";
@@ -35,8 +35,38 @@ pub(in crate::http) fn compact_summary_block(
     }
 }
 
-/// Build the completed [`ConversationBlockDto`] for payloads that produce a single
-/// final block. Shared by live and replay delta functions.
+/// 构建 live、replay 和 snapshot 共用的流式助手 block。
+pub(in crate::http) fn streaming_assistant_block(
+    id: String,
+    text: String,
+    reasoning_content: Option<String>,
+) -> ConversationBlockDto {
+    ConversationBlockDto::Assistant {
+        id,
+        text,
+        reasoning_content,
+        status: ConversationBlockStatusDto::Streaming,
+    }
+}
+
+/// 构建 live、replay 和 snapshot 共用的流式工具调用 block。
+pub(in crate::http) fn streaming_tool_call_block(
+    id: String,
+    name: &str,
+    arguments: Option<&serde_json::Value>,
+) -> ConversationBlockDto {
+    ConversationBlockDto::ToolCall {
+        id,
+        name: name.to_owned(),
+        arguments: arguments.map_or_else(String::new, |value| format_args_inline(name, value)),
+        text: String::new(),
+        status: ConversationBlockStatusDto::Streaming,
+        metadata: None,
+        arguments_json: arguments.cloned(),
+    }
+}
+
+/// 为产生单个终态 block 的 payload 构建共享投影。
 pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
     match &event.payload {
         EventPayload::UserMessage {
@@ -67,28 +97,19 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
             arguments,
             arguments_json,
             ..
-        } => {
-            let metadata: serde_json::Value = serde_json::to_value(&result.metadata)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
-            let metadata = if metadata.as_object().is_some_and(|m| !m.is_empty()) {
-                Some(metadata)
+        } => Some(ConversationBlockDto::ToolCall {
+            id: call_id.to_string(),
+            name: tool_name.clone(),
+            arguments: arguments.clone(),
+            text: result.content.clone(),
+            status: if result.is_error {
+                ConversationBlockStatusDto::Error
             } else {
-                None
-            };
-            Some(ConversationBlockDto::ToolCall {
-                id: call_id.to_string(),
-                name: tool_name.clone(),
-                arguments: arguments.clone(),
-                text: result.content.clone(),
-                status: if result.is_error {
-                    ConversationBlockStatusDto::Error
-                } else {
-                    ConversationBlockStatusDto::Complete
-                },
-                metadata,
-                arguments_json: arguments_json.clone(),
-            })
-        },
+                ConversationBlockStatusDto::Complete
+            },
+            metadata: non_empty_metadata(&result.metadata),
+            arguments_json: arguments_json.clone(),
+        }),
         EventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
             message: message.clone(),
@@ -159,15 +180,11 @@ pub(in crate::http) fn messages_to_blocks(
                         continue;
                     };
                     let block_index = blocks.len();
-                    blocks.push(ConversationBlockDto::ToolCall {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                        arguments: format_args_inline(name, arguments),
-                        text: String::new(),
-                        status: ConversationBlockStatusDto::Streaming,
-                        metadata: None,
-                        arguments_json: Some(arguments.clone()),
-                    });
+                    blocks.push(streaming_tool_call_block(
+                        call_id.clone(),
+                        name,
+                        Some(arguments),
+                    ));
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }
             },

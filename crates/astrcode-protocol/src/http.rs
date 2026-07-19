@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 use crate::wire::{
-    ApprovalDecisionDto, ExecutionModeDto, ExtensionCapabilityDto, PhaseDto, ProviderAuthSchemeDto,
-    ProviderWireFormatDto, ThinkingLevelDto, ToolOriginDto, ToolOutputStreamDto,
+    ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
+    ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
+    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingLevelDto, ToolOriginDto,
+    ToolOutputStreamDto,
 };
 
 /// 新建会话请求。
@@ -117,13 +119,7 @@ pub struct ToolUiRespondResponse {
 )]
 pub enum PromptSubmitResponse {
     /// 已接受并异步执行。
-    Accepted {
-        session_id: String,
-        turn_id: String,
-        /// 如果该请求隐式 fork，则记录来源。v1 总是 None。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        branched_from_session_id: Option<String>,
-    },
+    Accepted { session_id: String, turn_id: String },
     /// 请求已同步处理完成。
     Handled { session_id: String, message: String },
 }
@@ -133,9 +129,6 @@ pub enum PromptSubmitResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionRequest {
-    /// 额外 compact 指令，v1 暂不接入生产链路。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
     /// 保留最近 N 个完整 user turn group。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_recent_turns: Option<usize>,
@@ -301,8 +294,7 @@ pub struct SlashCommandInfoDto {
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    /// 命令来源：`builtin`、`extension` 或 `skill`。
-    pub source: String,
+    pub source: CommandSourceDto,
 }
 
 impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
@@ -325,9 +317,9 @@ impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
 #[serde(rename_all = "camelCase")]
 pub struct ShadowedSlashCommandDto {
     pub name: String,
-    pub active_source: String,
+    pub active_source: CommandSourceDto,
     pub active_priority: i32,
-    pub shadowed_source: String,
+    pub shadowed_source: CommandSourceDto,
     pub shadowed_priority: i32,
     pub shadowed_extension_id: String,
 }
@@ -357,9 +349,6 @@ pub struct SessionListItemDto {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
-    /// 父会话 seq，v1 未接线。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_storage_seq: Option<u64>,
     pub phase: PhaseDto,
     /// 首条用户消息内容，无消息时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -410,9 +399,6 @@ pub struct ConversationControlStateDto {
     pub can_request_compact: bool,
     pub compact_pending: bool,
     pub compacting: bool,
-    /// 当前模式 ID，v1 暂无。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_mode_id: Option<String>,
     /// 活跃 turn ID，v1 snapshot 暂无。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
@@ -609,15 +595,10 @@ pub struct ConfigViewResponseDto {
     pub active_small_model: Option<String>,
     #[serde(default)]
     pub extension_states: std::collections::BTreeMap<String, bool>,
-    /// 工具审批模式：`manual` 或 `yolo`。
-    #[serde(default = "default_approval_mode")]
-    pub approval_mode: String,
+    #[serde(default)]
+    pub approval_mode: ApprovalModeDto,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
-}
-
-fn default_approval_mode() -> String {
-    "manual".to_string()
 }
 
 /// GET /api/extensions 响应中的单个扩展状态。
@@ -628,8 +609,7 @@ pub struct ExtensionStateDto {
     pub extension_id: String,
     pub enabled: bool,
     pub loaded: bool,
-    /// `builtin` / `disk` / `unknown`
-    pub source: String,
+    pub source: ExtensionSourceDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declaration: Option<ExtensionDeclarationDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,7 +711,7 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionHttpRouteDto {
-    pub method: String,
+    pub method: ExtensionHttpMethodDto,
     pub path: String,
     pub description: String,
     pub max_body_bytes: usize,
@@ -763,17 +743,12 @@ pub struct ExtensionDiagnosticsDto {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionStageDiagnosticsDto {
-    /// `unknown` / `running` / `succeeded` / `failed` / `skipped`
-    #[serde(default = "default_extension_stage_status")]
-    pub status: String,
+    #[serde(default)]
+    pub status: ExtensionStageStatusDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-fn default_extension_stage_status() -> String {
-    "unknown".to_string()
 }
 
 /// GET /api/extensions 响应。
@@ -962,8 +937,7 @@ pub struct UpdateActiveSelectionRequest {
     pub active_small_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
-    /// 工具审批模式：`manual` 或 `yolo`。
-    pub approval_mode: String,
+    pub approval_mode: ApprovalModeDto,
 }
 
 /// POST /api/config/active-selection 响应。

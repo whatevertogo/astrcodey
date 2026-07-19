@@ -82,15 +82,7 @@ fn convert_messages(
     for msg in messages {
         match msg.role {
             LlmRole::System => {
-                let text = msg
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        LlmContent::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let text = msg.joined_text("\n");
                 if !text.is_empty() {
                     system_blocks.push(serde_json::json!({
                         "type": "text",

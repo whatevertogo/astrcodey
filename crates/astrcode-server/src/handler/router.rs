@@ -73,8 +73,7 @@ impl CommandHandler {
 
             ClientCommand::DeleteSession { session_id } => {
                 let session_id = SessionId::from(session_id);
-                self.scheduler.abort_and_cleanup(&session_id).await;
-                match self.runtime.session_manager().delete(&session_id).await {
+                match self.scheduler.delete_session(&session_id).await {
                     Ok(()) => {
                         if self.focused_session_id.as_ref() == Some(&session_id) {
                             self.focused_session_id = None;

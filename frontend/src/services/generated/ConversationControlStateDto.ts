@@ -6,10 +6,6 @@ import type { PhaseDto } from "./PhaseDto";
  */
 export type ConversationControlStateDto = { phase: PhaseDto, canSubmitPrompt: boolean, canRequestCompact: boolean, compactPending: boolean, compacting: boolean,
 /**
- * 当前模式 ID，v1 暂无。
- */
-currentModeId?: string | null,
-/**
  * 活跃 turn ID，v1 snapshot 暂无。
  */
 activeTurnId?: string | null, };

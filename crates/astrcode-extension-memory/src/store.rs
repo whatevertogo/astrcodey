@@ -4,7 +4,12 @@
 //! - **项目记忆**：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/` （`project_ctx` /
 //!   `decision` / `general`、contexts/、pipeline 状态）
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
 
 use astrcode_extension_sdk::hostpaths::{self, ensure_dir};
 use parking_lot::Mutex;
@@ -27,8 +32,6 @@ const PROJECT_SECTIONS: &[(&str, &str)] = &[
     ("general", "## General"),
 ];
 
-const VALID_CATEGORIES: &[&str] = &["user_pref", "project_ctx", "decision", "general"];
-
 /// Result of a manual memory append operation.
 pub(crate) enum AppendResult {
     /// Memory was saved successfully.
@@ -38,7 +41,7 @@ pub(crate) enum AppendResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MemoryStoreScope {
+enum MemoryStoreScope {
     User,
     Project,
 }
@@ -48,6 +51,17 @@ impl MemoryStoreScope {
         match self {
             Self::User => USER_SECTIONS,
             Self::Project => PROJECT_SECTIONS,
+        }
+    }
+
+    fn normalize_category(self, category: &str) -> &str {
+        if self.sections().iter().any(|(key, _)| *key == category) {
+            category
+        } else {
+            match self {
+                Self::User => "user_pref",
+                Self::Project => "general",
+            }
         }
     }
 }
@@ -253,23 +267,21 @@ impl MemoryStore {
     }
 
     fn append_unlocked(&self, category: &str, content: &str) -> std::io::Result<()> {
-        let safe_category = if VALID_CATEGORIES.contains(&category) {
-            category
-        } else {
-            "general"
-        };
         let mut parsed = self.read_parsed()?;
-        parsed.add_entry(safe_category, content);
+        parsed.add_entry(category, content);
         atomic_write(&self.memory_path(), &parsed.render())
     }
 
-    pub(crate) fn new_user() -> std::io::Result<Self> {
-        let dir = hostpaths::memory_dir();
+    fn new_user() -> std::io::Result<Self> {
+        Self::new(hostpaths::memory_dir(), MemoryStoreScope::User)
+    }
+
+    fn new(dir: PathBuf, scope: MemoryStoreScope) -> std::io::Result<Self> {
         ensure_dir(&dir)?;
         let store = Self {
             dir,
             write_lock: Mutex::new(()),
-            scope: MemoryStoreScope::User,
+            scope,
             preference_lines_cache: Mutex::new(None),
         };
         if !store.memory_path().exists() {
@@ -278,25 +290,13 @@ impl MemoryStore {
         Ok(store)
     }
 
-    pub(crate) fn new_project(working_dir: &str) -> std::io::Result<Self> {
-        let project_key =
-            astrcode_extension_sdk::types::project_key_from_path(std::path::Path::new(working_dir));
+    fn new_project(project_key: &str) -> std::io::Result<Self> {
         let dir = hostpaths::astrcode_dir()
             .join("projects")
             .join(project_key)
             .join("extension_data")
             .join("astrcode.memory");
-        ensure_dir(&dir)?;
-        let store = Self {
-            dir,
-            write_lock: Mutex::new(()),
-            scope: MemoryStoreScope::Project,
-            preference_lines_cache: Mutex::new(None),
-        };
-        if !store.memory_path().exists() {
-            store.init_memory_file()?;
-        }
-        Ok(store)
+        Self::new(dir, MemoryStoreScope::Project)
     }
 
     fn memory_path(&self) -> PathBuf {
@@ -334,11 +334,11 @@ impl MemoryStore {
     }
 
     fn memory_file_mtime(&self) -> std::io::Result<Option<SystemTime>> {
-        let path = self.memory_path();
-        if !path.exists() {
-            return Ok(None);
+        match std::fs::metadata(self.memory_path()) {
+            Ok(metadata) => Ok(metadata.modified().ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
-        Ok(std::fs::metadata(path)?.modified().ok())
     }
 
     /// 返回 MEMORY.md 中全部 `user_pref` 条目（PromptBuild session 级全量注入）。
@@ -347,10 +347,10 @@ impl MemoryStore {
     }
 
     /// 返回 MEMORY.md 中 `user_pref` 类别的前 `limit` 条。
-    pub(crate) fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
+    fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
         let mtime = self.memory_file_mtime()?;
         if let Some(cache) = self.preference_lines_cache.lock().as_ref() {
-            if cache.memory_mtime == mtime && (limit == usize::MAX || cache.lines.len() >= limit) {
+            if cache.memory_mtime == mtime {
                 return Ok(cache.lines.iter().take(limit).cloned().collect());
             }
         }
@@ -386,6 +386,7 @@ impl MemoryStore {
     /// 在指定 category section 追加一条记忆。
     /// 如果 index 中已存在相似条目，返回 `AppendResult::SimilarExists` 而不写入。
     pub(crate) fn append(&self, category: &str, content: &str) -> std::io::Result<AppendResult> {
+        let category = self.scope.normalize_category(category);
         let _guard = self.write_lock.lock();
         let similar = self.memory_index().find_similar(content)?;
         if !similar.is_empty() {
@@ -407,26 +408,15 @@ impl MemoryStore {
     ) -> std::io::Result<bool> {
         use crate::index::{MemorySource, UpsertResult};
 
-        let safe_category = if VALID_CATEGORIES.contains(&category) {
-            category
-        } else {
-            "general"
-        };
+        let category = self.scope.normalize_category(category);
         let _guard = self.write_lock.lock();
         let index = self.memory_index();
 
-        match index.upsert_record(
-            content,
-            safe_category,
-            MemorySource::Manual,
-            None,
-            &[],
-            replaces,
-        )? {
+        match index.upsert_record(content, category, MemorySource::Manual, None, &[], replaces)? {
             UpsertResult::Unchanged => Ok(false),
             UpsertResult::Added(_) => {
                 let mut parsed = self.read_parsed()?;
-                parsed.add_entry(safe_category, content);
+                parsed.add_entry(category, content);
                 atomic_write(&self.memory_path(), &parsed.render())?;
                 Ok(true)
             },
@@ -434,7 +424,7 @@ impl MemoryStore {
                 previous_content, ..
             } => {
                 let mut parsed = self.read_parsed()?;
-                parsed.replace_or_add_entry(safe_category, &previous_content, content);
+                parsed.replace_or_add_entry(category, &previous_content, content);
                 atomic_write(&self.memory_path(), &parsed.render())?;
                 Ok(true)
             },
@@ -646,13 +636,13 @@ impl MemoryStore {
             if path.extension().is_none_or(|e| e != "md") {
                 continue;
             }
-            if let Ok(metadata) = path.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    if modified < cutoff {
-                        let _ = std::fs::remove_file(&path);
-                        deleted += 1;
-                    }
-                }
+            if path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| modified < cutoff)
+                && std::fs::remove_file(path).is_ok()
+            {
+                deleted += 1;
             }
         }
 
@@ -660,13 +650,15 @@ impl MemoryStore {
     }
 
     pub(crate) fn list_processed(&self) -> std::io::Result<BTreeMap<String, String>> {
-        let path = self.processed_path();
-        if !path.exists() {
-            return Ok(BTreeMap::new());
-        }
-        let content = std::fs::read_to_string(path)?;
+        let content = match std::fs::read_to_string(self.processed_path()) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            },
+            Err(error) => return Err(error),
+        };
         serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
     /// Pipeline 写入 contexts/ 文件 + 更新 processed_sessions.json。
@@ -687,15 +679,8 @@ impl MemoryStore {
         }
 
         // 更新 processed_sessions.json
-        let mut existing = BTreeMap::new();
         let path = self.processed_path();
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(map) = serde_json::from_str::<BTreeMap<String, String>>(&content) {
-                    existing = map;
-                }
-            }
-        }
+        let mut existing = self.list_processed().unwrap_or_default();
         for entry in processed {
             existing.insert(entry.session_id.clone(), entry.updated_at.clone());
         }
@@ -736,11 +721,7 @@ impl MemoryStore {
                 continue;
             }
 
-            let category = if VALID_CATEGORIES.contains(&entry.category.as_str()) {
-                entry.category.as_str()
-            } else {
-                "general"
-            };
+            let category = self.scope.normalize_category(&entry.category);
 
             match index.upsert_record(
                 &entry.content,
@@ -774,7 +755,6 @@ impl MemoryStore {
         if !removed.is_empty() {
             atomic_write(&self.memory_path(), &parsed.render())?;
         }
-        let _ = self.memory_index().delete_by_content_match(pattern);
         Ok(removed)
     }
 }
@@ -803,10 +783,7 @@ pub(crate) fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 
 /// 判断关键词是否像代码实体（路径、扩展名、CamelCase）。
 fn is_code_entity(kw: &str) -> bool {
-    kw.contains('/')
-        || kw.contains('\\')
-        || kw.contains('.')
-        || kw.chars().filter(|c| c.is_uppercase()).count() > 0
+    kw.contains('/') || kw.contains('\\') || kw.contains('.') || kw.chars().any(char::is_uppercase)
 }
 
 /// 原子写入：先写 .tmp 再 rename，防止写到一半崩溃。
@@ -819,29 +796,49 @@ fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
 
 // ─── MemoryStorePool ───────────────────────────────────────────────────
 
-const USER_STORE_KEY: &str = "__user_memory__";
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum StoreKey {
+    User,
+    Project(String),
+}
+
+type StoreSlot = Arc<Mutex<Option<Arc<MemoryStore>>>>;
 
 /// 管理用户级 + 项目级 MemoryStore。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct MemoryStorePool {
-    stores: Arc<Mutex<BTreeMap<String, Arc<MemoryStore>>>>,
+    stores: Arc<Mutex<BTreeMap<StoreKey, StoreSlot>>>,
+    project_aliases: Arc<Mutex<BTreeMap<String, Arc<MemoryStore>>>>,
 }
 
 impl MemoryStorePool {
     pub(crate) fn new() -> Self {
-        Self {
-            stores: Arc::new(Mutex::new(BTreeMap::new())),
+        Self::default()
+    }
+
+    fn get_or_create(
+        &self,
+        key: StoreKey,
+        create: impl FnOnce() -> std::io::Result<MemoryStore>,
+    ) -> std::io::Result<Arc<MemoryStore>> {
+        let slot = self
+            .stores
+            .lock()
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone();
+        let mut cached = slot.lock();
+        if let Some(store) = cached.as_ref() {
+            return Ok(store.clone());
         }
+
+        let store = Arc::new(create()?);
+        *cached = Some(store.clone());
+        Ok(store)
     }
 
     fn user_store(&self) -> std::io::Result<Arc<MemoryStore>> {
-        let mut stores = self.stores.lock();
-        if let Some(store) = stores.get(USER_STORE_KEY) {
-            return Ok(store.clone());
-        }
-        let store = Arc::new(MemoryStore::new_user()?);
-        stores.insert(USER_STORE_KEY.to_string(), store.clone());
-        Ok(store)
+        self.get_or_create(StoreKey::User, MemoryStore::new_user)
     }
 
     /// 用户记忆（`~/.astrcode/memory/`）+ 当前项目记忆。
@@ -850,30 +847,81 @@ impl MemoryStorePool {
         working_dir: &str,
     ) -> std::io::Result<crate::scope::ScopedMemoryStores> {
         let user = self.user_store()?;
-        let mut stores = self.stores.lock();
-        let project = if let Some(store) = stores.get(working_dir) {
-            store.clone()
-        } else {
-            let store = Arc::new(MemoryStore::new_project(working_dir)?);
-            stores.insert(working_dir.to_string(), store.clone());
-            store
-        };
-        Ok(crate::scope::ScopedMemoryStores { user, project })
-    }
-}
+        if let Some(project) = self.project_aliases.lock().get(working_dir).cloned() {
+            return Ok(crate::scope::ScopedMemoryStores { user, project });
+        }
 
-impl Default for MemoryStorePool {
-    fn default() -> Self {
-        Self::new()
+        let project_key =
+            astrcode_extension_sdk::types::project_key_from_path(Path::new(working_dir));
+        let project = self.get_or_create(StoreKey::Project(project_key.clone()), || {
+            MemoryStore::new_project(&project_key)
+        })?;
+        self.project_aliases
+            .lock()
+            .insert(working_dir.to_string(), project.clone());
+        Ok(crate::scope::ScopedMemoryStores { user, project })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_to_char_boundary;
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use tempfile::TempDir;
+
+    use super::{
+        MemoryStore, MemoryStorePool, MemoryStoreScope, StoreKey, truncate_to_char_boundary,
+    };
 
     #[test]
-    fn truncate_to_char_boundary_does_not_split_utf8() {
+    fn scope_normalizes_categories_and_truncation_preserves_utf8() {
+        assert_eq!(
+            MemoryStoreScope::User.normalize_category("invalid"),
+            "user_pref"
+        );
+        assert_eq!(
+            MemoryStoreScope::Project.normalize_category("invalid"),
+            "general"
+        );
+        assert_eq!(
+            MemoryStoreScope::Project.normalize_category("decision"),
+            "decision"
+        );
         assert_eq!(truncate_to_char_boundary("你好 world", 4), "你");
+    }
+
+    #[test]
+    fn store_pool_initializes_each_key_once() {
+        let temp = TempDir::new().unwrap();
+        let pool = MemoryStorePool::new();
+        let initializations = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(2));
+
+        let handles = (0..2)
+            .map(|_| {
+                let pool = pool.clone();
+                let dir = temp.path().join("project");
+                let initializations = initializations.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    pool.get_or_create(StoreKey::Project("same-project".into()), || {
+                        initializations.fetch_add(1, Ordering::Relaxed);
+                        MemoryStore::new(dir, MemoryStoreScope::Project)
+                    })
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let stores = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(initializations.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&stores[0], &stores[1]));
     }
 }

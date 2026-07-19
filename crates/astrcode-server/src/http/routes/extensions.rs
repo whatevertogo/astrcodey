@@ -7,12 +7,12 @@ use astrcode_extensions::runner::{
     ExtensionHttpDispatchResult, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
 use astrcode_protocol::{
-    events::ClientNotification,
     http::{
         ExtensionDeclarationDto, ExtensionDiagnosticsDto, ExtensionHttpRouteDto,
         ExtensionListResponseDto, ExtensionReloadResponseDto, ExtensionStageDiagnosticsDto,
         ExtensionStateDto, SetExtensionEnabledRequest, SetExtensionEnabledResponseDto,
     },
+    wire::{ExtensionSourceDto, ExtensionStageStatusDto},
 };
 use axum::{
     Json,
@@ -22,8 +22,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::super::{
-    HttpState, bad_request_response, error_response, internal_error_response, not_found_response,
+use super::{
+    super::{
+        HttpState, bad_request_response, error_response, internal_error_response,
+        not_found_response,
+    },
+    notify_extensions_config_changed, reload_extension_registry,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -34,13 +38,7 @@ pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> 
 }
 
 pub(in crate::http) async fn reload_extensions(State(state): State<HttpState>) -> Response {
-    let reload_errors = state.runtime.reload_extensions().await;
-    state
-        .event_bus
-        .send_notification(ClientNotification::ExtensionRegistryChanged);
-    for error in &reload_errors {
-        tracing::warn!("extension reload error: {error}");
-    }
+    let reload_errors = reload_extension_registry(&state).await;
     Json(ExtensionReloadResponseDto { reload_errors }).into_response()
 }
 
@@ -78,23 +76,9 @@ pub(in crate::http) async fn set_enabled(
     }
     state.runtime.sync_session_model_bindings();
 
-    // 通知扩展配置已变更
-    let config_errors = state
-        .runtime
-        .config_manager
-        .notify_extensions_config_changed()
-        .await;
-    for error in &config_errors {
-        tracing::warn!("extension config notify error: {error}");
-    }
+    notify_extensions_config_changed(&state).await;
 
-    let reload_errors = state.runtime.reload_extensions().await;
-    state
-        .event_bus
-        .send_notification(ClientNotification::ExtensionRegistryChanged);
-    for error in &reload_errors {
-        tracing::warn!("extension reload error: {error}");
-    }
+    let reload_errors = reload_extension_registry(&state).await;
 
     Json(SetExtensionEnabledResponseDto {
         success: true,
@@ -194,11 +178,11 @@ async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
     ids.into_iter()
         .map(|extension_id| {
             let source = if bundled_set.contains(&extension_id) {
-                "builtin"
+                ExtensionSourceDto::Builtin
             } else if loaded_set.contains(&extension_id) {
-                "disk"
+                ExtensionSourceDto::Disk
             } else {
-                "unknown"
+                ExtensionSourceDto::Unknown
             };
             ExtensionStateDto {
                 enabled: astrcode_bundled_extensions::extension_enabled(
@@ -215,7 +199,7 @@ async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
                     .cloned()
                     .map(extension_diagnostics_dto),
                 extension_id,
-                source: source.to_string(),
+                source,
             }
         })
         .collect()
@@ -258,14 +242,7 @@ fn extension_http_route_dto(
     route: astrcode_core::extension::ExtensionHttpRoute,
 ) -> ExtensionHttpRouteDto {
     ExtensionHttpRouteDto {
-        method: match route.method {
-            ExtensionHttpMethod::Get => "GET",
-            ExtensionHttpMethod::Post => "POST",
-            ExtensionHttpMethod::Put => "PUT",
-            ExtensionHttpMethod::Patch => "PATCH",
-            ExtensionHttpMethod::Delete => "DELETE",
-        }
-        .into(),
+        method: route.method.into(),
         path: route.path,
         description: route.description,
         max_body_bytes: route.max_body_bytes,
@@ -291,18 +268,14 @@ fn extension_stage_diagnostics_dto(
     diagnostics: ExtensionStageDiagnostics,
 ) -> ExtensionStageDiagnosticsDto {
     ExtensionStageDiagnosticsDto {
-        status: extension_stage_status_string(diagnostics.status).to_string(),
+        status: match diagnostics.status {
+            ExtensionStageStatus::Unknown => ExtensionStageStatusDto::Unknown,
+            ExtensionStageStatus::Running => ExtensionStageStatusDto::Running,
+            ExtensionStageStatus::Succeeded => ExtensionStageStatusDto::Succeeded,
+            ExtensionStageStatus::Failed => ExtensionStageStatusDto::Failed,
+            ExtensionStageStatus::Skipped => ExtensionStageStatusDto::Skipped,
+        },
         duration_ms: diagnostics.duration_ms,
         error: diagnostics.error,
-    }
-}
-
-fn extension_stage_status_string(status: ExtensionStageStatus) -> &'static str {
-    match status {
-        ExtensionStageStatus::Unknown => "unknown",
-        ExtensionStageStatus::Running => "running",
-        ExtensionStageStatus::Succeeded => "succeeded",
-        ExtensionStageStatus::Failed => "failed",
-        ExtensionStageStatus::Skipped => "skipped",
     }
 }

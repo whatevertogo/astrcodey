@@ -14,14 +14,6 @@ pub struct SlashCommandSpec {
     pub description: String,
     /// 是否需要额外参数
     pub needs_argument: bool,
-    /// 是否要求 session 空闲
-    pub requires_idle: bool,
-    /// 是否提供参数补全
-    pub argument_completions: bool,
-    /// 同来源冲突时的优先级
-    pub priority: i32,
-    /// 命令来源
-    pub source: String,
 }
 
 /// 已解析的斜杠命令枚举。
@@ -51,60 +43,36 @@ pub fn builtin_commands() -> Vec<SlashCommandSpec> {
             usage: "/new".into(),
             description: "Create a fresh session".into(),
             needs_argument: false,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
         SlashCommandSpec {
             name: "resume".into(),
             usage: "/resume".into(),
             description: "Resume a previous session (interactive picker)".into(),
             needs_argument: false,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
         SlashCommandSpec {
             name: "compact".into(),
             usage: "/compact".into(),
             description: "Compact the current session context".into(),
             needs_argument: false,
-            requires_idle: true,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
         SlashCommandSpec {
             name: "recap".into(),
             usage: "/recap".into(),
             description: "Show a brief recap of the conversation".into(),
             needs_argument: false,
-            requires_idle: true,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
         SlashCommandSpec {
             name: "help".into(),
             usage: "/help".into(),
             description: "Show command help".into(),
             needs_argument: false,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
         SlashCommandSpec {
             name: "quit".into(),
             usage: "/quit".into(),
             description: "Exit astrcode".into(),
             needs_argument: false,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-            source: "builtin".into(),
         },
     ]
 }

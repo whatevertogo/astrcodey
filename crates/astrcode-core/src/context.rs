@@ -113,13 +113,11 @@ impl From<LlmError> for CompactError {
 /// 判断消息是否是 compact 后注入的 synthetic context message。
 pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
     message.role == LlmRole::User
-        && message.content.iter().any(|content| {
-            matches!(
-                content,
-                LlmContent::Text { text }
-                    if text.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-            )
-        })
+        && message
+            .content
+            .iter()
+            .filter_map(LlmContent::as_text)
+            .any(is_compact_summary_text)
 }
 
 /// 检测文本内容是否以 compact summary 标记开头。
@@ -131,13 +129,11 @@ pub fn is_compact_summary_text(content: &str) -> bool {
 pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
     is_compact_summary_message(message)
         || (message.role == LlmRole::User
-            && message.content.iter().any(|content| {
-                matches!(
-                    content,
-                    LlmContent::Text { text }
-                        if text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)
-                )
-            }))
+            && message
+                .content
+                .iter()
+                .filter_map(LlmContent::as_text)
+                .any(|text| text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)))
 }
 
 /// 粗略识别 provider 返回的上下文过长错误。

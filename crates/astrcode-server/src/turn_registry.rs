@@ -70,7 +70,7 @@ impl TurnRegistry {
     }
 
     /// 仅当活跃 turn 的底层 task 已结束时移除，返回其 turn_id。
-    pub fn remove_if_finished(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
+    pub fn remove_if_finished(&self, session_id: &SessionId) -> Option<TurnId> {
         let mut entries = self.entries.lock();
         if !entries
             .get(session_id)
@@ -78,15 +78,17 @@ impl TurnRegistry {
         {
             return None;
         }
-        entries.remove(session_id).map(|e| (e.turn_id, e.session))
+        let entry = entries.remove(session_id)?;
+        drop(entries);
+        Some(entry.turn_id)
     }
 
     /// 请求活跃 turn 协作式 shutdown，不移除 registry。
-    pub fn request_shutdown(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
+    pub fn request_shutdown(&self, session_id: &SessionId) -> Option<TurnId> {
         let entries = self.entries.lock();
         let entry = entries.get(session_id)?;
         entry.shutdown_handle.request_shutdown();
-        Some((entry.turn_id.clone(), Arc::clone(&entry.session)))
+        Some(entry.turn_id.clone())
     }
 
     /// 强制 kill 并移除活跃 turn，返回 turn_id 和 session 用于兜底写终态事件。
@@ -122,6 +124,7 @@ impl TurnRegistry {
         Some((entry.turn_id, entry.session))
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn active_is_finished(&self, session_id: &SessionId) -> bool {
         self.entries
             .lock()
@@ -133,11 +136,6 @@ impl TurnRegistry {
     pub fn force_kill_current(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
         let turn_id = self.active_turn_id(session_id)?;
         self.force_kill_and_remove(session_id, &turn_id)
-    }
-
-    /// 仅移除（不 kill）。用于已完成的 turn 清理。
-    pub fn remove(&self, session_id: &SessionId) {
-        self.entries.lock().remove(session_id);
     }
 
     pub fn has_active(&self, session_id: &SessionId) -> bool {
@@ -152,12 +150,12 @@ impl TurnRegistry {
             .map(|e| e.turn_id.clone())
     }
 
-    /// 获取指定 session 的活跃 session Arc。
-    pub fn get_session(&self, session_id: &SessionId) -> Option<Arc<Session>> {
+    /// 获取指定 session 的活跃 turn 与 session。
+    pub fn active_execution(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
         self.entries
             .lock()
             .get(session_id)
-            .map(|e| Arc::clone(&e.session))
+            .map(|e| (e.turn_id.clone(), Arc::clone(&e.session)))
     }
 }
 
@@ -360,7 +358,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
-        let (removed_turn_id, _) = registry.remove_if_finished(&sid).unwrap();
+        let removed_turn_id = registry.remove_if_finished(&sid).unwrap();
         assert_eq!(removed_turn_id, turn_id);
         assert!(!registry.has_active(&sid));
     }

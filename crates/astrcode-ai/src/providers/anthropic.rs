@@ -15,7 +15,7 @@ use crate::{
     common::{
         HttpPostRequest, StreamEventSink, apply_auth_header, build_client, ensure_header,
         report_stream_error, retry_policy_from_config, send_event, stream_text_delta,
-        stream_with_event_type,
+        stream_with_event_type, token_usage_has_value,
     },
     wire::anthropic as anthropic_wire,
 };
@@ -401,15 +401,6 @@ fn extract_anthropic_token_usage(event: &serde_json::Value) -> Option<LlmTokenUs
         source: Some(LlmTokenUsageSource::ProviderUsage),
     };
     token_usage_has_value(&token_usage).then_some(token_usage)
-}
-
-fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
-    usage.input_tokens.is_some()
-        || usage.cached_input_tokens.is_some()
-        || usage.cache_creation_input_tokens.is_some()
-        || usage.output_tokens.is_some()
-        || usage.reasoning_output_tokens.is_some()
-        || usage.total_tokens.is_some()
 }
 
 #[cfg(test)]

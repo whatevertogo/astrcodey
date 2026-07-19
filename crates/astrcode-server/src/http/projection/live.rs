@@ -3,13 +3,14 @@
 use astrcode_core::event::{Event, EventPayload, Phase};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
-    http::{
-        ConversationBlockDto, ConversationBlockStatusDto, ConversationControlStateDto,
-        ConversationCursorDto, ConversationDeltaDto,
-    },
+    http::{ConversationControlStateDto, ConversationCursorDto, ConversationDeltaDto},
 };
 
-use super::{args::format_args_inline, blocks::completed_block_from_payload};
+use super::{
+    args::format_args_inline,
+    blocks::{completed_block_from_payload, streaming_assistant_block, streaming_tool_call_block},
+    cross_session_compact_deltas, non_empty_metadata,
+};
 
 pub(in crate::http) fn event_to_deltas(
     event: &Event,
@@ -19,12 +20,7 @@ pub(in crate::http) fn event_to_deltas(
         EventPayload::AssistantMessageStarted { message_id } => {
             vec![
                 ConversationDeltaDto::AppendBlock {
-                    block: ConversationBlockDto::Assistant {
-                        id: message_id.to_string(),
-                        text: String::new(),
-                        reasoning_content: None,
-                        status: ConversationBlockStatusDto::Streaming,
-                    },
+                    block: streaming_assistant_block(message_id.to_string(), String::new(), None),
                 },
                 ConversationDeltaDto::UpdateControlState {
                     control: control_from_event(event, has_messages),
@@ -40,15 +36,7 @@ pub(in crate::http) fn event_to_deltas(
         EventPayload::ToolCallStarted { call_id, tool_name } => {
             vec![
                 ConversationDeltaDto::AppendBlock {
-                    block: ConversationBlockDto::ToolCall {
-                        id: call_id.to_string(),
-                        name: tool_name.clone(),
-                        arguments: String::new(),
-                        text: String::new(),
-                        status: ConversationBlockStatusDto::Streaming,
-                        metadata: None,
-                        arguments_json: None,
-                    },
+                    block: streaming_tool_call_block(call_id.to_string(), tool_name, None),
                 },
                 ConversationDeltaDto::UpdateControlState {
                     control: control_from_event(event, has_messages),
@@ -81,25 +69,7 @@ pub(in crate::http) fn event_to_deltas(
         EventPayload::CompactBoundaryCreated {
             continued_session_id,
             ..
-        } => {
-            let mut deltas = Vec::new();
-            // 同会话 compact：等 SessionContinued + snapshot 刷新后再插入卡片，
-            // 避免 AppendBlock 把摘要误追加到列表末尾。
-            if continued_session_id != &event.session_id {
-                deltas.extend(
-                    completed_block_from_payload(event)
-                        .map(|block| ConversationDeltaDto::AppendBlock { block }),
-                );
-                deltas.push(ConversationDeltaDto::SessionContinued {
-                    parent_session_id: event.session_id.to_string(),
-                    new_session_id: continued_session_id.to_string(),
-                    parent_cursor: ConversationCursorDto {
-                        value: event.seq.unwrap_or_default().to_string(),
-                    },
-                });
-            }
-            deltas
-        },
+        } => cross_session_compact_deltas(event, continued_session_id),
         EventPayload::SessionContinuedFromCompaction {
             parent_session_id,
             parent_cursor,
@@ -116,18 +86,11 @@ pub(in crate::http) fn event_to_deltas(
 
         // Phase transitions
         EventPayload::TurnStarted
+        | EventPayload::TurnCompleted { .. }
         | EventPayload::AgentRunStarted
-        | EventPayload::CompactionStarted => {
-            vec![ConversationDeltaDto::UpdateControlState {
-                control: control_from_event(event, has_messages),
-            }]
-        },
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
-            vec![ConversationDeltaDto::UpdateControlState {
-                control: control_from_event(event, has_messages),
-            }]
-        },
-        EventPayload::CompactionCompleted { .. }
+        | EventPayload::AgentRunCompleted { .. }
+        | EventPayload::CompactionStarted
+        | EventPayload::CompactionCompleted { .. }
         | EventPayload::CompactionSkipped { .. }
         | EventPayload::CompactionFailed { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
@@ -185,16 +148,10 @@ pub(in crate::http) fn event_to_deltas(
             content,
             metadata,
         } => {
-            let metadata = serde_json::to_value(metadata)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
             vec![ConversationDeltaDto::PatchToolCall {
                 block_id: call_id.to_string(),
                 text: content.clone(),
-                metadata: if metadata.as_object().is_some_and(|m| !m.is_empty()) {
-                    Some(metadata)
-                } else {
-                    None
-                },
+                metadata: non_empty_metadata(metadata),
             }]
         },
 
@@ -312,14 +269,16 @@ fn control_from_state(
         can_request_compact: can_submit_prompt && has_messages,
         compact_pending: false,
         compacting: matches!(phase, Phase::Compacting),
-        current_mode_id: None,
         active_turn_id,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use astrcode_protocol::wire::PhaseDto;
+    use astrcode_protocol::{
+        http::{ConversationBlockDto, ConversationBlockStatusDto},
+        wire::PhaseDto,
+    };
 
     use super::*;
 
@@ -512,79 +471,54 @@ mod tests {
     }
 
     #[test]
-    fn in_turn_compact_completion_restores_thinking_control_state() {
-        let event = Event::new(
-            "session-1".into(),
-            Some("turn-1".into()),
-            EventPayload::CompactionCompleted {
-                messages_removed: 2,
-            },
-        );
+    fn lifecycle_events_project_control_state() {
+        let cases = [
+            (
+                EventPayload::CompactionCompleted {
+                    messages_removed: 2,
+                },
+                Some("turn-1"),
+                PhaseDto::Thinking,
+                false,
+                Some("turn-1"),
+            ),
+            (
+                EventPayload::TurnStarted,
+                Some("turn-42"),
+                PhaseDto::Thinking,
+                false,
+                Some("turn-42"),
+            ),
+            (
+                EventPayload::TurnCompleted {
+                    finish_reason: "stop".into(),
+                },
+                Some("turn-42"),
+                PhaseDto::Idle,
+                true,
+                None,
+            ),
+            (
+                EventPayload::CompactionCompleted {
+                    messages_removed: 2,
+                },
+                None,
+                PhaseDto::Idle,
+                true,
+                None,
+            ),
+        ];
 
-        let deltas = event_to_deltas(&event, true);
-
-        assert!(matches!(
-            deltas.as_slice(),
-            [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == PhaseDto::Thinking
-                    && !control.compacting
-                    && control.active_turn_id.as_deref() == Some("turn-1")
-        ));
-    }
-
-    #[test]
-    fn turn_started_exposes_active_turn_id_for_inject() {
-        let event = Event::new(
-            "session-1".into(),
-            Some("turn-42".into()),
-            EventPayload::TurnStarted,
-        );
-
-        let deltas = event_to_deltas(&event, true);
-
-        assert!(matches!(
-            deltas.as_slice(),
-            [ConversationDeltaDto::UpdateControlState { control }]
-                if control.active_turn_id.as_deref() == Some("turn-42")
-        ));
-    }
-
-    #[test]
-    fn turn_completed_clears_active_turn_id() {
-        let event = Event::new(
-            "session-1".into(),
-            Some("turn-42".into()),
-            EventPayload::TurnCompleted {
-                finish_reason: "stop".into(),
-            },
-        );
-
-        let deltas = event_to_deltas(&event, true);
-
-        assert!(matches!(
-            deltas.as_slice(),
-            [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == PhaseDto::Idle && control.active_turn_id.is_none()
-        ));
-    }
-
-    #[test]
-    fn manual_compact_completion_restores_idle_control_state() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::CompactionCompleted {
-                messages_removed: 2,
-            },
-        );
-
-        let deltas = event_to_deltas(&event, true);
-
-        assert!(matches!(
-            deltas.as_slice(),
-            [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == PhaseDto::Idle && control.can_submit_prompt
-        ));
+        for (payload, turn_id, phase, can_submit_prompt, active_turn_id) in cases {
+            let event = Event::new("session-1".into(), turn_id.map(Into::into), payload);
+            let deltas = event_to_deltas(&event, true);
+            let [ConversationDeltaDto::UpdateControlState { control }] = deltas.as_slice() else {
+                panic!("expected one control-state delta, got {deltas:?}");
+            };
+            assert_eq!(control.phase, phase);
+            assert_eq!(control.can_submit_prompt, can_submit_prompt);
+            assert_eq!(control.active_turn_id.as_deref(), active_turn_id);
+        }
     }
 
     #[test]

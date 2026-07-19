@@ -33,10 +33,11 @@ use astrcode_protocol::{
     events::ClientNotification,
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
-        CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
-        PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
+        CompactSessionResponse, ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
+        CreateSessionResponseDto, PromptSubmitResponse, ProviderCatalogResponseDto,
+        SlashCommandListResponseDto,
     },
-    wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
+    wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
     bootstrap::ServerRuntime,
@@ -333,6 +334,26 @@ async fn provider_catalog_route_returns_endpoint_presets() {
             .any(|endpoint| endpoint.base_url.as_deref()
                 == Some("https://ark.cn-beijing.volces.com/api/v3"))
     );
+}
+
+#[tokio::test]
+async fn active_selection_rejects_unknown_approval_mode_with_structured_error() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(runtime, event_tx).unwrap();
+
+    let response = post_json(
+        app,
+        "/api/config/active-selection",
+        r#"{"activeProfile":"test","activeModel":"test","approvalMode":"future"}"#,
+        &token,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: ConversationErrorEnvelopeDto =
+        serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(error.code, "invalid_approval_mode");
 }
 
 #[tokio::test]
@@ -981,7 +1002,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "compact")
         .expect("compact command");
-    assert_eq!(compact.source, "builtin");
+    assert_eq!(compact.source, CommandSourceDto::Builtin);
     assert!(!compact.needs_argument);
     assert!(compact.requires_idle);
     assert!(!compact.argument_completions);
@@ -992,7 +1013,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "mode")
         .expect("mode extension command");
-    assert_eq!(mode_cmd.source, "extension");
+    assert_eq!(mode_cmd.source, CommandSourceDto::Extension);
 
     let shift_tab = body
         .keybindings
@@ -1237,16 +1258,13 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .await
         .unwrap();
     assert!(!state.context_messages.is_empty());
-    let restored_context = state
-        .context_messages
-        .iter()
-        .flat_map(|message| &message.message.content)
-        .filter_map(|content| match content {
-            astrcode_core::llm::LlmContent::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let restored_context = astrcode_core::llm::LlmContent::join_text(
+        state
+            .context_messages
+            .iter()
+            .flat_map(|message| &message.message.content),
+        "\n",
+    );
     assert!(restored_context.contains("<post_compact_context>"));
     assert!(restored_context.contains(read_fixture));
     assert!(restored_context.contains("compact_restore_fixture"));

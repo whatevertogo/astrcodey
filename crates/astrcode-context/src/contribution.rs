@@ -11,8 +11,8 @@
 //!   ├─ ExtensionRunner::collect_prompt_contributions_typed()
 //!   │    → PromptContributions
 //!   │
-//!   ├─ PromptEngine::ensure(contribs, base, tools)
-//!   │    → system prompt（指纹缓存，动态内容变化时自动重建）
+//!   ├─ PromptProvider::assemble(input)
+//!   │    → system prompt（包含本轮最新动态贡献）
 //!   │
 //!   └─ LlmContextAssembler::prepare_messages_with_llm()
 //!        → provider-ready messages

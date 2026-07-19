@@ -268,16 +268,7 @@ fn extract_conversation(model: &SessionReadModel) -> String {
                 astrcode_extension_sdk::llm::LlmRole::Assistant => "Assistant",
                 _ => return None,
             };
-            let text: String = msg
-                .message
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    LlmContent::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = msg.message.joined_text("\n");
             if text.is_empty() {
                 None
             } else {

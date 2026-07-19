@@ -23,24 +23,17 @@ mod server_system;
 
 pub use server_system::{ServerSystem, spawn_server_system, spawn_server_system_without_legacy};
 
-fn approval_mode_wire(mode: astrcode_core::permission::ApprovalMode) -> String {
-    match mode {
-        astrcode_core::permission::ApprovalMode::Manual => "manual".into(),
-        astrcode_core::permission::ApprovalMode::Yolo => "yolo".into(),
-    }
-}
-
 fn apply_approval_mode_bootstrap_options(
     config: &mut astrcode_core::config::Config,
     opts: &BootstrapOptions,
 ) {
     if let Some(mode) = opts.approval_mode_override {
-        config.runtime.approval_mode = Some(approval_mode_wire(mode));
+        config.runtime.approval_mode = Some(mode.as_str().into());
         return;
     }
     if config.runtime.approval_mode.is_none() {
         if let Some(mode) = opts.default_approval_mode_if_unset {
-            config.runtime.approval_mode = Some(approval_mode_wire(mode));
+            config.runtime.approval_mode = Some(mode.as_str().into());
         }
     }
 }
@@ -244,9 +237,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         child_sessions,
     });
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
-    session_manager.add_resource_cleanup(Arc::new(TurnSchedulerCleanup {
-        scheduler: Arc::clone(&scheduler),
-    }));
 
     // 7. 加载扩展。
     //
@@ -416,22 +406,6 @@ impl SessionResourceCleanup for BackgroundShellCleanup {
         astrcode_tools::background_shell::cleanup_background_shells_for_session(
             session_id.as_str(),
         );
-    }
-}
-
-/// session 销毁/回收时清理 turn scheduler 中的待处理输入和活跃记录。
-struct TurnSchedulerCleanup {
-    scheduler: Arc<TurnScheduler>,
-}
-
-impl SessionResourceCleanup for TurnSchedulerCleanup {
-    fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
-        let scheduler = Arc::clone(&self.scheduler);
-        let sid = session_id.clone();
-        crate::task_utils::spawn_traced("turn_scheduler_cleanup", async move {
-            scheduler.abort_and_cleanup(&sid).await;
-            tracing::debug!(session_id = %sid, "turn scheduler cleanup finished");
-        });
     }
 }
 

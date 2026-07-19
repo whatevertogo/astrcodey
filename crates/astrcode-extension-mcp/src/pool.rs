@@ -7,6 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     process::Stdio,
     sync::{
         Arc,
@@ -114,24 +115,17 @@ impl ServerId {
     fn from_config(server: &McpServerConfig) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        server.transport.hash(&mut hasher);
         match server.transport {
             crate::config::McpTransport::Stdio => {
-                "stdio".hash(&mut hasher);
                 server.command.hash(&mut hasher);
                 server.args.hash(&mut hasher);
-                for (k, v) in &server.env {
-                    k.hash(&mut hasher);
-                    v.hash(&mut hasher);
-                }
+                server.env.hash(&mut hasher);
                 server.cwd.hash(&mut hasher);
             },
             crate::config::McpTransport::Http => {
-                "http".hash(&mut hasher);
                 server.url.hash(&mut hasher);
-                for (k, v) in &server.headers {
-                    k.hash(&mut hasher);
-                    v.hash(&mut hasher);
-                }
+                server.headers.hash(&mut hasher);
             },
         }
         Self(format!("{:x}", hasher.finish()))
@@ -186,29 +180,13 @@ impl McpProcessPool {
         &self,
         server: &McpServerConfig,
     ) -> Result<Vec<McpTool>, McpPoolError> {
-        let (id, entry) = self.pooled_entry(server).await?;
-        match list_tools_from_entry(&entry).await {
-            Ok(tools) => Ok(tools),
-            Err(error) if error_invalidates_client(&error) => {
-                self.evict_entry_if_current(&id, &entry).await;
-                let (retry_id, retry_entry) = self.pooled_entry(server).await?;
-                match list_tools_from_entry(&retry_entry).await {
-                    Ok(tools) => Ok(tools),
-                    Err(retry_error) => {
-                        if error_invalidates_client(&retry_error) {
-                            self.evict_entry_if_current(&retry_id, &retry_entry).await;
-                        }
-                        Err(retry_error)
-                    },
-                }
-            },
-            Err(error) => {
-                if error_invalidates_client(&error) {
-                    self.evict_entry_if_current(&id, &entry).await;
-                }
-                Err(error)
-            },
-        }
+        self.execute_with_reconnect(
+            server,
+            error_invalidates_client,
+            list_tools_from_entry,
+            list_tools_from_entry,
+        )
+        .await
     }
 
     /// Execute `tools/call`, restoring a dead pooled process if needed.
@@ -218,29 +196,50 @@ impl McpProcessPool {
         tool_name: &str,
         arguments: Value,
     ) -> Result<CallToolResult, McpPoolError> {
+        let initial_arguments = arguments.clone();
+        self.execute_with_reconnect(
+            server,
+            should_retry_call_after_reconnect,
+            |entry| call_tool_from_entry(entry, tool_name, initial_arguments),
+            |entry| call_tool_from_entry(entry, tool_name, arguments),
+        )
+        .await
+    }
+
+    async fn execute_with_reconnect<T, First, FirstFuture, Retry, RetryFuture>(
+        &self,
+        server: &McpServerConfig,
+        should_retry: fn(&McpPoolError) -> bool,
+        first: First,
+        retry: Retry,
+    ) -> Result<T, McpPoolError>
+    where
+        First: FnOnce(Arc<PooledClient>) -> FirstFuture,
+        FirstFuture: Future<Output = Result<T, McpPoolError>>,
+        Retry: FnOnce(Arc<PooledClient>) -> RetryFuture,
+        RetryFuture: Future<Output = Result<T, McpPoolError>>,
+    {
         let (id, entry) = self.pooled_entry(server).await?;
-        match call_tool_from_entry(&entry, tool_name, arguments.clone()).await {
-            Ok(result) => Ok(result),
-            Err(error) if should_retry_call_after_reconnect(&error) => {
-                self.evict_entry_if_current(&id, &entry).await;
-                let (retry_id, retry_entry) = self.pooled_entry(server).await?;
-                match call_tool_from_entry(&retry_entry, tool_name, arguments).await {
-                    Ok(result) => Ok(result),
-                    Err(retry_error) => {
-                        if error_invalidates_client(&retry_error) {
-                            self.evict_entry_if_current(&retry_id, &retry_entry).await;
-                        }
-                        Err(retry_error)
-                    },
-                }
-            },
-            Err(error) => {
-                if error_invalidates_client(&error) {
-                    self.evict_entry_if_current(&id, &entry).await;
-                }
-                Err(error)
-            },
+        let error = match first(Arc::clone(&entry)).await {
+            Ok(result) => return Ok(result),
+            Err(error) => error,
+        };
+        let retry_after_reconnect = should_retry(&error);
+        if error_invalidates_client(&error) {
+            self.evict_entry_if_current(&id, &entry).await;
         }
+        if !retry_after_reconnect {
+            return Err(error);
+        }
+
+        let (retry_id, retry_entry) = self.pooled_entry(server).await?;
+        let result = retry(Arc::clone(&retry_entry)).await;
+        if let Err(error) = &result {
+            if error_invalidates_client(error) {
+                self.evict_entry_if_current(&retry_id, &retry_entry).await;
+            }
+        }
+        result
     }
 
     async fn pooled_entry(
@@ -263,25 +262,12 @@ impl McpProcessPool {
             pool.values().cloned().collect()
         };
         for entry in entries {
-            match entry.as_ref() {
-                PooledClient::Stdio(client) => {
-                    if !client_healthy(client) {
-                        return Err(McpPoolError::UnhealthyProcess);
-                    }
-                    let _request = client.request_lock.lock().await;
-                    let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
-                    let result = request_result_stdio(
-                        client,
-                        protocol::list_tools_request(next_id),
-                        next_id,
-                    )
-                    .await?;
-                    protocol::parse_list_tools(result).map_err(McpPoolError::Result)?;
-                },
-                PooledClient::Http(client) => {
-                    client.list_tools().await?;
-                },
+            if let PooledClient::Stdio(client) = entry.as_ref() {
+                if !client_healthy(client) {
+                    return Err(McpPoolError::UnhealthyProcess);
+                }
             }
+            list_tools_from_entry(entry).await?;
         }
         Ok(())
     }
@@ -292,9 +278,7 @@ impl McpProcessPool {
             let mut pool = self.pool.lock().await;
             pool.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
         };
-        for entry in entries {
-            shutdown_pooled(entry).await;
-        }
+        shutdown_all(entries).await;
     }
 
     /// Drop pooled clients that are no longer referenced by any warm cache.
@@ -315,9 +299,7 @@ impl McpProcessPool {
                 .filter_map(|id| pool.remove(&id))
                 .collect::<Vec<_>>()
         };
-        for client in stale {
-            shutdown_pooled(client).await;
-        }
+        shutdown_all(stale).await;
     }
 
     async fn evict_entry_if_current(&self, id: &ServerId, expected: &Arc<PooledClient>) {
@@ -383,39 +365,47 @@ impl McpProcessPool {
     }
 }
 
-async fn list_tools_from_entry(entry: &PooledClient) -> Result<Vec<McpTool>, McpPoolError> {
-    match entry {
+async fn list_tools_from_entry(entry: Arc<PooledClient>) -> Result<Vec<McpTool>, McpPoolError> {
+    match entry.as_ref() {
         PooledClient::Stdio(client) => {
-            let _request = client.request_lock.lock().await;
-            let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
-            let result =
-                request_result_stdio(client, protocol::list_tools_request(next_id), next_id)
-                    .await?;
-            protocol::parse_list_tools(result).map_err(McpPoolError::Result)
+            execute_stdio_request(
+                client,
+                protocol::list_tools_request,
+                protocol::parse_list_tools,
+            )
+            .await
         },
         PooledClient::Http(client) => client.list_tools().await,
     }
 }
 
 async fn call_tool_from_entry(
-    entry: &PooledClient,
+    entry: Arc<PooledClient>,
     tool_name: &str,
     arguments: Value,
 ) -> Result<CallToolResult, McpPoolError> {
-    match entry {
+    match entry.as_ref() {
         PooledClient::Stdio(client) => {
-            let _request = client.request_lock.lock().await;
-            let next_id = client.next_id.fetch_add(1, Ordering::SeqCst);
-            let result = request_result_stdio(
+            execute_stdio_request(
                 client,
-                protocol::call_tool_request(next_id, tool_name, arguments),
-                next_id,
+                |id| protocol::call_tool_request(id, tool_name, arguments),
+                protocol::parse_call_tool,
             )
-            .await?;
-            protocol::parse_call_tool(result).map_err(McpPoolError::Result)
+            .await
         },
         PooledClient::Http(client) => client.call_tool(tool_name, arguments).await,
     }
+}
+
+async fn execute_stdio_request<T>(
+    client: &StdioPooledClient,
+    build_request: impl FnOnce(u64) -> Value,
+    parse_result: fn(Value) -> Result<T, serde_json::Error>,
+) -> Result<T, McpPoolError> {
+    let _request = client.request_lock.lock().await;
+    let id = client.next_id.fetch_add(1, Ordering::SeqCst);
+    let result = request_result_stdio(client, build_request(id), id).await?;
+    parse_result(result).map_err(McpPoolError::Result)
 }
 
 fn should_retry_call_after_reconnect(error: &McpPoolError) -> bool {
@@ -456,15 +446,13 @@ async fn shutdown_stdio(client: &StdioPooledClient) {
 }
 
 async fn shutdown_pooled(client: Arc<PooledClient>) {
-    match Arc::try_unwrap(client) {
-        Ok(PooledClient::Stdio(client)) => shutdown_stdio(&client).await,
-        Ok(PooledClient::Http(_)) => {},
-        Err(client) => {
-            if let PooledClient::Stdio(client) = client.as_ref() {
-                shutdown_stdio(client).await;
-            }
-        },
+    if let PooledClient::Stdio(client) = client.as_ref() {
+        shutdown_stdio(client).await;
     }
+}
+
+async fn shutdown_all(clients: Vec<Arc<PooledClient>>) {
+    futures_util::future::join_all(clients.into_iter().map(shutdown_pooled)).await;
 }
 
 // ─── Stdio client ────────────────────────────────────────────────────────
@@ -767,23 +755,10 @@ mod tests {
     #[tokio::test]
     async fn reuses_http_session_after_prewarm() {
         let server = TestHttpServer::start(vec![
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {"protocolVersion": "2025-06-18"}
-            }))
-            .header("Mcp-Session-Id", "session-1"),
+            TestResponse::initialize("session-1"),
             TestResponse::accepted(),
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo"}]}
-            })),
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo"}]}
-            })),
+            TestResponse::tool_list(),
+            TestResponse::tool_list(),
             TestResponse::json(json!({
                 "jsonrpc": "2.0",
                 "id": 2,
@@ -794,16 +769,7 @@ mod tests {
             })),
         ])
         .await;
-        let config = McpServerConfig {
-            name: "http-fake".into(),
-            transport: McpTransport::Http,
-            command: String::new(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            cwd: None,
-            url: Some(server.url()),
-            headers: BTreeMap::new(),
-        };
+        let config = http_server_config(&server);
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
         assert!(
@@ -838,38 +804,15 @@ mod tests {
     #[tokio::test]
     async fn reconnects_http_session_after_expired_response() {
         let server = TestHttpServer::start(vec![
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {"protocolVersion": "2025-06-18"}
-            }))
-            .header("Mcp-Session-Id", "session-1"),
+            TestResponse::initialize("session-1"),
             TestResponse::accepted(),
             TestResponse::status(reqwest::StatusCode::NOT_FOUND, "expired"),
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {"protocolVersion": "2025-06-18"}
-            }))
-            .header("Mcp-Session-Id", "session-2"),
+            TestResponse::initialize("session-2"),
             TestResponse::accepted(),
-            TestResponse::json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo"}]}
-            })),
+            TestResponse::tool_list(),
         ])
         .await;
-        let config = McpServerConfig {
-            name: "http-fake".into(),
-            transport: McpTransport::Http,
-            command: String::new(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            cwd: None,
-            url: Some(server.url()),
-            headers: BTreeMap::new(),
-        };
+        let config = http_server_config(&server);
         let pool = McpProcessPool::new(Duration::from_secs(5));
 
         assert!(
@@ -972,6 +915,19 @@ mod tests {
         }
     }
 
+    fn http_server_config(server: &TestHttpServer) -> McpServerConfig {
+        McpServerConfig {
+            name: "http-fake".into(),
+            transport: McpTransport::Http,
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: Some(server.url()),
+            headers: BTreeMap::new(),
+        }
+    }
+
     #[derive(Clone)]
     struct TestRequest {
         headers: BTreeMap<String, String>,
@@ -985,6 +941,23 @@ mod tests {
     }
 
     impl TestResponse {
+        fn initialize(session_id: &str) -> Self {
+            Self::json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2025-06-18"}
+            }))
+            .header("Mcp-Session-Id", session_id)
+        }
+
+        fn tool_list() -> Self {
+            Self::json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": [{"name": "echo"}]}
+            }))
+        }
+
         fn json(body: Value) -> Self {
             Self {
                 status: reqwest::StatusCode::OK,

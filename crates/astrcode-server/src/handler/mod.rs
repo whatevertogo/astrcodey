@@ -126,14 +126,14 @@ impl CommandHandler {
         source_id: SessionId,
         at_cursor: Option<String>,
     ) -> Result<SessionId, HandlerError> {
-        let forked = self
+        let session = self
             .runtime
             .session_manager()
             .fork(&source_id, at_cursor.as_ref())
             .await
             .map_err(HandlerError::SessionManager)?;
 
-        let new_sid = forked.session.id().clone();
+        let new_sid = session.id().clone();
         self.focused_session_id = Some(new_sid.clone());
 
         // 初始化 runtime（工具表在新 session 上需要重建）
@@ -144,7 +144,7 @@ impl CommandHandler {
             .await
             .map(|m| m.working_dir)
             .unwrap_or_else(|_| ".".into());
-        if let Err(e) = forked.session.initialize_runtime(&working_dir).await {
+        if let Err(e) = session.initialize_runtime(&working_dir).await {
             tracing::warn!(session_id = %new_sid, error = %e, "fork: runtime init failed");
         }
 

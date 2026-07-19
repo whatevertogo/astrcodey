@@ -50,10 +50,9 @@ impl CommandHandler {
             self.send_error(40400, "No active turn");
             return Err(HandlerError::NoActiveTurn);
         }
-        match self.inject_input_for_session(sid.clone(), text).await? {
-            PromptSubmission::Handled { .. } => Ok(()),
-            PromptSubmission::Accepted { .. } => Ok(()),
-        }
+        self.inject_input_for_session(sid.clone(), text)
+            .await
+            .map(|_| ())
     }
 
     /// Mid-turn 注入：要求当前 session 有活跃 turn，经 [`InputDelivery::InjectIfRunningElseStart`]

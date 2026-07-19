@@ -11,14 +11,13 @@
 use std::future::Future;
 
 use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
+use astrcode_support::text::compact_inline;
 
-use crate::{
-    ContextSettings,
-    token_budget::{estimate_request_tokens, estimate_text_tokens},
-};
+use crate::{ContextSettings, token_budget::estimate_request_tokens};
 
 const COMPACT_SUMMARY_END: &str = "</compact_summary>";
 const MAX_PTL_RETRIES: usize = 3;
+const MAX_SUMMARY_LINE_CHARS: usize = 320;
 
 mod assemble;
 mod parse;
@@ -101,6 +100,7 @@ where
     Fut: Future<Output = Result<String, CompactError>>,
 {
     let parts = prepare_compact_parts(messages, system_prompt, keep_recent_turns)?;
+    let round_starts = api_round_starts(&parts.prepared_input.messages);
     let mut repair_feedback: Option<String> = None;
     let mut ptl_rounds_dropped = 0usize;
     let mut repair_attempts = 0u8;
@@ -108,13 +108,12 @@ where
     let mut last_error: Option<CompactError> = None;
 
     while repair_attempts < max_attempts {
-        let Some(prepared_input) =
-            compact_input_for_ptl_retry(&parts.prepared_input, ptl_rounds_dropped)
-        else {
+        let Some(message_start) = round_starts.get(ptl_rounds_dropped).copied() else {
             break;
         };
         let compact_messages = request_messages(
-            &prepared_input,
+            &parts.prepared_input,
+            message_start,
             system_prompt,
             settings,
             repair_feedback.as_deref(),
@@ -123,14 +122,12 @@ where
         let output = match request_text(compact_messages).await {
             Ok(output) => output,
             Err(error) if should_retry_prompt_too_long(&error) => {
-                let Some(next_drop) =
-                    next_ptl_retry_drop(&parts.prepared_input, ptl_rounds_dropped)
-                else {
+                let next_drop = ptl_rounds_dropped + 1;
+                if next_drop > MAX_PTL_RETRIES || next_drop >= round_starts.len() {
                     last_error = Some(error);
                     break;
-                };
+                }
                 ptl_rounds_dropped = next_drop;
-                last_error = Some(error);
                 continue;
             },
             Err(error) => {
@@ -139,22 +136,20 @@ where
             },
         };
         repair_attempts += 1;
-        match finish_compact_output(
-            &output,
-            parts.retained_messages.clone(),
-            parts.pre_tokens,
-            parts.messages_removed,
-            system_prompt,
-            render_options,
-        ) {
-            Ok(compaction) => return Ok(compaction),
-            Err(CompactError::Parse(error)) => {
-                repair_feedback = Some(error.to_string());
-                last_error = Some(CompactError::Parse(error));
+        match parse_compact_output(&output) {
+            Ok(parsed) => {
+                return Ok(finish_compact_summary(
+                    assemble::sanitize_compact_summary(&parsed.summary),
+                    parts.retained_messages,
+                    parts.pre_tokens,
+                    parts.messages_removed,
+                    system_prompt,
+                    render_options,
+                ));
             },
             Err(error) => {
-                last_error = Some(error);
-                break;
+                repair_feedback = Some(error.to_string());
+                last_error = Some(error.into());
             },
         }
     }
@@ -246,9 +241,6 @@ pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnve
 ///
 /// `keep_start` 为保留区首条消息下标时，应对 `split_after = keep_start - 1` 调用本函数。
 pub fn can_split_after(messages: &[LlmMessage], split_after: usize) -> bool {
-    if split_after >= messages.len() {
-        return true;
-    }
     let Some(message) = messages.get(split_after) else {
         return true;
     };
@@ -282,32 +274,25 @@ fn can_compact_before(messages: &[LlmMessage], keep_start: usize) -> bool {
 
 fn adjust_keep_start_to_safe_boundary(
     messages: &[LlmMessage],
+    turn_starts: &[usize],
     mut keep_start: usize,
 ) -> Option<usize> {
-    let turn_starts = user_turn_starts(messages);
     while keep_start > 0 && !can_compact_before(messages, keep_start) {
         let previous = turn_starts
             .iter()
+            .rev()
             .copied()
-            .filter(|index| *index < keep_start)
-            .max()?;
-        if previous == keep_start {
-            return None;
-        }
+            .find(|index| *index < keep_start)?;
         keep_start = previous;
     }
-    if keep_start == 0 || !can_compact_before(messages, keep_start) {
-        None
-    } else {
-        Some(keep_start)
-    }
+    can_compact_before(messages, keep_start).then_some(keep_start)
 }
 
 fn split_compact_start(messages: &[LlmMessage], keep_recent_turns: Option<usize>) -> Option<usize> {
     let has_compressible = messages
         .iter()
         .any(|m| m.role == LlmRole::Assistant && !is_synthetic_context_message(m));
-    if !has_compressible || messages.is_empty() {
+    if !has_compressible {
         return None;
     }
 
@@ -325,7 +310,7 @@ fn split_compact_start(messages: &[LlmMessage], keep_recent_turns: Option<usize>
     let candidate = turn_starts
         .get(turn_starts.len().saturating_sub(keep_turns))
         .copied()?;
-    adjust_keep_start_to_safe_boundary(messages, candidate)
+    adjust_keep_start_to_safe_boundary(messages, &turn_starts, candidate)
 }
 
 fn removed_visible_messages(messages: &[LlmMessage]) -> usize {
@@ -377,16 +362,18 @@ fn user_turn_starts(messages: &[LlmMessage]) -> Vec<usize> {
 
 fn request_messages(
     prepared_input: &PreparedCompactInput,
+    message_start: usize,
     system_prompt: Option<&str>,
     settings: &ContextSettings,
     repair_feedback: Option<&str>,
     custom_instructions: &[String],
 ) -> Vec<LlmMessage> {
-    let mut messages = Vec::with_capacity(prepared_input.messages.len() + 2);
+    let input_messages = &prepared_input.messages[message_start..];
+    let mut messages = Vec::with_capacity(input_messages.len() + 2);
     if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty()) {
         messages.push(LlmMessage::system(system_prompt.to_string()));
     }
-    messages.extend(prepared_input.messages.clone());
+    messages.extend_from_slice(input_messages);
     messages.push(LlmMessage::user(prompt::render_compact_request(
         &prepared_input.prompt_mode,
         settings,
@@ -396,63 +383,19 @@ fn request_messages(
     messages
 }
 
-fn compact_input_for_ptl_retry(
-    prepared_input: &PreparedCompactInput,
-    rounds_dropped: usize,
-) -> Option<PreparedCompactInput> {
-    if rounds_dropped == 0 {
-        return Some(prepared_input.clone());
-    }
-    let ranges = api_round_ranges(&prepared_input.messages);
-    let start = ranges.get(rounds_dropped)?.start;
-    Some(PreparedCompactInput {
-        messages: prepared_input.messages[start..].to_vec(),
-        prompt_mode: prepared_input.prompt_mode.clone(),
-    })
-}
-
-fn next_ptl_retry_drop(
-    prepared_input: &PreparedCompactInput,
-    current_rounds_dropped: usize,
-) -> Option<usize> {
-    let next = current_rounds_dropped.saturating_add(1);
-    let round_count = api_round_ranges(&prepared_input.messages).len();
-    (next <= MAX_PTL_RETRIES && next < round_count).then_some(next)
-}
-
-fn api_round_ranges(messages: &[LlmMessage]) -> Vec<std::ops::Range<usize>> {
+fn api_round_starts(messages: &[LlmMessage]) -> Vec<usize> {
     if messages.is_empty() {
         return Vec::new();
     }
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    for (index, message) in messages.iter().enumerate().skip(1) {
-        if message.role == LlmRole::User {
-            ranges.push(start..index);
-            start = index;
-        }
-    }
-    ranges.push(start..messages.len());
-    ranges
-}
-
-fn finish_compact_output(
-    raw_output: &str,
-    retained_messages: Vec<LlmMessage>,
-    pre_tokens: usize,
-    messages_removed: usize,
-    system_prompt: Option<&str>,
-    render_options: &CompactSummaryRenderOptions,
-) -> Result<CompactResult, CompactError> {
-    let parsed = parse_compact_output(raw_output)?;
-    Ok(finish_compact_summary(
-        assemble::sanitize_compact_summary(&parsed.summary),
-        retained_messages,
-        pre_tokens,
-        messages_removed,
-        system_prompt,
-        render_options,
-    ))
+    std::iter::once(0)
+        .chain(
+            messages
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter_map(|(index, message)| (message.role == LlmRole::User).then_some(index)),
+        )
+        .collect()
 }
 
 fn finish_compact_summary(
@@ -511,10 +454,11 @@ fn summarize_prefix(messages: &[LlmMessage]) -> String {
         if text.trim().is_empty() {
             continue;
         }
+        let text = compact_inline(&text, MAX_SUMMARY_LINE_CHARS);
         if message.role == LlmRole::User {
-            lines.push(format!("   - {}", truncate_summary_line(&text)));
+            lines.push(format!("   - {text}"));
         } else {
-            lines.push(format!("   - {role}: {}", truncate_summary_line(&text)));
+            lines.push(format!("   - {role}: {text}"));
         }
     }
     lines.extend([
@@ -530,18 +474,6 @@ fn summarize_prefix(messages: &[LlmMessage]) -> String {
     ]);
 
     lines.join("\n")
-}
-
-fn truncate_summary_line(text: &str) -> String {
-    let max_chars = 320usize.min(estimate_text_tokens(text).saturating_mul(4).max(1));
-    if text.chars().count() <= max_chars {
-        return text.trim().to_string();
-    }
-    let mut end = 0usize;
-    for (index, _) in text.char_indices().take(max_chars) {
-        end = index;
-    }
-    format!("{}...", text[..end].trim())
 }
 
 #[cfg(test)]
@@ -769,42 +701,7 @@ scratchpad that should not survive
 
     #[test]
     fn parse_compact_output_accepts_required_nine_section_summary() {
-        let raw = r#"
-<analysis>
-scratchpad that should be ignored
-</analysis>
-
-<summary>
-1. Primary Request and Intent:
-   preserve structure
-
-2. Key Technical Concepts:
-   - compact
-
-3. Files and Code Sections:
-   - crates/astrcode-context/src/compaction.rs
-
-4. Errors and fixes:
-   - (none)
-
-5. Problem Solving:
-   done
-
-6. All user messages:
-   - user asked for compact
-
-7. Pending Tasks:
-   - (none)
-
-8. Current Work:
-   compact parser
-
-9. Optional Next Step:
-   - (none)
-</summary>
-"#;
-
-        let parsed = parse_compact_output(raw).unwrap();
+        let parsed = parse_compact_output(valid_compact_summary()).unwrap();
 
         assert!(parsed.summary.contains("Primary Request and Intent"));
         assert!(!parsed.summary.contains("scratchpad"));
@@ -840,17 +737,7 @@ scratchpad that should be ignored
             &[],
         );
 
-        for section in [
-            "1. Primary Request and Intent:",
-            "2. Key Technical Concepts:",
-            "3. Files and Code Sections:",
-            "4. Errors and fixes:",
-            "5. Problem Solving:",
-            "6. All user messages:",
-            "7. Pending Tasks:",
-            "8. Current Work:",
-            "9. Optional Next Step:",
-        ] {
+        for section in parse::REQUIRED_SUMMARY_SECTIONS {
             assert!(prompt.contains(section), "missing {section}");
         }
         assert!(prompt.contains("<summary>"));

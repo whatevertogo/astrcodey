@@ -7,19 +7,25 @@
 use astrcode_core::{
     config::{ProviderAuthScheme, ProviderWireFormat},
     event::{Phase, ToolOutputStream},
-    extension::ExtensionCapability,
-    llm::ThinkingLevel,
-    permission::ApprovalDecision,
+    extension::{ExtensionCapability, ExtensionHttpMethod},
+    llm::{LlmRole, ThinkingLevel},
+    permission::{ApprovalDecision, ApprovalMode},
     storage::AgentSessionStatus,
     tool::{ExecutionMode, ToolOrigin},
 };
 use serde::{Deserialize, Serialize};
 
-macro_rules! impl_domain_to_wire_conversion {
-    ($domain:ty => $wire:ty { $($variant:ident),+ $(,)? }) => {
+macro_rules! impl_wire_values {
+    ($wire:ty { $($variant:ident),+ $(,)? }) => {
         impl $wire {
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
         }
+    };
+}
+
+macro_rules! impl_domain_to_wire_conversion {
+    ($domain:ty => $wire:ty { $($variant:ident),+ $(,)? }) => {
+        impl_wire_values!($wire { $($variant),+ });
 
         impl From<$domain> for $wire {
             fn from(value: $domain) -> Self {
@@ -30,6 +36,93 @@ macro_rules! impl_domain_to_wire_conversion {
         }
     };
 }
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSourceDto {
+    Builtin,
+    Extension,
+    Skill,
+}
+
+impl_wire_values!(CommandSourceDto {
+    Builtin,
+    Extension,
+    Skill,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionSourceDto {
+    Builtin,
+    Disk,
+    #[default]
+    Unknown,
+}
+
+impl_wire_values!(ExtensionSourceDto {
+    Builtin,
+    Disk,
+    Unknown,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionStageStatusDto {
+    #[default]
+    Unknown,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+impl_wire_values!(ExtensionStageStatusDto {
+    Unknown,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRoleDto {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl_domain_to_wire_conversion!(LlmRole => MessageRoleDto {
+    System,
+    User,
+    Assistant,
+    Tool,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ExtensionHttpMethodDto {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl_domain_to_wire_conversion!(ExtensionHttpMethod => ExtensionHttpMethodDto {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+});
 
 macro_rules! impl_bidirectional_wire_conversion {
     ($domain:ty => $wire:ty { $($variant:ident),+ $(,)? }) => {
@@ -93,6 +186,32 @@ impl_bidirectional_wire_conversion!(ApprovalDecision => ApprovalDecisionDto {
     AllowAlways,
     DenyAlways,
 });
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalModeDto {
+    #[default]
+    Manual,
+    Yolo,
+    #[serde(other, skip_serializing)]
+    #[cfg_attr(feature = "typescript", ts(skip))]
+    Unsupported,
+}
+
+impl_domain_to_wire_conversion!(ApprovalMode => ApprovalModeDto { Manual, Yolo });
+
+impl TryFrom<ApprovalModeDto> for ApprovalMode {
+    type Error = ();
+
+    fn try_from(value: ApprovalModeDto) -> Result<Self, Self::Error> {
+        match value {
+            ApprovalModeDto::Manual => Ok(Self::Manual),
+            ApprovalModeDto::Yolo => Ok(Self::Yolo),
+            ApprovalModeDto::Unsupported => Err(()),
+        }
+    }
+}
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +386,26 @@ mod tests {
         assert_wire_values(
             ApprovalDecisionDto::ALL,
             &["allow_once", "deny_once", "allow_always", "deny_always"],
+        );
+        assert_wire_values(ApprovalModeDto::ALL, &["manual", "yolo"]);
+        assert_eq!(
+            serde_json::from_str::<ApprovalModeDto>(r#""future_mode""#).unwrap(),
+            ApprovalModeDto::Unsupported
+        );
+        assert!(serde_json::to_string(&ApprovalModeDto::Unsupported).is_err());
+        assert_wire_values(CommandSourceDto::ALL, &["builtin", "extension", "skill"]);
+        assert_wire_values(ExtensionSourceDto::ALL, &["builtin", "disk", "unknown"]);
+        assert_wire_values(
+            ExtensionStageStatusDto::ALL,
+            &["unknown", "running", "succeeded", "failed", "skipped"],
+        );
+        assert_wire_values(
+            MessageRoleDto::ALL,
+            &["system", "user", "assistant", "tool"],
+        );
+        assert_wire_values(
+            ExtensionHttpMethodDto::ALL,
+            &["GET", "POST", "PUT", "PATCH", "DELETE"],
         );
         assert_wire_values(ToolOutputStreamDto::ALL, &["stdout", "stderr"]);
         assert_wire_values(

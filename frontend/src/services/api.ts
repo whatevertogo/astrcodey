@@ -8,7 +8,9 @@ import type {
   ExtensionReloadResponseDto,
   ModelListResponseDto,
   SetExtensionEnabledResponseDto,
+  ToolApprovalRequest,
   ToolUiRespondResponse,
+  UpdateActiveSelectionRequest,
   UpdateActiveSelectionResponseDto,
 } from './generated'
 import type {
@@ -21,6 +23,7 @@ import type {
   ConversationSnapshot,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponse,
+  ApprovalMode,
   ConfigView,
   CurrentModelInfo,
   ModelTestResult,
@@ -278,15 +281,15 @@ export async function updateActiveSelection(
   activeModel: string,
   activeSmallProfile?: string,
   activeSmallModel?: string,
-  approvalMode: 'manual' | 'yolo' = 'manual'
+  approvalMode: ApprovalMode = 'manual'
 ): Promise<UpdateActiveSelectionResponseDto> {
-  const body: Record<string, unknown> = {
+  const body: UpdateActiveSelectionRequest = {
     activeProfile,
     activeModel,
+    activeSmallProfile: activeSmallProfile || undefined,
+    activeSmallModel: activeSmallModel || undefined,
     approvalMode,
   }
-  if (activeSmallProfile) body.activeSmallProfile = activeSmallProfile
-  if (activeSmallModel) body.activeSmallModel = activeSmallModel
   return request('/api/config/active-selection', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -367,17 +370,14 @@ export async function submitToolUiRespond(
   return (await response.json()) as ToolUiRespondResponse
 }
 
-export type ToolGateApprovalDecision =
-  | 'allow_once'
-  | 'deny_once'
-  | 'allow_always'
-  | 'deny_always'
+export type ToolGateApprovalDecision = ToolApprovalRequest['decision']
 
 export async function submitToolGateApproval(
   sessionId: string,
   callId: string,
   decision: ToolGateApprovalDecision
 ): Promise<void> {
+  const body: ToolApprovalRequest = { callId, decision }
   const response = await (
     await resolveFetch()
   )(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/approve`, {
@@ -386,7 +386,7 @@ export async function submitToolGateApproval(
       'Content-Type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify({ callId, decision }),
+    body: JSON.stringify(body),
   })
 
   if (!response.ok) {

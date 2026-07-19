@@ -5,10 +5,6 @@
  */
 export type CompactSessionRequest = {
 /**
- * 额外 compact 指令，v1 暂不接入生产链路。
- */
-instructions?: string | null,
-/**
  * 保留最近 N 个完整 user turn group。
  */
 keepRecentTurns?: number | null, };

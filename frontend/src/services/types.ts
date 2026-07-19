@@ -3,6 +3,7 @@
 
 import type {
   AgentSessionStatusDto,
+  ApprovalModeDto,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponseDto,
   AvailableModelDto,
@@ -48,6 +49,7 @@ import type {
 
 export {
   AGENT_SESSION_STATUSES,
+  APPROVAL_MODES,
   BLOCK_STATUSES,
   PHASES,
   PROVIDER_AUTH_SCHEMES,
@@ -58,6 +60,7 @@ export {
 export type Phase = PhaseDto
 export type ToolOutputStream = ToolOutputStreamDto
 export type BlockStatus = ConversationBlockStatusDto
+export type ApprovalMode = ApprovalModeDto
 export type {
   ApplyProviderPresetRequest,
   CommandInvokeResponse,
@@ -130,7 +133,6 @@ export interface ConversationControlState {
   canRequestCompact: boolean
   compactPending: boolean
   compacting: boolean
-  currentModeId?: string
   activeTurnId?: string
 }
 
@@ -246,9 +248,7 @@ export type ProviderAuthScheme = ProviderAuthSchemeDto
 
 export type ModelView = ModelDto
 
-export type ConfigView = Omit<ConfigViewResponseDto, 'approvalMode'> & {
-  approvalMode: 'manual' | 'yolo'
-}
+export type ConfigView = ConfigViewResponseDto
 
 export type ProviderCatalogView = ProviderCatalogResponseDto
 

@@ -8,7 +8,23 @@ pub use crate::{
     session_operations::ServerSessionOperations,
     turn_registry::TurnRegistry,
     turn_scheduler::{
-        CompletionParams, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
-        MAX_PROMPT_TEXT_BYTES, StartedExecution, TurnScheduleError, TurnScheduler,
+        DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES,
+        StartedExecution, TurnScheduleError, TurnScheduler,
     },
 };
+
+pub async fn recycle_completed_session_for_test(
+    scheduler: &TurnScheduler,
+    session_id: &astrcode_core::types::SessionId,
+    turn_id: &astrcode_core::types::TurnId,
+) -> Result<bool, TurnScheduleError> {
+    scheduler
+        .recycle_completed_session(session_id, turn_id)
+        .await
+        .map(|outcome| {
+            matches!(
+                outcome,
+                crate::turn_scheduler::CompletedRecycleOutcome::Recycled
+            )
+        })
+}

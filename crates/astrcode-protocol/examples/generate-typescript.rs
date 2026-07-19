@@ -144,6 +144,12 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         PhaseDto,
         ToolOutputStreamDto,
         ApprovalDecisionDto,
+        ApprovalModeDto,
+        CommandSourceDto,
+        ExtensionSourceDto,
+        ExtensionStageStatusDto,
+        MessageRoleDto,
+        ExtensionHttpMethodDto,
         ProviderWireFormatDto,
         ProviderAuthSchemeDto,
         ThinkingLevelDto,
@@ -160,6 +166,20 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     push_wire_values(&mut output, "PHASES", PhaseDto::ALL)?;
     push_wire_values(&mut output, "TOOL_OUTPUT_STREAMS", ToolOutputStreamDto::ALL)?;
     push_wire_values(&mut output, "APPROVAL_DECISIONS", ApprovalDecisionDto::ALL)?;
+    push_wire_values(&mut output, "APPROVAL_MODES", ApprovalModeDto::ALL)?;
+    push_wire_values(&mut output, "COMMAND_SOURCES", CommandSourceDto::ALL)?;
+    push_wire_values(&mut output, "EXTENSION_SOURCES", ExtensionSourceDto::ALL)?;
+    push_wire_values(
+        &mut output,
+        "EXTENSION_STAGE_STATUSES",
+        ExtensionStageStatusDto::ALL,
+    )?;
+    push_wire_values(&mut output, "MESSAGE_ROLES", MessageRoleDto::ALL)?;
+    push_wire_values(
+        &mut output,
+        "EXTENSION_HTTP_METHODS",
+        ExtensionHttpMethodDto::ALL,
+    )?;
     push_wire_values(
         &mut output,
         "PROVIDER_WIRE_FORMATS",

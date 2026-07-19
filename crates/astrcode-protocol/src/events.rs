@@ -7,6 +7,7 @@ use astrcode_core::{event::Event, extension::Keybinding};
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
+use crate::wire::{CommandSourceDto, MessageRoleDto};
 
 /// 服务器推送给客户端的通知枚举。
 ///
@@ -117,7 +118,7 @@ pub struct SessionSnapshot {
 /// 快照中的单条消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDto {
-    pub role: String,
+    pub role: MessageRoleDto,
     pub content: String,
 }
 
@@ -131,8 +132,7 @@ pub struct ExtensionCommandInfo {
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    /// 命令来源：`builtin`、`extension` 或 `skill`。
-    pub source: String,
+    pub source: CommandSourceDto,
 }
 
 

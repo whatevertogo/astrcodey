@@ -17,6 +17,7 @@ use crate::{
     MemoryServices,
     config::MemoryConfig,
     pipeline, prompts,
+    scope::ScopedMemoryStores,
     store::{AppendResult, MemoryStorePool},
 };
 
@@ -84,6 +85,21 @@ fn ok_text(content: String) -> ToolResult {
     ToolResult::text(content, false, BTreeMap::new())
 }
 
+async fn with_scoped_stores<T: Send + 'static>(
+    store_pool: Arc<MemoryStorePool>,
+    working_dir: &str,
+    operation: impl FnOnce(ScopedMemoryStores) -> std::io::Result<T> + Send + 'static,
+) -> Result<T, ExtensionError> {
+    let working_dir = working_dir.to_string();
+    tokio::task::spawn_blocking(move || {
+        let stores = store_pool.get_scoped(&working_dir)?;
+        operation(stores)
+    })
+    .await
+    .map_err(|error| ExtensionError::Internal(error.to_string()))?
+    .map_err(|error| ExtensionError::Internal(error.to_string()))
+}
+
 // ─── Save Handler ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySaveHandler {
@@ -117,10 +133,6 @@ impl ToolHandler for MemorySaveHandler {
     ) -> Result<ToolResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let scoped = self
-            .store_pool
-            .get_scoped(working_dir)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = args.content;
         let category = args.category;
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
@@ -128,12 +140,10 @@ impl ToolHandler for MemorySaveHandler {
         // replace_match 路径：精准 upsert，不经过 delete
         if let Some(ref replaces) = replace {
             let replaces = replaces.clone();
-            let changed = tokio::task::spawn_blocking(move || {
-                scoped.upsert(&category, &content, Some(replaces.as_str()))
+            let changed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
+                stores.upsert(&category, &content, Some(replaces.as_str()))
             })
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+            .await?;
             return Ok(ok_text(
                 if changed {
                     "Memory updated."
@@ -145,10 +155,10 @@ impl ToolHandler for MemorySaveHandler {
         }
 
         // 正常新增路径
-        let result = tokio::task::spawn_blocking(move || scoped.append(&category, &content))
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let result = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
+            stores.append(&category, &content)
+        })
+        .await?;
 
         match result {
             AppendResult::Saved => {
@@ -206,16 +216,12 @@ impl ToolHandler for MemoryDeleteHandler {
         if args.match_pattern.trim().is_empty() {
             return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()));
         }
-        let scoped = self
-            .store_pool
-            .get_scoped(working_dir)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
-        let removed = tokio::task::spawn_blocking(move || scoped.delete_by_content(&pattern))
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let removed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
+            stores.delete_by_content(&pattern)
+        })
+        .await?;
 
         if !removed.is_empty() {
             if let Some(ref sink) = ctx.capabilities.host.extension_event_sink {
@@ -267,21 +273,19 @@ impl ToolHandler for MemoryListHandler {
     ) -> Result<ToolResult, ExtensionError> {
         let args: ListArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-        let scoped = self
-            .store_pool
-            .get_scoped(working_dir)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
         let query = args.query.filter(|q| !q.trim().is_empty());
 
-        let entries = tokio::task::spawn_blocking(move || match query {
-            Some(q) => scoped.search(&q, limit),
-            None => scoped.list_entries(limit),
-        })
-        .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let entries =
+            with_scoped_stores(
+                self.store_pool.clone(),
+                working_dir,
+                move |stores| match query {
+                    Some(query) => stores.search(&query, limit),
+                    None => stores.list_entries(limit),
+                },
+            )
+            .await?;
 
         if entries.is_empty() {
             Ok(ok_text("No memories found.".to_string()))

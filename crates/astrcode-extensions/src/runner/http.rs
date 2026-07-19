@@ -73,41 +73,13 @@ impl ExtensionRunner {
             }
         };
         request.path_params = path_params;
-        let started = std::time::Instant::now();
-        let result = tokio::time::timeout(self.timeout, entry.handler.handle(request)).await;
-        let response = match result {
-            Ok(Ok(response)) => {
-                self.record_hook_result(
-                    &entry.extension_id,
-                    "http_route",
-                    started.elapsed(),
-                    None,
-                    false,
-                );
-                response
-            },
-            Ok(Err(error)) => {
-                self.record_hook_result(
-                    &entry.extension_id,
-                    "http_route",
-                    started.elapsed(),
-                    Some(error.to_string()),
-                    false,
-                );
-                return Err(error);
-            },
-            Err(_) => {
-                let error = ExtensionError::Timeout(self.timeout.as_millis() as u64);
-                self.record_hook_result(
-                    &entry.extension_id,
-                    "http_route",
-                    started.elapsed(),
-                    Some(error.to_string()),
-                    true,
-                );
-                return Err(error);
-            },
-        };
+        let response = self
+            .run_recorded_blocking_hook(
+                &entry.extension_id,
+                "http_route",
+                entry.handler.handle(request),
+            )
+            .await?;
         if !(100..=599).contains(&response.status) {
             return Err(ExtensionError::Internal(format!(
                 "extension {} returned invalid HTTP status {}",

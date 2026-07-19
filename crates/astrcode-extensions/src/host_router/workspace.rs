@@ -59,7 +59,7 @@ impl WorkspaceGroup {
     }
 }
 
-pub(super) fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let relative_path = required_string(input, "path")?;
     reject_sensitive_path(relative_path)?;
     let path = resolve_existing_path(root, relative_path, "workspace.read")?;
@@ -95,7 +95,7 @@ pub(super) fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     Ok(json!({ "content": content }))
 }
 
-pub(super) fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let relative_path = input.get("path").and_then(Value::as_str).unwrap_or(".");
     reject_sensitive_path(relative_path)?;
     let path = resolve_existing_path(root, relative_path, "workspace.list")?;
@@ -154,7 +154,7 @@ pub(super) fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let pattern = required_string(input, "pattern")?;
     let regex = Regex::new(pattern)
         .map_err(|error| ErrorPayload::new("invalid_input", format!("invalid regex: {error}")))?;
@@ -165,7 +165,7 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let max_matches = bounded_usize(input, "max_matches", 100, 1, MAX_SEARCH_MATCHES);
     let max_bytes = bounded_usize(input, "max_bytes", 64 * 1024, 1, MAX_SEARCH_OUTPUT_BYTES);
     let max_line_chars = bounded_usize(input, "max_line_chars", 500, 1, MAX_SEARCH_LINE_CHARS);
-    let searchable = searchable_files(&canonical_root, &search_root)?;
+    let searchable = searchable_files_with_limit(&canonical_root, &search_root, MAX_WALK_ENTRIES)?;
     let mut matches = Vec::new();
     let mut output_bytes = 0usize;
     let mut output_truncated = false;
@@ -217,7 +217,7 @@ pub(super) fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-pub(super) fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let pattern = required_string(input, "pattern")?;
     if Path::new(pattern).is_absolute() {
         return Err(ErrorPayload::new(
@@ -287,19 +287,18 @@ pub(super) fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
 }
 
 fn is_overly_broad_glob(pattern: &str, relative_root: &str) -> bool {
-    let normalized_root = relative_root
-        .trim()
-        .strip_prefix("./")
-        .unwrap_or(relative_root.trim());
+    let normalized_root = normalize_relative_pattern(relative_root);
     if normalized_root != "." && !normalized_root.is_empty() {
         return false;
     }
 
-    let normalized_pattern = pattern.trim();
-    let normalized_pattern = normalized_pattern
-        .strip_prefix("./")
-        .unwrap_or(normalized_pattern);
+    let normalized_pattern = normalize_relative_pattern(pattern);
     !normalized_pattern.split('/').any(segment_has_literal)
+}
+
+fn normalize_relative_pattern(value: &str) -> &str {
+    let value = value.trim();
+    value.strip_prefix("./").unwrap_or(value)
 }
 
 fn segment_has_literal(segment: &str) -> bool {
@@ -321,7 +320,7 @@ fn segment_has_literal(segment: &str) -> bool {
     false
 }
 
-pub(super) fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let relative_path = required_string(input, "path")?;
     let content = required_string_allow_empty(input, "content")?;
     enforce_content_limit(content)?;
@@ -338,7 +337,7 @@ pub(super) fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-pub(super) fn edit(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
+fn edit(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let relative_path = required_string(input, "path")?;
     let old_text = required_string(input, "old_text")?;
     let new_text = required_string_allow_empty(input, "new_text")?;
@@ -592,26 +591,22 @@ fn traversable_entry(root: &Path, entry: &DirEntry, include_ignored: bool) -> bo
         return true;
     }
     let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
-    if relative.components().any(|component| match component {
-        Component::Normal(name) => name.to_str().is_some_and(is_sensitive_component),
-        _ => false,
-    }) {
-        return false;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        if name.to_str().is_some_and(is_sensitive_component)
+            || (!include_ignored && IGNORED_DIRECTORIES.iter().any(|ignored| name == *ignored))
+        {
+            return false;
+        }
     }
-    include_ignored
-        || !relative.components().any(|component| match component {
-            Component::Normal(name) => IGNORED_DIRECTORIES.iter().any(|ignored| name == *ignored),
-            _ => false,
-        })
+    true
 }
 
 struct SearchableFiles {
     files: Vec<PathBuf>,
     truncated: bool,
-}
-
-fn searchable_files(root: &Path, search_root: &Path) -> Result<SearchableFiles, ErrorPayload> {
-    searchable_files_with_limit(root, search_root, MAX_WALK_ENTRIES)
 }
 
 fn searchable_files_with_limit(

@@ -22,7 +22,7 @@ use serde::Deserialize;
 
 use super::super::{
     HttpState, handler_error_response, internal_error_response, not_found_response,
-    projection::snapshot::conversation_to_dto,
+    projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
 use crate::handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission};
 
@@ -114,7 +114,6 @@ pub(in crate::http) async fn inject_message(
             Json(PromptSubmitResponse::Accepted {
                 session_id: session_id.into_string(),
                 turn_id: turn_id.into_string(),
-                branched_from_session_id: None,
             })
             .into_response()
         },
@@ -218,7 +217,6 @@ pub(in crate::http) async fn submit_prompt(
             Json(PromptSubmitResponse::Accepted {
                 session_id: session_id.into_string(),
                 turn_id: turn_id.into_string(),
-                branched_from_session_id: None,
             })
             .into_response()
         },
@@ -431,7 +429,7 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     let title = summary
         .first_user_message
         .clone()
-        .unwrap_or_else(|| session_title(&summary.working_dir));
+        .unwrap_or_else(|| session_title_from_working_dir(&summary.working_dir));
     SessionListItemDto {
         session_id: summary.session_id.into_string(),
         working_dir: summary.working_dir,
@@ -440,18 +438,8 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
         created_at: summary.created_at,
         updated_at: summary.updated_at,
         parent_session_id: summary.parent_session_id.map(SessionId::into_string),
-        parent_storage_seq: None,
         phase: summary.phase.into(),
         first_user_message: summary.first_user_message,
         source_extension: summary.source_extension,
     }
-}
-
-fn session_title(working_dir: &str) -> String {
-    std::path::Path::new(working_dir)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(working_dir)
-        .to_string()
 }

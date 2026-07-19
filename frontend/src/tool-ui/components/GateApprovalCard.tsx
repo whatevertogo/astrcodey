@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { cn } from '../../lib/utils'
-import { submitToolGateApproval } from '../../services/api'
+import {
+  submitToolGateApproval,
+  type ToolGateApprovalDecision,
+} from '../../services/api'
 import { useAppStore } from '../../store/conversation'
 import {
   stringValue,
@@ -67,9 +70,7 @@ export function GateApprovalCard({
   const intent = resolveIntent(args)
   const headline = approvalHeadline(toolName, gate.prompt)
 
-  async function decide(
-    decision: 'allow_once' | 'deny_once' | 'allow_always' | 'deny_always'
-  ) {
+  async function decide(decision: ToolGateApprovalDecision) {
     setBusy(true)
     setError(null)
     try {

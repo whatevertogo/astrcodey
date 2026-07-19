@@ -12,7 +12,7 @@ use std::{
 
 use astrcode_core::{
     config::ProviderAuthScheme,
-    llm::{LlmClientConfig, LlmError, LlmEvent},
+    llm::{LlmClientConfig, LlmError, LlmEvent, LlmTokenUsage},
 };
 use futures_util::StreamExt;
 use parking_lot::Mutex;
@@ -25,6 +25,15 @@ use crate::{
 
 fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
     LlmError::StreamParse(error.to_string())
+}
+
+pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
+    usage.input_tokens.is_some()
+        || usage.cached_input_tokens.is_some()
+        || usage.cache_creation_input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.reasoning_output_tokens.is_some()
+        || usage.total_tokens.is_some()
 }
 
 /// SSE 事件回调类型：接收 (event_type, parsed_json, tx)，返回 false 停止处理。
@@ -546,21 +555,9 @@ async fn parse_sse_bytes(
     track_event_type: bool,
     on_event: SseCallback,
 ) -> Result<(), LlmError> {
-    let endpoint = response.url().to_string();
-    let status = response.status();
-    let content_type = header_value(response.headers(), reqwest::header::CONTENT_TYPE);
-    let content_encoding = header_value(response.headers(), reqwest::header::CONTENT_ENCODING);
-    let mut stream = response.bytes_stream();
-    let mut decoder = Utf8StreamDecoder::new();
-    let mut line_reader = SseLineReader::new();
     let mut current_event_type = String::new();
-    let mut bytes_read = 0usize;
     let mut has_data_line = false;
-    let mut body_preview = String::new();
-    let stream_started = Instant::now();
-    let mut first_chunk_reported = false;
-
-    let mut dispatch_line = |line: &str| -> bool {
+    let Some(summary) = consume_sse_lines(response, &tx, SseBodyPreview::Capture, |line| {
         process_sse_line(
             line,
             &tx,
@@ -569,11 +566,62 @@ async fn parse_sse_bytes(
             &mut has_data_line,
             &on_event,
         )
+    })
+    .await?
+    else {
+        return Ok(());
     };
+
+    if summary.bytes_read > 0 && !has_data_line {
+        return Err(LlmError::StreamParse(format!(
+            "LLM returned 200 but response is not valid SSE (no data: lines found). Content-Type: \
+             {}, bytes: {}, preview: {}",
+            summary.content_type.as_deref().unwrap_or("<missing>"),
+            summary.bytes_read,
+            truncate_str(&summary.body_preview, 256),
+        )));
+    }
+
+    Ok(())
+}
+
+/// 完整消费一个 SSE 响应后供协议层做收尾校验的传输统计。
+pub(crate) struct SseStreamSummary {
+    content_type: Option<String>,
+    bytes_read: usize,
+    body_preview: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SseBodyPreview {
+    Capture,
+    Skip,
+}
+
+/// 解码 HTTP 响应并逐行分发 SSE 内容。
+///
+/// 返回 `None` 表示接收端关闭或回调主动停止，调用方不应继续发送收尾事件。
+pub(crate) async fn consume_sse_lines(
+    response: reqwest::Response,
+    tx: &mpsc::UnboundedSender<LlmEvent>,
+    preview: SseBodyPreview,
+    mut on_line: impl FnMut(&str) -> bool,
+) -> Result<Option<SseStreamSummary>, LlmError> {
+    let endpoint = response.url().to_string();
+    let status = response.status();
+    let content_type = header_value(response.headers(), reqwest::header::CONTENT_TYPE);
+    let content_encoding = header_value(response.headers(), reqwest::header::CONTENT_ENCODING);
+    let mut stream = response.bytes_stream();
+    let mut decoder = Utf8StreamDecoder::new();
+    let mut line_reader = SseLineReader::new();
+    let mut bytes_read = 0usize;
+    let mut body_preview = String::new();
+    let stream_started = Instant::now();
+    let mut first_chunk_reported = false;
 
     while let Some(chunk) = stream.next().await {
         if tx.is_closed() {
-            return Ok(());
+            return Ok(None);
         }
         let bytes = chunk.map_err(|error| {
             stream_body_error(
@@ -596,48 +644,42 @@ async fn parse_sse_bytes(
                 "LLM stream first bytes received"
             );
         }
-        if body_preview.is_empty() && !bytes.is_empty() {
-            let preview_len = bytes.len().min(512);
-            body_preview = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
+        if preview == SseBodyPreview::Capture && body_preview.is_empty() && !bytes.is_empty() {
+            body_preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_string();
         }
         if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
-            for line in line_reader
-                .push_chunk(&text)
-                .map_err(stream_decoder_error)?
-            {
-                if !dispatch_line(&line) {
-                    return Ok(());
-                }
+            if !consume_decoded_lines(&mut line_reader, &text, &mut on_line)? {
+                return Ok(None);
             }
         }
     }
     if let Some(tail) = decoder.finish() {
-        for line in line_reader
-            .push_chunk(&tail)
-            .map_err(stream_decoder_error)?
-        {
-            if !dispatch_line(&line) {
-                return Ok(());
-            }
+        if !consume_decoded_lines(&mut line_reader, &tail, &mut on_line)? {
+            return Ok(None);
         }
     }
-    if let Some(line) = line_reader.flush() {
-        if !dispatch_line(&line) {
-            return Ok(());
+    if line_reader.flush().is_some_and(|line| !on_line(&line)) {
+        return Ok(None);
+    }
+
+    Ok(Some(SseStreamSummary {
+        content_type,
+        bytes_read,
+        body_preview,
+    }))
+}
+
+fn consume_decoded_lines(
+    line_reader: &mut SseLineReader,
+    text: &str,
+    on_line: &mut impl FnMut(&str) -> bool,
+) -> Result<bool, LlmError> {
+    for line in line_reader.push_chunk(text).map_err(stream_decoder_error)? {
+        if !on_line(&line) {
+            return Ok(false);
         }
     }
-
-    if bytes_read > 0 && !has_data_line {
-        return Err(LlmError::StreamParse(format!(
-            "LLM returned 200 but response is not valid SSE (no data: lines found). Content-Type: \
-             {}, bytes: {}, preview: {}",
-            content_type.as_deref().unwrap_or("<missing>"),
-            bytes_read,
-            truncate_str(&body_preview, 256),
-        )));
-    }
-
-    Ok(())
+    Ok(true)
 }
 
 /// 处理单行 SSE 输出。返回 `false` 表示接收端已关闭。

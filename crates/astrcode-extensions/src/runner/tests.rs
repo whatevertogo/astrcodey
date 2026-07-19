@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -14,11 +15,11 @@ use astrcode_extension_sdk::{
         CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
         ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionCtx, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
         ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent,
-        ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
-        ToolHookTarget, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
+        ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItem, StopReason,
+        ToolHandler, ToolHookTarget, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
         UserMessageEnvelopeResult,
     },
     tool::{
@@ -27,9 +28,9 @@ use astrcode_extension_sdk::{
     },
 };
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
-use super::{ExtensionHttpDispatchResult, ExtensionRunner};
+use super::{CommandSource, ExtensionHttpDispatchResult, ExtensionRunner};
 use crate::runner::tool_adapter::normalize_stringified_booleans;
 
 struct ManagedTaskExtension {
@@ -46,6 +47,19 @@ struct StartupDirectoryExtension {
 struct StartupEventExtension;
 
 struct UnhealthyExtension;
+
+struct ConfigChangeProbeExtension(Arc<ConfigChangeProbeState>);
+
+#[derive(Default)]
+struct ConfigChangeProbeState {
+    calls: AtomicUsize,
+    fail_next: AtomicBool,
+    block_version: AtomicUsize,
+    entered: Notify,
+    release: Notify,
+    applied_version: AtomicUsize,
+    stopped: AtomicBool,
+}
 
 struct StateProbeExtension;
 
@@ -161,6 +175,42 @@ struct CommandProbeExtension {
 struct CommandProbe {
     label: &'static str,
     argument_completions: bool,
+}
+
+#[async_trait::async_trait]
+impl Extension for ConfigChangeProbeExtension {
+    fn id(&self) -> &str {
+        "config-change-probe"
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.status_item(StatusItem {
+            id: "config-change-probe".into(),
+            text: String::new(),
+            priority: 0,
+            tooltip: None,
+        });
+    }
+
+    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
+        self.0.calls.fetch_add(1, Ordering::SeqCst);
+        let version = config.0["version"].as_u64().unwrap() as usize;
+        if self.0.block_version.load(Ordering::SeqCst) == version {
+            self.0.entered.notify_one();
+            self.0.release.notified().await;
+        }
+        if self.0.fail_next.swap(false, Ordering::SeqCst) {
+            Err(ExtensionError::Internal("injected config failure".into()))
+        } else {
+            self.0.applied_version.store(version, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        self.0.stopped.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -835,6 +885,118 @@ async fn diagnostics_records_register_and_start_failure_states() {
 }
 
 #[tokio::test]
+async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
+    let state = Arc::new(ConfigChangeProbeState::default());
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let config =
+        |version| BTreeMap::from([("config-change-probe".into(), json!({"version": version}))]);
+    runner.update_extension_configs(config(1));
+    runner
+        .register(Arc::new(ConfigChangeProbeExtension(Arc::clone(&state))))
+        .await
+        .unwrap();
+
+    runner.update_extension_configs(config(2));
+    assert!(runner.notify_config_changed().await.is_empty());
+    assert!(runner.notify_config_changed().await.is_empty());
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 2);
+
+    state.fail_next.store(true, Ordering::SeqCst);
+    runner.update_extension_configs(config(3));
+    assert_eq!(runner.notify_config_changed().await.len(), 1);
+    assert!(runner.notify_config_changed().await.is_empty());
+    assert!(runner.notify_config_changed().await.is_empty());
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
+
+    state.block_version.store(4, Ordering::SeqCst);
+    runner.update_extension_configs(config(4));
+    let notify_v4 = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.notify_config_changed().await })
+    };
+    state.entered.notified().await;
+    runner.update_extension_configs(config(5));
+    let notify_v5 = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.notify_config_changed().await })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
+    state.release.notify_one();
+    assert!(notify_v4.await.unwrap().is_empty());
+    assert!(notify_v5.await.unwrap().is_empty());
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 5);
+
+    state.block_version.store(6, Ordering::SeqCst);
+    runner.update_extension_configs(config(6));
+    let notify_v6 = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.notify_config_changed().await })
+    };
+    state.entered.notified().await;
+    let unregister = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move {
+            runner
+                .unregister("config-change-probe", StopReason::Disabled)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            runner.register(Arc::new(StateProbeExtension)),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    );
+    assert!(!state.stopped.load(Ordering::SeqCst));
+    state.release.notify_one();
+    assert!(notify_v6.await.unwrap().is_empty());
+    assert!(unregister.await.unwrap().unwrap());
+    assert!(state.stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn recorded_blocking_hook_tracks_error_and_timeout() {
+    let runner = ExtensionRunner::new(Duration::from_millis(10));
+
+    assert!(
+        runner
+            .run_recorded_blocking_hook::<()>("probe", "pre_tool_use", async {
+                Err(ExtensionError::Internal("injected failure".into()))
+            })
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        runner
+            .run_recorded_blocking_hook(
+                "probe",
+                "pre_tool_use",
+                std::future::pending::<Result<(), ExtensionError>>(),
+            )
+            .await,
+        Err(ExtensionError::Timeout(10))
+    ));
+
+    let diagnostics = runner.diagnostics_snapshot();
+    let diagnostics = diagnostics.get("probe").unwrap();
+    assert_eq!(diagnostics.hook_calls, 2);
+    assert_eq!(diagnostics.hook_timeouts, 1);
+    assert!(
+        diagnostics
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("timed out"))
+    );
+}
+
+#[tokio::test]
 async fn startup_timeout_cleans_tasks_and_rolls_back_partial_start() {
     let task_stopped = Arc::new(AtomicBool::new(false));
     let stop_reason = Arc::new(Mutex::new(None));
@@ -1157,13 +1319,11 @@ async fn command_resolution_uses_source_priority_then_declared_priority() {
         .expect("demo command");
 
     assert_eq!(demo.extension_id, "normal-high");
-    assert_eq!(demo.source, "extension");
+    assert_eq!(demo.source, CommandSource::Extension);
     assert_eq!(demo.shadowed.len(), 2);
-    assert!(
-        demo.shadowed.iter().any(|command| {
-            command.extension_id == "astrcode-skill" && command.source == "skill"
-        })
-    );
+    assert!(demo.shadowed.iter().any(|command| {
+        command.extension_id == "astrcode-skill" && command.source == CommandSource::Skill
+    }));
 }
 
 #[tokio::test]

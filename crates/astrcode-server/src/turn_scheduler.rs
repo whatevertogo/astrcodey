@@ -26,7 +26,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, Weak},
     time::Duration,
 };
 
@@ -98,23 +98,18 @@ pub enum DeliveryOutcome {
     Queued { queue_len: usize },
 }
 
-/// 告诉 scheduler 要收尾哪条 execution（输入参数，不是完成结果）。
-pub struct CompletionParams {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-}
-
 pub struct StartedExecution {
     pub turn_id: TurnId,
     pub handle: TurnHandle,
 }
 
-/// 对外 execution 查询视图（durable phase + 热路径 registry + 队列深度）。
+/// 对外 execution 查询视图（durable session snapshot + 热路径 registry + 队列深度）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionExecutionView {
     pub phase: Phase,
     pub active_turn_id: Option<TurnId>,
     pub queued_inputs: usize,
+    pub message_count: usize,
 }
 
 /// 用户输入（文本 + 可选附件）。
@@ -149,23 +144,49 @@ impl From<&str> for PromptInput {
     }
 }
 
-pub(crate) struct PendingMessage {
-    input: PromptInput,
-}
-
-type PendingQueue = VecDeque<PendingMessage>;
-type SessionDeliveryGate = Arc<AsyncMutex<()>>;
+type PendingQueue = VecDeque<PromptInput>;
+type SessionDeliveryGate = Arc<AsyncMutex<SessionDeliveryState>>;
 pub const MAX_PENDING_INPUTS_PER_SESSION: usize = 32;
 pub const MAX_PROMPT_TEXT_BYTES: usize = 1024 * 1024;
 const FORCE_KILL_GRACE_MS: u64 = 1500;
 const ABORT_WAIT_POLL_MS: u64 = 50;
 const ABORT_WAIT_EXTRA_MS: u64 = 500;
+const INITIAL_DELIVERY_GATE_PRUNE_AT: usize = 128;
 
-#[derive(Debug, Clone)]
-enum InjectDecision {
-    StartNew,
-    StartAfterFinished { finished_turn_id: TurnId },
-    InjectInto { turn_id: TurnId },
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionDeliveryState {
+    Open,
+    Closing,
+}
+
+pub(crate) enum CompletedRecycleOutcome {
+    Recycled,
+    StaleCompletion,
+}
+
+impl SessionDeliveryState {
+    fn ensure_open(self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+        if self == Self::Closing {
+            return Err(TurnScheduleError::SessionNotFound(format!(
+                "{session_id}: session is closing"
+            )));
+        }
+        Ok(())
+    }
+}
+
+struct DeliveryGateRegistry {
+    gates: HashMap<SessionId, Weak<AsyncMutex<SessionDeliveryState>>>,
+    next_prune_at: usize,
+}
+
+impl Default for DeliveryGateRegistry {
+    fn default() -> Self {
+        Self {
+            gates: HashMap::new(),
+            next_prune_at: INITIAL_DELIVERY_GATE_PRUNE_AT,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -174,7 +195,7 @@ pub struct TurnScheduler {
     registry: Arc<TurnRegistry>,
     child_sessions: Arc<ChildSessionCoordinator>,
     pending_queues: Arc<Mutex<HashMap<SessionId, PendingQueue>>>,
-    delivery_gates: Arc<AsyncMutex<HashMap<SessionId, SessionDeliveryGate>>>,
+    delivery_gates: Arc<Mutex<DeliveryGateRegistry>>,
     detached_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -189,17 +210,29 @@ impl TurnScheduler {
             registry,
             child_sessions,
             pending_queues: Arc::new(Mutex::new(HashMap::new())),
-            delivery_gates: Arc::new(AsyncMutex::new(HashMap::new())),
+            delivery_gates: Arc::new(Mutex::new(DeliveryGateRegistry::default())),
             detached_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    async fn session_delivery_gate(&self, session_id: &SessionId) -> SessionDeliveryGate {
-        let mut gates = self.delivery_gates.lock().await;
-        gates
-            .entry(session_id.clone())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+    fn session_delivery_gate(&self, session_id: &SessionId) -> SessionDeliveryGate {
+        let mut registry = self.delivery_gates.lock();
+        if let Some(gate) = registry.gates.get(session_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        if registry.gates.len() >= registry.next_prune_at {
+            registry.gates.retain(|_, gate| gate.strong_count() > 0);
+            registry.next_prune_at = registry
+                .gates
+                .len()
+                .saturating_mul(2)
+                .max(INITIAL_DELIVERY_GATE_PRUNE_AT);
+        }
+        let gate = Arc::new(AsyncMutex::new(SessionDeliveryState::Open));
+        registry
+            .gates
+            .insert(session_id.clone(), Arc::downgrade(&gate));
+        gate
     }
 
     fn track_detached_task(&self, handle: JoinHandle<()>) {
@@ -213,12 +246,6 @@ impl TurnScheduler {
         let handles: Vec<JoinHandle<()>> = self.detached_tasks.lock().drain(..).collect();
         for handle in handles {
             let _ = handle.await;
-        }
-    }
-
-    fn release_delivery_gate(&self, session_id: &SessionId) {
-        if let Ok(mut gates) = self.delivery_gates.try_lock() {
-            gates.remove(session_id);
         }
     }
 
@@ -240,7 +267,7 @@ impl TurnScheduler {
         &self.registry
     }
 
-    pub async fn sync_durable_events(&self, session_id: &SessionId) {
+    pub(crate) async fn sync_durable_events(&self, session_id: &SessionId) {
         self.session_manager.sync_durable_events(session_id).await;
     }
 
@@ -250,12 +277,11 @@ impl TurnScheduler {
         session_id: &SessionId,
     ) -> Result<SessionExecutionView, TurnScheduleError> {
         let active_turn_id = self.registry.active_turn_id(session_id);
-        let phase = self
+        let state = self
             .session_manager
             .read_model(session_id)
             .await
-            .map_err(|e| TurnScheduleError::SessionNotFound(format!("{session_id}: {e}")))?
-            .phase;
+            .map_err(|e| TurnScheduleError::SessionNotFound(format!("{session_id}: {e}")))?;
         let queued_inputs = self
             .pending_queues
             .lock()
@@ -263,9 +289,10 @@ impl TurnScheduler {
             .map(|q| q.len())
             .unwrap_or(0);
         Ok(SessionExecutionView {
-            phase,
+            phase: state.phase,
             active_turn_id,
             queued_inputs,
+            message_count: state.messages.len(),
         })
     }
 
@@ -277,7 +304,7 @@ impl TurnScheduler {
         delivery: InputDelivery,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
         validate_prompt_input(&input)?;
-        let gate = self.session_delivery_gate(&session_id).await;
+        let gate = self.session_delivery_gate(&session_id);
         self.deliver_input_gated(gate, session_id, input, delivery)
             .await
     }
@@ -289,95 +316,38 @@ impl TurnScheduler {
         input: PromptInput,
         delivery: InputDelivery,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
-        let _guard = gate.lock().await;
+        let state = gate.lock().await;
+        state.ensure_open(&session_id)?;
         match delivery {
             InputDelivery::StartNew => {
-                if self.registry.has_active(&session_id) {
-                    return Err(TurnScheduleError::TurnAlreadyRunning);
-                }
-                let started = self
-                    .start_execution_locked(session_id.clone(), input)
-                    .await?;
-                self.watch_detached_turn(
-                    session_id,
-                    started.turn_id.clone(),
-                    started.handle,
-                    "deliver_input:start",
-                );
-                Ok(DeliveryOutcome::Started {
-                    turn_id: started.turn_id,
-                })
+                self.start_detached_locked(session_id, input, "deliver_input:start")
+                    .await
             },
             InputDelivery::InjectIfRunningElseStart => {
-                let decision = if let Some((finished_turn_id, _)) =
-                    self.registry.remove_if_finished(&session_id)
-                {
-                    InjectDecision::StartAfterFinished { finished_turn_id }
-                } else if let Some(turn_id) = self.registry.active_turn_id(&session_id) {
-                    InjectDecision::InjectInto { turn_id }
-                } else {
-                    InjectDecision::StartNew
-                };
-
-                match decision {
-                    InjectDecision::StartAfterFinished { finished_turn_id } => {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            turn_id = %finished_turn_id,
-                            "finished active turn was still registered; starting injected input as a new turn"
-                        );
-                        self.sync_durable_events(&session_id).await;
-                        let started = self
-                            .start_execution_locked(session_id.clone(), input)
-                            .await?;
-                        self.watch_detached_turn(
+                if let Some(finished_turn_id) = self.registry.remove_if_finished(&session_id) {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        turn_id = %finished_turn_id,
+                        "finished active turn was still registered; starting injected input as a new turn"
+                    );
+                    self.sync_durable_events(&session_id).await;
+                    return self
+                        .start_detached_locked(
                             session_id,
-                            started.turn_id.clone(),
-                            started.handle,
+                            input,
                             "deliver_input:inject-after-finished",
-                        );
-                        Ok(DeliveryOutcome::Started {
-                            turn_id: started.turn_id,
-                        })
-                    },
-                    InjectDecision::InjectInto { turn_id } => {
-                        match self.inject_internal(&session_id, input.clone()).await {
-                            Ok(()) => Ok(DeliveryOutcome::Injected { turn_id }),
-                            Err(TurnScheduleError::NoActiveTurn) => {
-                                let started = self
-                                    .start_execution_locked(session_id.clone(), input)
-                                    .await?;
-                                self.watch_detached_turn(
-                                    session_id,
-                                    started.turn_id.clone(),
-                                    started.handle,
-                                    "deliver_input:inject-fallback",
-                                );
-                                Ok(DeliveryOutcome::Started {
-                                    turn_id: started.turn_id,
-                                })
-                            },
-                            Err(error) => Err(error),
-                        }
-                    },
-                    InjectDecision::StartNew => {
-                        let started = self
-                            .start_execution_locked(session_id.clone(), input)
-                            .await?;
-                        self.watch_detached_turn(
-                            session_id,
-                            started.turn_id.clone(),
-                            started.handle,
-                            "deliver_input:inject",
-                        );
-                        Ok(DeliveryOutcome::Started {
-                            turn_id: started.turn_id,
-                        })
-                    },
+                        )
+                        .await;
                 }
+                if let Some((turn_id, session)) = self.registry.active_execution(&session_id) {
+                    self.inject_internal(&turn_id, &session, input).await?;
+                    return Ok(DeliveryOutcome::Injected { turn_id });
+                }
+                self.start_detached_locked(session_id, input, "deliver_input:inject")
+                    .await
             },
-            InputDelivery::QueueIfRunningElseStart => {
-                if self.registry.has_active(&session_id) {
+            InputDelivery::QueueIfRunningElseStart if self.registry.has_active(&session_id) => {
+                let queue_len = {
                     let mut queues = self.pending_queues.lock();
                     let queue = queues.entry(session_id.clone()).or_default();
                     if queue.len() >= MAX_PENDING_INPUTS_PER_SESSION {
@@ -385,45 +355,40 @@ impl TurnScheduler {
                             max: MAX_PENDING_INPUTS_PER_SESSION,
                         });
                     }
-                    queue.push_back(PendingMessage { input });
-                    let queue_len = queue.len();
-                    drop(queues);
-                    tracing::info!(
-                        session_id = %session_id,
-                        queue_len = queue_len,
-                        "message queued for next turn"
-                    );
-                    return Ok(DeliveryOutcome::Queued { queue_len });
-                }
-                let started = self
-                    .start_execution_locked(session_id.clone(), input)
-                    .await?;
-                self.watch_detached_turn(
-                    session_id,
-                    started.turn_id.clone(),
-                    started.handle,
-                    "deliver_input:queue",
+                    queue.push_back(input);
+                    queue.len()
+                };
+                tracing::info!(
+                    session_id = %session_id,
+                    queue_len,
+                    "message queued for next turn"
                 );
-                Ok(DeliveryOutcome::Started {
-                    turn_id: started.turn_id,
-                })
+                Ok(DeliveryOutcome::Queued { queue_len })
+            },
+            InputDelivery::QueueIfRunningElseStart => {
+                self.start_detached_locked(session_id, input, "deliver_input:queue")
+                    .await
             },
             InputDelivery::InterruptAndStart => {
                 self.abort(&session_id).await?;
-                let started = self
-                    .start_execution_locked(session_id.clone(), input)
-                    .await?;
-                self.watch_detached_turn(
-                    session_id,
-                    started.turn_id.clone(),
-                    started.handle,
-                    "deliver_input:interrupt",
-                );
-                Ok(DeliveryOutcome::Started {
-                    turn_id: started.turn_id,
-                })
+                self.start_detached_locked(session_id, input, "deliver_input:interrupt")
+                    .await
             },
         }
+    }
+
+    /// 调用方必须持有对应 session 的 delivery gate。
+    async fn start_detached_locked(
+        &self,
+        session_id: SessionId,
+        input: PromptInput,
+        source: &'static str,
+    ) -> Result<DeliveryOutcome, TurnScheduleError> {
+        let StartedExecution { turn_id, handle } = self
+            .start_execution_locked(session_id.clone(), input)
+            .await?;
+        self.watch_detached_turn(session_id, turn_id.clone(), handle, source);
+        Ok(DeliveryOutcome::Started { turn_id })
     }
 
     /// 启动新 turn 并返回 handle（需要等待结果时用 [`Self::start_with_completion`]）。
@@ -433,11 +398,9 @@ impl TurnScheduler {
         input: PromptInput,
     ) -> Result<StartedExecution, TurnScheduleError> {
         validate_prompt_input(&input)?;
-        let gate = self.session_delivery_gate(&session_id).await;
-        let _guard = gate.lock().await;
-        if self.registry.has_active(&session_id) {
-            return Err(TurnScheduleError::TurnAlreadyRunning);
-        }
+        let gate = self.session_delivery_gate(&session_id);
+        let state = gate.lock().await;
+        state.ensure_open(&session_id)?;
         self.start_execution_locked(session_id, input).await
     }
 
@@ -492,33 +455,31 @@ impl TurnScheduler {
     /// turn。
     pub async fn finish_and_maybe_start_next(
         &self,
-        completion: CompletionParams,
+        session_id: &SessionId,
+        turn_id: &TurnId,
     ) -> Option<StartedExecution> {
-        self.registry
-            .remove_if_matches(&completion.session_id, &completion.turn_id);
-        self.sync_durable_events(&completion.session_id).await;
-        self.child_sessions
-            .drain_completed(self, &completion.session_id)
-            .await;
+        self.registry.remove_if_matches(session_id, turn_id);
+        self.sync_durable_events(session_id).await;
+        self.child_sessions.drain_completed(self, session_id).await;
 
-        let gate = self.session_delivery_gate(&completion.session_id).await;
-        let _guard = gate.lock().await;
-        if self.registry.has_active(&completion.session_id) {
+        let gate = self.session_delivery_gate(session_id);
+        let state = gate.lock().await;
+        if *state == SessionDeliveryState::Closing {
             return None;
         }
-        let input = self.dequeue_next_pending(&completion.session_id)?;
+        if self.registry.has_active(session_id) {
+            return None;
+        }
+        let input = self.dequeue_next_pending(session_id)?;
         tracing::info!(
-            session_id = %completion.session_id,
+            session_id = %session_id,
             "auto-submitting next queued message for new turn"
         );
-        match self
-            .start_execution_locked(completion.session_id.clone(), input)
-            .await
-        {
+        match self.start_execution_locked(session_id.clone(), input).await {
             Ok(started) => Some(started),
             Err(e) => {
                 tracing::warn!(
-                    session_id = %completion.session_id,
+                    session_id = %session_id,
                     error = %e,
                     "failed to auto-submit queued message"
                 );
@@ -575,10 +536,7 @@ impl TurnScheduler {
             }
 
             let next = self
-                .finish_and_maybe_start_next(CompletionParams {
-                    session_id: session_id.clone(),
-                    turn_id: turn_id.clone(),
-                })
+                .finish_and_maybe_start_next(&session_id, &turn_id)
                 .await;
 
             let Some(StartedExecution {
@@ -598,7 +556,7 @@ impl TurnScheduler {
         self.child_sessions
             .cascade_abort_children(self, session_id)
             .await;
-        self.request_turn_shutdown(session_id).await?;
+        self.request_turn_shutdown(session_id);
 
         if self.registry.has_active(session_id) {
             let deadline = tokio::time::Instant::now()
@@ -629,42 +587,91 @@ impl TurnScheduler {
     }
 
     /// 仅对本 session 发起协作式 shutdown（不级联子 session、不跑 stale repair）。
-    pub(crate) async fn request_turn_shutdown(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), TurnScheduleError> {
-        if let Some((turn_id, _session)) = self.registry.request_shutdown(session_id) {
+    fn request_turn_shutdown(&self, session_id: &SessionId) {
+        if let Some(turn_id) = self.registry.request_shutdown(session_id) {
             self.schedule_force_kill(session_id.clone(), turn_id);
         }
+    }
+
+    /// completion 已产出但 task 可能尚未退出；只按 turn identity 非破坏性移除。
+    pub async fn release_completed_execution(&self, session_id: &SessionId, turn_id: &TurnId) {
+        let gate = self.session_delivery_gate(session_id);
+        let _state = gate.lock().await;
+        self.release_completed_execution_locked(session_id, turn_id);
+    }
+
+    fn release_completed_execution_locked(&self, session_id: &SessionId, turn_id: &TurnId) -> bool {
+        if self
+            .registry
+            .remove_if_matches(session_id, turn_id)
+            .is_some()
+        {
+            self.pending_queues.lock().remove(session_id);
+            return true;
+        }
+        false
+    }
+
+    /// 清理 session 的 execution 与待处理输入；仍在运行的 turn 会被中止。
+    pub async fn cleanup_execution(&self, session_id: &SessionId) {
+        let gate = self.session_delivery_gate(session_id);
+        let _state = gate.lock().await;
+        self.cleanup_execution_locked(session_id).await;
+    }
+
+    async fn cleanup_execution_locked(&self, session_id: &SessionId) {
+        if self.registry.remove_if_finished(session_id).is_none() {
+            if let Some((turn_id, session)) = self.registry.force_kill_current(session_id) {
+                self.emit_turn_aborted(&turn_id, &session, session_id).await;
+            }
+        }
+        if self.pending_queues.lock().remove(session_id).is_some() {
+            tracing::info!(session_id = %session_id, "cleaned up pending message queue");
+        }
+    }
+
+    async fn close_delivery_gate(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionDeliveryGate, TurnScheduleError> {
+        let gate = self.session_delivery_gate(session_id);
+        let mut state = gate.lock().await;
+        state.ensure_open(session_id)?;
+        *state = SessionDeliveryState::Closing;
+        drop(state);
+        Ok(gate)
+    }
+
+    pub async fn delete_session(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+        let _gate = self.close_delivery_gate(session_id).await?;
+        self.cleanup_execution_locked(session_id).await;
+        self.session_manager.delete(session_id).await?;
         Ok(())
     }
 
-    /// 已完成 turn 的 registry / 队列清理（不 abort、不写 `TurnCompleted`）。
-    ///
-    /// 用于 child session 正常结束后的 recycle；turn 终态已由 runner 写入事件日志。
-    pub async fn release_completed_execution(&self, session_id: &SessionId) {
-        self.registry.remove(session_id);
-        let removed = self.pending_queues.lock().remove(session_id);
-        if removed.is_some() {
-            tracing::debug!(
-                session_id = %session_id,
-                "released pending message queue after completed turn"
-            );
-        }
+    pub async fn recycle_session(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+        let _gate = self.close_delivery_gate(session_id).await?;
+        self.cleanup_execution_locked(session_id).await;
+        self.session_manager.recycle_session(session_id).await?;
+        Ok(())
     }
 
-    /// 中止或删除 session 时的强制清理（可能 abort 活跃 turn 并写 `TurnCompleted(aborted)`）。
-    pub async fn abort_and_cleanup(&self, session_id: &SessionId) {
-        if self.registry.active_is_finished(session_id) {
-            self.registry.remove(session_id);
-        } else if let Some((turn_id, session)) = self.registry.force_kill_current(session_id) {
-            self.emit_turn_aborted(&turn_id, &session, session_id).await;
+    pub(crate) async fn recycle_completed_session(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<CompletedRecycleOutcome, TurnScheduleError> {
+        let gate = self.session_delivery_gate(session_id);
+        let mut state = gate.lock().await;
+        state.ensure_open(session_id)?;
+        if !self.release_completed_execution_locked(session_id, turn_id) {
+            return Ok(CompletedRecycleOutcome::StaleCompletion);
         }
-        let removed = self.pending_queues.lock().remove(session_id);
-        if removed.is_some() {
-            tracing::info!(session_id = %session_id, "cleaned up pending message queue");
-        }
-        self.release_delivery_gate(session_id);
+        *state = SessionDeliveryState::Closing;
+        drop(state);
+        let _gate = gate;
+        self.session_manager.recycle_session(session_id).await?;
+        Ok(CompletedRecycleOutcome::Recycled)
     }
 
     fn schedule_force_kill(&self, session_id: SessionId, turn_id: TurnId) {
@@ -749,21 +756,14 @@ impl TurnScheduler {
 
     async fn inject_internal(
         &self,
-        session_id: &SessionId,
+        turn_id: &TurnId,
+        session: &Session,
         input: PromptInput,
     ) -> Result<(), TurnScheduleError> {
-        let turn_id = self
-            .registry
-            .active_turn_id(session_id)
-            .ok_or(TurnScheduleError::NoActiveTurn)?;
-        let session = self
-            .registry
-            .get_session(session_id)
-            .ok_or(TurnScheduleError::NoActiveTurn)?;
         let message_id = new_message_id();
         session
             .emit_durable(
-                Some(&turn_id),
+                Some(turn_id),
                 EventPayload::UserMessage {
                     message_id,
                     text: input.text,
@@ -808,7 +808,7 @@ impl TurnScheduler {
     fn dequeue_next_pending(&self, session_id: &SessionId) -> Option<PromptInput> {
         let mut queues = self.pending_queues.lock();
         let queue = queues.get_mut(session_id)?;
-        let input = queue.pop_front()?.input;
+        let input = queue.pop_front()?;
         if queue.is_empty() {
             queues.remove(session_id);
         }
@@ -893,15 +893,7 @@ async fn repair_stale_runs_for_state(
     {
         let child_sid = &link.child_session_id;
         if scheduler.registry().has_active(child_sid) {
-            if let Err(e) = scheduler.request_turn_shutdown(child_sid).await {
-                tracing::debug!(
-                    parent_session_id = %session.id(),
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "repair_stale: child abort returned error"
-                );
-            }
-            scheduler.abort_and_cleanup(child_sid).await;
+            scheduler.cleanup_execution(child_sid).await;
             continue;
         }
         session

@@ -1,5 +1,7 @@
 //! Session read model -> conversation snapshot DTO projection.
 
+use std::collections::BTreeMap;
+
 use astrcode_core::{
     storage::{PendingToolApprovalView, PendingToolInteractionView, SessionReadModel},
     types::ToolCallId,
@@ -10,8 +12,12 @@ use astrcode_protocol::http::{
 };
 
 use super::{
-    blocks::{compact_summary_block, latest_compact_boundary, messages_to_blocks},
+    blocks::{
+        compact_summary_block, latest_compact_boundary, messages_to_blocks,
+        streaming_assistant_block,
+    },
     live::control_from_phase,
+    session_title_from_working_dir,
 };
 use crate::server_event_bus::StreamingSnapshot;
 
@@ -21,7 +27,7 @@ pub(in crate::http) fn conversation_to_dto(
 ) -> ConversationSnapshotResponseDto {
     let title = session
         .first_user_message()
-        .unwrap_or_else(|| session_title(&session.working_dir));
+        .unwrap_or_else(|| session_title_from_working_dir(&session.working_dir));
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
@@ -29,19 +35,21 @@ pub(in crate::http) fn conversation_to_dto(
         blocks.push(compact_summary_block(boundary));
     }
     blocks.extend(messages_to_blocks(&session.messages));
-    apply_pending_tool_approvals(&mut blocks, &session.pending_tool_approvals);
-    apply_pending_tool_interactions(&mut blocks, &session.pending_tool_interactions);
+    apply_pending_tool_state(
+        &mut blocks,
+        &session.pending_tool_approvals,
+        &session.pending_tool_interactions,
+    );
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
     // 需要从 runtime 的 live 投影补充，让重连客户端看到已流出的文本。
     if let Some(msg) = streaming {
-        blocks.push(ConversationBlockDto::Assistant {
-            id: msg.message_id.clone(),
-            text: msg.text.clone(),
-            reasoning_content: msg.reasoning_content.clone(),
-            status: ConversationBlockStatusDto::Streaming,
-        });
+        blocks.push(streaming_assistant_block(
+            msg.message_id.clone(),
+            msg.text.clone(),
+            msg.reasoning_content.clone(),
+        ));
     }
 
     ConversationSnapshotResponseDto {
@@ -61,11 +69,12 @@ pub(in crate::http) fn conversation_to_dto(
     }
 }
 
-fn apply_pending_tool_interactions(
+fn apply_pending_tool_state(
     blocks: &mut [ConversationBlockDto],
-    pending: &std::collections::BTreeMap<ToolCallId, PendingToolInteractionView>,
+    approvals: &BTreeMap<ToolCallId, PendingToolApprovalView>,
+    interactions: &BTreeMap<ToolCallId, PendingToolInteractionView>,
 ) {
-    for block in blocks.iter_mut() {
+    for block in blocks {
         let ConversationBlockDto::ToolCall {
             id,
             text,
@@ -76,63 +85,38 @@ fn apply_pending_tool_interactions(
         else {
             continue;
         };
-        let Some(interaction) = pending.get(&ToolCallId::from(id.as_str())) else {
+        let approval = approvals.get(id.as_str());
+        let interaction = interactions.get(id.as_str());
+        if approval.is_none() && interaction.is_none() {
             continue;
-        };
-        *text = interaction.content.clone();
-        *status = ConversationBlockStatusDto::Streaming;
-        let mut merged = metadata
-            .take()
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        let interaction_metadata = serde_json::to_value(&interaction.metadata)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        if let Some(interaction_metadata) = interaction_metadata.as_object() {
-            merged.extend(interaction_metadata.clone());
         }
-        *metadata = if merged.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Object(merged))
+
+        let mut merged = match metadata.take() {
+            Some(serde_json::Value::Object(metadata)) => metadata,
+            _ => serde_json::Map::new(),
         };
+        if let Some(approval) = approval {
+            merged.insert(
+                "toolGateApproval".into(),
+                serde_json::json!({
+                    "pending": true,
+                    "prompt": &approval.prompt,
+                    "ruleKey": &approval.rule_key,
+                }),
+            );
+        }
+        if let Some(interaction) = interaction {
+            *text = interaction.content.clone();
+            *status = ConversationBlockStatusDto::Streaming;
+            merged.extend(
+                interaction
+                    .metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+        }
+        *metadata = (!merged.is_empty()).then_some(serde_json::Value::Object(merged));
     }
-}
-
-fn apply_pending_tool_approvals(
-    blocks: &mut [ConversationBlockDto],
-    pending: &std::collections::BTreeMap<ToolCallId, PendingToolApprovalView>,
-) {
-    for block in blocks.iter_mut() {
-        let ConversationBlockDto::ToolCall { id, metadata, .. } = block else {
-            continue;
-        };
-        let Some(approval) = pending.get(&ToolCallId::from(id.as_str())) else {
-            continue;
-        };
-
-        let mut merged = metadata
-            .take()
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        merged.insert(
-            "toolGateApproval".into(),
-            serde_json::json!({
-                "pending": true,
-                "prompt": &approval.prompt,
-                "ruleKey": &approval.rule_key,
-            }),
-        );
-        *metadata = Some(serde_json::Value::Object(merged));
-    }
-}
-
-fn session_title(working_dir: &str) -> String {
-    std::path::Path::new(working_dir)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(working_dir)
-        .to_string()
 }
 
 #[cfg(test)]
@@ -141,6 +125,33 @@ mod tests {
     use astrcode_protocol::http::ConversationBlockStatusDto;
 
     use super::*;
+
+    fn session_with_tool_call(
+        session_id: &str,
+        call_id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> SessionReadModel {
+        let mut session = SessionReadModel::empty(session_id.into());
+        session.working_dir = "D:/work/project".into();
+        session
+            .messages
+            .push(astrcode_core::storage::SequencedLlmMessage {
+                message: LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: vec![LlmContent::ToolCall {
+                        call_id: call_id.into(),
+                        name: name.into(),
+                        arguments,
+                    }],
+                    name: None,
+                    reasoning_content: None,
+                },
+                updated_seq: 1,
+                source: None,
+            });
+        session
+    }
 
     #[test]
     fn conversation_snapshot_cursor_is_full_snapshot_version() {
@@ -163,24 +174,12 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_renders_tool_call_as_structured_block() {
-        let mut session = SessionReadModel::empty("session-1".into());
-        session.working_dir = "D:/work/project".into();
-        session
-            .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
-                message: LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: vec![LlmContent::ToolCall {
-                        call_id: "tool-1".into(),
-                        name: "read".into(),
-                        arguments: serde_json::json!({ "path": "Cargo.toml" }),
-                    }],
-                    name: None,
-                    reasoning_content: None,
-                },
-                updated_seq: 1,
-                source: None,
-            });
+        let mut session = session_with_tool_call(
+            "session-1",
+            "tool-1",
+            "read",
+            serde_json::json!({ "path": "Cargo.toml" }),
+        );
         session
             .messages
             .push(astrcode_core::storage::SequencedLlmMessage {
@@ -212,25 +211,13 @@ mod tests {
     }
 
     #[test]
-    fn conversation_snapshot_applies_pending_tool_approval_metadata() {
-        let mut session = SessionReadModel::empty("session-approval".into());
-        session.working_dir = "D:/work/project".into();
-        session
-            .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
-                message: LlmMessage {
-                    role: LlmRole::Assistant,
-                    content: vec![LlmContent::ToolCall {
-                        call_id: "tool-approval".into(),
-                        name: "shell".into(),
-                        arguments: serde_json::json!({ "command": "git push" }),
-                    }],
-                    name: None,
-                    reasoning_content: None,
-                },
-                updated_seq: 1,
-                source: None,
-            });
+    fn conversation_snapshot_applies_pending_tool_state() {
+        let mut session = session_with_tool_call(
+            "session-approval",
+            "tool-approval",
+            "shell",
+            serde_json::json!({ "command": "git push" }),
+        );
         session.pending_tool_approvals.insert(
             "tool-approval".into(),
             astrcode_core::storage::PendingToolApprovalView {
@@ -238,14 +225,28 @@ mod tests {
                 rule_key: Some("shell:write".into()),
             },
         );
+        session.pending_tool_interactions.insert(
+            "tool-approval".into(),
+            PendingToolInteractionView {
+                content: "awaiting confirmation".into(),
+                metadata: BTreeMap::from([(
+                    "toolUi".into(),
+                    serde_json::json!({ "kind": "confirmation" }),
+                )]),
+            },
+        );
 
         let dto = conversation_to_dto(session, None);
 
         match &dto.blocks[0] {
             ConversationBlockDto::ToolCall {
+                text,
+                status,
                 metadata: Some(metadata),
                 ..
             } => {
+                assert_eq!(text, "awaiting confirmation");
+                assert!(matches!(status, ConversationBlockStatusDto::Streaming));
                 let approval = metadata
                     .get("toolGateApproval")
                     .expect("toolGateApproval metadata");
@@ -261,6 +262,7 @@ mod tests {
                     approval.get("ruleKey").and_then(|v| v.as_str()),
                     Some("shell:write")
                 );
+                assert_eq!(metadata["toolUi"]["kind"], "confirmation");
             },
             other => panic!("unexpected block: {other:?}"),
         }

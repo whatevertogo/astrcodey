@@ -3,7 +3,7 @@
 //! 模型必须返回一个 `<summary>...</summary>` 块，并包含固定九段标题。
 //! 这里不理解每段内容的语义，只守住结构 contract；摘要质量由 prompt 约束。
 
-const REQUIRED_SUMMARY_SECTIONS: [&str; 9] = [
+pub(super) const REQUIRED_SUMMARY_SECTIONS: [&str; 9] = [
     "1. Primary Request and Intent:",
     "2. Key Technical Concepts:",
     "3. Files and Code Sections:",

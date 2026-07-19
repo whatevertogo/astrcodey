@@ -11,13 +11,6 @@ use astrcode_core::{
     types::SessionId,
 };
 
-fn session_ids(access: SessionAccess<'_>) -> (SessionId, SessionId) {
-    (
-        SessionId::from(access.caller_session_id),
-        SessionId::from(access.target_session_id),
-    )
-}
-
 use crate::{
     child_session::{ChildCleanup, ChildSessionCoordinator},
     session_manager::SessionManager,
@@ -28,6 +21,41 @@ pub struct ServerSessionOperations {
     pub session_manager: Arc<SessionManager>,
     pub scheduler: Arc<TurnScheduler>,
     pub child_sessions: Arc<ChildSessionCoordinator>,
+}
+
+impl ServerSessionOperations {
+    async fn verified_session_ids(
+        &self,
+        access: SessionAccess<'_>,
+    ) -> Result<(SessionId, SessionId), SessionApiError> {
+        let caller_sid = SessionId::from(access.caller_session_id);
+        let target_sid = SessionId::from(access.target_session_id);
+        self.child_sessions
+            .verify_access(&caller_sid, &target_sid)
+            .await?;
+        Ok((caller_sid, target_sid))
+    }
+
+    async fn deliver_message(
+        &self,
+        access: SessionAccess<'_>,
+        content: String,
+        delivery: InputDelivery,
+    ) -> Result<SessionDeliveryOutcome, SessionApiError> {
+        let (_, target_sid) = self.verified_session_ids(access).await?;
+        let outcome = self
+            .scheduler
+            .deliver_input(
+                target_sid.clone(),
+                crate::turn_scheduler::PromptInput::text_only(content),
+                delivery,
+            )
+            .await
+            .map_err(SessionApiError::internal)?;
+
+        self.session_manager.sync_durable_events(&target_sid).await;
+        Ok(delivery_outcome(outcome))
+    }
 }
 
 #[async_trait::async_trait]
@@ -68,24 +96,8 @@ impl SessionOperations for ServerSessionOperations {
         access: SessionAccess<'_>,
         content: String,
     ) -> Result<SessionDeliveryOutcome, SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
-
-        let outcome = self
-            .scheduler
-            .deliver_input(
-                target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(content),
-                InputDelivery::InjectIfRunningElseStart,
-            )
+        self.deliver_message(access, content, InputDelivery::InjectIfRunningElseStart)
             .await
-            .map_err(SessionApiError::internal)?;
-
-        self.session_manager.sync_durable_events(&target_sid).await;
-        Ok(delivery_outcome(outcome))
     }
 
     async fn interrupt_and_submit(
@@ -93,28 +105,12 @@ impl SessionOperations for ServerSessionOperations {
         access: SessionAccess<'_>,
         content: String,
     ) -> Result<SessionDeliveryOutcome, SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
-        let outcome = self
-            .scheduler
-            .deliver_input(
-                target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(content),
-                InputDelivery::InterruptAndStart,
-            )
+        self.deliver_message(access, content, InputDelivery::InterruptAndStart)
             .await
-            .map_err(SessionApiError::internal)?;
-        self.session_manager.sync_durable_events(&target_sid).await;
-        Ok(delivery_outcome(outcome))
     }
 
     async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
         self.scheduler
             .abort(&target_sid)
             .await
@@ -125,10 +121,7 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         access: SessionAccess<'_>,
     ) -> Result<SessionExecutionView, SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
         let view = self
             .scheduler
             .execution_view(&target_sid)
@@ -145,10 +138,8 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResult, SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(request.access.as_access());
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
+        let (caller_sid, target_sid) = self
+            .verified_session_ids(request.access.as_access())
             .await?;
 
         if request.wait_for_result {
@@ -191,11 +182,7 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         access: SessionAccess<'_>,
     ) -> Result<SessionStatus, SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
 
         let view = self
             .scheduler
@@ -207,22 +194,12 @@ impl SessionOperations for ServerSessionOperations {
             alive: true,
             has_active_turn: view.active_turn_id.is_some(),
             last_finish_reason: None,
-            message_count: self
-                .session_manager
-                .read_model(&target_sid)
-                .await
-                .map_err(|e| SessionApiError::NotFound(e.to_string()))?
-                .messages
-                .len(),
+            message_count: view.message_count,
         })
     }
 
     async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (caller_sid, target_sid) = self.verified_session_ids(access).await?;
 
         self.child_sessions
             .recycle_child(self.scheduler.as_ref(), &caller_sid, &target_sid)
@@ -232,18 +209,13 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn delete_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
 
         if let Err(e) = self.scheduler.abort(&target_sid).await {
             tracing::warn!(%target_sid, error = %e, "abort failed before session delete");
         }
-        self.scheduler.abort_and_cleanup(&target_sid).await;
-        self.session_manager
-            .delete(&target_sid)
+        self.scheduler
+            .delete_session(&target_sid)
             .await
             .map_err(SessionApiError::internal)?;
 
@@ -251,11 +223,7 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = session_ids(access);
-
-        self.child_sessions
-            .verify_access(&caller_sid, &target_sid)
-            .await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
 
         self.session_manager
             .restore_session(&target_sid)

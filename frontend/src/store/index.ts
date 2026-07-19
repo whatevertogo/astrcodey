@@ -360,7 +360,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             canRequestCompact: current.control?.canRequestCompact ?? false,
             compactPending: current.control?.compactPending ?? false,
             compacting: false,
-            currentModeId: current.control?.currentModeId,
             activeTurnId: response.turnId,
           },
         }))

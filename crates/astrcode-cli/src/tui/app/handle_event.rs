@@ -447,10 +447,7 @@ fn apply_event(app: &mut App, event: &Event) {
             summary,
             ..
         } => {
-            let was_tracked_child = app
-                .child_session_map
-                .get(child_session_id.as_str())
-                .is_some_and(|call_id| app.child_agents.contains_key(call_id));
+            let was_tracked_child = is_tracked_child(app, child_session_id.as_str());
             let short_summary = truncate_first_line(summary, 60);
             if !was_tracked_child {
                 app.push_message(
@@ -469,10 +466,7 @@ fn apply_event(app: &mut App, event: &Event) {
             error,
             ..
         } => {
-            let was_tracked_child = app
-                .child_session_map
-                .get(child_session_id.as_str())
-                .is_some_and(|call_id| app.child_agents.contains_key(call_id));
+            let was_tracked_child = is_tracked_child(app, child_session_id.as_str());
             if !was_tracked_child {
                 app.push_message(
                     MessageRole::Error,
@@ -506,6 +500,12 @@ fn apply_event(app: &mut App, event: &Event) {
         },
         _ => {},
     }
+}
+
+fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
+    app.child_session_map
+        .get(child_session_id)
+        .is_some_and(|call_id| app.child_agents.contains_key(call_id))
 }
 
 /// 处理来自子 session 的事件，将工具调用进度路由到对应的 ChildAgentTracker。
@@ -596,11 +596,11 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     app.is_compacting = false;
 
     for message in &snapshot.messages {
-        let role = match message.role.as_str() {
-            "user" => MessageRole::User,
-            "assistant" => MessageRole::Assistant,
-            "tool" => MessageRole::Tool,
-            _ => MessageRole::System,
+        let role = match message.role {
+            astrcode_protocol::wire::MessageRoleDto::System => MessageRole::System,
+            astrcode_protocol::wire::MessageRoleDto::User => MessageRole::User,
+            astrcode_protocol::wire::MessageRoleDto::Assistant => MessageRole::Assistant,
+            astrcode_protocol::wire::MessageRoleDto::Tool => MessageRole::Tool,
         };
 
         // Compact summary 消息使用特殊标签
@@ -684,10 +684,6 @@ fn apply_extension_command_list(
             usage: format!("/{}", info.name),
             description: info.description.clone(),
             needs_argument: info.needs_argument,
-            requires_idle: info.requires_idle,
-            argument_completions: info.argument_completions,
-            priority: info.priority,
-            source: info.source.clone(),
         })
         .collect();
     app.extension_command_names = app
@@ -801,7 +797,12 @@ fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolRe
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::event::{Event, EventPayload};
+    use std::collections::BTreeMap;
+
+    use astrcode_core::{
+        event::{Event, EventPayload},
+        tool::ToolResult,
+    };
 
     use super::*;
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
@@ -813,6 +814,17 @@ mod tests {
     fn apply_payload(app: &mut App, payload: EventPayload) {
         let event = Event::new("session".into(), Some("turn".into()), payload);
         apply_event(app, &event);
+    }
+
+    fn tool_result(content: &str, is_error: bool) -> ToolResult {
+        ToolResult {
+            call_id: "call-1".into(),
+            content: content.into(),
+            is_error,
+            error: None,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
     }
 
     #[test]
@@ -885,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_run_status_does_not_enter_scrollback() {
+    fn completion_statuses_preserve_actionable_reasons_without_scrollback() {
         let mut app = make_app();
         apply_payload(&mut app, EventPayload::AgentRunStarted);
         assert!(app.is_streaming);
@@ -900,11 +912,8 @@ mod tests {
         );
         assert!(!app.is_streaming);
         assert!(app.scrollback_queue.is_empty());
-    }
+        assert_eq!(app.status_text, "Ready · done");
 
-    #[test]
-    fn normal_stop_reason_does_not_stick_in_idle_status() {
-        let mut app = make_app();
         apply_payload(
             &mut app,
             EventPayload::TurnCompleted {
@@ -912,18 +921,7 @@ mod tests {
             },
         );
         assert_eq!(app.status_text, "Ready");
-        apply_payload(
-            &mut app,
-            EventPayload::AgentRunCompleted {
-                reason: "stop".into(),
-            },
-        );
-        assert_eq!(app.status_text, "Ready");
-    }
 
-    #[test]
-    fn actionable_completion_reason_stays_visible() {
-        let mut app = make_app();
         apply_payload(
             &mut app,
             EventPayload::AgentRunCompleted {
@@ -952,37 +950,6 @@ mod tests {
 
         app.history_next();
         assert!(app.input_text().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod codex_style_tests {
-    use std::collections::BTreeMap;
-
-    use astrcode_core::{
-        event::{Event, EventPayload},
-        tool::ToolResult,
-    };
-
-    use super::*;
-    use crate::tui::store::transcript::MessageRole;
-
-    fn make_app() -> App {
-        App::new(crate::tui::theme::Theme::detect())
-    }
-    fn apply_payload(app: &mut App, payload: EventPayload) {
-        let event = Event::new("session".into(), Some("turn".into()), payload);
-        apply_event(app, &event);
-    }
-    fn tool_result(content: &str, is_error: bool) -> ToolResult {
-        ToolResult {
-            call_id: "call-1".into(),
-            content: content.into(),
-            is_error,
-            error: None,
-            metadata: BTreeMap::new(),
-            duration_ms: None,
-        }
     }
 
     #[test]

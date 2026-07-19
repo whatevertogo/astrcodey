@@ -1,7 +1,5 @@
 use std::{collections::BTreeMap, time::Duration};
 
-use astrcode_extension_sdk::extension::ExtensionError;
-
 use super::ExtensionRunner;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,6 +38,12 @@ pub(super) enum ExtensionDiagnosticStage {
     Start,
 }
 
+pub(super) enum ExtensionStageOutcome {
+    Succeeded,
+    Failed(String),
+    Skipped,
+}
+
 /// 一次主动健康检查的扩展级结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionHealthReport {
@@ -60,13 +64,11 @@ impl ExtensionRunner {
         let mut reports = Vec::with_capacity(extensions.len());
         for extension in extensions {
             let extension_id = extension.id().to_string();
-            let error = match tokio::time::timeout(self.timeout, extension.health()).await {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(_) => {
-                    Some(ExtensionError::Timeout(self.timeout.as_millis() as u64).to_string())
-                },
-            };
+            let error = self
+                .run_with_timeout(extension.health())
+                .await
+                .err()
+                .map(|error| error.to_string());
             reports.push(ExtensionHealthReport {
                 extension_id,
                 error,
@@ -80,8 +82,7 @@ impl ExtensionRunner {
             extension_id,
             ExtensionDiagnosticStage::Load,
             elapsed,
-            None,
-            ExtensionStageStatus::Succeeded,
+            ExtensionStageOutcome::Succeeded,
         );
     }
 
@@ -95,8 +96,7 @@ impl ExtensionRunner {
             extension_id,
             ExtensionDiagnosticStage::Load,
             elapsed,
-            Some(error.into()),
-            ExtensionStageStatus::Failed,
+            ExtensionStageOutcome::Failed(error.into()),
         );
     }
 
@@ -114,9 +114,13 @@ impl ExtensionRunner {
         extension_id: &str,
         stage: ExtensionDiagnosticStage,
         elapsed: Option<Duration>,
-        error: Option<String>,
-        status: ExtensionStageStatus,
+        outcome: ExtensionStageOutcome,
     ) {
+        let (status, error) = match outcome {
+            ExtensionStageOutcome::Succeeded => (ExtensionStageStatus::Succeeded, None),
+            ExtensionStageOutcome::Failed(error) => (ExtensionStageStatus::Failed, Some(error)),
+            ExtensionStageOutcome::Skipped => (ExtensionStageStatus::Skipped, None),
+        };
         let mut diagnostics = self.diagnostics.write();
         let entry = diagnostics.entry(extension_id.to_string()).or_default();
         let stage = stage_diagnostics_mut(entry, stage);

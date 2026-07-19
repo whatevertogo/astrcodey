@@ -7,16 +7,14 @@
 //! ## 扩展动态贡献流程
 //!
 //! 扩展不直接依赖此模块。它们实现 `PromptBuildHandler` 返回
-//! `PromptContributions`（定义在 `astrcode-core`）。TurnRunner 每轮
-//! 调用 `ExtensionRunner::collect_prompt_contributions_typed()` 收集
-//! 最新贡献，然后传给 `PromptEngine::ensure()` 组装。
+//! `PromptContributions`（定义在 `astrcode-core`）。TurnRunner 每轮收集
+//! 最新贡献，由 `DefaultPromptProvider` 组装完整 prompt。
 //!
 //! ```text
 //! TurnRunner (每轮)
 //!   → ExtensionRunner::collect_prompt_contributions_typed()
-//!   → PromptEngine::ensure(contribs, base, tools)
-//!     → 指纹没变 → 返回缓存
-//!     → 指纹变了 → 重建 prompt → 返回新值
+//!   → DefaultPromptProvider::assemble(input)
+//!     → build_system_prompt(input)
 //! ```
 //!
 //! MCP 断连/重连、skill 文件变化等都会在下一轮自动反映到 prompt。
@@ -38,12 +36,12 @@ use astrcode_support::hostpaths::astrcode_dir;
 
 // ─── 内置常量 ──────────────────────────────────────────────────────────
 
-pub const DEFAULT_IDENTITY: &str =
-    "You are Astrcode, an agent that helps users with engineering tasks.\nReason calmly from \
-     evidence; when something is unclear, say so openly rather than guessing.\nShare \
-     well-considered perspectives grounded in facts and careful thinking—not neutral \
-     summaries.\nCommunicate naturally and warmly: straightforward when simple, thoughtful and \
-     precise when not.";
+const DEFAULT_IDENTITY: &str = "You are Astrcode, an agent that helps users with engineering \
+                                tasks.\nReason calmly from evidence; when something is unclear, \
+                                say so openly rather than guessing.\nShare well-considered \
+                                perspectives grounded in facts and careful thinking—not neutral \
+                                summaries.\nCommunicate naturally and warmly: straightforward \
+                                when simple, thoughtful and precise when not.";
 
 const MAX_IDENTITY_SIZE: usize = 8192;
 
@@ -103,56 +101,8 @@ const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
 const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";
 const TOOL_SECTION_EXTERNAL_MCP: &str = "External MCP Tools";
 const TOOL_SECTION_EXTENSION: &str = "Extension Tools";
-fn tool_agent_collaboration_guidance() -> String {
-    String::from("- `subagentType` from [Agents]; see detailed guide for delegation patterns.")
-}
-
-// ─── PromptEngine ───────────────────────────────────────────────────────
-
-/// System prompt 组装器，带指纹缓存。
-///
-/// 每个 turn 调 `ensure()`，内部按指纹判断是否需要重建。
-/// 外部调用方负责每轮收集最新扩展贡献。
-pub struct PromptEngine {
-    /// 上次组装的 prompt 指纹（用于 KV cache 稳定性判断）
-    fingerprint: String,
-    /// 缓存的完整 prompt 文本
-    cached_prompt: String,
-}
-
-impl PromptEngine {
-    pub fn new() -> Self {
-        Self {
-            fingerprint: String::new(),
-            cached_prompt: String::new(),
-        }
-    }
-
-    /// 确保 prompt 是最新的。指纹不变则返回缓存，变了则重建。
-    ///
-    /// 返回 `(prompt, fingerprint, rebuilt)`，`rebuilt` 为 true 表示本次重建了。
-    pub fn ensure(&mut self, input: SystemPromptInput) -> (String, String, bool) {
-        let new_fp = compute_fingerprint(&input);
-        if new_fp == self.fingerprint && !self.fingerprint.is_empty() {
-            return (self.cached_prompt.clone(), new_fp, false);
-        }
-        let prompt = build_system_prompt(&input);
-        self.fingerprint = new_fp.clone();
-        self.cached_prompt = prompt.clone();
-        (prompt, new_fp, true)
-    }
-
-    /// 强制重建（用于 configuration 变更等场景）。
-    pub fn invalidate(&mut self) {
-        self.fingerprint.clear();
-    }
-}
-
-impl Default for PromptEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+const TOOL_AGENT_COLLABORATION_GUIDANCE: &str =
+    "- `subagentType` from [Agents]; see detailed guide for delegation patterns.";
 
 /// Default system prompt assembler used by the first-party host.
 pub struct DefaultPromptProvider;
@@ -174,67 +124,17 @@ impl PromptFileProvider for DefaultPromptFileProvider {
     }
 }
 
-fn compute_fingerprint(input: &SystemPromptInput) -> String {
-    // 对 prompt 的动态部分计算指纹：工具列表、扩展块、额外指令。
-    // 静态部分（identity、rules）已包含在 input 中，一并参与。
-    let mut key = String::new();
-    key.push_str(&input.working_dir);
-    key.push('\0');
-    key.push_str(&input.os);
-    key.push('\0');
-    key.push_str(&input.shell);
-    key.push('\0');
-    key.push_str(if input.gh_cli_available {
-        "gh:yes"
-    } else {
-        "gh:no"
-    });
-    key.push('\0');
-    if let Some(ref id) = input.identity {
-        key.push_str(id);
-    }
-    key.push('\0');
-    if let Some(ref rules) = input.user_rules {
-        key.push_str(rules);
-    }
-    key.push('\0');
-    if let Some(ref rules) = input.project_rules {
-        key.push_str(rules);
-    }
-    key.push('\0');
-    for tool in &input.tools {
-        key.push_str(&tool.name);
-        key.push('\0');
-    }
-    for block in &input.extension_blocks {
-        key.push_str(match block.section {
-            ExtensionSection::PlatformInstructions => "pi",
-            ExtensionSection::AdditionalInstructions => "ai",
-            ExtensionSection::Skills => "sk",
-            ExtensionSection::Agents => "ag",
-        });
-        key.push('\0');
-        key.push_str(&block.content);
-        key.push('\0');
-    }
-    if let Some(ref extra) = input.extra_instructions {
-        key.push_str(extra);
-    }
-
-    astrcode_support::hash::hex_fingerprint(key.as_bytes())
-}
-
 // ─── Identity 加载 ─────────────────────────────────────────────────────
 
-pub fn user_identity_md_path() -> PathBuf {
+fn user_identity_md_path() -> PathBuf {
     astrcode_dir().join("IDENTITY.md")
 }
 
-pub fn user_agents_md_path() -> PathBuf {
+fn user_agents_md_path() -> PathBuf {
     astrcode_dir().join("AGENTS.md")
 }
 
-pub fn load_identity_md(path: &Path) -> Option<String> {
+fn load_identity_md(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -249,7 +149,7 @@ pub fn load_identity_md(path: &Path) -> Option<String> {
     Some(identity.to_string())
 }
 
-pub fn load_user_rules(path: &Path) -> Option<String> {
+fn load_user_rules(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let content = content.trim();
     if content.is_empty() {
@@ -280,7 +180,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// 根据结构化输入构建完整的 system prompt 字符串。
 ///
 /// 纯函数，无副作用。section 顺序固定，不可配置。
-pub fn build_system_prompt(input: &SystemPromptInput) -> String {
+fn build_system_prompt(input: &SystemPromptInput) -> String {
     let mut sections = default_contributors()
         .into_iter()
         .flat_map(|contributor| contributor.contribute(input))
@@ -292,88 +192,6 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
         .map(render_prompt_section)
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-/// 构建稳定前缀：Identity → ProjectRules（不含 date）。
-///
-/// 这些 section 在 session 生命周期内不变，跨 turn 复用 KV 缓存。
-pub fn build_stable_prefix(input: &SystemPromptInput) -> String {
-    let mut sections = stable_contributors()
-        .into_iter()
-        .flat_map(|contributor| contributor.contribute(input))
-        .filter(|section| !section.body.trim().is_empty())
-        .collect::<Vec<_>>();
-    sections.sort_by_key(|section| section.order);
-    sections
-        .into_iter()
-        .map(render_prompt_section)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// 构建动态后缀：ToolSummary → ExtraInstructions。
-///
-/// 这些 section 每 turn 刷新（tools、extension 贡献可能变化）。
-pub fn build_dynamic_suffix(input: &SystemPromptInput) -> String {
-    let mut sections = dynamic_contributors()
-        .into_iter()
-        .flat_map(|contributor| contributor.contribute(input))
-        .filter(|section| !section.body.trim().is_empty())
-        .collect::<Vec<_>>();
-    sections.sort_by_key(|section| section.order);
-    sections
-        .into_iter()
-        .map(render_prompt_section)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// 计算稳定前缀的指纹（仅含不变字段，不含 date/tools/extensions）。
-pub fn compute_stable_fingerprint(input: &SystemPromptInput) -> String {
-    let mut key = String::new();
-    key.push_str(&input.working_dir);
-    key.push('\0');
-    key.push_str(&input.os);
-    key.push('\0');
-    key.push_str(&input.shell);
-    key.push('\0');
-    key.push_str(if input.gh_cli_available {
-        "gh:yes"
-    } else {
-        "gh:no"
-    });
-    key.push('\0');
-    if let Some(ref id) = input.identity {
-        key.push_str(id);
-    }
-    key.push('\0');
-    if let Some(ref rules) = input.user_rules {
-        key.push_str(rules);
-    }
-    key.push('\0');
-    if let Some(ref rules) = input.project_rules {
-        key.push_str(rules);
-    }
-    astrcode_support::hash::hex_fingerprint(key.as_bytes())
-}
-
-fn stable_contributors() -> [PromptContributor; 6] {
-    [
-        PromptContributor::Identity,
-        PromptContributor::System,
-        PromptContributor::TaskGuidelines,
-        PromptContributor::Communication,
-        PromptContributor::Environment,
-        PromptContributor::Rules,
-    ]
-}
-
-fn dynamic_contributors() -> [PromptContributor; 3] {
-    [
-        PromptContributor::ToolSummary,
-        PromptContributor::ExtensionPrompt,
-        PromptContributor::ExtraInstructions,
-    ]
 }
 
 fn default_contributors() -> [PromptContributor; 9] {
@@ -652,11 +470,10 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
     }
 
     if !collab.is_empty() {
-        let collab_guidance = tool_agent_collaboration_guidance();
         push_tool_section(
             &mut lines,
             TOOL_SECTION_AGENT_COLLABORATION,
-            Some(collab_guidance.as_str()),
+            Some(TOOL_AGENT_COLLABORATION_GUIDANCE),
         );
         push_tool_list_entries(&mut lines, &collab, false);
     }
@@ -697,9 +514,9 @@ fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
 
     if !detailed_guides.is_empty() {
         lines.push(String::new());
-        for guide in &detailed_guides {
+        for guide in detailed_guides {
             lines.push(String::new());
-            lines.push(guide.clone());
+            lines.push(guide);
         }
     }
 
@@ -822,23 +639,18 @@ fn is_extension_tool(tool: &ToolDefinition) -> bool {
 // ─── AGENTS.md 加载 ────────────────────────────────────────────────────
 
 /// 从 working_dir 向上遍历查找所有 AGENTS.md，由浅到深排序。
-pub fn find_agents_files(working_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let mut current = Some(working_dir);
-    while let Some(dir) = current {
-        dirs.push(dir.to_path_buf());
-        current = dir.parent();
-    }
-
-    dirs.reverse();
-    dirs.into_iter()
+fn find_agents_files(working_dir: &Path) -> Vec<PathBuf> {
+    let mut files = working_dir
+        .ancestors()
         .map(|dir| dir.join("AGENTS.md"))
         .filter(|path| path.is_file())
-        .collect()
+        .collect::<Vec<_>>();
+    files.reverse();
+    files
 }
 
 /// 读取并合并 AGENTS.md 文件为一段 project rules 文本。
-pub fn load_project_rules(working_dir: &Path) -> Option<String> {
+fn load_project_rules(working_dir: &Path) -> Option<String> {
     let files = find_agents_files(working_dir);
     if files.is_empty() {
         return None;
@@ -872,15 +684,10 @@ fn non_empty_string(text: String) -> Option<String> {
 
 // ─── Prompt file loading ───────────────────────────────────────────────
 
-/// 异步加载系统提示词文件（identity、user rules、project rules）。
-pub async fn load_system_prompt_files(working_dir: &str) -> PromptFiles {
-    load_system_prompt_files_with_scope(working_dir, true).await
-}
-
 /// 按会话类型加载系统提示词文件。
 ///
 /// 子 agent 使用专用 body，不应继承 AGENTS.md（项目级与用户级）。
-pub async fn load_system_prompt_files_with_scope(
+async fn load_system_prompt_files_with_scope(
     working_dir: &str,
     include_agents_rules: bool,
 ) -> PromptFiles {
@@ -944,34 +751,6 @@ mod tests {
             extra_instructions: None,
             tool_prompt_metadata: std::collections::HashMap::new(),
         }
-    }
-
-    #[test]
-    fn ensure_caches_when_fingerprint_unchanged() {
-        let mut engine = PromptEngine::new();
-        let input = input();
-
-        let (prompt1, fp1, rebuilt1) = engine.ensure(input.clone());
-        assert!(rebuilt1);
-        assert!(!prompt1.is_empty());
-
-        let (prompt2, fp2, rebuilt2) = engine.ensure(input);
-        assert!(!rebuilt2);
-        assert_eq!(fp1, fp2);
-        assert_eq!(prompt1, prompt2);
-    }
-
-    #[test]
-    fn ensure_rebuilds_when_input_changes() {
-        let mut engine = PromptEngine::new();
-        let (_, fp1, _) = engine.ensure(input());
-
-        let mut changed = input();
-        changed.working_dir = "/different".into();
-        let (_, fp2, rebuilt) = engine.ensure(changed);
-
-        assert!(rebuilt);
-        assert_ne!(fp1, fp2);
     }
 
     #[test]

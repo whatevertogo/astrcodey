@@ -38,9 +38,15 @@ impl CommandHandle {
             .map_err(|_| HandlerError::ActorUnavailable)
     }
 
-    async fn recv<T>(rx: oneshot::Receiver<T>) -> Result<T, HandlerError> {
-        rx.await.map_err(|_| HandlerError::ActorUnavailable)
+    async fn request<T>(
+        &self,
+        message: impl FnOnce(oneshot::Sender<Result<T, HandlerError>>) -> CommandMessage,
+    ) -> Result<T, HandlerError> {
+        let (reply, rx) = oneshot::channel();
+        self.post(message(reply)).await?;
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
+
     /// 启动 CommandHandler Actor，返回可克隆的句柄。
     pub fn spawn(
         runtime: Arc<ServerRuntime>,
@@ -52,18 +58,14 @@ impl CommandHandle {
 
     /// 发送客户端命令，等待执行完成。
     pub async fn handle(&self, command: ClientCommand) -> Result<(), HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::ClientCommand { command, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::ClientCommand { command, reply })
+            .await
     }
 
     /// 创建新会话，返回会话 ID。
     pub async fn create_session(&self, working_dir: String) -> Result<SessionId, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::CreateSession { working_dir, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::CreateSession { working_dir, reply })
+            .await
     }
 
     /// 提交提示词，返回 Turn ID 和完成通知接收器。
@@ -72,14 +74,12 @@ impl CommandHandle {
         session_id: SessionId,
         input: PromptInput,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::SubmitInputWithCompletion {
+        self.request(|reply| CommandMessage::SubmitInputWithCompletion {
             session_id,
             input,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 向指定会话提交输入。
@@ -88,14 +88,12 @@ impl CommandHandle {
         session_id: SessionId,
         input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::SubmitInputForSession {
+        self.request(|reply| CommandMessage::SubmitInputForSession {
             session_id,
             input,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 向活跃 turn 注入 mid-turn 消息（steer）。
@@ -104,14 +102,12 @@ impl CommandHandle {
         session_id: SessionId,
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::InjectInputForSession {
+        self.request(|reply| CommandMessage::InjectInputForSession {
             session_id,
             text,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 手动压缩指定会话。
@@ -120,22 +116,18 @@ impl CommandHandle {
         session_id: SessionId,
         keep_recent_turns: Option<usize>,
     ) -> Result<ManualCompactOutcome, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::CompactSession {
+        self.request(|reply| CommandMessage::CompactSession {
             session_id,
             keep_recent_turns,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 中止指定会话的活跃 Turn。
     pub async fn abort_session(&self, session_id: SessionId) -> Result<(), HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::AbortSession { session_id, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::AbortSession { session_id, reply })
+            .await
     }
 
     /// 获取指定会话的完整命令列表与诊断。
@@ -143,10 +135,8 @@ impl CommandHandle {
         &self,
         session_id: SessionId,
     ) -> Result<CommandList, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::ListCommandCatalogForSession { session_id, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::ListCommandCatalogForSession { session_id, reply })
+            .await
     }
 
     /// 执行指定会话的一等 command。
@@ -156,15 +146,13 @@ impl CommandHandle {
         command_name: String,
         arguments: String,
     ) -> Result<CommandInvocation, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::InvokeCommandForSession {
+        self.request(|reply| CommandMessage::InvokeCommandForSession {
             session_id,
             command_name,
             arguments,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 请求指定 command 的参数补全。
@@ -175,16 +163,14 @@ impl CommandHandle {
         argument: String,
         cursor: Option<usize>,
     ) -> Result<CommandCompletions, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::CompleteCommandForSession {
+        self.request(|reply| CommandMessage::CompleteCommandForSession {
             session_id,
             command_name,
             argument,
             cursor,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 修复进程重启后残留的过期 turn phase。
@@ -192,10 +178,8 @@ impl CommandHandle {
     /// 如果 session phase 为非 Idle 且无活跃 Turn，写入 `TurnCompleted(interrupted)`
     /// 将 session 恢复为 Idle。session 已经是 Idle/Error 时静默返回 Ok。
     pub async fn repair_stale_turn(&self, session_id: SessionId) -> Result<(), HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::RepairStaleTurn { session_id, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::RepairStaleTurn { session_id, reply })
+            .await
     }
 
     /// Fork 源会话，返回新 session ID。
@@ -204,14 +188,12 @@ impl CommandHandle {
         source_id: SessionId,
         at_cursor: Option<String>,
     ) -> Result<SessionId, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::ForkSession {
+        self.request(|reply| CommandMessage::ForkSession {
             source_id,
             at_cursor,
             reply,
         })
-        .await?;
-        Self::recv(rx).await?
+        .await
     }
 
     /// 停止 actor 主循环并等待任务退出。
@@ -224,10 +206,8 @@ impl CommandHandle {
 
     /// 删除指定工作目录下的所有会话，返回删除数量。
     pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(CommandMessage::DeleteProject { working_dir, reply })
-            .await?;
-        Self::recv(rx).await?
+        self.request(|reply| CommandMessage::DeleteProject { working_dir, reply })
+            .await
     }
 }
 

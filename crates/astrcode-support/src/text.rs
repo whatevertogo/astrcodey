@@ -11,21 +11,32 @@
 /// 用于把工具调用参数、命令行、用户输入等折叠成可放进单行 UI 的预览。
 pub fn compact_inline(text: &str, max_chars: usize) -> String {
     let mut compact = String::new();
-    let mut words = text.split_whitespace();
-    if let Some(first) = words.next() {
-        compact.push_str(first);
-        for word in words {
+    let mut char_count = 0;
+    let mut truncated = false;
+
+    'words: for word in text.split_whitespace() {
+        if char_count > 0 {
+            if char_count == max_chars {
+                truncated = true;
+                break;
+            }
             compact.push(' ');
-            compact.push_str(word);
+            char_count += 1;
+        }
+        for ch in word.chars() {
+            if char_count == max_chars {
+                truncated = true;
+                break 'words;
+            }
+            compact.push(ch);
+            char_count += 1;
         }
     }
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
 
-    let mut preview = compact.chars().take(max_chars).collect::<String>();
-    preview.push('…');
-    preview
+    if truncated {
+        compact.push('…');
+    }
+    compact
 }
 
 /// 取首行，超长按字符数截断并追加 `…`。
@@ -75,22 +86,19 @@ mod tests {
     }
 
     #[test]
-    fn compact_inline_empty_string() {
-        assert_eq!(compact_inline("", 10), "");
-    }
-
-    #[test]
-    fn compact_inline_collapses_whitespace() {
-        assert_eq!(compact_inline("  hello   world  ", 80), "hello world");
-    }
-
-    #[test]
-    fn compact_inline_truncates_at_char_boundary() {
-        assert_eq!(compact_inline("0123456789", 5), "01234…");
-    }
-
-    #[test]
-    fn compact_inline_exact_limit_no_ellipsis() {
-        assert_eq!(compact_inline("abcde", 5), "abcde");
+    fn compact_inline_handles_whitespace_and_character_limits() {
+        for (input, max_chars, expected) in [
+            ("", 10, ""),
+            ("  hello   world  ", 80, "hello world"),
+            ("0123456789", 5, "01234…"),
+            ("abcde", 5, "abcde"),
+            ("content", 0, "…"),
+            ("ab cd", 5, "ab cd"),
+            ("ab cd", 2, "ab…"),
+            ("ab cd", 3, "ab …"),
+            ("你好 世界", 4, "你好 世…"),
+        ] {
+            assert_eq!(compact_inline(input, max_chars), expected);
+        }
     }
 }

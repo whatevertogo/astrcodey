@@ -4,8 +4,9 @@
 //! The host only grants the extension explicit session-control capability.
 
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{HashMap, hash_map::RandomState},
+    hash::BuildHasher,
+    sync::Arc,
     time::Duration,
 };
 
@@ -20,7 +21,7 @@ use astrcode_extension_sdk::{
     },
 };
 use parking_lot::Mutex as ParkingMutex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -84,6 +85,15 @@ impl Default for TelegramChannelConfig {
     }
 }
 
+impl TelegramChannelConfig {
+    fn active_bot_token(&self) -> Result<Option<String>, ExtensionError> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        resolve_bot_token(self).map(|token| (!token.is_empty()).then_some(token))
+    }
+}
+
 const fn default_request_timeout_secs() -> u64 {
     30
 }
@@ -97,7 +107,7 @@ const fn default_max_reply_chars() -> usize {
 }
 
 struct TelegramChannelsExtension {
-    runtime: ParkingMutex<Option<Arc<ChannelRuntime>>>,
+    runtime: ParkingMutex<Option<Arc<TelegramRuntime>>>,
 }
 
 impl TelegramChannelsExtension {
@@ -148,7 +158,7 @@ impl Extension for TelegramChannelsExtension {
             })?;
 
         let api = Arc::new(HttpTelegramApi::new());
-        let runtime = Arc::new(ChannelRuntime::new(
+        let runtime = Arc::new(TelegramRuntime::new(
             config,
             startup_working_dir,
             session_ops,
@@ -180,15 +190,15 @@ impl Extension for TelegramChannelsExtension {
     }
 }
 
-struct ChannelRuntime {
+struct TelegramRuntime {
     config: ParkingMutex<ChannelsConfig>,
     startup_working_dir: String,
-    sessions_by_channel: Mutex<HashMap<String, String>>,
+    sessions_by_chat: ParkingMutex<HashMap<String, String>>,
     session_ops: Arc<dyn SessionOperations>,
     telegram: Arc<dyn TelegramApi>,
 }
 
-impl ChannelRuntime {
+impl TelegramRuntime {
     fn new(
         config: ChannelsConfig,
         startup_working_dir: String,
@@ -198,7 +208,7 @@ impl ChannelRuntime {
         Self {
             config: ParkingMutex::new(config),
             startup_working_dir,
-            sessions_by_channel: Mutex::new(HashMap::new()),
+            sessions_by_chat: ParkingMutex::new(HashMap::new()),
             session_ops,
             telegram,
         }
@@ -237,9 +247,7 @@ impl ChannelRuntime {
             return self.send_reply(cfg, &inbound.chat_id, reply).await;
         }
 
-        let session_id = self
-            .session_for_channel("telegram", &inbound.chat_id, cfg)
-            .await?;
+        let session_id = self.session_for_chat(&inbound.chat_id, cfg).await?;
         let result = self
             .session_ops
             .submit_turn(SubmitTurnRequest::for_session(session_id, inbound.text))
@@ -255,27 +263,17 @@ impl ChannelRuntime {
         self.send_reply(cfg, &inbound.chat_id, &reply).await
     }
 
-    async fn session_for_channel(
+    async fn session_for_chat(
         &self,
-        channel: &str,
-        external_id: &str,
+        chat_id: &str,
         cfg: &TelegramChannelConfig,
     ) -> Result<String, ExtensionError> {
-        let key = session_key(channel, external_id);
-        let cached_session_id = self
-            .sessions_by_channel
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned();
+        let cached_session_id = self.sessions_by_chat.lock().get(chat_id).cloned();
         if let Some(session_id) = cached_session_id {
             if self.cached_session_alive(&session_id).await {
                 return Ok(session_id);
             }
-            self.sessions_by_channel
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&key);
+            self.sessions_by_chat.lock().remove(chat_id);
         }
         let working_dir = cfg
             .working_dir
@@ -291,10 +289,9 @@ impl ChannelRuntime {
             .await
             .map_err(|e| ExtensionError::Internal(format!("create telegram session: {e}")))?;
 
-        self.sessions_by_channel
+        self.sessions_by_chat
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, handle.session_id.clone());
+            .insert(chat_id.to_owned(), handle.session_id.clone());
         Ok(handle.session_id)
     }
 
@@ -324,39 +321,63 @@ impl ChannelRuntime {
     }
 }
 
-async fn poll_telegram(runtime: Arc<ChannelRuntime>, shutdown: CancellationToken) {
-    let mut offset: Option<i64> = None;
-    let mut registered_commands_for: Option<String> = None;
+#[derive(Default)]
+struct TelegramPollState {
+    token_hasher: RandomState,
+    token_fingerprint: Option<u64>,
+    offset: Option<i64>,
+    commands_registered: bool,
+}
+
+impl TelegramPollState {
+    fn activate(&mut self, bot_token: &str) {
+        let fingerprint = self.token_hasher.hash_one(bot_token);
+        if self.token_fingerprint != Some(fingerprint) {
+            self.token_fingerprint = Some(fingerprint);
+            self.offset = None;
+            self.commands_registered = false;
+        }
+    }
+
+    fn observe(&mut self, update_id: i64) {
+        self.offset = Some(self.offset.unwrap_or(update_id).max(update_id + 1));
+    }
+}
+
+async fn wait_to_retry(shutdown: &CancellationToken) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => false,
+        () = tokio::time::sleep(Duration::from_secs(CONFIG_SLEEP_SECS)) => true,
+    }
+}
+
+async fn poll_telegram(runtime: Arc<TelegramRuntime>, shutdown: CancellationToken) {
+    let mut state = TelegramPollState::default();
     loop {
         if shutdown.is_cancelled() {
             break;
         }
 
         let cfg = runtime.current_config().telegram;
-        let bot_token = match resolve_bot_token(&cfg) {
-            Ok(token) => token,
-            Err(error) => {
-                tracing::warn!(
-                    extension_id = EXTENSION_ID,
-                    error = %error,
-                    "telegram bot token is not available"
-                );
-                tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    () = tokio::time::sleep(Duration::from_secs(CONFIG_SLEEP_SECS)) => {},
+        let bot_token = match cfg.active_bot_token() {
+            Ok(Some(token)) => token,
+            inactive => {
+                state.commands_registered = false;
+                if let Err(error) = inactive {
+                    tracing::warn!(
+                        extension_id = EXTENSION_ID,
+                        error = %error,
+                        "telegram bot token is not available"
+                    );
+                }
+                if !wait_to_retry(&shutdown).await {
+                    break;
                 }
                 continue;
             },
         };
 
-        if !cfg.enabled || bot_token.is_empty() {
-            registered_commands_for = None;
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                () = tokio::time::sleep(Duration::from_secs(CONFIG_SLEEP_SECS)) => {},
-            }
-            continue;
-        }
+        state.activate(&bot_token);
         if cfg.streaming {
             tracing::warn!(
                 extension_id = EXTENSION_ID,
@@ -364,13 +385,13 @@ async fn poll_telegram(runtime: Arc<ChannelRuntime>, shutdown: CancellationToken
                  the AstrCode turn completes"
             );
         }
-        if cfg.register_commands && registered_commands_for.as_deref() != Some(&bot_token) {
+        if cfg.register_commands && !state.commands_registered {
             match runtime
                 .telegram
                 .set_commands(&bot_token, telegram_commands(), cfg.request_timeout_secs)
                 .await
             {
-                Ok(()) => registered_commands_for = Some(bot_token.clone()),
+                Ok(()) => state.commands_registered = true,
                 Err(error) => tracing::warn!(
                     extension_id = EXTENSION_ID,
                     error = %error,
@@ -378,14 +399,14 @@ async fn poll_telegram(runtime: Arc<ChannelRuntime>, shutdown: CancellationToken
                 ),
             }
         } else if !cfg.register_commands {
-            registered_commands_for = None;
+            state.commands_registered = false;
         }
 
         let updates = tokio::select! {
             () = shutdown.cancelled() => break,
             result = runtime.telegram.get_updates(
                 &bot_token,
-                offset,
+                state.offset,
                 cfg.poll_timeout_secs,
                 cfg.request_timeout_secs,
             ) => result,
@@ -394,7 +415,7 @@ async fn poll_telegram(runtime: Arc<ChannelRuntime>, shutdown: CancellationToken
         match updates {
             Ok(updates) => {
                 for update in updates {
-                    offset = Some(offset.unwrap_or(update.update_id).max(update.update_id + 1));
+                    state.observe(update.update_id);
                     if let Some(inbound) = inbound_message(update) {
                         if let Err(error) = runtime.handle_inbound(&cfg, inbound).await {
                             tracing::warn!(
@@ -412,9 +433,8 @@ async fn poll_telegram(runtime: Arc<ChannelRuntime>, shutdown: CancellationToken
                     error = %error,
                     "telegram getUpdates failed"
                 );
-                tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    () = tokio::time::sleep(Duration::from_secs(CONFIG_SLEEP_SECS)) => {},
+                if !wait_to_retry(&shutdown).await {
+                    break;
                 }
             },
         }
@@ -460,6 +480,24 @@ impl HttpTelegramApi {
     fn method_url(bot_token: &str, method: &str) -> String {
         format!("{TELEGRAM_API_BASE}/bot{bot_token}/{method}")
     }
+
+    async fn post<T: DeserializeOwned>(
+        &self,
+        bot_token: &str,
+        method: &str,
+        body: &impl Serialize,
+        request_timeout_secs: u64,
+    ) -> Result<T, TelegramError> {
+        self.client
+            .post(Self::method_url(bot_token, method))
+            .timeout(Duration::from_secs(request_timeout_secs.max(1)))
+            .json(body)
+            .send()
+            .await?
+            .json::<TelegramResponse<T>>()
+            .await?
+            .into_result()
+    }
 }
 
 #[async_trait::async_trait]
@@ -478,17 +516,8 @@ impl TelegramApi for HttpTelegramApi {
         if let Some(offset) = offset {
             body["offset"] = json!(offset);
         }
-        let response = self
-            .client
-            .post(Self::method_url(bot_token, "getUpdates"))
-            .timeout(Duration::from_secs(request_timeout_secs.max(1)))
-            .json(&body)
-            .send()
-            .await?
-            .json::<TelegramResponse<Vec<TelegramUpdate>>>()
-            .await?;
-
-        telegram_result(response)
+        self.post(bot_token, "getUpdates", &body, request_timeout_secs)
+            .await
     }
 
     async fn send_message(
@@ -498,19 +527,18 @@ impl TelegramApi for HttpTelegramApi {
         text: &str,
         request_timeout_secs: u64,
     ) -> Result<(), TelegramError> {
-        let response = self
-            .client
-            .post(Self::method_url(bot_token, "sendMessage"))
-            .timeout(Duration::from_secs(request_timeout_secs.max(1)))
-            .json(&json!({
+        let _: serde_json::Value = self
+            .post(
+                bot_token,
+                "sendMessage",
+                &json!({
                 "chat_id": chat_id,
                 "text": text,
-            }))
-            .send()
-            .await?
-            .json::<TelegramResponse<serde_json::Value>>()
+                }),
+                request_timeout_secs,
+            )
             .await?;
-        telegram_result(response).map(|_| ())
+        Ok(())
     }
 
     async fn set_commands(
@@ -519,16 +547,15 @@ impl TelegramApi for HttpTelegramApi {
         commands: Vec<TelegramBotCommand>,
         request_timeout_secs: u64,
     ) -> Result<(), TelegramError> {
-        let response = self
-            .client
-            .post(Self::method_url(bot_token, "setMyCommands"))
-            .timeout(Duration::from_secs(request_timeout_secs.max(1)))
-            .json(&json!({ "commands": commands }))
-            .send()
-            .await?
-            .json::<TelegramResponse<bool>>()
+        let _: bool = self
+            .post(
+                bot_token,
+                "setMyCommands",
+                &json!({ "commands": commands }),
+                request_timeout_secs,
+            )
             .await?;
-        telegram_result(response).map(|_| ())
+        Ok(())
     }
 }
 
@@ -547,17 +574,17 @@ struct TelegramResponse<T> {
     description: Option<String>,
 }
 
-fn telegram_result<T>(response: TelegramResponse<T>) -> Result<T, TelegramError> {
-    if response.ok {
-        response
-            .result
-            .ok_or_else(|| TelegramError::Api("telegram response missing result".into()))
-    } else {
-        Err(TelegramError::Api(
-            response
-                .description
-                .unwrap_or_else(|| "telegram api error".into()),
-        ))
+impl<T> TelegramResponse<T> {
+    fn into_result(self) -> Result<T, TelegramError> {
+        if self.ok {
+            self.result
+                .ok_or_else(|| TelegramError::Api("telegram response missing result".into()))
+        } else {
+            Err(TelegramError::Api(
+                self.description
+                    .unwrap_or_else(|| "telegram api error".into()),
+            ))
+        }
     }
 }
 
@@ -620,10 +647,6 @@ fn split_reply(text: &str, max_chars: usize) -> Vec<String> {
         chunks.push(current);
     }
     chunks
-}
-
-fn session_key(channel: &str, external_id: &str) -> String {
-    format!("{channel}:{external_id}")
 }
 
 fn telegram_commands() -> Vec<TelegramBotCommand> {
@@ -694,6 +717,8 @@ fn resolve_env_token(raw_env_name: &str) -> Result<String, ExtensionError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use astrcode_extension_sdk::tool::{
         SessionApiError, SessionDeliveryOutcome, SessionHandle, SessionStatus,
     };
@@ -836,6 +861,68 @@ mod tests {
         }
     }
 
+    struct TestHarness {
+        runtime: TelegramRuntime,
+        session_ops: Arc<FakeSessionOps>,
+        telegram: Arc<FakeTelegram>,
+    }
+
+    impl TestHarness {
+        fn new(allowed_chat_ids: &[&str], allow_all_chats: bool) -> Self {
+            let session_ops = Arc::new(FakeSessionOps::default());
+            let telegram = Arc::new(FakeTelegram::default());
+            let runtime = TelegramRuntime::new(
+                ChannelsConfig {
+                    telegram: TelegramChannelConfig {
+                        enabled: true,
+                        bot_token: Some("token".into()),
+                        allowed_chat_ids: allowed_chat_ids
+                            .iter()
+                            .map(|chat_id| (*chat_id).into())
+                            .collect(),
+                        allow_all_chats,
+                        max_reply_chars: 100,
+                        ..Default::default()
+                    },
+                },
+                "D:/workspace".into(),
+                session_ops.clone(),
+                telegram.clone(),
+            );
+            Self {
+                runtime,
+                session_ops,
+                telegram,
+            }
+        }
+
+        async fn handle(&self, chat_id: &str, text: &str) {
+            let cfg = self.runtime.current_config().telegram;
+            self.runtime
+                .handle_inbound(
+                    &cfg,
+                    InboundMessage {
+                        chat_id: chat_id.into(),
+                        text: text.into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        fn root_create_count(&self) -> usize {
+            self.session_ops.root_creates.lock().unwrap().len()
+        }
+
+        fn submitted_prompts(&self) -> Vec<String> {
+            self.session_ops.submitted_prompts.lock().unwrap().clone()
+        }
+
+        fn sent_messages(&self) -> Vec<(String, String)> {
+            self.telegram.sent.lock().unwrap().clone()
+        }
+    }
+
     #[test]
     fn nested_config_deserializes_with_defaults() {
         let cfg: ChannelsConfig = serde_json::from_value(json!({
@@ -898,6 +985,16 @@ mod tests {
 
     #[test]
     fn bot_token_supports_env_reference() {
+        assert_eq!(
+            TelegramChannelConfig {
+                enabled: false,
+                bot_token_env: Some("ASTRCODE_TEST_MISSING_TELEGRAM_TOKEN".into()),
+                ..Default::default()
+            }
+            .active_bot_token()
+            .unwrap(),
+            None
+        );
         std::env::set_var("ASTRCODE_TEST_TELEGRAM_TOKEN", "token-from-env");
         assert_eq!(
             resolve_bot_token(&TelegramChannelConfig {
@@ -935,6 +1032,26 @@ mod tests {
     }
 
     #[test]
+    fn poll_state_resets_cursor_only_when_bot_changes() {
+        let mut state = TelegramPollState::default();
+
+        state.activate("first");
+        let first_fingerprint = state.token_fingerprint;
+        state.observe(4);
+        state.observe(2);
+        state.commands_registered = true;
+        state.activate("first");
+        assert_eq!(state.token_fingerprint, first_fingerprint);
+        assert_eq!(state.offset, Some(5));
+        assert!(state.commands_registered);
+
+        state.activate("second");
+        assert_ne!(state.token_fingerprint, first_fingerprint);
+        assert_eq!(state.offset, None);
+        assert!(!state.commands_registered);
+    }
+
+    #[test]
     fn telegram_commands_include_start_and_help() {
         let commands = telegram_commands();
         assert_eq!(
@@ -954,51 +1071,18 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_messages_reuse_chat_session() {
-        let session_ops = Arc::new(FakeSessionOps::default());
-        let telegram = Arc::new(FakeTelegram::default());
-        let runtime = ChannelRuntime::new(
-            ChannelsConfig {
-                telegram: TelegramChannelConfig {
-                    enabled: true,
-                    bot_token: Some("token".into()),
-                    allowed_chat_ids: vec!["42".into()],
-                    max_reply_chars: 100,
-                    ..Default::default()
-                },
-            },
-            "D:/workspace".into(),
-            session_ops.clone(),
-            telegram.clone(),
-        );
+        let test = TestHarness::new(&["42"], false);
 
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "42".into(),
-                    text: "first".into(),
-                },
-            )
-            .await
-            .unwrap();
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "42".into(),
-                    text: "second".into(),
-                },
-            )
-            .await
-            .unwrap();
+        test.handle("42", "first").await;
+        test.handle("42", "second").await;
 
-        assert_eq!(session_ops.root_creates.lock().unwrap().len(), 1);
+        assert_eq!(test.root_create_count(), 1);
         assert_eq!(
-            *session_ops.submitted_prompts.lock().unwrap(),
+            test.submitted_prompts(),
             vec!["first".to_string(), "second".to_string()]
         );
         assert_eq!(
-            *telegram.sent.lock().unwrap(),
+            test.sent_messages(),
             vec![
                 ("42".to_string(), "reply: first".to_string()),
                 ("42".to_string(), "reply: second".to_string())
@@ -1008,143 +1092,37 @@ mod tests {
 
     #[tokio::test]
     async fn telegram_commands_reply_without_session_turn() {
-        let session_ops = Arc::new(FakeSessionOps::default());
-        let telegram = Arc::new(FakeTelegram::default());
-        let runtime = ChannelRuntime::new(
-            ChannelsConfig {
-                telegram: TelegramChannelConfig {
-                    enabled: true,
-                    bot_token: Some("token".into()),
-                    allowed_chat_ids: vec!["42".into()],
-                    ..Default::default()
-                },
-            },
-            "D:/workspace".into(),
-            session_ops.clone(),
-            telegram.clone(),
-        );
+        let test = TestHarness::new(&["42"], false);
 
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "42".into(),
-                    text: "/help@my_bot".into(),
-                },
-            )
-            .await
-            .unwrap();
+        test.handle("42", "/help@my_bot").await;
 
-        assert!(session_ops.root_creates.lock().unwrap().is_empty());
-        assert!(session_ops.submitted_prompts.lock().unwrap().is_empty());
-        assert_eq!(telegram.sent.lock().unwrap().len(), 1);
-        assert!(
-            telegram.sent.lock().unwrap()[0]
-                .1
-                .contains("AstrCode is ready")
-        );
+        assert_eq!(test.root_create_count(), 0);
+        assert!(test.submitted_prompts().is_empty());
+        let sent = test.sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].1.contains("AstrCode is ready"));
     }
 
     #[tokio::test]
-    async fn unauthorized_chat_does_not_create_session() {
-        let session_ops = Arc::new(FakeSessionOps::default());
-        let telegram = Arc::new(FakeTelegram::default());
-        let runtime = ChannelRuntime::new(
-            ChannelsConfig {
-                telegram: TelegramChannelConfig {
-                    enabled: true,
-                    bot_token: Some("token".into()),
-                    allowed_chat_ids: vec!["42".into()],
-                    ..Default::default()
-                },
-            },
-            "D:/workspace".into(),
-            session_ops.clone(),
-            telegram.clone(),
-        );
+    async fn chat_access_policy_is_explicit() {
+        let cases: [(&str, &[&str], bool, &str, bool); 3] = [
+            ("unlisted chat", &["42"], false, "99", false),
+            ("empty allowlist", &[], false, "42", false),
+            ("allow all", &[], true, "42", true),
+        ];
 
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "99".into(),
-                    text: "blocked".into(),
-                },
-            )
-            .await
-            .unwrap();
+        for (name, allowed_chat_ids, allow_all_chats, chat_id, allowed) in cases {
+            let test = TestHarness::new(allowed_chat_ids, allow_all_chats);
 
-        assert!(session_ops.root_creates.lock().unwrap().is_empty());
-        assert!(telegram.sent.lock().unwrap().is_empty());
-    }
+            test.handle(chat_id, "request").await;
 
-    #[tokio::test]
-    async fn empty_allowlist_rejects_by_default() {
-        let session_ops = Arc::new(FakeSessionOps::default());
-        let telegram = Arc::new(FakeTelegram::default());
-        let runtime = ChannelRuntime::new(
-            ChannelsConfig {
-                telegram: TelegramChannelConfig {
-                    enabled: true,
-                    bot_token: Some("token".into()),
-                    allowed_chat_ids: Vec::new(),
-                    allow_all_chats: false,
-                    ..Default::default()
-                },
-            },
-            "D:/workspace".into(),
-            session_ops.clone(),
-            telegram.clone(),
-        );
-
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "42".into(),
-                    text: "blocked".into(),
-                },
-            )
-            .await
-            .unwrap();
-
-        assert!(session_ops.root_creates.lock().unwrap().is_empty());
-        assert!(telegram.sent.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn allow_all_chats_is_explicit() {
-        let session_ops = Arc::new(FakeSessionOps::default());
-        let telegram = Arc::new(FakeTelegram::default());
-        let runtime = ChannelRuntime::new(
-            ChannelsConfig {
-                telegram: TelegramChannelConfig {
-                    enabled: true,
-                    bot_token: Some("token".into()),
-                    allow_all_chats: true,
-                    ..Default::default()
-                },
-            },
-            "D:/workspace".into(),
-            session_ops.clone(),
-            telegram.clone(),
-        );
-
-        runtime
-            .handle_inbound(
-                &runtime.current_config().telegram,
-                InboundMessage {
-                    chat_id: "42".into(),
-                    text: "allowed".into(),
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(session_ops.root_creates.lock().unwrap().len(), 1);
-        assert_eq!(
-            *telegram.sent.lock().unwrap(),
-            vec![("42".to_string(), "reply: allowed".to_string())]
-        );
+            assert_eq!(test.root_create_count(), usize::from(allowed), "{name}");
+            assert_eq!(
+                test.submitted_prompts().len(),
+                usize::from(allowed),
+                "{name}"
+            );
+            assert_eq!(test.sent_messages().len(), usize::from(allowed), "{name}");
+        }
     }
 }

@@ -14,11 +14,8 @@ pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
 pub(super) type ContinueAfterStopExtensionHandler<H> = (String, ContinueAfterStopOptions, Arc<H>);
 pub(super) type SimpleExtensionHandler<H> = (String, Arc<H>);
-pub(super) type PrioritizedToolHandler<H> = (i32, String, HookMode, ToolHookTarget, Arc<H>);
-pub(super) type PrioritizedContinueAfterStopHandler<H> =
-    (i32, String, ContinueAfterStopOptions, Arc<H>);
-pub(super) type PrioritizedSimpleHandler<H> = (i32, String, Arc<H>);
-pub(super) type PrioritizedEventHandler<K, H> = (K, i32, String, HookMode, Arc<H>);
+type Prioritized<T> = (i32, T);
+type PrioritizedEvent<K, T> = (K, i32, T);
 
 #[derive(Clone)]
 pub(super) struct HttpRouteEntry {
@@ -78,36 +75,25 @@ impl HandlerIndex {
 }
 
 pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
-    let mut pre: Vec<PrioritizedToolHandler<dyn PreToolUseHandler>> = Vec::new();
-    let mut post: Vec<PrioritizedToolHandler<dyn PostToolUseHandler>> = Vec::new();
-    let mut prov: Vec<PrioritizedEventHandler<ProviderEvent, dyn ProviderHandler>> = Vec::new();
-    let mut pb: Vec<(i32, Arc<dyn PromptBuildHandler>)> = Vec::new();
-    let mut cmp: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)> = Vec::new();
-    let mut ptuf: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)> = Vec::new();
-    let mut cas: Vec<PrioritizedContinueAfterStopHandler<dyn ContinueAfterStopHandler>> =
-        Vec::new();
-    let mut ume: Vec<PrioritizedSimpleHandler<dyn UserMessageEnvelopeHandler>> = Vec::new();
-    let mut atr: Vec<PrioritizedSimpleHandler<dyn AfterToolResultsHandler>> = Vec::new();
-    let mut lc: Vec<PrioritizedEventHandler<ExtensionEvent, dyn LifecycleHandler>> = Vec::new();
+    let mut pre_tool_use = Vec::new();
+    let mut post_tool_use = Vec::new();
+    let mut provider = Vec::new();
+    let mut prompt_build = Vec::new();
+    let mut compact = Vec::new();
+    let mut post_tool_use_failure = Vec::new();
+    let mut continue_after_stop = Vec::new();
+    let mut user_message_envelope = Vec::new();
+    let mut after_tool_results = Vec::new();
+    let mut lifecycle = Vec::new();
     let mut tool_metadata = HashMap::new();
     let mut tool_ui = HashMap::new();
-    #[allow(clippy::type_complexity)]
-    let mut static_tools: Vec<(
-        ToolDefinition,
-        Arc<dyn ToolHandler>,
-        String,
-        Vec<ExtensionCapability>,
-    )> = Vec::new();
-    let mut tool_discoveries: Vec<(
-        String,
-        Arc<dyn ToolDiscoveryHandler>,
-        Vec<ExtensionCapability>,
-    )> = Vec::new();
-    let mut static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> = Vec::new();
-    let mut command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)> = Vec::new();
-    let mut keybindings: Vec<Keybinding> = Vec::new();
-    let mut status_items: Vec<StatusItem> = Vec::new();
-    let mut extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>> = HashMap::new();
+    let mut static_tools = Vec::new();
+    let mut tool_discoveries = Vec::new();
+    let mut static_commands = Vec::new();
+    let mut command_discoveries = Vec::new();
+    let mut keybindings = Vec::new();
+    let mut status_items = Vec::new();
+    let mut extension_event_decls = HashMap::new();
     let mut extension_data_dir_extensions = HashSet::new();
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
@@ -115,90 +101,101 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     for record in records {
         capabilities.insert(record.id.clone(), record.capabilities.clone());
         for registration in record.reg.pre_tool_use() {
-            pre.push((
+            pre_tool_use.push((
                 registration.priority,
-                record.id.clone(),
-                registration.mode,
-                registration.target.clone(),
-                Arc::clone(&registration.handler),
+                (
+                    record.id.clone(),
+                    registration.mode,
+                    registration.target.clone(),
+                    Arc::clone(&registration.handler),
+                ),
             ));
         }
         for registration in record.reg.post_tool_use() {
-            post.push((
+            post_tool_use.push((
                 registration.priority,
-                record.id.clone(),
-                registration.mode,
-                registration.target.clone(),
-                Arc::clone(&registration.handler),
+                (
+                    record.id.clone(),
+                    registration.mode,
+                    registration.target.clone(),
+                    Arc::clone(&registration.handler),
+                ),
             ));
         }
-        for (ev, mode, pri, h) in record.reg.provider() {
-            prov.push((*ev, *pri, record.id.clone(), *mode, Arc::clone(h)));
+        for (event, mode, priority, handler) in record.reg.provider() {
+            provider.push((
+                *event,
+                *priority,
+                (record.id.clone(), *mode, Arc::clone(handler)),
+            ));
         }
-        for (pri, h) in record.reg.prompt_build() {
-            pb.push((*pri, Arc::clone(h)));
+        for (priority, handler) in record.reg.prompt_build() {
+            prompt_build.push((*priority, Arc::clone(handler)));
         }
-        for (ev, pri, h) in record.reg.compact() {
-            cmp.push((*ev, *pri, Arc::clone(h)));
+        for (event, priority, handler) in record.reg.compact() {
+            compact.push((*event, *priority, Arc::clone(handler)));
         }
-        for (pri, h) in record.reg.post_tool_use_failure() {
-            ptuf.push((*pri, Arc::clone(h)));
+        for (priority, handler) in record.reg.post_tool_use_failure() {
+            post_tool_use_failure.push((*priority, Arc::clone(handler)));
         }
         for registration in record.reg.continue_after_stop() {
-            cas.push((
+            continue_after_stop.push((
                 registration.priority,
-                record.id.clone(),
-                registration.options,
-                Arc::clone(&registration.handler),
+                (
+                    record.id.clone(),
+                    registration.options,
+                    Arc::clone(&registration.handler),
+                ),
             ));
         }
         for registration in record.reg.user_message_envelope() {
-            ume.push((
+            user_message_envelope.push((
                 registration.priority,
-                record.id.clone(),
-                Arc::clone(&registration.handler),
+                (record.id.clone(), Arc::clone(&registration.handler)),
             ));
         }
         for registration in record.reg.after_tool_results() {
-            atr.push((
+            after_tool_results.push((
                 registration.priority,
-                record.id.clone(),
-                Arc::clone(&registration.handler),
+                (record.id.clone(), Arc::clone(&registration.handler)),
             ));
         }
-        for (ev, mode, pri, h) in record.reg.lifecycle() {
-            lc.push((ev.clone(), *pri, record.id.clone(), *mode, Arc::clone(h)));
+        for (event, mode, priority, handler) in record.reg.lifecycle() {
+            lifecycle.push((
+                event.clone(),
+                *priority,
+                (record.id.clone(), *mode, Arc::clone(handler)),
+            ));
         }
-        // collect 缓存
-        tool_metadata.extend(record.reg.all_tool_metadata().clone());
-        tool_ui.extend(record.reg.all_tool_ui().clone());
-        for (def, handler) in record.reg.tools().iter() {
+        for (name, metadata) in record.reg.all_tool_metadata() {
+            tool_metadata.insert(name.clone(), metadata.clone());
+        }
+        for (name, ui) in record.reg.all_tool_ui() {
+            tool_ui.insert(name.clone(), ui.clone());
+        }
+        for (definition, handler) in record.reg.tools() {
             static_tools.push((
-                def.clone(),
+                definition.clone(),
                 Arc::clone(handler),
                 record.id.clone(),
                 record.capabilities.clone(),
             ));
         }
-        for discovery in record.reg.tool_discoveries().iter() {
+        for discovery in record.reg.tool_discoveries() {
             tool_discoveries.push((
                 record.id.clone(),
                 Arc::clone(discovery),
                 record.capabilities.clone(),
             ));
         }
-        for (cmd, handler) in record.reg.commands().iter() {
-            static_commands.push((record.id.clone(), cmd.clone(), Arc::clone(handler)));
+        for (command, handler) in record.reg.commands() {
+            static_commands.push((record.id.clone(), command.clone(), Arc::clone(handler)));
         }
-        for discovery in record.reg.command_discoveries().iter() {
+        for discovery in record.reg.command_discoveries() {
             command_discoveries.push((record.id.clone(), Arc::clone(discovery)));
         }
-        for kb in record.reg.keybindings() {
-            keybindings.push(kb.clone());
-        }
-        for item in record.reg.status_items() {
-            status_items.push(item.clone());
-        }
+        keybindings.extend_from_slice(record.reg.keybindings());
+        status_items.extend_from_slice(record.reg.status_items());
         if !record.reg.extension_event_decls().is_empty() {
             extension_event_decls.insert(
                 record.id.clone(),
@@ -221,37 +218,17 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         );
     }
 
-    pre.sort_by_key(|b| std::cmp::Reverse(b.0));
-    post.sort_by_key(|b| std::cmp::Reverse(b.0));
-    prov.sort_by_key(|b| std::cmp::Reverse(b.1));
-    pb.sort_by_key(|b| std::cmp::Reverse(b.0));
-    cmp.sort_by_key(|b| std::cmp::Reverse(b.1));
-    ptuf.sort_by_key(|b| std::cmp::Reverse(b.0));
-    cas.sort_by_key(|b| std::cmp::Reverse(b.0));
-    ume.sort_by_key(|b| std::cmp::Reverse(b.0));
-    atr.sort_by_key(|b| std::cmp::Reverse(b.0));
-    lc.sort_by_key(|b| std::cmp::Reverse(b.1));
-
     HandlerIndex {
-        pre_tool_use: pre
-            .into_iter()
-            .map(|(_, id, m, target, h)| (id, m, target, h))
-            .collect(),
-        post_tool_use: post
-            .into_iter()
-            .map(|(_, id, m, target, h)| (id, m, target, h))
-            .collect(),
-        provider: group_by_event_with_mode(prov),
-        prompt_build: pb.into_iter().map(|(_, h)| h).collect(),
-        compact: group_by_event_plain(cmp),
-        post_tool_use_failure: ptuf.into_iter().map(|(_, h)| h).collect(),
-        continue_after_stop: cas
-            .into_iter()
-            .map(|(_, id, options, h)| (id, options, h))
-            .collect(),
-        user_message_envelope: ume.into_iter().map(|(_, id, h)| (id, h)).collect(),
-        after_tool_results: atr.into_iter().map(|(_, id, h)| (id, h)).collect(),
-        lifecycle: group_by_event_with_mode(lc),
+        pre_tool_use: handlers_by_priority(pre_tool_use),
+        post_tool_use: handlers_by_priority(post_tool_use),
+        provider: handlers_by_event(provider),
+        prompt_build: handlers_by_priority(prompt_build),
+        compact: handlers_by_event(compact),
+        post_tool_use_failure: handlers_by_priority(post_tool_use_failure),
+        continue_after_stop: handlers_by_priority(continue_after_stop),
+        user_message_envelope: handlers_by_priority(user_message_envelope),
+        after_tool_results: handlers_by_priority(after_tool_results),
+        lifecycle: handlers_by_event(lifecycle),
         tool_metadata,
         tool_ui,
         static_tools,
@@ -326,30 +303,21 @@ fn http_method_name(method: ExtensionHttpMethod) -> &'static str {
     }
 }
 
-fn group_by_event_with_mode<K, H>(
-    mut items: Vec<PrioritizedEventHandler<K, H>>,
-) -> HashMap<K, Vec<ExtensionHandler<H>>>
-where
-    K: std::hash::Hash + Eq,
-    H: ?Sized,
-{
-    let mut map: HashMap<K, Vec<ExtensionHandler<H>>> = HashMap::new();
-    for (ev, _, extension_id, mode, h) in items.drain(..) {
-        map.entry(ev).or_default().push((extension_id, mode, h));
-    }
-    map
+fn handlers_by_priority<T>(mut handlers: Vec<Prioritized<T>>) -> Vec<T> {
+    handlers.sort_by_key(|handler| std::cmp::Reverse(handler.0));
+    handlers.into_iter().map(|(_, handler)| handler).collect()
 }
 
-fn group_by_event_plain<K, H>(mut items: Vec<(K, i32, Arc<H>)>) -> HashMap<K, Vec<Arc<H>>>
+fn handlers_by_event<K, T>(mut handlers: Vec<PrioritizedEvent<K, T>>) -> HashMap<K, Vec<T>>
 where
     K: std::hash::Hash + Eq,
-    H: ?Sized,
 {
-    let mut map: HashMap<K, Vec<Arc<H>>> = HashMap::new();
-    for (ev, _, h) in items.drain(..) {
-        map.entry(ev).or_default().push(h);
+    handlers.sort_by_key(|handler| std::cmp::Reverse(handler.1));
+    let mut grouped: HashMap<K, Vec<T>> = HashMap::new();
+    for (event, _, handler) in handlers {
+        grouped.entry(event).or_default().push(handler);
     }
-    map
+    grouped
 }
 
 /// 在 debug 级日志里输出每个事件的 handler 调度顺序（按优先级降序，extension_id 标注）。
@@ -387,17 +355,17 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
                 registration.target.clone(),
             ));
         }
-        for (ev, mode, pri, _) in record.reg.provider() {
-            provider.push((id, *ev, *pri, *mode));
+        for (event, mode, priority, _) in record.reg.provider() {
+            provider.push((id, *event, *priority, *mode));
         }
-        for (pri, _) in record.reg.prompt_build() {
-            prompt.push((id, *pri));
+        for (priority, _) in record.reg.prompt_build() {
+            prompt.push((id, *priority));
         }
-        for (ev, pri, _) in record.reg.compact() {
-            compact.push((id, *ev, *pri));
+        for (event, priority, _) in record.reg.compact() {
+            compact.push((id, *event, *priority));
         }
-        for (ev, mode, pri, _) in record.reg.lifecycle() {
-            lifecycle.push((id, ev.clone(), *pri, *mode));
+        for (event, mode, priority, _) in record.reg.lifecycle() {
+            lifecycle.push((id, event.clone(), *priority, *mode));
         }
     }
 
@@ -431,5 +399,25 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
 impl ExtensionRunner {
     pub(super) fn load_index(&self) -> Arc<HandlerIndex> {
         Arc::clone(&self.index.read())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handlers_by_event, handlers_by_priority};
+
+    #[test]
+    fn priority_helpers_sort_descending_and_preserve_ties() {
+        let handlers = handlers_by_priority(vec![(0, "low"), (10, "first"), (10, "second")]);
+        assert_eq!(handlers, ["first", "second", "low"]);
+
+        let grouped = handlers_by_event(vec![
+            ("a", 0, "a-low"),
+            ("b", 5, "b"),
+            ("a", 5, "a-first"),
+            ("a", 5, "a-second"),
+        ]);
+        assert_eq!(grouped["a"], ["a-first", "a-second", "a-low"]);
+        assert_eq!(grouped["b"], ["b"]);
     }
 }

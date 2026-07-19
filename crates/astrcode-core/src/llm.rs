@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
+pub mod token_estimate;
+
 /// LLM 对话消息中的角色。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmRole {
     /// 系统指令消息。
@@ -74,6 +76,26 @@ pub enum LlmContent {
 }
 
 impl LlmContent {
+    /// 返回纯文本内容；非文本块返回 `None`。
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// 按给定分隔符拼接内容集合中的纯文本块，忽略其他内容类型。
+    pub fn join_text<'a>(contents: impl IntoIterator<Item = &'a Self>, separator: &str) -> String {
+        let mut output = String::new();
+        for (index, text) in contents.into_iter().filter_map(Self::as_text).enumerate() {
+            if index > 0 {
+                output.push_str(separator);
+            }
+            output.push_str(text);
+        }
+        output
+    }
+
     /// 将内容转换为人类可读的纯文本展示。
     ///
     /// 这是有损转换——不可能完全还原原始渲染效果。
@@ -187,6 +209,11 @@ impl LlmMessage {
             .map(LlmContent::to_display_text)
             .collect::<Vec<_>>()
             .join(separator)
+    }
+
+    /// 按给定分隔符拼接消息中的纯文本块，忽略图片和工具块。
+    pub fn joined_text(&self, separator: &str) -> String {
+        LlmContent::join_text(&self.content, separator)
     }
 
     /// 判断该消息在去掉展示元数据后是否仍应发送给 provider。
@@ -715,6 +742,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn joined_text_preserves_text_blocks_and_ignores_other_content() {
+        let mut message = LlmMessage::user("first");
+        message.content.extend([
+            LlmContent::Text {
+                text: String::new(),
+            },
+            LlmContent::Image {
+                base64: "image".into(),
+                media_type: "image/png".into(),
+                filename: None,
+            },
+            LlmContent::Text {
+                text: "last".into(),
+            },
+        ]);
+
+        assert_eq!(message.joined_text("|"), "first||last");
+        assert_eq!(message.content[2].as_text(), None);
+    }
+
+    #[test]
     fn provider_visible_messages_truncates_dangling_tool_call_before_user_append() {
         let messages = vec![
             LlmMessage::user("start"),
@@ -755,10 +803,7 @@ mod tests {
         let text = message
             .content
             .iter()
-            .find_map(|part| match part {
-                LlmContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
+            .find_map(LlmContent::as_text)
             .expect("text attachment");
         assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
         assert!(text.ends_with("</attachment>"));

@@ -1,7 +1,10 @@
 //! 配置查看 / 重载 / 激活选择路由。
 
 use astrcode_core::{
-    config::{ModelConfig, Profile, ProviderCapabilities, ProviderSpec, builtin_provider_catalog},
+    config::{
+        Config, ConfigStoreError, ModelConfig, Profile, ProviderCapabilities, ProviderSpec,
+        builtin_provider_catalog,
+    },
     permission::ApprovalMode,
 };
 use astrcode_protocol::http::{
@@ -17,11 +20,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::super::{HttpState, bad_request_response, internal_error_response};
+use super::{
+    super::{HttpState, bad_request_response, internal_error_response},
+    notify_extensions_config_changed, reload_extension_registry,
+};
 use crate::bootstrap::{self, BootstrapOptions};
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
     let raw = state.runtime.config_manager().raw_config_snapshot();
+    let effective = state.runtime.config_manager().read_effective();
     let config_path = state
         .runtime
         .config_manager
@@ -54,26 +61,14 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                 .collect(),
         })
         .collect();
-    let approval_mode = state
-        .runtime
-        .config_manager
-        .read_effective()
-        .agent
-        .approval_mode;
     Json(ConfigViewResponseDto {
         config_path,
         active_profile: raw.active_profile.clone(),
         active_model: raw.active_model.clone(),
         active_small_profile: raw.active_small_profile.clone(),
         active_small_model: raw.active_small_model,
-        extension_states: state
-            .runtime
-            .config_manager
-            .read_effective()
-            .extensions
-            .extension_states
-            .clone(),
-        approval_mode: approval_mode_to_wire(approval_mode),
+        extension_states: effective.extensions.extension_states.clone(),
+        approval_mode: effective.agent.approval_mode.into(),
         profiles,
         warning: None,
     })
@@ -167,28 +162,10 @@ pub(in crate::http) async fn apply_provider_preset(
         }
     }
 
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .config_store()
-        .save(&candidate)
-        .await
-    {
-        return internal_error_response("save_failed", error);
-    }
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(candidate)
-    {
-        tracing::warn!("apply_raw_config_and_rebuild failed after provider preset save: {error}");
-        append_warning(
-            &mut warning,
-            format!("Saved to disk but runtime kept the previous provider: {error}."),
-        );
-    } else {
-        state.runtime.sync_session_model_bindings();
+    match persist_and_apply_config(&state, candidate).await {
+        Ok(Some(apply_warning)) => append_warning(&mut warning, apply_warning),
+        Ok(None) => {},
+        Err(error) => return internal_error_response("save_failed", error),
     }
 
     Json(ApplyProviderPresetResponseDto {
@@ -235,36 +212,18 @@ pub(in crate::http) async fn remove_provider_preset(
         candidate.active_small_model = None;
     }
 
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .config_store()
-        .save(&candidate)
-        .await
-    {
-        return internal_error_response("save_failed", error);
-    }
-
-    let mut warning = None;
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(candidate.clone())
-    {
-        tracing::warn!("apply_raw_config_and_rebuild failed after provider preset remove: {error}");
-        append_warning(
-            &mut warning,
-            format!("Saved to disk but runtime kept the previous provider: {error}."),
-        );
-    } else {
-        state.runtime.sync_session_model_bindings();
-    }
+    let active_profile = candidate.active_profile.clone();
+    let active_model = candidate.active_model.clone();
+    let warning = match persist_and_apply_config(&state, candidate).await {
+        Ok(warning) => warning,
+        Err(error) => return internal_error_response("save_failed", error),
+    };
 
     Json(RemoveProviderPresetResponseDto {
         success: true,
         removed_profile_name: profile_name.to_string(),
-        active_profile: candidate.active_profile,
-        active_model: candidate.active_model,
+        active_profile,
+        active_model,
         warning,
     })
     .into_response()
@@ -303,22 +262,9 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     }
     state.runtime.sync_session_model_bindings();
     // 通知扩展配置已变更（针对已运行扩展的配置热更新）
-    let config_errors = state
-        .runtime
-        .config_manager
-        .notify_extensions_config_changed()
-        .await;
-    for error in &config_errors {
-        tracing::warn!("extension config notify error: {error}");
-    }
+    notify_extensions_config_changed(&state).await;
     // 重载扩展（处理启用/禁用状态变化）
-    let reload_errors = state.runtime.reload_extensions().await;
-    state
-        .event_bus
-        .send_notification(astrcode_protocol::events::ClientNotification::ExtensionRegistryChanged);
-    for error in reload_errors {
-        tracing::warn!("extension reload error: {error}");
-    }
+    let _ = reload_extension_registry(&state).await;
 
     Json(ConfigReloadResponseDto {
         active_profile,
@@ -333,17 +279,11 @@ pub(in crate::http) async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
-    let approval_mode = match ApprovalMode::parse(&request.approval_mode) {
-        Some(mode) => mode,
-        None => {
-            return bad_request_response(
-                "invalid_approval_mode",
-                format!(
-                    "Invalid approvalMode {:?}; expected \"manual\" or \"yolo\"",
-                    request.approval_mode
-                ),
-            );
-        },
+    let Ok(approval_mode) = ApprovalMode::try_from(request.approval_mode) else {
+        return bad_request_response(
+            "invalid_approval_mode",
+            "Invalid approvalMode; expected \"manual\" or \"yolo\"",
+        );
     };
 
     let mut candidate = state.runtime.config_manager().raw_config_snapshot();
@@ -355,58 +295,52 @@ pub(in crate::http) async fn update_active_selection(
         candidate.active_small_model = Some(m);
     }
 
-    candidate.runtime.approval_mode = Some(approval_mode_to_wire(approval_mode));
+    candidate.runtime.approval_mode = Some(approval_mode.as_str().into());
 
     // Validate before persisting.
     if let Err(error) = candidate.clone().into_effective() {
         return bad_request_response("invalid_selection", error);
     };
 
-    // Persist the validated candidate.
-    if let Err(error) = state
+    let warning = match persist_and_apply_config(&state, candidate).await {
+        Ok(warning) => warning,
+        Err(error) => return internal_error_response("save_failed", error),
+    };
+
+    // 通知扩展配置已变更（如果有扩展配置变化）
+    notify_extensions_config_changed(&state).await;
+
+    Json(UpdateActiveSelectionResponseDto {
+        success: true,
+        warning,
+    })
+    .into_response()
+}
+
+async fn persist_and_apply_config(
+    state: &HttpState,
+    candidate: Config,
+) -> Result<Option<String>, ConfigStoreError> {
+    state
         .runtime
         .config_manager
         .config_store()
         .save(&candidate)
-        .await
-    {
-        return internal_error_response("save_failed", error);
-    }
+        .await?;
 
-    // apply_raw_config_and_rebuild re-validates internally; failure here after
-    // the explicit check above indicates a race or I/O issue.
     if let Err(error) = state
         .runtime
         .config_manager
         .apply_raw_config_and_rebuild(candidate)
     {
         tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
-    } else {
-        state.runtime.sync_session_model_bindings();
+        return Ok(Some(format!(
+            "Saved to disk but runtime kept the previous effective configuration: {error}."
+        )));
     }
 
-    // 通知扩展配置已变更（如果有扩展配置变化）
-    let config_errors = state
-        .runtime
-        .config_manager
-        .notify_extensions_config_changed()
-        .await;
-    for error in &config_errors {
-        tracing::warn!("extension config notify error: {error}");
-    }
-
-    Json(UpdateActiveSelectionResponseDto {
-        success: true,
-        warning: None,
-    })
-    .into_response()
-}
-
-fn approval_mode_to_wire(mode: ApprovalMode) -> String {
-    match mode {
-        ApprovalMode::Manual => "manual".to_string(),
-        ApprovalMode::Yolo => "yolo".to_string(),
-    }
+    state.runtime.sync_session_model_bindings();
+    Ok(None)
 }
 
 fn provider_spec_to_dto(spec: &ProviderSpec) -> ProviderSpecDto {

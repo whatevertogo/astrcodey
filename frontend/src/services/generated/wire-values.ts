@@ -3,6 +3,12 @@
 export const PHASES = ["idle","thinking","streaming","calling_tool","compacting","error"] as const
 export const TOOL_OUTPUT_STREAMS = ["stdout","stderr"] as const
 export const APPROVAL_DECISIONS = ["allow_once","deny_once","allow_always","deny_always"] as const
+export const APPROVAL_MODES = ["manual","yolo"] as const
+export const COMMAND_SOURCES = ["builtin","extension","skill"] as const
+export const EXTENSION_SOURCES = ["builtin","disk","unknown"] as const
+export const EXTENSION_STAGE_STATUSES = ["unknown","running","succeeded","failed","skipped"] as const
+export const MESSAGE_ROLES = ["system","user","assistant","tool"] as const
+export const EXTENSION_HTTP_METHODS = ["GET","POST","PUT","PATCH","DELETE"] as const
 export const PROVIDER_WIRE_FORMATS = ["openai_chat_completions","openai_responses","anthropic_messages","google_genai"] as const
 export const PROVIDER_AUTH_SCHEMES = ["none","bearer","x_api_key","x_goog_api_key"] as const
 export const THINKING_LEVELS = ["low","medium","high"] as const

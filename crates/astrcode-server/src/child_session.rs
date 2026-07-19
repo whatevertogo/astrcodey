@@ -22,11 +22,11 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     session_manager::SessionManager,
-    turn_scheduler::{CompletionParams, InputDelivery, TurnScheduler},
+    turn_scheduler::{CompletedRecycleOutcome, InputDelivery, TurnScheduler},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChildOutcome {
+enum ChildOutcome {
     Completed { output: String },
     Failed { error: String },
     Aborted,
@@ -42,53 +42,22 @@ pub enum ChildCleanup {
     Keep,
 }
 
-#[derive(Debug, Clone)]
-pub struct ChildSessionCompletionConfig {
-    pub child_session_id: SessionId,
-    pub parent_session_id: SessionId,
-    pub cleanup: ChildCleanup,
+struct ChildSessionCompletionConfig {
+    child_session_id: SessionId,
+    parent_session_id: SessionId,
+    turn_id: TurnId,
+    cleanup: ChildCleanup,
     /// 非 None 时在完成后向父 session 注入通知；字符串作 summary 提示（可为空）。
-    pub notify_on_complete: Option<String>,
-    pub tool_call_id: Option<String>,
+    notify_on_complete: Option<String>,
+    tool_call_id: Option<String>,
 }
 
-struct ChildSessionTracker {
-    guards: Mutex<Vec<Arc<ChildSessionCompletionGuard>>>,
-}
-
-impl ChildSessionTracker {
-    fn new() -> Self {
-        Self {
-            guards: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn register(&self, guard: Arc<ChildSessionCompletionGuard>) {
-        self.guards.lock().push(guard);
-    }
-
-    fn collect_completed(&self) -> Vec<Arc<ChildSessionCompletionGuard>> {
-        let mut guards = self.guards.lock();
-        let (done, pending): (Vec<_>, Vec<_>) = guards
-            .drain(..)
-            .partition(|g| g.outcome_rx.borrow().is_some());
-        *guards = pending;
-        done
-    }
-
-    fn abort_all_direct(&self) -> Vec<Arc<ChildSessionCompletionGuard>> {
-        let guards: Vec<_> = self.guards.lock().drain(..).collect();
-        for guard in &guards {
-            guard.request_shutdown();
-        }
-        guards
-    }
-}
+type CompletionGuards = Vec<Arc<ChildSessionCompletionGuard>>;
 
 /// 子 agent session 完成、turn 提交与回收的 server 侧协调者。
 pub struct ChildSessionCoordinator {
     session_manager: Arc<SessionManager>,
-    by_parent: Mutex<HashMap<SessionId, ChildSessionTracker>>,
+    by_parent: Mutex<HashMap<SessionId, CompletionGuards>>,
     completed_tx: mpsc::Sender<SessionId>,
     completed_rx: Mutex<Option<mpsc::Receiver<SessionId>>>,
 }
@@ -120,10 +89,6 @@ impl ChildSessionCoordinator {
                     .await;
             }
         });
-    }
-
-    pub fn session_manager(&self) -> &Arc<SessionManager> {
-        &self.session_manager
     }
 
     pub async fn verify_access(
@@ -248,13 +213,10 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
 
-        let turn_id = started.turn_id.clone();
+        let turn_id = started.turn_id;
         let result = started.handle.wait().await;
         let next = scheduler
-            .finish_and_maybe_start_next(CompletionParams {
-                session_id: target_sid.clone(),
-                turn_id,
-            })
+            .finish_and_maybe_start_next(target_sid, &turn_id)
             .await;
         scheduler.watch_queued_if_any(target_sid.clone(), next);
 
@@ -307,6 +269,7 @@ impl ChildSessionCoordinator {
         let config = ChildSessionCompletionConfig {
             child_session_id: target_sid.clone(),
             parent_session_id: caller_sid.clone(),
+            turn_id: turn_id.clone(),
             cleanup,
             notify_on_complete,
             tool_call_id,
@@ -316,16 +279,11 @@ impl ChildSessionCoordinator {
         Ok((turn_id, target_sid.clone()))
     }
 
-    pub async fn record_completed(
-        &self,
-        parent_sid: &SessionId,
-        child_sid: &SessionId,
-        summary: &str,
-    ) {
+    async fn record_completed(&self, parent_sid: &SessionId, child_sid: &SessionId, summary: &str) {
         write_agent_completed(&self.session_manager, parent_sid, child_sid, summary).await;
     }
 
-    pub async fn record_failed(&self, parent_sid: &SessionId, child_sid: &SessionId, error: &str) {
+    async fn record_failed(&self, parent_sid: &SessionId, child_sid: &SessionId, error: &str) {
         write_agent_failed(&self.session_manager, parent_sid, child_sid, error).await;
     }
 
@@ -335,8 +293,47 @@ impl ChildSessionCoordinator {
         parent_sid: &SessionId,
         child_sid: &SessionId,
     ) {
-        scheduler.release_completed_execution(child_sid).await;
-        if let Err(e) = self.session_manager.recycle_session(child_sid).await {
+        let result = scheduler.recycle_session(child_sid).await;
+        self.record_child_recycled(parent_sid, child_sid, result)
+            .await;
+    }
+
+    async fn recycle_completed_child(
+        &self,
+        scheduler: &TurnScheduler,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+        turn_id: &TurnId,
+    ) {
+        match scheduler
+            .recycle_completed_session(child_sid, turn_id)
+            .await
+        {
+            Ok(CompletedRecycleOutcome::Recycled) => {
+                self.record_child_recycled(parent_sid, child_sid, Ok(()))
+                    .await;
+            },
+            Ok(CompletedRecycleOutcome::StaleCompletion) => {
+                tracing::debug!(
+                    session_id = %child_sid,
+                    turn_id = %turn_id,
+                    "ignored stale child completion during recycle"
+                );
+            },
+            Err(error) => {
+                self.record_child_recycled(parent_sid, child_sid, Err(error))
+                    .await;
+            },
+        }
+    }
+
+    async fn record_child_recycled(
+        &self,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+        result: Result<(), crate::turn_scheduler::TurnScheduleError>,
+    ) {
+        if let Err(e) = result {
             tracing::warn!(
                 session_id = %child_sid,
                 error = %e,
@@ -362,7 +359,7 @@ impl ChildSessionCoordinator {
                     "failed to append AgentSessionRecycled event"
                 );
             }
-            scheduler.sync_durable_events(parent_sid).await;
+            self.session_manager.sync_durable_events(parent_sid).await;
         }
     }
 
@@ -371,14 +368,17 @@ impl ChildSessionCoordinator {
         for guard in completed {
             self.write_terminal_for_guard(&guard).await;
             if guard.cleanup_policy() == ChildCleanup::Recycle {
-                self.recycle_child(
+                self.recycle_completed_child(
                     scheduler,
                     guard.parent_session_id(),
                     guard.child_session_id(),
+                    guard.turn_id(),
                 )
                 .await;
             } else {
-                scheduler.registry().remove(guard.child_session_id());
+                scheduler
+                    .release_completed_execution(guard.child_session_id(), guard.turn_id())
+                    .await;
             }
             if guard.notify_text().is_some() {
                 let message = build_background_agent_notification(&guard).await;
@@ -401,14 +401,14 @@ impl ChildSessionCoordinator {
         }
     }
 
-    pub fn register_completion_guard(
-        &self,
-        handle: TurnHandle,
-        config: ChildSessionCompletionConfig,
-    ) {
+    fn register_completion_guard(&self, handle: TurnHandle, config: ChildSessionCompletionConfig) {
         let parent_sid = config.parent_session_id.clone();
         let guard = ChildSessionCompletionGuard::spawn(handle, config, self.completed_tx.clone());
-        self.register_guard(&parent_sid, Arc::new(guard));
+        self.by_parent
+            .lock()
+            .entry(parent_sid)
+            .or_default()
+            .push(Arc::new(guard));
     }
 
     pub async fn cascade_abort_children(&self, scheduler: &TurnScheduler, parent_sid: &SessionId) {
@@ -439,31 +439,26 @@ impl ChildSessionCoordinator {
         Ok(())
     }
 
-    fn register_guard(&self, parent_sid: &SessionId, guard: Arc<ChildSessionCompletionGuard>) {
-        self.by_parent
-            .lock()
-            .entry(parent_sid.clone())
-            .or_insert_with(ChildSessionTracker::new)
-            .register(guard);
-    }
-
-    fn drain_completed_guards(
-        &self,
-        parent_sid: &SessionId,
-    ) -> Vec<Arc<ChildSessionCompletionGuard>> {
-        let mut map = self.by_parent.lock();
-        let Some(tracker) = map.get_mut(parent_sid) else {
+    fn drain_completed_guards(&self, parent_sid: &SessionId) -> CompletionGuards {
+        let mut by_parent = self.by_parent.lock();
+        let Some((parent_key, guards)) = by_parent.remove_entry(parent_sid) else {
             return Vec::new();
         };
-        tracker.collect_completed()
+        let (completed, pending): (CompletionGuards, CompletionGuards) = guards
+            .into_iter()
+            .partition(|guard| guard.outcome_rx.borrow().is_some());
+        if !pending.is_empty() {
+            by_parent.insert(parent_key, pending);
+        }
+        completed
     }
 
-    fn abort_all_direct(&self, parent_sid: &SessionId) -> Vec<Arc<ChildSessionCompletionGuard>> {
-        let mut map = self.by_parent.lock();
-        let Some(tracker) = map.get_mut(parent_sid) else {
-            return Vec::new();
-        };
-        tracker.abort_all_direct()
+    fn abort_all_direct(&self, parent_sid: &SessionId) -> CompletionGuards {
+        let guards = self.by_parent.lock().remove(parent_sid).unwrap_or_default();
+        for guard in &guards {
+            guard.request_shutdown();
+        }
+        guards
     }
 
     async fn write_terminal_for_guard(&self, guard: &ChildSessionCompletionGuard) {
@@ -531,14 +526,20 @@ impl ChildSessionCoordinator {
         for guard in guards.iter().rev() {
             let child_sid = guard.child_session_id();
             let parent_sid = guard.parent_session_id();
-            self.ensure_child_execution_stopped(scheduler, child_sid)
-                .await;
-            let error = match guard.outcome().await {
-                ChildOutcome::TimedOut => "abort timed out",
-                _ => "aborted",
+            let outcome = guard.outcome().await;
+            let timed_out = outcome == ChildOutcome::TimedOut;
+            let error = if timed_out {
+                "abort timed out"
+            } else {
+                "aborted"
             };
             self.record_failed(parent_sid, child_sid, error).await;
-            self.recycle_child(scheduler, parent_sid, child_sid).await;
+            if timed_out {
+                self.recycle_child(scheduler, parent_sid, child_sid).await;
+            } else {
+                self.recycle_completed_child(scheduler, parent_sid, child_sid, guard.turn_id())
+                    .await;
+            }
         }
     }
 
@@ -572,34 +573,14 @@ impl ChildSessionCoordinator {
         }
 
         for (parent_sid, child_sid) in pending.into_iter().rev() {
-            if let Err(e) = scheduler.request_turn_shutdown(&child_sid).await {
-                tracing::warn!(
-                    parent_session_id = %parent_sid,
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "cascade abort: unguarded child abort returned error"
-                );
-            }
-            self.ensure_child_execution_stopped(scheduler, &child_sid)
-                .await;
             self.record_failed(&parent_sid, &child_sid, "aborted").await;
             self.recycle_child(scheduler, &parent_sid, &child_sid).await;
-        }
-    }
-
-    async fn ensure_child_execution_stopped(
-        &self,
-        scheduler: &TurnScheduler,
-        child_sid: &SessionId,
-    ) {
-        if scheduler.registry().has_active(child_sid) {
-            scheduler.abort_and_cleanup(child_sid).await;
         }
     }
 }
 
 /// 只等待 `TurnHandle` 并记录 outcome；不写父 session 事件。
-pub struct ChildSessionCompletionGuard {
+struct ChildSessionCompletionGuard {
     config: ChildSessionCompletionConfig,
     outcome_tx: watch::Sender<Option<ChildOutcome>>,
     outcome_rx: watch::Receiver<Option<ChildOutcome>>,
@@ -618,7 +599,7 @@ fn try_set_outcome(tx: &watch::Sender<Option<ChildOutcome>>, outcome: ChildOutco
 }
 
 impl ChildSessionCompletionGuard {
-    pub fn spawn(
+    fn spawn(
         handle: TurnHandle,
         config: ChildSessionCompletionConfig,
         completed_tx: mpsc::Sender<SessionId>,
@@ -652,7 +633,7 @@ impl ChildSessionCompletionGuard {
         }
     }
 
-    pub async fn outcome(&self) -> ChildOutcome {
+    async fn outcome(&self) -> ChildOutcome {
         if let Some(outcome) = self.outcome_rx.borrow().clone() {
             return outcome;
         }
@@ -667,36 +648,40 @@ impl ChildSessionCompletionGuard {
         }
     }
 
-    pub fn request_shutdown(&self) {
+    fn request_shutdown(&self) {
         self.shutdown_handle.request_shutdown();
     }
 
-    pub fn force_timeout(&self) {
+    fn force_timeout(&self) {
         self.shutdown_handle.force_kill();
         try_set_outcome(&self.outcome_tx, ChildOutcome::TimedOut);
     }
 
-    pub fn child_session_id(&self) -> &SessionId {
+    fn child_session_id(&self) -> &SessionId {
         &self.config.child_session_id
     }
 
-    pub fn parent_session_id(&self) -> &SessionId {
+    fn parent_session_id(&self) -> &SessionId {
         &self.config.parent_session_id
     }
 
-    pub fn cleanup_policy(&self) -> ChildCleanup {
+    fn turn_id(&self) -> &TurnId {
+        &self.config.turn_id
+    }
+
+    fn cleanup_policy(&self) -> ChildCleanup {
         self.config.cleanup
     }
 
-    pub fn notify_text(&self) -> Option<&str> {
+    fn notify_text(&self) -> Option<&str> {
         self.config.notify_on_complete.as_deref()
     }
 
-    pub fn tool_call_id(&self) -> Option<&str> {
+    fn tool_call_id(&self) -> Option<&str> {
         self.config.tool_call_id.as_deref()
     }
 
-    pub fn summary_hint(&self) -> Option<&str> {
+    fn summary_hint(&self) -> Option<&str> {
         self.config
             .notify_on_complete
             .as_deref()
@@ -773,50 +758,25 @@ fn one_line_summary(text: &str) -> String {
 }
 
 async fn build_background_agent_notification(guard: &ChildSessionCompletionGuard) -> String {
-    let child_id = guard.child_session_id().to_string();
-    let tool_call_id = guard.tool_call_id().map(str::to_string);
-    let summary_hint = guard.summary_hint().map(str::to_string);
-    match guard.outcome().await {
+    let outcome = guard.outcome().await;
+    let (status, error, output_body, output_truncated) = match &outcome {
         ChildOutcome::Completed { output } => {
-            let (body, truncated) = truncate_notification_output(&output);
-            format_background_agent_notification(
-                &child_id,
-                tool_call_id.as_deref(),
-                "completed",
-                None,
-                summary_hint.as_deref(),
-                &body,
-                truncated,
-            )
+            let (body, truncated) = truncate_notification_output(output);
+            ("completed", None, body, truncated)
         },
-        ChildOutcome::Failed { error } => format_background_agent_notification(
-            &child_id,
-            tool_call_id.as_deref(),
-            "failed",
-            Some(&error),
-            summary_hint.as_deref(),
-            "",
-            false,
-        ),
-        ChildOutcome::Aborted => format_background_agent_notification(
-            &child_id,
-            tool_call_id.as_deref(),
-            "aborted",
-            Some("aborted"),
-            summary_hint.as_deref(),
-            "",
-            false,
-        ),
-        ChildOutcome::TimedOut => format_background_agent_notification(
-            &child_id,
-            tool_call_id.as_deref(),
-            "timed_out",
-            Some("timed out"),
-            summary_hint.as_deref(),
-            "",
-            false,
-        ),
-    }
+        ChildOutcome::Failed { error } => ("failed", Some(error.as_str()), String::new(), false),
+        ChildOutcome::Aborted => ("aborted", Some("aborted"), String::new(), false),
+        ChildOutcome::TimedOut => ("timed_out", Some("timed out"), String::new(), false),
+    };
+    format_background_agent_notification(
+        guard.child_session_id().as_str(),
+        guard.tool_call_id(),
+        status,
+        error,
+        guard.summary_hint(),
+        &output_body,
+        output_truncated,
+    )
 }
 
 fn format_background_agent_notification(

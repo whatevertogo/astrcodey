@@ -8,9 +8,7 @@ use astrcode_core::{
 };
 
 use crate::{
-    deferred_tools::{
-        ToolSnapshot, activate_deferred_tools, clone_tools_by_index, provider_visible_tool_indexes,
-    },
+    deferred_tools::{ToolSnapshot, activate_deferred_tools, provider_visible_tools},
     tool_deduplicator::ToolCallDeduplicator,
     tool_types::StreamedToolCall,
 };
@@ -132,8 +130,7 @@ impl TurnState {
             })
             .collect::<Vec<_>>();
         let active_deferred_tools = HashSet::new();
-        let tool_indexes = provider_visible_tool_indexes(&all_tools, &active_deferred_tools);
-        let visible_tools = clone_tools_by_index(&all_tools, &tool_indexes);
+        let visible_tools = provider_visible_tools(&all_tools, &active_deferred_tools);
 
         Self {
             transcript: TurnTranscript::default(),
@@ -240,9 +237,8 @@ impl TurnState {
             discovered_tools,
         );
         if changed {
-            let tool_indexes =
-                provider_visible_tool_indexes(&self.all_tools, &self.active_deferred_tools);
-            self.visible_tools = clone_tools_by_index(&self.all_tools, &tool_indexes);
+            self.visible_tools =
+                provider_visible_tools(&self.all_tools, &self.active_deferred_tools);
         }
         changed
     }

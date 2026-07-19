@@ -6,9 +6,7 @@ use astrcode_core::{message_attachment::MessageAttachment, types::*};
 use tokio::sync::mpsc;
 
 use super::{CommandHandler, CommandMessage, HandlerError, errors::turn_schedule_error_for_client};
-use crate::turn_scheduler::{
-    CompletionParams, PromptInput, StartedExecution, TurnScheduleError, TurnScheduler,
-};
+use crate::turn_scheduler::{PromptInput, StartedExecution, TurnScheduleError, TurnScheduler};
 
 /// Turn 完成结果，通过 oneshot 通道发送。
 #[derive(Debug, Clone)]
@@ -140,12 +138,7 @@ async fn run_completion_watcher(
             None => TurnCompletion::Dropped,
         };
 
-        let next = scheduler
-            .finish_and_maybe_start_next(CompletionParams {
-                session_id: sid.clone(),
-                turn_id: turn_id.clone(),
-            })
-            .await;
+        let next = scheduler.finish_and_maybe_start_next(&sid, &turn_id).await;
 
         let actor_ok = send_turn_completion(
             &mut completion_tx,

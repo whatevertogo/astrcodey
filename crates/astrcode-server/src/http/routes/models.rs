@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use astrcode_core::config::LlmSettings;
 use astrcode_protocol::http::{
     AvailableModelDto, CurrentModelResponseDto, ModelListResponseDto, ModelTestResponseDto,
 };
@@ -16,13 +17,7 @@ use super::super::HttpState;
 pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -> Response {
     let raw = state.runtime.config_manager().raw_config_snapshot();
     let eff = state.runtime.config_manager().read_effective();
-    Json(CurrentModelResponseDto {
-        profile_name: raw.active_profile,
-        model_id: eff.llm.model_id.clone(),
-        provider_kind: eff.llm.provider_kind.clone(),
-        wire_format: eff.llm.wire_format.into(),
-    })
-    .into_response()
+    current_model_response(raw.active_profile, &eff.llm)
 }
 
 pub(in crate::http) async fn list_models(State(state): State<HttpState>) -> Response {
@@ -75,6 +70,10 @@ pub(in crate::http) async fn get_small_current_model(State(state): State<HttpSta
         (Some(p), Some(_)) => (p.clone(), &eff.small_llm),
         _ => (raw.active_profile.clone(), &eff.small_llm),
     };
+    current_model_response(profile_name, model)
+}
+
+fn current_model_response(profile_name: String, model: &LlmSettings) -> Response {
     Json(CurrentModelResponseDto {
         profile_name,
         model_id: model.model_id.clone(),

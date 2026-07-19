@@ -175,16 +175,14 @@ export default function CommandSelector({
   )
 }
 
-function sourceLabel(source: string): string {
+function sourceLabel(source: SlashCommandInfo['source']): string {
   switch (source) {
     case 'builtin':
       return '内置命令'
     case 'skill':
       return '技能'
-    case 'plugin':
+    case 'extension':
       return '插件'
-    default:
-      return '命令'
   }
 }
 
@@ -192,7 +190,7 @@ function CommandIcon({
   source,
   selected,
 }: {
-  source: string
+  source: SlashCommandInfo['source']
   selected: boolean
 }) {
   if (source === 'skill') {

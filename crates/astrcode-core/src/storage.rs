@@ -638,12 +638,8 @@ impl SessionReadModel {
         self.messages
             .iter()
             .find(|m| m.source.is_none() && matches!(m.message.role, LlmRole::User))
-            .and_then(|m| {
-                m.message.content.iter().find_map(|c| match c {
-                    LlmContent::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-            })
+            .and_then(|m| m.message.content.iter().find_map(LlmContent::as_text))
+            .map(str::to_owned)
     }
 
     /// 统计 provider 可见的非合成 user 消息条数。
@@ -705,7 +701,7 @@ impl SessionReadModel {
                 let LlmContent::ToolCall { call_id, name, .. } = content else {
                     continue;
                 };
-                if remaining.remove(&ToolCallId::from(call_id.clone())) {
+                if remaining.remove(call_id.as_str()) {
                     pending.push(UnansweredToolCall {
                         call_id: call_id.clone(),
                         tool_name: name.clone(),
