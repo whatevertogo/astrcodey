@@ -1,11 +1,10 @@
 //! 子 Agent 会话链接：唯一线缆 DTO 与集中构造逻辑。
 
-/// 子 Agent 会话的运行状态（HTTP/SSE/JSON-RPC 共用）。
-///
-/// Re-export core 类型；线缆格式（snake_case）与内部一致，无需额外 DTO。
-pub use astrcode_core::storage::AgentSessionStatus as AgentSessionStatusDto;
-use astrcode_core::{event::Phase, storage::AgentSessionLinkView};
+use astrcode_core::storage::AgentSessionLinkView;
 use serde::{Deserialize, Serialize};
+
+pub use crate::wire::AgentSessionStatusDto;
+use crate::wire::PhaseDto;
 
 /// 子 Agent 会话链接（HTTP/SSE/JSON-RPC 共用线缆 DTO，camelCase 序列化）。
 ///
@@ -29,7 +28,7 @@ pub struct AgentSessionLinkDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<Phase>,
+    pub phase: Option<PhaseDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<String>,
 }
@@ -45,7 +44,7 @@ struct AgentSessionLinkPatch {
     final_session_id: Option<String>,
     summary: Option<String>,
     error: Option<String>,
-    phase: Option<Phase>,
+    phase: Option<PhaseDto>,
     current_tool: Option<String>,
 }
 
@@ -73,11 +72,11 @@ impl AgentSessionLinkPatch {
             tool_call_id: link.tool_call_id.as_ref().map(ToString::to_string),
             agent_name: Some(link.agent_name.clone()),
             task: Some(link.task.clone()),
-            status: Some(link.status),
+            status: Some(link.status.into()),
             final_session_id: link.final_session_id.as_ref().map(ToString::to_string),
             summary: link.summary.clone(),
             error: link.error.clone(),
-            phase: link.phase,
+            phase: link.phase.map(Into::into),
             current_tool: link.current_tool.clone(),
         }
     }
@@ -94,7 +93,7 @@ impl AgentSessionLinkPatch {
             agent_name: Some(agent_name.as_ref().to_string()),
             task: Some(task.as_ref().to_string()),
             status: Some(AgentSessionStatusDto::Running),
-            phase: Some(Phase::Thinking),
+            phase: Some(PhaseDto::Thinking),
             ..Default::default()
         }
     }
@@ -129,7 +128,7 @@ impl AgentSessionLinkPatch {
 
     fn phase_only(
         child_session_id: impl AsRef<str>,
-        phase: Phase,
+        phase: PhaseDto,
         current_tool: Option<String>,
     ) -> Self {
         Self {
@@ -178,7 +177,7 @@ impl AgentSessionLinkDto {
     /// 子 session 阶段刷新；省略 status，避免覆盖终态。
     pub fn phase_only(
         child_session_id: impl AsRef<str>,
-        phase: Phase,
+        phase: PhaseDto,
         current_tool: Option<String>,
     ) -> Self {
         AgentSessionLinkPatch::phase_only(child_session_id, phase, current_tool).into()
@@ -222,7 +221,7 @@ mod tests {
     #[test]
     fn phase_only_patch_omits_status_on_wire() {
         let dto =
-            AgentSessionLinkDto::phase_only("child-1", Phase::CallingTool, Some("read".into()));
+            AgentSessionLinkDto::phase_only("child-1", PhaseDto::CallingTool, Some("read".into()));
         let value = serde_json::to_value(&dto).unwrap();
         assert!(value.get("status").is_none());
         assert_eq!(value["phase"], json!("calling_tool"));
@@ -233,7 +232,7 @@ mod tests {
     fn spawned_includes_running_status() {
         let dto = AgentSessionLinkDto::spawned("child-1", "tool-1", "reviewer", "review diff");
         assert_eq!(dto.status, Some(AgentSessionStatusDto::Running));
-        assert_eq!(dto.phase, Some(Phase::Thinking));
+        assert_eq!(dto.phase, Some(PhaseDto::Thinking));
     }
 
     #[test]

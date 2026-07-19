@@ -12,3 +12,4 @@ pub mod framing;
 pub mod http;
 pub mod transport;
 pub mod version;
+pub mod wire;

@@ -36,6 +36,7 @@ use astrcode_protocol::{
         CompactSessionResponse, ConversationSnapshotResponseDto, CreateSessionResponseDto,
         PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
     },
+    wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
     bootstrap::ServerRuntime,
@@ -309,7 +310,10 @@ async fn provider_catalog_route_returns_endpoint_presets() {
         .find(|provider| provider.id == "qwen")
         .expect("qwen preset exists");
     assert_eq!(qwen.provider_kind, "qwen");
-    assert_eq!(qwen.wire_format, ProviderWireFormat::OpenAiChatCompletions);
+    assert_eq!(
+        qwen.wire_format,
+        ProviderWireFormatDto::OpenAiChatCompletions
+    );
     assert!(
         qwen.endpoints
             .iter()
@@ -322,7 +326,7 @@ async fn provider_catalog_route_returns_endpoint_presets() {
         .iter()
         .find(|provider| provider.id == "ark")
         .expect("ark preset exists");
-    assert_eq!(ark.auth_scheme, ProviderAuthScheme::Bearer);
+    assert_eq!(ark.auth_scheme, ProviderAuthSchemeDto::Bearer);
     assert!(
         ark.endpoints
             .iter()

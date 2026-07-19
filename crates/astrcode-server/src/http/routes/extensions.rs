@@ -226,8 +226,12 @@ fn extension_declaration_dto(
 ) -> ExtensionDeclarationDto {
     ExtensionDeclarationDto {
         id: declaration.id,
-        capabilities: declaration.capabilities,
-        tools: declaration.tools,
+        capabilities: declaration
+            .capabilities
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        tools: declaration.tools.into_iter().map(Into::into).collect(),
         dynamic_tools: declaration.dynamic_tools,
         commands: declaration.commands,
         dynamic_commands: declaration.dynamic_commands,

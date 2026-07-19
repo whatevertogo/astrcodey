@@ -35,8 +35,8 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         .map(|p| ProfileDto {
             name: p.name.clone(),
             provider_kind: p.provider_kind.clone(),
-            wire_format: p.wire_format,
-            auth_scheme: p.auth_scheme,
+            wire_format: p.wire_format.into(),
+            auth_scheme: p.auth_scheme.into(),
             base_url: p.base_url.clone(),
             has_api_key: astrcode_core::config::profile_has_resolvable_api_key(p),
             models: p
@@ -48,7 +48,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                     context_limit: m.context_limit,
                     model_options: m.model_options.as_ref().map(|o| ModelOptionsDto {
                         reasoning: o.reasoning,
-                        thinking_level: o.thinking_level,
+                        thinking_level: o.thinking_level.map(Into::into),
                     }),
                 })
                 .collect(),
@@ -414,8 +414,8 @@ fn provider_spec_to_dto(spec: &ProviderSpec) -> ProviderSpecDto {
         id: spec.id.to_string(),
         display_name: spec.display_name.to_string(),
         provider_kind: spec.provider_kind.to_string(),
-        wire_format: spec.wire_format,
-        auth_scheme: spec.auth_scheme,
+        wire_format: spec.wire_format.into(),
+        auth_scheme: spec.auth_scheme.into(),
         default_model: spec.default_model.to_string(),
         api_key_env_vars: spec
             .api_key_env_vars

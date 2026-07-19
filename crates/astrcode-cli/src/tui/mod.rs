@@ -29,8 +29,10 @@ pub(crate) mod viewport;
 use std::{io, sync::Arc};
 
 use astrcode_client::client::AstrcodeClient;
-use astrcode_core::permission::ApprovalDecision;
-use astrcode_protocol::commands::{ClientCommand, UiResponseValue};
+use astrcode_protocol::{
+    commands::{ClientCommand, UiResponseValue},
+    wire::ApprovalDecisionDto,
+};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio_stream::StreamExt;
 
@@ -178,8 +180,8 @@ async fn handle_key(
 ) -> io::Result<()> {
     if let Some(pending) = app.pending_tool_approval.clone() {
         let decision = match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalDecision::AllowOnce),
-            KeyCode::Char('n') | KeyCode::Char('N') => Some(ApprovalDecision::DenyOnce),
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalDecisionDto::AllowOnce),
+            KeyCode::Char('n') | KeyCode::Char('N') => Some(ApprovalDecisionDto::DenyOnce),
             _ => None,
         };
         if let Some(decision) = decision {

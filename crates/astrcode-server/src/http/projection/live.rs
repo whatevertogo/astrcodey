@@ -61,7 +61,7 @@ pub(in crate::http) fn event_to_deltas(
             delta,
         } => vec![ConversationDeltaDto::ToolOutput {
             call_id: call_id.to_string(),
-            stream: *stream,
+            stream: (*stream).into(),
             delta: delta.clone(),
         }],
 
@@ -307,7 +307,7 @@ fn control_from_state(
 ) -> ConversationControlStateDto {
     let can_submit_prompt = matches!(phase, Phase::Idle | Phase::Error);
     ConversationControlStateDto {
-        phase,
+        phase: phase.into(),
         can_submit_prompt,
         can_request_compact: can_submit_prompt && has_messages,
         compact_pending: false,
@@ -319,6 +319,8 @@ fn control_from_state(
 
 #[cfg(test)]
 mod tests {
+    use astrcode_protocol::wire::PhaseDto;
+
     use super::*;
 
     #[test]
@@ -524,7 +526,7 @@ mod tests {
         assert!(matches!(
             deltas.as_slice(),
             [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == Phase::Thinking
+                if control.phase == PhaseDto::Thinking
                     && !control.compacting
                     && control.active_turn_id.as_deref() == Some("turn-1")
         ));
@@ -562,7 +564,7 @@ mod tests {
         assert!(matches!(
             deltas.as_slice(),
             [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == Phase::Idle && control.active_turn_id.is_none()
+                if control.phase == PhaseDto::Idle && control.active_turn_id.is_none()
         ));
     }
 
@@ -581,7 +583,7 @@ mod tests {
         assert!(matches!(
             deltas.as_slice(),
             [ConversationDeltaDto::UpdateControlState { control }]
-                if control.phase == Phase::Idle && control.can_submit_prompt
+                if control.phase == PhaseDto::Idle && control.can_submit_prompt
         ));
     }
 
