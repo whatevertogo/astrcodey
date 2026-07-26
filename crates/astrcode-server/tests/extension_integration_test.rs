@@ -87,6 +87,7 @@ impl Extension for EchoToolExtension {
                         "text": { "type": "string" }
                     }
                 }),
+                strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
             },
@@ -147,6 +148,7 @@ impl Extension for FixedToolExtension {
                     "type": "object",
                     "properties": {}
                 }),
+                strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
             },

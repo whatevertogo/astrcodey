@@ -143,6 +143,7 @@ mod tests {
                         call_id: call_id.into(),
                         name: name.into(),
                         arguments,
+                        raw_arguments: None,
                     }],
                     name: None,
                     reasoning_content: None,

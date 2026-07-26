@@ -9,6 +9,7 @@ mod provider_catalog;
 mod retry;
 mod serialization;
 mod stream_decoder;
+mod strict_tools;
 mod tool_result_wire;
 mod wire;
 

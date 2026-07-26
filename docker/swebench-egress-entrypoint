@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf &
+exec python3 /usr/local/bin/swebench-provider-gateway.py

@@ -124,13 +124,15 @@ impl ContentMapper for GoogleGenAiMapper {
         })
     }
 
-    fn tool_call(_call_id: &str, name: &str, arguments: &serde_json::Value) -> serde_json::Value {
-        let args = match arguments {
-            serde_json::Value::String(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::json!({}))
-            },
-            other => other.clone(),
-        };
+    fn tool_call(
+        _call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        raw_arguments: Option<&str>,
+    ) -> serde_json::Value {
+        // Gemini requires `args` to be JSON. Malformed provider text remains
+        // available in the durable model and is paired with an error result.
+        let args = raw_arguments.map_or_else(|| arguments.clone(), |_| serde_json::json!({}));
         serde_json::json!({"functionCall": {"name": name, "args": args}})
     }
 
@@ -211,11 +213,20 @@ mod tests {
     fn assistant_tool_call_uses_function_call() {
         let msg = LlmMessage {
             role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            }],
+            content: vec![
+                LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                    raw_arguments: None,
+                },
+                LlmContent::ToolCall {
+                    call_id: "call_bad".into(),
+                    name: "read".into(),
+                    arguments: serde_json::Value::String(r#"{"path":"#.into()),
+                    raw_arguments: Some(r#"{"path":"#.into()),
+                },
+            ],
             name: None,
             reasoning_content: None,
         };
@@ -223,6 +234,10 @@ mod tests {
         let function_call = &json["parts"][0]["functionCall"];
         assert_eq!(function_call["name"], "read");
         assert_eq!(function_call["args"]["path"], "foo.rs");
+        assert_eq!(
+            json["parts"][1]["functionCall"]["args"],
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -266,6 +281,7 @@ mod tests {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: true,
             origin: ToolOrigin::Builtin,
             execution_mode: ExecutionMode::Parallel,
         }];
@@ -288,6 +304,10 @@ mod tests {
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "s");
         assert!(body["contents"].is_array());
         assert!(body["tools"].is_array());
+        assert!(
+            body.pointer("/tools/0/functionDeclarations/0/strict")
+                .is_none()
+        );
         assert!(body.get("generationConfig").is_none());
     }
 

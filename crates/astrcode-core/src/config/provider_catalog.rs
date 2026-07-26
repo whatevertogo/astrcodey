@@ -19,6 +19,7 @@ pub struct ProviderSpecCapabilities {
     pub prompt_cache_key: bool,
     pub stream_usage: bool,
     pub reasoning_effort: bool,
+    pub strict_tool_use: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,18 +103,26 @@ const OPENAI_RESPONSES_CAPABILITIES: ProviderSpecCapabilities = ProviderSpecCapa
     prompt_cache_key: true,
     stream_usage: true,
     reasoning_effort: true,
+    strict_tool_use: true,
 };
 
 const OPENAI_CHAT_CAPABILITIES: ProviderSpecCapabilities = ProviderSpecCapabilities {
     prompt_cache_key: false,
     stream_usage: false,
     reasoning_effort: false,
+    strict_tool_use: false,
 };
 
 const BASIC_CAPABILITIES: ProviderSpecCapabilities = ProviderSpecCapabilities {
     prompt_cache_key: false,
     stream_usage: false,
     reasoning_effort: false,
+    strict_tool_use: false,
+};
+
+const ANTHROPIC_CAPABILITIES: ProviderSpecCapabilities = ProviderSpecCapabilities {
+    strict_tool_use: true,
+    ..BASIC_CAPABILITIES
 };
 
 const BUILTIN_PROVIDER_CATALOG: &[ProviderSpec] = &[
@@ -137,7 +146,7 @@ const BUILTIN_PROVIDER_CATALOG: &[ProviderSpec] = &[
         default_model: "claude-sonnet-4-6",
         api_key_env_vars: &["ANTHROPIC_API_KEY"],
         endpoints: ANTHROPIC_ENDPOINTS,
-        capabilities: BASIC_CAPABILITIES,
+        capabilities: ANTHROPIC_CAPABILITIES,
     },
     ProviderSpec {
         id: "gemini",
@@ -234,6 +243,18 @@ mod tests {
                 .filter(|endpoint| endpoint.is_default)
                 .count();
             assert_eq!(default_count, 1, "provider spec {}", spec.id);
+        }
+    }
+
+    #[test]
+    fn strict_tool_use_is_enabled_only_for_verified_presets() {
+        for spec in builtin_provider_catalog() {
+            assert_eq!(
+                spec.capabilities.strict_tool_use,
+                matches!(spec.id, "openai" | "anthropic"),
+                "provider spec {}",
+                spec.id
+            );
         }
     }
 

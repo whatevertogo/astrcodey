@@ -15,25 +15,35 @@ use crate::tool_result_wire::{
 
 // ─── 工具序列化 ────────────────────────────────────────────────────────
 
-pub(crate) fn tools_to_json(tools: &[ToolDefinition]) -> serde_json::Value {
+pub(crate) fn tools_to_json(
+    tools: &[ToolDefinition],
+    supports_strict_tool_use: bool,
+) -> serde_json::Value {
     serde_json::Value::Array(
         tools
             .iter()
             .map(|t| {
+                let mut function = serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                });
+                if supports_strict_tool_use && t.strict {
+                    function["strict"] = serde_json::json!(true);
+                }
                 serde_json::json!({
                     "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
+                    "function": function
                 })
             })
             .collect(),
     )
 }
 
-pub(crate) fn responses_tools_json(tools: &[ToolDefinition]) -> serde_json::Value {
+pub(crate) fn responses_tools_json(
+    tools: &[ToolDefinition],
+    supports_strict_tool_use: bool,
+) -> serde_json::Value {
     serde_json::Value::Array(
         tools
             .iter()
@@ -43,11 +53,79 @@ pub(crate) fn responses_tools_json(tools: &[ToolDefinition]) -> serde_json::Valu
                     "name": t.name,
                     "description": t.description,
                     "parameters": t.parameters,
-                    "strict": false,
+                    "strict": supports_strict_tool_use && t.strict,
                 })
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod strict_tool_tests {
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+
+    use super::*;
+
+    fn tool(strict: bool) -> ToolDefinition {
+        ToolDefinition {
+            name: "lookup".into(),
+            description: String::new(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
+            strict,
+            origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
+        }
+    }
+
+    #[test]
+    fn serializes_strict_at_each_openai_wire_location() {
+        let cases = [
+            (
+                tools_to_json(&[tool(true)], true),
+                "/0/function/strict",
+                Some(true),
+            ),
+            (
+                tools_to_json(&[tool(true)], false),
+                "/0/function/strict",
+                None,
+            ),
+            (
+                tools_to_json(&[tool(false)], true),
+                "/0/function/strict",
+                None,
+            ),
+            (
+                responses_tools_json(&[tool(true)], true),
+                "/0/strict",
+                Some(true),
+            ),
+            (
+                responses_tools_json(&[tool(true)], false),
+                "/0/strict",
+                Some(false),
+            ),
+            (
+                responses_tools_json(&[tool(false)], true),
+                "/0/strict",
+                Some(false),
+            ),
+        ];
+
+        for (serialized, pointer, expected) in cases {
+            assert_eq!(
+                serialized
+                    .pointer(pointer)
+                    .and_then(serde_json::Value::as_bool),
+                expected
+            );
+        }
+    }
 }
 
 // ─── Chat Completions 消息 ──────────────────────────────────────────────
@@ -83,12 +161,16 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
                         call_id,
                         name,
                         arguments,
+                        raw_arguments,
                     } => Some(serde_json::json!({
                         "id": call_id,
                         "type": "function",
                         "function": {
                             "name": name,
-                            "arguments": arguments.to_string()
+                            "arguments": tool_call_arguments_text(
+                                arguments,
+                                raw_arguments.as_deref(),
+                            )
                         }
                     })),
                     _ => None,
@@ -178,13 +260,17 @@ pub(crate) fn responses_input_items(message: &LlmMessage) -> Vec<serde_json::Val
                     call_id,
                     name,
                     arguments,
+                    raw_arguments,
                 } = content
                 {
                     items.push(serde_json::json!({
                         "type": "function_call",
                         "call_id": call_id,
                         "name": name,
-                        "arguments": arguments.to_string()
+                        "arguments": tool_call_arguments_text(
+                            arguments,
+                            raw_arguments.as_deref(),
+                        )
                     }));
                 }
             }
@@ -229,6 +315,10 @@ fn responses_message_content(content: &[LlmContent], input: bool) -> serde_json:
             })
             .collect(),
     )
+}
+
+fn tool_call_arguments_text(arguments: &serde_json::Value, raw_arguments: Option<&str>) -> String {
+    raw_arguments.map_or_else(|| arguments.to_string(), str::to_owned)
 }
 
 // ─── Prompt cache 辅助 ─────────────────────────────────────────────────
@@ -276,7 +366,12 @@ pub(crate) fn prompt_cache_retention_wire_value(
 pub(crate) trait ContentMapper {
     fn text(text: &str) -> serde_json::Value;
     fn image(base64: &str, media_type: &str) -> serde_json::Value;
-    fn tool_call(call_id: &str, name: &str, arguments: &serde_json::Value) -> serde_json::Value;
+    fn tool_call(
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        raw_arguments: Option<&str>,
+    ) -> serde_json::Value;
     /// 返回 `None` 表示此提供商不在用户消息内联 ToolResult。
     fn tool_result(id: &str, content: &str, is_error: bool) -> Option<serde_json::Value>;
     fn empty() -> serde_json::Value;
@@ -316,7 +411,13 @@ pub(crate) trait ContentMapper {
                     call_id,
                     name,
                     arguments,
-                } => Some(Self::tool_call(call_id, name, arguments)),
+                    raw_arguments,
+                } => Some(Self::tool_call(
+                    call_id,
+                    name,
+                    arguments,
+                    raw_arguments.as_deref(),
+                )),
                 _ => None,
             })
             .collect();
@@ -331,7 +432,7 @@ pub(crate) trait ContentMapper {
 mod tests {
     use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 
-    use super::chat_message_to_json;
+    use super::{chat_message_to_json, responses_input_items};
 
     #[test]
     fn chat_tool_call_message_preserves_content_and_reasoning_content() {
@@ -345,6 +446,7 @@ mod tests {
                     call_id: "call_1".into(),
                     name: "read".into(),
                     arguments: serde_json::json!({"path": "a.rs"}),
+                    raw_arguments: None,
                 },
             ],
             name: None,
@@ -357,5 +459,40 @@ mod tests {
         assert_eq!(value["content"], "checking");
         assert_eq!(value["reasoning_content"], "private reasoning");
         assert_eq!(value["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
+    fn openai_history_distinguishes_raw_and_valid_string_arguments() {
+        let raw = r#"{"text">"news"}"#;
+        let message = LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![
+                LlmContent::ToolCall {
+                    call_id: "call_bad".into(),
+                    name: "interact".into(),
+                    arguments: serde_json::Value::String(raw.into()),
+                    raw_arguments: Some(raw.into()),
+                },
+                LlmContent::ToolCall {
+                    call_id: "call_string".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::Value::String("hello".into()),
+                    raw_arguments: None,
+                },
+            ],
+            name: None,
+            reasoning_content: None,
+        };
+
+        let chat = chat_message_to_json(&message);
+        let responses = responses_input_items(&message);
+
+        assert_eq!(chat["tool_calls"][0]["function"]["arguments"], raw);
+        assert_eq!(responses[0]["arguments"], raw);
+        assert_eq!(
+            chat["tool_calls"][1]["function"]["arguments"],
+            serde_json::json!(r#""hello""#)
+        );
+        assert_eq!(responses[1]["arguments"], serde_json::json!(r#""hello""#));
     }
 }

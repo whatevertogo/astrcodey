@@ -324,6 +324,7 @@ mod tests {
                 name: name.into(),
                 description: format!("MCP tool from server '{server}': {tool}"),
                 parameters: json!({"type": "object"}),
+                strict: false,
                 origin: ToolOrigin::Bundled,
                 execution_mode: ExecutionMode::Sequential,
             },

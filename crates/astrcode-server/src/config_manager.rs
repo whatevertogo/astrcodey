@@ -61,6 +61,7 @@ fn build_provider_from_settings(
         max_retries: settings.max_retries,
         retry_base_delay_ms: settings.retry_base_delay_ms,
         reasoning: settings.reasoning,
+        supports_strict_tool_use: settings.supports_strict_tool_use,
         extras,
         extra_headers: Default::default(),
     };

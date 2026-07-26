@@ -732,6 +732,7 @@ mod tests {
             name: name.into(),
             description: description.into(),
             parameters: Default::default(),
+            strict: false,
             origin,
             execution_mode: ExecutionMode::Sequential,
         }

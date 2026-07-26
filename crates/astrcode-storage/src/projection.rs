@@ -179,12 +179,14 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             call_id,
             tool_name,
             arguments,
+            raw_arguments,
         } => {
             model.pending_tool_calls.insert(call_id.clone());
             let tool_call = LlmContent::ToolCall {
                 call_id: call_id.to_string(),
                 name: tool_name.clone(),
                 arguments: arguments.clone(),
+                raw_arguments: raw_arguments.clone(),
             };
             // Merge into the previous assistant message for this model sub-turn.
             // DeepSeek thinking mode requires reasoning_content and tool_calls to

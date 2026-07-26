@@ -116,6 +116,7 @@ fn agent_tool_definition() -> ToolDefinition {
         description: AGENT_TOOL_DESCRIPTION.into(),
         parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS)
             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
     }

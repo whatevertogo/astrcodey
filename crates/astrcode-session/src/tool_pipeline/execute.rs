@@ -228,13 +228,17 @@ impl ToolCalls {
                 metadata: Default::default(),
                 duration_ms: None,
             };
+            let (arguments, arguments_json) = crate::tool_types::tool_call_completion_arguments(
+                call.tool_input.clone(),
+                call.raw_arguments.clone(),
+            );
             if let Err(commit_error) = complete_tool_call(
                 &input.publisher,
                 &call.call_id,
                 call.name.clone(),
                 result.clone(),
-                call.tool_input.to_string(),
-                Some(call.tool_input.clone()),
+                arguments,
+                arguments_json,
             )
             .await
             {

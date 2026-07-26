@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use astrcode_core::event::{Event, EventPayload};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 从 session event log 自动提取的统计指标。
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Metrics {
     /// 总 turn 数。
     pub total_turns: usize,

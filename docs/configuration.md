@@ -152,7 +152,39 @@ allow = [{ tool = "read" }]
 | `baseUrl` | API 根 URL；Anthropic 若 URL 无 `/v1` 段会自动补全 |
 | `apiKey` | 见 §6.3；可省略，则按 profile 名回退已知环境变量 |
 | `models` | 模型列表 |
-| `capabilities` | 可选：`supportsPromptCacheKey`、`promptCacheRetention`（`inMemory` / `24h`）、`supportsStreamUsage` |
+| `capabilities` | 可选：`supportsPromptCacheKey`、`promptCacheRetention`（`inMemory` / `24h`）、`supportsStreamUsage`、`supportsStrictToolUse` |
+
+`supportsStrictToolUse` 控制是否把工具自身的 `strict` 声明发送给 provider。旧配置缺少该字段时按
+`false` 处理；OpenAI-compatible 网关需确认兼容后显式开启。内置工具和内置扩展工具默认声明
+`strict`（MCP 暂不声明）。发送前会从工具的自然参数契约编译 provider 专用 Schema：
+
+- OpenAI：递归关闭额外属性，并把可选字段转换为 required + nullable；
+- Anthropic：递归关闭额外属性，移除其 strict 子集不支持、但仍由执行器校验的约束关键字；
+- 无法安全编译的 Schema 在网络请求前返回带工具名和 Schema 路径的错误。
+
+OpenAI strict 可能因此为原本可选的字段返回 `null`。工具注册表会依据原始 Schema，只把“原本
+可选且原始类型不接受 null”的对象属性还原为缺省；显式 nullable、required null 和数组中的合法
+null 不会被吞掉。执行器看到的仍是原始工具契约。
+
+Anthropic 还限制单次请求中的 strict 工具、可选参数和 union 数量。超过硬上限时，wire 副本按
+Builtin → Bundled → Extension → SDK 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
+为 nullable union；仍无法容纳的工具仅在该次 Anthropic 请求中降级为非 strict，并输出包含工具
+名的 warning。当前 8 个核心工具的自然 Schema 合计 44 个 optional，超过其 `24 optional + 16
+union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表中的原始 strict 定义不会被修改。
+
+该开关只表示 provider 支持 OpenAI / Anthropic 的**逐工具** strict 契约，不代表所有厂商的等价
+能力都能复用同一字段：
+
+| Provider | 官方约束方式 | 当前处理 |
+|----------|--------------|----------|
+| OpenAI | `tools[].function.strict`（Chat）或 `tools[].strict`（Responses） | 官方 preset 开启 |
+| Anthropic | `tools[].strict`，且有单次请求聚合上限 | 官方 preset 开启；超限按上述规则确定性降级 |
+| Google Gemini | 请求级 `functionCallingConfig.mode = VALIDATED`，会约束本次请求的全部函数 | 不映射逐工具声明 |
+| DeepSeek | `/beta` 端点，且本次请求的全部函数都必须为 strict | 默认关闭，不能仅切换该开关 |
+| Qwen、Ark、Zhipu | 当前 preset 未确认与逐工具 strict 契约一致 | 默认关闭 |
+
+无法解析且不能安全修复的 provider 工具参数不会被替换成空对象执行；运行时会保留原始参数并生成
+配对的错误结果，让模型重新生成符合 Schema 的调用。
 
 ### 6.2 模型
 

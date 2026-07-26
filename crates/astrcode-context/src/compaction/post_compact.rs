@@ -190,6 +190,7 @@ fn scan_tool_messages(messages: &[LlmMessage]) -> ToolMessageIndex {
                         call_id,
                         name,
                         arguments,
+                        ..
                     } = content
                     else {
                         continue;
@@ -310,6 +311,7 @@ mod tests {
                 call_id: call_id.into(),
                 name: "read".into(),
                 arguments: json!({ "path": path }),
+                raw_arguments: None,
             }],
             name: None,
             reasoning_content: None,

@@ -321,6 +321,7 @@ fn skill_tool_definition() -> ToolDefinition {
             },
             "required": ["skill"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }

@@ -6,11 +6,13 @@
 pub mod adapter;
 pub mod case;
 pub mod client;
+mod git;
 pub mod judge;
 pub mod metrics;
 pub mod report;
 pub mod runner;
 pub mod setup;
+mod swebench_instance;
 
 use std::path::PathBuf;
 
@@ -35,6 +37,10 @@ pub struct EvalConfig {
     pub server_addr: Option<String>,
     /// Auth token（与 server_addr 配合使用）。
     pub auth_token: Option<String>,
+    /// 每完成一个 case 后追加一行的 JSONL checkpoint 路径。
+    pub checkpoint_path: Option<PathBuf>,
+    /// 从已有 checkpoint 恢复，跳过已经完成的 case。
+    pub resume_checkpoint: bool,
     /// 存储根目录（eval session 数据隔离）。
     ///
     /// 指定后通过 `ASTRCODE_TEST_HOME` 环境变量注入，server 使用此目录
@@ -42,6 +48,48 @@ pub struct EvalConfig {
     /// - `None`：使用自动创建的 tempdir（默认，最安全的隔离）
     /// - `Some(path)`：使用指定路径（可累积历史结果）
     pub storage_root: Option<PathBuf>,
+    /// 在官方 SWE-bench instance image 中逐例启动求解服务。
+    pub swe_bench_instance: Option<SweBenchInstanceConfig>,
+}
+
+/// 官方 SWE-bench instance image 求解环境配置。
+#[derive(Debug, Clone)]
+pub struct SweBenchInstanceConfig {
+    /// 注入 instance image 的 Linux amd64 Astrcode 二进制。
+    pub solver_binary: PathBuf,
+    /// 只包含环境变量密钥引用的 Astrcode 配置文件。
+    pub server_config: PathBuf,
+    /// 官方预构建 instance image 的 Docker namespace。
+    pub image_namespace: String,
+    /// 可由宿主机访问、但禁用 IP masquerade 的控制网络。
+    pub control_network: String,
+    /// 按例接入隔离网络的可信 provider gateway 容器。
+    pub provider_gateway_container: String,
+    /// instance 中 HTTP(S) 请求使用的白名单代理地址。
+    pub proxy_url: String,
+    /// 可信控制 relay 使用的镜像；求解容器本身不接控制网络。
+    pub control_relay_image: String,
+    /// 每例 session、server log 与元数据的审计目录。
+    pub audit_dir: PathBuf,
+    /// Docker 容器名前缀；应包含本次运行 ID，避免不同运行混用。
+    pub container_prefix: String,
+    /// 求解完成后、删除 instance image 前执行的官方逐例判分。
+    pub streaming_harness: Option<SweBenchStreamingHarnessConfig>,
+}
+
+/// 官方 SWE-bench harness 的逐例判分配置。
+#[derive(Debug, Clone)]
+pub struct SweBenchStreamingHarnessConfig {
+    /// 已安装 swebench harness 的 Python 可执行文件。
+    pub python: PathBuf,
+    /// 官方 harness dataset_name。
+    pub dataset_name: String,
+    /// 官方 harness split。
+    pub split: String,
+    /// 隔离逐例判分日志的 run ID。
+    pub run_id: String,
+    /// 官方测试脚本的单例超时秒数。
+    pub timeout_secs: u64,
 }
 
 /// eval 用例来源。
@@ -65,7 +113,10 @@ impl Default for EvalConfig {
             keep_workdir: false,
             server_addr: None,
             auth_token: None,
+            checkpoint_path: None,
+            resume_checkpoint: false,
             storage_root: None,
+            swe_bench_instance: None,
         }
     }
 }
@@ -91,7 +142,7 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
     }
 
     let runner = EvalRunner::start(&config).await?;
-    let report = runner.run_all(cases).await;
+    let report = runner.run_all(cases).await?;
     Ok(report)
 }
 

@@ -21,8 +21,8 @@ use tokio::{
 };
 
 use crate::shell_tool::{
-    MAX_CAPTURE_BYTES_PER_STREAM, command_args, hide_command_window, setup_process_group,
-    terminate_child_tree,
+    MAX_CAPTURE_BYTES_PER_STREAM, command_args, exit_signal, hide_command_window,
+    setup_process_group, terminate_child_tree,
 };
 
 const BACKGROUND_SHELLS_DIR: &str = "background-shells";
@@ -147,6 +147,7 @@ pub struct BackgroundShellStatus {
     pub output_path: PathBuf,
     pub status: String,
     pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
     pub output: String,
     pub output_truncated: bool,
     pub output_tokens: usize,
@@ -162,6 +163,7 @@ struct BackgroundShellRecord {
     output_path: PathBuf,
     status: Mutex<ShellRunStatus>,
     exit_code: Mutex<Option<i32>>,
+    signal: Mutex<Option<i32>>,
     read_offset: Mutex<u64>,
     child: Mutex<Option<Child>>,
     done: Notify,
@@ -225,6 +227,7 @@ impl BackgroundShellRegistry {
             output_path: output_path.clone(),
             status: Mutex::new(ShellRunStatus::Running),
             exit_code: Mutex::new(None),
+            signal: Mutex::new(None),
             read_offset: Mutex::new(read_offset),
             child: Mutex::new(Some(child)),
             done: Notify::new(),
@@ -259,6 +262,7 @@ impl BackgroundShellRegistry {
             output_path: output_path.clone(),
             status: Mutex::new(ShellRunStatus::Running),
             exit_code: Mutex::new(None),
+            signal: Mutex::new(None),
             read_offset: Mutex::new(read_offset),
             child: Mutex::new(Some(params.child)),
             done: Notify::new(),
@@ -336,32 +340,33 @@ async fn finish_background_shell(
         None => return,
     };
 
-    let (exit_code, run_status) = match tokio::time::timeout(
+    let (exit_code, signal, run_status) = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         child.wait(),
     )
     .await
     {
         Ok(Ok(status)) => {
-            let code = status.code().unwrap_or(-1);
-            let st = if code == 0 {
+            let code = status.code();
+            let signal = exit_signal(&status);
+            let st = if status.success() {
                 ShellRunStatus::Completed
             } else {
                 ShellRunStatus::Failed
             };
-            (Some(code), st)
+            (code, signal, st)
         },
-        Ok(Err(_)) => (None, ShellRunStatus::Failed),
+        Ok(Err(_)) => (None, None, ShellRunStatus::Failed),
         Err(_) => {
             terminate_child_tree(&mut child).await;
             let _ = child.wait().await;
-            (None, ShellRunStatus::TimedOut)
+            (None, None, ShellRunStatus::TimedOut)
         },
     };
 
     let _ = tokio::join!(stdout_join, stderr_join);
 
-    let footer = format_footer(run_status, exit_code);
+    let footer = format_footer(run_status, exit_code, signal);
     if let Err(e) = append_bytes(&record.output_path, footer.as_bytes()).await {
         tracing::warn!(
             shell_id = %record.shell_id,
@@ -370,15 +375,17 @@ async fn finish_background_shell(
         );
     }
 
-    publish_completion(&record, run_status, exit_code);
+    publish_completion(&record, run_status, exit_code, signal);
 }
 
 fn publish_completion(
     record: &BackgroundShellRecord,
     run_status: ShellRunStatus,
     exit_code: Option<i32>,
+    signal: Option<i32>,
 ) {
     *record.exit_code.lock() = exit_code;
+    *record.signal.lock() = signal;
     *record.status.lock() = run_status;
     record.done.notify_waiters();
 }
@@ -472,7 +479,7 @@ async fn write_file_header(
     Ok(header.len() as u64)
 }
 
-fn format_footer(status: ShellRunStatus, exit_code: Option<i32>) -> String {
+fn format_footer(status: ShellRunStatus, exit_code: Option<i32>, signal: Option<i32>) -> String {
     let status_str = match status {
         ShellRunStatus::Completed => "completed",
         ShellRunStatus::Failed => "failed",
@@ -483,7 +490,10 @@ fn format_footer(status: ShellRunStatus, exit_code: Option<i32>) -> String {
     let code_line = exit_code
         .map(|c| format!("\nexit_code: {c}"))
         .unwrap_or_default();
-    format!("\n---\nstatus: {status_str}{code_line}\n---\n")
+    let signal_line = signal
+        .map(|signal| format!("\nsignal: {signal}"))
+        .unwrap_or_default();
+    format!("\n---\nstatus: {status_str}{code_line}{signal_line}\n---\n")
 }
 
 async fn stream_to_file(mut stream: impl AsyncRead + Unpin, path: PathBuf, is_stderr: bool) {
@@ -550,6 +560,7 @@ async fn read_shell_status(
 ) -> Result<BackgroundShellStatus, ToolError> {
     let status = *record.status.lock();
     let exit_code = *record.exit_code.lock();
+    let signal = *record.signal.lock();
     let (status_str, running) = match status {
         ShellRunStatus::Running => ("running", true),
         ShellRunStatus::Completed => ("completed", false),
@@ -563,6 +574,7 @@ async fn read_shell_status(
         output_path: record.output_path.clone(),
         status: status_str.into(),
         exit_code,
+        signal,
         output: preview.content,
         output_truncated: preview.truncated,
         output_tokens: preview.original_tokens,

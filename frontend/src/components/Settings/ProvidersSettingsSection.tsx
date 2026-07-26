@@ -206,6 +206,7 @@ export function ProvidersSettingsSection({
               provider.capabilities.promptCacheKey ? 'Cache key' : null,
               provider.capabilities.streamUsage ? 'Stream usage' : null,
               provider.capabilities.reasoningEffort ? 'Reasoning' : null,
+              provider.capabilities.strictToolUse ? 'Strict tools' : null,
             ].filter((label): label is string => Boolean(label))
             const displayedBaseUrl =
               profile?.baseUrl ??

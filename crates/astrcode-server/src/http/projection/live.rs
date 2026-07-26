@@ -109,12 +109,13 @@ pub(in crate::http) fn event_to_deltas(
             call_id,
             tool_name,
             arguments,
+            raw_arguments,
         } => {
             let args_text = format_args_inline(tool_name, arguments);
             vec![ConversationDeltaDto::PatchArguments {
                 block_id: call_id.to_string(),
                 arguments: args_text,
-                arguments_json: Some(arguments.clone()),
+                arguments_json: raw_arguments.is_none().then(|| arguments.clone()),
             }]
         },
 
@@ -295,6 +296,7 @@ mod tests {
                     "prompt": "Read every module and provide a very long report that should not appear in the collapsed summary line.",
                     "subagent_type": "explorer",
                 }),
+                raw_arguments: None,
             },
         );
 

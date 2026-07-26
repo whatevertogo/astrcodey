@@ -43,6 +43,7 @@ fn to_session_update(payload: &EventPayload) -> Option<SessionUpdate> {
             call_id,
             tool_name,
             arguments,
+            ..
         } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             ToolCallId::new(call_id.as_str()),
             ToolCallUpdateFields::new()

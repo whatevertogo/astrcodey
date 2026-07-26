@@ -615,6 +615,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
             },
             "required": ["todos"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }

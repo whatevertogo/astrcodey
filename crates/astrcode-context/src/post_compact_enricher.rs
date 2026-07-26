@@ -291,6 +291,7 @@ mod tests {
                 call_id: call_id.into(),
                 name: "read".into(),
                 arguments: json!({ "path": path }),
+                raw_arguments: None,
             }],
             name: None,
             reasoning_content: None,
@@ -363,6 +364,7 @@ mod tests {
                     call_id: "agent-1".into(),
                     name: "agent".into(),
                     arguments: json!({ "description": "inspect compact" }),
+                    raw_arguments: None,
                 }],
                 name: None,
                 reasoning_content: None,
@@ -373,6 +375,7 @@ mod tests {
             name: "read".into(),
             description: "read files".into(),
             parameters: json!({}),
+            strict: false,
             origin: ToolOrigin::Builtin,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }];

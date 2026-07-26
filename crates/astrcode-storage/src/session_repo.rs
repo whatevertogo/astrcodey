@@ -1679,6 +1679,7 @@ mod tests {
                 call_id: ToolCallId::from("call_1"),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({"path": "a.rs"}),
+                raw_arguments: None,
             },
         ))
         .await
@@ -1760,6 +1761,7 @@ mod tests {
                 call_id: ToolCallId::from("call_1"),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({"path": "a.rs"}),
+                raw_arguments: None,
             },
         ))
         .await
@@ -1771,6 +1773,7 @@ mod tests {
                 call_id: ToolCallId::from("call_2"),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({"path": "b.rs"}),
+                raw_arguments: None,
             },
         ))
         .await

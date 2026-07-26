@@ -42,6 +42,14 @@ impl ToolCalls {
         publisher: Arc<TurnEvents>,
     ) -> Result<CommittedToolResults, TurnError> {
         let mut pending_results = Vec::with_capacity(prepared.len());
+        let mut raw_arguments_by_call_id = prepared
+            .iter()
+            .filter_map(|call| {
+                call.raw_arguments
+                    .as_ref()
+                    .map(|raw| (call.call_id.clone(), raw.clone()))
+            })
+            .collect::<HashMap<_, _>>();
         for call in prepared {
             let mut result = results
                 .remove(&call.index)
@@ -145,14 +153,17 @@ impl ToolCalls {
                 tool_input: tool_input.clone(),
                 tool_result: tool_result.clone(),
             });
-            let arguments = tool_input.to_string();
+            let (arguments, arguments_json) = crate::tool_types::tool_call_completion_arguments(
+                tool_input,
+                raw_arguments_by_call_id.remove(call_id.as_str()),
+            );
             complete_tool_call(
                 &publisher,
                 call_id.as_str(),
                 tool_name.clone(),
                 tool_result.clone(),
                 arguments,
-                Some(tool_input),
+                arguments_json,
             )
             .await?;
             pending_declared.remove(call_id.as_str());

@@ -268,6 +268,7 @@ fn apply_event(app: &mut App, event: &Event) {
             call_id: _,
             tool_name,
             arguments,
+            ..
         } => {
             // Update status with argument summary.
             app.status_text = format!("● {}", tool_call_summary(tool_name, Some(arguments)));

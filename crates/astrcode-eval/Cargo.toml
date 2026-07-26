@@ -18,4 +18,6 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
 parquet = { version = "59.0.0", default-features = false, features = ["brotli", "flate2-zlib-rs", "lz4", "snap", "zstd"] }

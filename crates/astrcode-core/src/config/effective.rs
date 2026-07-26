@@ -57,6 +57,8 @@ pub struct LlmSettings {
     pub supports_prompt_cache_key: bool,
     /// 当前 provider 是否支持流式 usage 统计。
     pub supports_stream_usage: bool,
+    /// 当前 provider 是否支持 strict tool use。
+    pub supports_strict_tool_use: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
     /// 是否启用推理模式（如 DeepSeek reasoner）。
@@ -86,6 +88,7 @@ impl LlmSettings {
             retry_base_delay_ms: super::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS,
             supports_prompt_cache_key: false,
             supports_stream_usage: false,
+            supports_strict_tool_use: false,
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,

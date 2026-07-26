@@ -135,6 +135,25 @@ mod tests {
     }
 
     #[test]
+    fn builtins_request_provider_strict_tool_use() {
+        let mut registry = ToolRegistry::new();
+        for tool in builtin_tools(PathBuf::from("."), 30) {
+            registry.register(tool);
+        }
+
+        let non_strict = registry
+            .list_definitions()
+            .into_iter()
+            .filter(|definition| !definition.strict)
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert!(
+            non_strict.is_empty(),
+            "built-in tools must opt into strict tool use: {non_strict:?}"
+        );
+    }
+
+    #[test]
     fn builtins_declare_resource_accesses() {
         let mut registry = ToolRegistry::new();
         for tool in builtin_tools(PathBuf::from("."), 30) {

@@ -68,6 +68,7 @@ pub fn build_tools(reg: &ExtensionRegistration) -> Vec<ToolDefinition> {
             name: t.name.clone(),
             description: t.description.clone(),
             parameters: t.parameters.clone(),
+            strict: t.strict,
             origin: ToolOrigin::Extension,
             execution_mode: if t.mode == "parallel" {
                 ExecutionMode::Parallel

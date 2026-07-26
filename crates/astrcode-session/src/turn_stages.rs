@@ -48,11 +48,20 @@ impl TurnTranscript {
                 text: text.to_string(),
             });
         }
-        content.extend(tool_calls.iter().map(|tool_call| LlmContent::ToolCall {
-            call_id: tool_call.call_id.clone(),
-            name: tool_call.name.clone(),
-            arguments:
-                serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::Value::Null),
+        content.extend(tool_calls.iter().map(|tool_call| {
+            let (arguments, raw_arguments) = match serde_json::from_str(&tool_call.arguments) {
+                Ok(arguments) => (arguments, None),
+                Err(_) => (
+                    serde_json::Value::String(tool_call.arguments.clone()),
+                    Some(tool_call.arguments.clone()),
+                ),
+            };
+            LlmContent::ToolCall {
+                call_id: tool_call.call_id.clone(),
+                name: tool_call.name.clone(),
+                arguments,
+                raw_arguments,
+            }
         }));
         self.record_assistant_message(content, reasoning_content);
     }
@@ -247,4 +256,39 @@ impl TurnState {
 pub(crate) struct PreparedProviderRequest {
     pub(crate) llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
     pub(crate) messages: Vec<astrcode_core::llm::LlmMessage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_marks_unparseable_tool_arguments_as_raw() {
+        let raw = r#"{"query":"unfinished"#;
+        let mut transcript = TurnTranscript::default();
+        transcript.record_assistant_tool_calls(
+            "",
+            None,
+            &[StreamedToolCall {
+                call_id: "call-bad".into(),
+                name: "search".into(),
+                arguments: raw.into(),
+            }],
+        );
+
+        let message = transcript
+            .latest_provider_response
+            .as_ref()
+            .expect("tool call should produce an assistant message");
+        let LlmContent::ToolCall {
+            arguments,
+            raw_arguments,
+            ..
+        } = &message.content[0]
+        else {
+            panic!("expected tool call content");
+        };
+        assert_eq!(arguments, &serde_json::Value::String(raw.into()));
+        assert_eq!(raw_arguments.as_deref(), Some(raw));
+    }
 }

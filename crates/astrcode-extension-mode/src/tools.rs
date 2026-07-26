@@ -55,6 +55,7 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
             },
             "required": ["mode"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }
@@ -78,6 +79,7 @@ pub fn upsert_plan_tool_definition() -> ToolDefinition {
             },
             "required": ["content"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }

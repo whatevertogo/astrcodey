@@ -171,6 +171,7 @@ fn edit_file_tool_definition() -> &'static ToolDefinition {
             "Tips:\n",
             "- Single-file, small, precise edits after `read`",
         ).into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

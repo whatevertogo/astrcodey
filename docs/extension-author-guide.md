@@ -54,6 +54,13 @@ async fn run() -> Result<(), ErrorPayload> {
 
 现用 `worker.tool(def, handler)`：**同一次调用**写入 manifest 与 handler 表。
 
+SDK builder 创建的工具默认启用 strict。宿主会将该声明写入 S5R manifest，并在 profile 同时声明
+`supportsStrictToolUse` 时为 OpenAI 或 Anthropic 编译对应的 strict Schema；工具定义本身不需要
+复制两份 provider 专用 Schema。无法安全编译的结构会在发请求前返回带工具名与 Schema 路径的
+本地错误。只有刻意开放或动态、无法满足 provider strict 子集的 Schema 才调用 `.non_strict()`；
+`.strict()` 可用于显式重申默认契约。MCP 工具暂不自动推断 strict；Anthropic 达到单次请求 strict
+聚合上限时，溢出工具只在 wire 副本上确定性降级并记录 warning。
+
 ## 类型化参数
 
 避免手写 `event["input"]["arguments"]["name"]`：

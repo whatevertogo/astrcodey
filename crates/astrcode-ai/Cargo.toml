@@ -16,3 +16,8 @@ reqwest = { workspace = true, features = ["stream", "json"] }
 futures-util = { workspace = true }
 getrandom = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+astrcode-tools = { path = "../astrcode-tools" }

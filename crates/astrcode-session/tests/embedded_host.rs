@@ -118,6 +118,7 @@ impl Tool for EmbeddedEchoTool {
             name: "embeddedEcho".into(),
             description: "Echoes an embedded host value.".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: false,
             origin: ToolOrigin::Sdk,
             execution_mode: ExecutionMode::Sequential,
         }
@@ -208,6 +209,7 @@ fn effective_config() -> EffectiveConfig {
         retry_base_delay_ms: 0,
         supports_prompt_cache_key: false,
         supports_stream_usage: false,
+        supports_strict_tool_use: false,
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,

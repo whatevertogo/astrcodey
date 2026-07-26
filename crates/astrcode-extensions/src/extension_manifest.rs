@@ -28,6 +28,8 @@ pub mod manifest_types {
         pub name: String,
         pub description: String,
         pub parameters: Value,
+        #[serde(default)]
+        pub strict: bool,
         #[serde(default = "sequential_mode")]
         pub mode: String,
     }
@@ -172,4 +174,40 @@ fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistrati
         http_routes,
         extension_events,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn s5r_tool_strict_declaration_is_backward_compatible() {
+        let registration = registration_from_s5r_metadata(
+            &json!({
+                "extension_id": "strict-test",
+                "version": "0.0.0",
+                "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
+                "tools": [
+                    {
+                        "name": "legacy",
+                        "description": "",
+                        "parameters": {"type": "object"}
+                    },
+                    {
+                        "name": "strict",
+                        "description": "",
+                        "parameters": {"type": "object"},
+                        "strict": true
+                    }
+                ]
+            }),
+            astrcode_extension_sdk::s5r::S5R_VERSION,
+        )
+        .expect("manifest should parse");
+
+        assert!(!registration.tools[0].strict);
+        assert!(registration.tools[1].strict);
+    }
 }

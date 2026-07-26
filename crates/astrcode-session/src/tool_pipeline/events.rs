@@ -30,6 +30,7 @@ async fn declare_tool_call(
             call_id: call.call_id.clone().into(),
             tool_name: call.name.clone(),
             arguments: call.tool_input.clone(),
+            raw_arguments: call.raw_arguments.clone(),
         })
         .await
 }

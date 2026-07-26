@@ -10,7 +10,7 @@ use tokio::{
     sync::Notify,
 };
 
-use super::MAX_CAPTURE_BYTES_PER_STREAM;
+use super::{MAX_CAPTURE_BYTES_PER_STREAM, PipelineSemantics};
 use crate::background_shell::append_shell_output;
 
 #[derive(Clone, Copy)]
@@ -98,8 +98,11 @@ pub(super) fn foreground_shell_metadata(
     command: &str,
     intent: Option<&str>,
     shell: &ShellInfo,
+    pipeline_semantics: PipelineSemantics,
     cwd: &Path,
-    exit: i32,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    wait_error: Option<&str>,
     timed_out: bool,
     stdout_capture: &CapturedOutput,
     stderr_capture: &CapturedOutput,
@@ -109,9 +112,16 @@ pub(super) fn foreground_shell_metadata(
     if let Some(intent) = intent.filter(|intent| !intent.trim().is_empty()) {
         meta.insert("intent".into(), serde_json::json!(intent));
     }
-    meta.insert("exitCode".into(), serde_json::json!(exit));
+    meta.insert("exitCode".into(), serde_json::json!(exit_code));
+    if let Some(signal) = signal {
+        meta.insert("signal".into(), serde_json::json!(signal));
+    }
+    if let Some(wait_error) = wait_error {
+        meta.insert("processError".into(), serde_json::json!(wait_error));
+    }
     meta.insert("shell".into(), serde_json::json!(shell.name));
     meta.insert("shellPath".into(), serde_json::json!(shell.path));
+    insert_pipeline_metadata(&mut meta, pipeline_semantics);
     meta.insert("cwd".into(), serde_json::json!(cwd.display().to_string()));
     meta.insert("streamed".into(), serde_json::json!(false));
     meta.insert("timedOut".into(), serde_json::json!(timed_out));
@@ -139,6 +149,24 @@ pub(super) fn foreground_shell_metadata(
         );
     }
     meta
+}
+
+pub(super) fn insert_pipeline_metadata(
+    metadata: &mut BTreeMap<String, serde_json::Value>,
+    semantics: PipelineSemantics,
+) {
+    metadata.insert(
+        "pipelinePolicy".into(),
+        serde_json::json!(semantics.policy_name()),
+    );
+    metadata.insert(
+        "pipelinePolicyEnforced".into(),
+        serde_json::json!(semantics.is_enforced()),
+    );
+    metadata.insert(
+        "pipelineStatusScope".into(),
+        serde_json::json!(semantics.status_scope()),
+    );
 }
 
 pub(super) async fn capture_stream_with_background_transfer(

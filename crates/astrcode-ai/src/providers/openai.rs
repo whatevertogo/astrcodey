@@ -14,6 +14,7 @@ use crate::{
         HttpPostRequest, apply_auth_header, build_client, report_stream_error,
         retry_policy_from_config,
     },
+    strict_tools::{StrictToolProvider, prepare_strict_tools},
     wire::{openai as openai_wire, openai::parser::StandardAccumulator},
 };
 
@@ -64,6 +65,7 @@ impl StandardProvider {
             max_output_tokens: self.model_limits_val.max_output_tokens,
             supports_stream_usage: self.config.supports_stream_usage(),
             supports_prompt_cache_key: self.config.supports_prompt_cache_key(),
+            supports_strict_tool_use: self.config.supports_strict_tool_use,
             prompt_cache_retention: self.config.prompt_cache_retention(),
             thinking_level: self.config.thinking_level(),
         }
@@ -93,9 +95,14 @@ impl LlmProvider for StandardProvider {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
+        mut tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        prepare_strict_tools(
+            &mut tools,
+            self.config.supports_strict_tool_use,
+            StrictToolProvider::OpenAi,
+        )?;
         let body = self.build_request_body(&messages, &tools);
 
         let endpoint = self.endpoint();
@@ -128,13 +135,18 @@ impl LlmProvider for StandardProvider {
     async fn count_input_tokens(
         &self,
         messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
+        mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         if self.api_mode != OpenAiApiMode::Responses {
             return Err(LlmError::Unsupported(
                 "OpenAI Chat Completions does not expose provider-side input token counting".into(),
             ));
         }
+        prepare_strict_tools(
+            &mut tools,
+            self.config.supports_strict_tool_use,
+            StrictToolProvider::OpenAi,
+        )?;
 
         let mut headers: Vec<(String, String)> =
             self.config.extra_headers.clone().into_iter().collect();
@@ -213,6 +225,7 @@ mod tests {
                 "properties": { "path": { "type": "string" } },
                 "required": ["path"]
             }),
+            strict: false,
             origin: ToolOrigin::Builtin,
             execution_mode: ExecutionMode::Parallel,
         }
@@ -266,6 +279,25 @@ mod tests {
         let p = provider(OpenAiApiMode::ChatCompletions, false, None);
         let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
         assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_invalid_strict_schema_before_transport() {
+        let mut provider = provider(OpenAiApiMode::Responses, false, None);
+        provider.config.supports_strict_tool_use = true;
+        let mut invalid = sample_tool();
+        invalid.strict = true;
+        invalid.parameters = serde_json::json!({"type": "string"});
+
+        let result = provider
+            .generate(vec![LlmMessage::user("hi")], vec![invalid])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::Unsupported(message))
+                if message.contains("strict tool `read` schema at `$`")
+        ));
     }
 
     #[test]

@@ -29,13 +29,16 @@ fn background_output_dir_falls_back_to_cwd_astrcode() {
 
 #[test]
 fn format_footer_contains_status() {
-    let footer = format_footer(ShellRunStatus::Completed, Some(0));
+    let footer = format_footer(ShellRunStatus::Completed, Some(0), None);
     assert!(footer.contains("completed"));
     assert!(footer.contains("exit_code: 0"));
 
-    let footer = format_footer(ShellRunStatus::TimedOut, None);
+    let footer = format_footer(ShellRunStatus::TimedOut, None, None);
     assert!(footer.contains("timed_out"));
     assert!(!footer.contains("exit_code"));
+
+    let footer = format_footer(ShellRunStatus::Failed, None, Some(15));
+    assert!(footer.contains("signal: 15"));
 }
 
 #[test]

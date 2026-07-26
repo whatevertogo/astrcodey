@@ -26,6 +26,7 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
+    pub(crate) raw_arguments: Option<String>,
     pub(crate) mode: ExecutionMode,
     pub(crate) outcome: PreparedToolInvocationOutcome,
 }
@@ -82,6 +83,16 @@ pub(crate) struct ExecutableToolInvocation {
     pub(crate) tool_input: serde_json::Value,
 }
 
+pub(crate) fn tool_call_completion_arguments(
+    tool_input: serde_json::Value,
+    raw_arguments: Option<String>,
+) -> (String, Option<serde_json::Value>) {
+    match raw_arguments {
+        Some(raw) => (raw, None),
+        None => (tool_input.to_string(), Some(tool_input)),
+    }
+}
+
 impl PreparedToolInvocation {
     /// 将预处理后的工具调用转换为可执行任务输入。
     pub(crate) fn to_executable(&self) -> ExecutableToolInvocation {
@@ -90,6 +101,35 @@ impl PreparedToolInvocation {
             call_id: self.call_id.clone(),
             name: self.name.clone(),
             tool_input: self.tool_input.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_arguments_distinguish_raw_from_valid_json_strings() {
+        let cases = [
+            (
+                serde_json::Value::String("hello".into()),
+                None,
+                r#""hello""#,
+                true,
+            ),
+            (
+                serde_json::Value::String(r#"{"query":"unfinished"#.into()),
+                Some(r#"{"query":"unfinished"#.into()),
+                r#"{"query":"unfinished"#,
+                false,
+            ),
+        ];
+
+        for (input, raw, expected_text, has_json) in cases {
+            let (text, json) = tool_call_completion_arguments(input, raw);
+            assert_eq!(text, expected_text);
+            assert_eq!(json.is_some(), has_json);
         }
     }
 }

@@ -45,7 +45,8 @@ pub(crate) fn memory_save_definition() -> ToolDefinition {
             "required": ["content"]
         }),
         execution_mode: ExecutionMode::Sequential,
-        origin: ToolOrigin::Extension,
+        strict: true,
+        origin: ToolOrigin::Bundled,
     }
 }
 
@@ -61,7 +62,8 @@ pub(crate) fn memory_delete_definition() -> ToolDefinition {
             "required": ["match"]
         }),
         execution_mode: ExecutionMode::Sequential,
-        origin: ToolOrigin::Extension,
+        strict: true,
+        origin: ToolOrigin::Bundled,
     }
 }
 
@@ -77,7 +79,8 @@ pub(crate) fn memory_list_definition() -> ToolDefinition {
             }
         }),
         execution_mode: ExecutionMode::Sequential,
-        origin: ToolOrigin::Extension,
+        strict: true,
+        origin: ToolOrigin::Bundled,
     }
 }
 

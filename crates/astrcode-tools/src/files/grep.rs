@@ -262,6 +262,7 @@ fn grep_tool_definition() -> &'static ToolDefinition {
             "- When hasMore/truncated is true, re-run the same search with offset set to \
              nextOffset — do not use `read` on tool-results paths",
         ).into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({

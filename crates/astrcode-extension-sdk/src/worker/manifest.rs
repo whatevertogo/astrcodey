@@ -51,6 +51,7 @@ impl ManifestCatalog {
                     "name": t.name,
                     "description": t.description,
                     "parameters": t.parameters,
+                    "strict": t.strict,
                     "mode": match t.execution_mode {
                         crate::tool::ExecutionMode::Parallel => "parallel",
                         crate::tool::ExecutionMode::Sequential => "sequential",
@@ -101,6 +102,19 @@ impl ManifestCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::tool;
+
+    #[test]
+    fn tool_strict_declaration_is_included_in_manifest() {
+        let catalog = ManifestCatalog {
+            tools: vec![tool("strictTool").strict().build()],
+            ..Default::default()
+        };
+
+        let metadata = catalog.to_metadata_value("test-extension", "0.0.0");
+
+        assert_eq!(metadata["tools"][0]["strict"], true);
+    }
 
     #[test]
     fn continue_after_stop_limit_serializes_under_hook_options() {
