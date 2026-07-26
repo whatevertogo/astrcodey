@@ -405,7 +405,8 @@ let submitted = HostClient::submit_session_turn(request).await?;
 内置扩展通过 SDK 的宿主路径 API 扫描 `~/.claude/agents`、`~/.astrcode/agents` 以及对应的项目目录。
 Agent frontmatter 支持 `tools` 白名单和 `disallowedTools` 黑名单；省略两者时继承父 session 的工具边界，
 两者同时存在时黑名单优先。各内置 Agent 的附加限制定义在各自 Markdown frontmatter 中：
-`explore` 和 `reviewer` 使用只读白名单，`execute` 通过 `disallowedTools: Task` 禁止递归委派；
+`explore` 使用只读白名单，`reviewer` 额外获得仅用于检查和验证的 `Bash`，`execute` 通过
+`disallowedTools: Task` 禁止递归委派；
 Claude 名称 `Task` 会被规范化为 AstrCode 工具名 `agent`。最终有效工具集仍会与整条父 session
 边界取交集，不能通过 Agent 配置扩大权限。自定义 Agent 若省略两者则不会附加隐藏限制。
 

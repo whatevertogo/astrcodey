@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(
             selection("reviewer"),
             Some(SessionToolSelection::Only {
-                names: vec!["glob".into(), "grep".into(), "read".into()]
+                names: vec!["glob".into(), "grep".into(), "read".into(), "shell".into()]
             })
         );
         assert_eq!(
