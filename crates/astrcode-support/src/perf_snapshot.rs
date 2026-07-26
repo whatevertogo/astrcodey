@@ -58,6 +58,7 @@ fn payload_type(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::SessionStarted { .. } => "session_started",
         EventPayload::ModelIdChanged { .. } => "model_id_changed",
+        EventPayload::SessionToolsConfigured { .. } => "session_tools_configured",
         EventPayload::SystemPromptConfigured { .. } => "system_prompt_configured",
         EventPayload::SessionDeleted => "session_deleted",
         EventPayload::AgentSessionSpawned { .. } => "agent_session_spawned",

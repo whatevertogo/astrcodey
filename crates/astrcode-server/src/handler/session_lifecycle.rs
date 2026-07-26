@@ -1,6 +1,6 @@
 //! 会话创建、恢复与 fork。
 
-use astrcode_core::types::SessionId;
+use astrcode_core::{extension::SessionToolSelection, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
 
 use super::{CommandHandler, HandlerError, snapshot::session_snapshot};
@@ -30,8 +30,22 @@ impl CommandHandler {
     }
 
     pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
+        self.create_session_with_tool_selection(working_dir, None)
+            .await
+    }
+
+    pub async fn create_session_with_tool_selection(
+        &mut self,
+        working_dir: String,
+        tool_selection: Option<SessionToolSelection>,
+    ) -> Result<SessionId, HandlerError> {
         tracing::info!(working_dir = %working_dir, "creating session");
-        let created = match self.runtime.session_manager().create(&working_dir).await {
+        let created = match self
+            .runtime
+            .session_manager()
+            .create_with_tool_selection(&working_dir, tool_selection.as_ref())
+            .await
+        {
             Ok(created) => created,
             Err(error) => {
                 tracing::error!(working_dir = %working_dir, error = %error, "create session failed");

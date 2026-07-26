@@ -4,7 +4,7 @@
 //! storage 不依赖也不返回这些 DTO。
 
 use astrcode_core::{
-    extension::{ExtensionEventDecl, Keybinding, SlashCommand, StatusItem},
+    extension::{ExtensionEventDecl, Keybinding, SessionToolSelection, SlashCommand, StatusItem},
     message_attachment::MessageAttachment,
 };
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ use crate::wire::{
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
     pub working_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_selection: Option<ToolSelectionDto>,
 }
 
 /// 新建会话响应。
@@ -31,6 +33,48 @@ pub struct CreateSessionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponseDto {
     pub session_id: String,
+}
+
+/// Session 工具可见性线缆契约。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolSelectionDto {
+    /// 使用全部工具，但排除指定名称。
+    All {
+        #[serde(default)]
+        except: Vec<String>,
+    },
+    /// 仅使用指定名称；空数组表示禁用全部工具。
+    Only {
+        #[serde(default)]
+        names: Vec<String>,
+    },
+}
+
+impl From<SessionToolSelection> for ToolSelectionDto {
+    fn from(selection: SessionToolSelection) -> Self {
+        match selection {
+            SessionToolSelection::All { except } => Self::All { except },
+            SessionToolSelection::Only { names } => Self::Only { names },
+        }
+    }
+}
+
+/// 配置 Session 后续 turn 工具边界的请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureSessionToolsRequest {
+    pub selection: ToolSelectionDto,
+}
+
+/// 配置 Session 工具边界后的有效选择。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigureSessionToolsResponse {
+    pub selection: ToolSelectionDto,
 }
 
 /// Prompt 和 conversation block 共用的附件线缆形状。

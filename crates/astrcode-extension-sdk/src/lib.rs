@@ -7,24 +7,24 @@
 pub mod extension {
     pub use astrcode_core::extension::{
         AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
-        AfterToolResultsRegistration, AfterToolResultsResult, ChildToolPolicy,
-        CommandCompletionItem, CommandCompletions, CommandContext, CommandDiscoveryHandler,
-        CommandHandler, CompactContext, CompactContributions, CompactEvent, CompactHandler,
-        CompactResult, CompactStrategy, CompactTrigger, ContinueAfterStopContext,
-        ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
-        ContinueAfterStopRegistration, ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES,
-        DiscoveredTool, EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension,
-        ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError,
-        ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks,
-        ExtensionToolOutcome, HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
+        AfterToolResultsRegistration, AfterToolResultsResult, CommandCompletionItem,
+        CommandCompletions, CommandContext, CommandDiscoveryHandler, CommandHandler,
+        CompactContext, CompactContributions, CompactEvent, CompactHandler, CompactResult,
+        CompactStrategy, CompactTrigger, ContinueAfterStopContext, ContinueAfterStopHandler,
+        ContinueAfterStopLimit, ContinueAfterStopOptions, ContinueAfterStopRegistration,
+        ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES, DiscoveredTool,
+        EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
+        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks, ExtensionToolOutcome,
+        HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
         MAX_EXTENSION_HTTP_BODY_BYTES, PostToolUseContext, PostToolUseFailureContext,
         PostToolUseFailureHandler, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
         PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
         PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, SlashCommand, StatusItem, StatusItemUpdatePayload, StopReason,
-        ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+        Registrar, SessionToolSelection, SlashCommand, StatusItem, StatusItemUpdatePayload,
+        StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
         UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
         UserMessageEnvelopeResult, extension_http_route_patterns_conflict,
         match_extension_http_route,
@@ -124,9 +124,11 @@ pub mod permission {
 pub mod builder;
 pub mod manifest;
 pub mod runtime;
+pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
 pub mod session_inspect;
+pub mod tool_pack;
 pub mod worker;
 
 /// Namespaced persistence locations for session-scoped extension data.
@@ -161,6 +163,7 @@ pub mod prelude {
         },
         manifest::validate_manifest,
         s5r::effects::HandlerResult,
+        session::SessionToolSelectionDto,
         session_inspect::{
             SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
             SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
@@ -171,9 +174,11 @@ pub mod prelude {
             ToolResult,
         },
         worker::{
-            HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
-            HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
-            HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
+            HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
+            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionTargetRequest,
+            HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput,
             HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
             HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
             HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
@@ -191,15 +196,18 @@ pub mod worker_prelude {
             ErrorPayload,
             effects::{CallContinuation, HandlerResult},
         },
+        session::SessionToolSelectionDto,
         session_inspect::{
             SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
             SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
             SessionInspectSnapshotOutput,
         },
         worker::{
-            HostApi, HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
-            HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
-            HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
+            HostApi, HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
+            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionTargetRequest,
+            HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput,
             HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
             HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
             HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,

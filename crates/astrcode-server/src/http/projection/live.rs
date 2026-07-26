@@ -160,7 +160,7 @@ pub(in crate::http) fn event_to_deltas(
             child_session_id,
             agent_name,
             task,
-            tool_policy: _,
+            tool_selection: _,
             tool_call_id,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: AgentSessionLinkDto::spawned(

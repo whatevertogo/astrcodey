@@ -319,7 +319,7 @@ impl ServerRuntime {
         }
     }
 
-    /// 按当前配置重载扩展集合，并让已打开 session 的工具快照在下一次 turn 重建。
+    /// 按当前配置重载扩展集合；新 turn 会直接解析新的工具快照。
     pub async fn reload_extensions(&self) -> Vec<String> {
         let caps = self.capabilities();
         let mut host_services = ExtensionHostServices::new(
@@ -345,7 +345,6 @@ impl ServerRuntime {
             self.startup_working_dir(),
         )
         .await;
-        self.session_manager().invalidate_tool_registries();
         load_errors
     }
 }

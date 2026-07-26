@@ -1,16 +1,22 @@
 //! Session history, control, and inspection capabilities.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use astrcode_core::{
-    extension::ChildToolPolicy,
+    extension::SessionToolSelection,
     storage::EventReader,
     tool::{
         CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
-        SubmitTurnRequest, SubmitTurnResult,
+        SubmitTurnRequest,
     },
 };
-use astrcode_extension_sdk::s5r::ErrorPayload;
+use astrcode_extension_sdk::{
+    s5r::ErrorPayload,
+    session::{
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionToolSelectionDto,
+    },
+};
 use serde_json::{Value, json};
 
 use super::{InvokeContext, block_on_async, capability::SessionCapability, session_inspect};
@@ -35,6 +41,7 @@ impl SessionGroup {
         match capability {
             SessionCapability::ReadEvents => self.read_events(&input, ctx),
             SessionCapability::Create => create_session(&input, ctx),
+            SessionCapability::ConfigureTools => configure_tools(&input, ctx),
             SessionCapability::SubmitTurn => submit_turn(&input, ctx),
             SessionCapability::InterruptAndSubmit => interrupt_and_submit(&input, ctx),
             SessionCapability::Inject => inject_input(&input, ctx),
@@ -127,15 +134,20 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
             "session_ops not available in context",
         )
     })?;
+    let wire_request =
+        parse_wire_request::<HostCreateSessionRequest>(input, "session.control.create")?;
     let request = CreateSessionRequest {
-        name: input["name"].as_str().unwrap_or("child").to_string(),
-        working_dir: input["working_dir"].as_str().map(str::to_string),
-        system_prompt: input["system_prompt"].as_str().map(str::to_string),
-        model_preference: input["model_preference"].as_str().map(str::to_string),
-        tool_policy: parse_child_tool_policy(input)?,
+        name: wire_request.name,
+        working_dir: wire_request.working_dir,
+        system_prompt: wire_request.system_prompt,
+        model_preference: wire_request.model_preference,
+        tool_selection: wire_request
+            .tool_selection
+            .map(|selection| map_tool_selection(selection, "tool_selection"))
+            .transpose()?,
         source_extension: Some(ctx.extension_id.clone()),
-        ephemeral: input["ephemeral"].as_bool().unwrap_or(false),
-        tool_call_id: input["tool_call_id"].as_str().unwrap_or("").to_string(),
+        ephemeral: wire_request.ephemeral,
+        tool_call_id: wire_request.tool_call_id.unwrap_or_default(),
     };
     let parent = ctx
         .session_id
@@ -143,16 +155,33 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
         .ok_or_else(|| ErrorPayload::new("invalid_input", "parent session_id required"))?;
     let ops = Arc::clone(ops);
     block_on_async(async move {
-        ops.create_session(&parent, request)
+        let handle = ops
+            .create_session(&parent, request)
             .await
-            .map(|handle| json!({ "session_id": handle.session_id }))
+            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))?;
+        serialize_wire_response(
+            HostCreateSessionOutput::from(handle),
+            "session.control.create",
+        )
+    })?
+}
+
+fn configure_tools(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+    let ops = required_session_ops(ctx)?;
+    let access = session_access_from_input(input, ctx)?;
+    let selection = parse_session_tool_selection(input)?;
+    block_on_async(async move {
+        ops.configure_tools(access.as_access(), selection)
+            .await
+            .map(|effective| json!({ "selection": SessionToolSelectionDto::from(effective) }))
             .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
     })?
 }
 
 fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let wait_for_result = input["wait_for_result"].as_bool().unwrap_or(true);
-    if ctx.on_peer_io_thread && wait_for_result {
+    let wire_request =
+        parse_wire_request::<HostSubmitTurnRequest>(input, "session.control.submit_turn")?;
+    if ctx.on_peer_io_thread && wire_request.wait_for_result {
         return Err(ErrorPayload::new(
             "invalid_request",
             "wait_for_result cannot be used from peer synchronous host invokes (deadlock risk); \
@@ -169,29 +198,25 @@ fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload
         .session_id
         .clone()
         .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
-    let target_session_id = input["target_session_id"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?
-        .to_string();
-    let user_prompt = input["user_prompt"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "user_prompt required"))?
-        .to_string();
-    let request = SubmitTurnRequest::for_child(caller, target_session_id, user_prompt)
-        .wait_for_result(wait_for_result)
-        .notify_parent_on_complete(
-            input["notify_parent_on_complete"]
-                .as_str()
-                .map(str::to_string),
-        )
-        .recycle_on_complete(input["recycle_on_complete"].as_bool().unwrap_or(false))
-        .tool_call_id(input["tool_call_id"].as_str().map(str::to_string));
+    let request = SubmitTurnRequest::for_child(
+        caller,
+        wire_request.target_session_id,
+        wire_request.user_prompt,
+    )
+    .wait_for_result(wire_request.wait_for_result)
+    .notify_parent_on_complete(wire_request.notify_parent_on_complete)
+    .recycle_on_complete(wire_request.recycle_on_complete)
+    .tool_call_id(wire_request.tool_call_id);
     let ops = Arc::clone(ops);
     block_on_async(async move {
-        ops.submit_turn(request)
+        let result = ops
+            .submit_turn(request)
             .await
-            .map(submit_turn_result_json)
-            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))?;
+        serialize_wire_response(
+            HostSubmitTurnOutput::from(result),
+            "session.control.submit_turn",
+        )
     })?
 }
 
@@ -272,22 +297,6 @@ fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPay
     })?
 }
 
-fn submit_turn_result_json(result: SubmitTurnResult) -> Value {
-    match result {
-        SubmitTurnResult::Completed { content } => {
-            json!({ "status": "completed", "content": content })
-        },
-        SubmitTurnResult::Backgrounded {
-            task_id,
-            session_id,
-        } => json!({
-            "status": "backgrounded",
-            "task_id": task_id,
-            "session_id": session_id
-        }),
-    }
-}
-
 fn session_delivery_outcome_json(outcome: SessionDeliveryOutcome) -> Value {
     match outcome {
         SessionDeliveryOutcome::Started { turn_id } => {
@@ -336,39 +345,78 @@ fn required_session_content(input: &Value) -> Result<String, ErrorPayload> {
         .ok_or_else(|| ErrorPayload::new("invalid_input", "content required"))
 }
 
-fn parse_child_tool_policy(input: &Value) -> Result<Option<ChildToolPolicy>, ErrorPayload> {
-    let Some(value) = input.get("tool_policy") else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-
-    let policy = serde_json::from_value::<ChildToolPolicy>(value.clone()).map_err(|error| {
-        ErrorPayload::new("invalid_input", format!("invalid tool_policy: {error}"))
-            .with_hint("expected {\"mode\":\"allow|deny\",\"tools\":[\"tool_name\"]}")
-    })?;
-    validate_child_tool_policy(&policy)?;
-    Ok(Some(policy))
+fn parse_session_tool_selection(input: &Value) -> Result<SessionToolSelection, ErrorPayload> {
+    let value = input
+        .get("selection")
+        .ok_or_else(|| ErrorPayload::new("invalid_input", "selection required"))?;
+    parse_tool_selection_value(value, "selection")
 }
 
-fn validate_child_tool_policy(policy: &ChildToolPolicy) -> Result<(), ErrorPayload> {
-    let tools = match policy {
-        ChildToolPolicy::Deny { tools } => tools,
-        ChildToolPolicy::Allow { tools } if tools.is_empty() => {
-            return Err(ErrorPayload::new(
-                "invalid_input",
-                "tool_policy allow mode requires at least one tool",
-            ));
-        },
-        ChildToolPolicy::Allow { tools } => tools,
-    };
+fn parse_tool_selection_value(
+    value: &Value,
+    field: &str,
+) -> Result<SessionToolSelection, ErrorPayload> {
+    let selection =
+        serde_json::from_value::<SessionToolSelectionDto>(value.clone()).map_err(|error| {
+            ErrorPayload::new("invalid_input", format!("invalid {field}: {error}")).with_hint(
+                "expected {\"mode\":\"all\",\"except\":[]} or {\"mode\":\"only\",\"names\":[]}",
+            )
+        })?;
+    map_tool_selection(selection, field)
+}
 
-    if tools.iter().any(|tool| tool.trim().is_empty()) {
-        return Err(ErrorPayload::new(
-            "invalid_input",
-            "tool_policy tools must be non-empty strings",
-        ));
+fn map_tool_selection(
+    selection: SessionToolSelectionDto,
+    field: &str,
+) -> Result<SessionToolSelection, ErrorPayload> {
+    match selection {
+        SessionToolSelectionDto::All { except } => Ok(SessionToolSelection::All {
+            except: validated_tool_names(except, &format!("{field}.except"))?,
+        }),
+        SessionToolSelectionDto::Only { names } => Ok(SessionToolSelection::Only {
+            names: validated_tool_names(names, &format!("{field}.names"))?,
+        }),
     }
-    Ok(())
+}
+
+fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, ErrorPayload> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| {
+            let tool = tool.trim();
+            if tool.is_empty() {
+                Err(ErrorPayload::new(
+                    "invalid_input",
+                    format!("{field} must contain non-empty strings"),
+                ))
+            } else {
+                Ok(tool.to_owned())
+            }
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(tools.into_iter().collect())
+}
+
+fn parse_wire_request<'de, T>(input: &'de Value, capability: &str) -> Result<T, ErrorPayload>
+where
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(input).map_err(|error| {
+        ErrorPayload::new(
+            "invalid_input",
+            format!("invalid {capability} request: {error}"),
+        )
+    })
+}
+
+fn serialize_wire_response<T>(output: T, capability: &str) -> Result<Value, ErrorPayload>
+where
+    T: serde::Serialize,
+{
+    serde_json::to_value(output).map_err(|error| {
+        ErrorPayload::new(
+            "serialization_failed",
+            format!("failed to serialize {capability} response: {error}"),
+        )
+    })
 }

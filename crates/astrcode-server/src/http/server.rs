@@ -9,7 +9,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -109,6 +109,10 @@ fn router_parts(
         .route(
             "/api/sessions/{id}/conversation",
             get(sessions::conversation_snapshot),
+        )
+        .route(
+            "/api/sessions/{id}/tools",
+            put(sessions::configure_session_tools),
         )
         .route("/api/sessions/{id}/stream", get(stream::session_stream))
         .route(

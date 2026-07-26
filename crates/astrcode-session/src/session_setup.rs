@@ -1,43 +1,50 @@
 //! Session 启动期资源构建：工具表快照与 system prompt 装配。
 //!
 //! 这两个动作以前在 server crate 的 `SessionManager` 内，但因为它们直接依赖
-//! `Session` 自己的 runtime（写回 tool_registry）和事件日志（追加 `SystemPromptConfigured`），
-//! 把它们搬到 session crate 后能让 Session 真正掌控自己的运行时。
+//! `Session` 自己的工具边界和事件日志（追加 `SystemPromptConfigured`），把它们搬到
+//! session crate 后能让 Session 真正掌控自己的运行时。
 
 use std::collections::HashMap;
 
 use astrcode_core::{
     config::ModelSelection,
-    extension::{ChildToolPolicy, ExtensionError, PromptBuildContext},
+    extension::{ExtensionError, PromptBuildContext, SessionToolSelection},
     prompt::{
         ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
         SystemPromptInput,
     },
     tool::{ToolDefinition, ToolPromptMetadata},
 };
-use astrcode_kernel::{ExtensionRuntime, ToolPack, ToolPackScope, ToolRegistry};
+use astrcode_extension_sdk::{
+    runtime_ports::{PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider},
+    tool_pack::{ToolPack, ToolPackScope},
+};
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 
-use crate::session::normalize_extra_system_prompt;
+use crate::{ToolRegistry, session::normalize_extra_system_prompt};
+
+pub(crate) struct BuiltToolRegistry {
+    pub registry: ToolRegistry,
+    pub completeness: ToolCatalogCompleteness,
+}
 
 /// 构建一个工作目录绑定的工具表快照。
 ///
-/// 每次新建/恢复 session 时调用一次；工具执行期间只读取这份快照，
-/// 不再维护运行中的动态工具层。
+/// Session 快照缓存未命中时调用；工具执行期间只读取构建出的快照。
 ///
-/// `tool_policy` 用于子 session 的工具裁剪：
-/// - `None`：保留父全集（即所有 builtin + extension 工具）。
-/// - `Some(Deny)`：从全集排除指定工具。
-/// - `Some(Allow)`：仅保留指定工具。空白名单视为非法配置（spawner 应在调用前拦截）。
+/// `tool_selection` 用于 session 的工具裁剪：
+/// - `None`：保留所有 builtin + extension 工具。
+/// - `Some(All)`：保留全集，但排除 `except` 中的工具。
+/// - `Some(Only)`：仅保留 `names` 中的工具。空名单表示明确禁用全部工具。
 ///
 /// 过滤在表构建末尾一次完成，确保 LLM schema、prompt 渲染、运行时白名单三处
 /// 都看到同一份工具集。
-pub async fn build_tool_registry_snapshot(
-    extension_runner: &dyn ExtensionRuntime,
+pub(crate) async fn build_tool_registry_snapshot(
+    tool_catalog: &dyn ToolCatalogProvider,
     tool_packs: &[std::sync::Arc<dyn ToolPack>],
     working_dir: &str,
-    tool_policy: Option<&ChildToolPolicy>,
-) -> ToolRegistry {
+    tool_selection: Option<&SessionToolSelection>,
+) -> Result<BuiltToolRegistry, ExtensionError> {
     let mut tool_registry = ToolRegistry::new();
     let scope = ToolPackScope { working_dir };
 
@@ -49,32 +56,31 @@ pub async fn build_tool_registry_snapshot(
 
     // Extensions override host tool packs, and earlier registered extensions
     // keep precedence over later registered extensions with the same tool name.
-    for tool in extension_runner
-        .collect_tool_adapters(working_dir)
-        .await
-        .into_iter()
-        .rev()
-    {
+    let catalog = tool_catalog.tool_catalog(working_dir).await?;
+    for diagnostic in &catalog.diagnostics {
+        tracing::warn!(
+            working_dir,
+            extension_id = diagnostic.extension_id,
+            error = diagnostic.message,
+            "extension tool catalog is partial"
+        );
+    }
+    for tool in catalog.tools.into_iter().rev() {
         tool_registry.register(tool);
     }
 
-    if let Some(policy) = tool_policy {
-        apply_child_tool_policy(&mut tool_registry, policy);
+    if let Some(selection) = tool_selection {
+        tool_registry.apply_tool_selection(selection);
     }
 
-    tool_registry
+    Ok(BuiltToolRegistry {
+        registry: tool_registry,
+        completeness: catalog.completeness,
+    })
 }
 
-/// 按 [`ChildToolPolicy`] 裁剪工具表。
-/// TODO: 更好的方式？支持子智能体自定义工具？
-/// `Deny` 直接 `unregister`；`Allow` 把不在白名单里的工具全部 `unregister`。
-/// 命中不存在的工具名只打 debug 日志，不报错——插件可能针对多版本宿主写策略。
-fn apply_child_tool_policy(registry: &mut ToolRegistry, policy: &ChildToolPolicy) {
-    *registry = registry.clone_with_child_policy(Some(policy));
-}
-
-pub struct SystemPromptSnapshotInput<'a> {
-    pub extension_runner: &'a dyn ExtensionRuntime,
+pub(crate) struct SystemPromptSnapshotInput<'a> {
+    pub prompt_contributor: &'a dyn PromptContributor,
     pub prompt_provider: &'a dyn PromptProvider,
     pub prompt_file_provider: &'a dyn PromptFileProvider,
     pub session_id: &'a str,
@@ -86,17 +92,17 @@ pub struct SystemPromptSnapshotInput<'a> {
     pub include_agents_rules: bool,
 }
 
-/// 扩展动态贡献的收集结果（extension blocks + merged tool metadata）。
-pub struct ExtensionPromptData {
+/// 扩展动态贡献的收集结果。
+struct ExtensionPromptData {
     pub extension_blocks: Vec<ExtensionPromptBlock>,
     pub merged_tool_metadata: HashMap<String, ToolPromptMetadata>,
 }
 
-/// 收集扩展的 prompt 贡献（extension blocks + tool prompt metadata）。
+/// 收集扩展的 prompt 贡献。
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
-pub async fn collect_extension_prompt_data(
-    extension_runner: &dyn ExtensionRuntime,
+async fn collect_extension_prompt_data(
+    prompt_contributor: &dyn PromptContributor,
     session_id: &str,
     working_dir: &str,
     model_id: &str,
@@ -109,7 +115,7 @@ pub async fn collect_extension_prompt_data(
         model: ModelSelection::simple(model_id),
         tools: tools.to_vec(),
     };
-    let contributions = extension_runner
+    let contributions = prompt_contributor
         .collect_prompt_contributions(prompt_ctx)
         .await?;
 
@@ -139,23 +145,20 @@ pub async fn collect_extension_prompt_data(
         });
     }
 
-    let mut merged_metadata = base_tool_prompt_metadata;
-    merged_metadata.extend(extension_runner.collect_tool_prompt_metadata().await);
-
     Ok(ExtensionPromptData {
         extension_blocks,
-        merged_tool_metadata: merged_metadata,
+        merged_tool_metadata: base_tool_prompt_metadata,
     })
 }
 
 /// 构建 system prompt 文本与指纹。
 ///
 /// 调用方决定是否要把结果写成 `SystemPromptConfigured` 事件。
-pub async fn build_system_prompt_snapshot(
+pub(crate) async fn build_system_prompt_snapshot(
     input: SystemPromptSnapshotInput<'_>,
 ) -> Result<(String, String), ExtensionError> {
     let SystemPromptSnapshotInput {
-        extension_runner,
+        prompt_contributor,
         prompt_provider,
         prompt_file_provider,
         session_id,
@@ -168,7 +171,7 @@ pub async fn build_system_prompt_snapshot(
     } = input;
 
     let ext_data = collect_extension_prompt_data(
-        extension_runner,
+        prompt_contributor,
         session_id,
         working_dir,
         model_id,

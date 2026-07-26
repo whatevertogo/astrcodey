@@ -3,6 +3,7 @@ use std::{path::Path, sync::Arc};
 use astrcode_core::tool_access::ResourceAccess;
 use astrcode_extension_sdk::{
     extension::*,
+    runtime_ports::{ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogSnapshot},
     tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
 };
 
@@ -10,9 +11,10 @@ use super::{ExtensionRunner, bind_extension_event_sink};
 
 impl ExtensionRunner {
     /// 从 HandlerIndex 缓存收集工具适配器。
-    pub async fn collect_tool_adapters_typed(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
+    pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         let index = self.load_index();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        let mut diagnostics = Vec::new();
         for (def, handler, ext_id, capabilities) in &index.static_tools {
             let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
             tools.push(Arc::new(HandlerTool {
@@ -49,11 +51,27 @@ impl ExtensionRunner {
                     }
                 },
                 Err(_) => {
-                    tracing::warn!("tool discovery timed out");
+                    let message = format!(
+                        "tool discovery timed out after {} ms",
+                        self.timeout.as_millis()
+                    );
+                    tracing::warn!(extension_id = %ext_id, error = %message);
+                    diagnostics.push(ToolCatalogDiagnostic {
+                        extension_id: ext_id.clone(),
+                        message,
+                    });
                 },
             }
         }
-        tools
+        ToolCatalogSnapshot {
+            tools,
+            completeness: if diagnostics.is_empty() {
+                ToolCatalogCompleteness::Complete
+            } else {
+                ToolCatalogCompleteness::Partial
+            },
+            diagnostics,
+        }
     }
 }
 

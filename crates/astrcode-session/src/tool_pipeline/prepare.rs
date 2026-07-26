@@ -222,8 +222,7 @@ impl ToolCalls {
             resource_accesses: &accesses,
             approval_mode: self.turn.shared.approval_mode,
             session_id: self.turn.shared.session_id.as_str(),
-            is_child_session: self.turn.shared.is_child_session,
-            child_tool_policy: self.turn.shared.child_tool_policy.as_ref(),
+            tool_selection: self.turn.shared.tool_selection.as_ref(),
         };
         match self.turn.shared.permission_chain.decide(&ctx) {
             PermissionDecision::Allow => PreparedToolInvocationOutcome::Ready,

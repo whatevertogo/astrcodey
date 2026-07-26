@@ -6,13 +6,16 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{event::EventPayload, tool::ToolPromptMetadata};
+use astrcode_core::event::EventPayload;
 use astrcode_extension_sdk::{
     extension::*,
-    tool::{SessionOperations, Tool},
+    runtime_ports::{
+        PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
+        SessionOperationsProvider, ToolCatalogProvider, ToolCatalogSnapshot, TurnHooks,
+    },
+    tool::SessionOperations,
     trusted::ExtensionHostServices,
 };
-use astrcode_kernel::ExtensionRuntime;
 use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
 
 mod commands;
@@ -53,6 +56,7 @@ pub struct ExtensionRunner {
     records: RwLock<Vec<ExtensionRecord>>,
     /// 预计算的 handler 索引，注册时重建，分发时直接查表
     index: parking_lot::RwLock<Arc<HandlerIndex>>,
+    runtime_publication: parking_lot::Mutex<RuntimePublication>,
     diagnostics: parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>,
     /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
@@ -68,6 +72,38 @@ pub struct ExtensionRunner {
     startup_event_tx: parking_lot::RwLock<Option<mpsc::UnboundedSender<EventPayload>>>,
     /// 统一注入给 bundled extension 的宿主运行态服务。
     host_services: parking_lot::RwLock<Option<Arc<ExtensionHostServices>>>,
+}
+
+#[derive(Default)]
+struct RuntimePublication {
+    generation: u64,
+    active_writers: usize,
+}
+
+struct RuntimePublicationGuard<'a> {
+    publication: &'a parking_lot::Mutex<RuntimePublication>,
+}
+
+impl<'a> RuntimePublicationGuard<'a> {
+    fn begin(publication: &'a parking_lot::Mutex<RuntimePublication>) -> Self {
+        let mut state = publication.lock();
+        state.active_writers = state.active_writers.saturating_add(1);
+        Self { publication }
+    }
+}
+
+impl Drop for RuntimePublicationGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.publication.lock();
+        if state.active_writers == 0 {
+            tracing::error!("runtime publication guard dropped without an active writer");
+            return;
+        }
+        state.active_writers -= 1;
+        if state.active_writers == 0 {
+            state.generation = state.generation.wrapping_add(1);
+        }
+    }
 }
 
 /// 从 `register()` 调用中收集的扩展能力记录。
@@ -157,6 +193,7 @@ impl ExtensionRunner {
             extensions: RwLock::new(Vec::new()),
             records: RwLock::new(Vec::new()),
             index: parking_lot::RwLock::new(Arc::new(HandlerIndex::default())),
+            runtime_publication: parking_lot::Mutex::new(RuntimePublication::default()),
             diagnostics: parking_lot::RwLock::new(BTreeMap::new()),
             session_ops: Arc::new(StdRwLock::new(None)),
             extension_tasks: RwLock::new(HashMap::new()),
@@ -397,6 +434,7 @@ impl ExtensionRunner {
         log_handler_dispatch_order(records);
         let index = Arc::new(build_handler_index(records));
         self.ensure_extensions_data_dir_dirs(&index);
+        let _publication = RuntimePublicationGuard::begin(&self.runtime_publication);
         *self.index.write() = index;
     }
 
@@ -473,6 +511,7 @@ impl ExtensionRunner {
                 })
                 .collect()
         };
+        let _publication = RuntimePublicationGuard::begin(&self.runtime_publication);
 
         let mut errors = Vec::new();
         for (extension_id, extension, new_config, operation_gate) in changes {
@@ -1070,7 +1109,7 @@ impl ExtensionRunner {
 }
 
 #[async_trait::async_trait]
-impl ExtensionRuntime for ExtensionRunner {
+impl TurnHooks for ExtensionRunner {
     async fn emit_pre_tool_use(
         &self,
         ctx: PreToolUseContext,
@@ -1091,13 +1130,6 @@ impl ExtensionRuntime for ExtensionRunner {
         ctx: ProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         ExtensionRunner::emit_provider(self, event, ctx).await
-    }
-
-    async fn collect_prompt_contributions(
-        &self,
-        ctx: PromptBuildContext,
-    ) -> Result<PromptContributions, ExtensionError> {
-        ExtensionRunner::collect_prompt_contributions_typed(self, ctx).await
     }
 
     async fn emit_compact(
@@ -1140,17 +1172,37 @@ impl ExtensionRuntime for ExtensionRunner {
     ) -> Result<(), ExtensionError> {
         ExtensionRunner::emit_lifecycle(self, event, ctx).await
     }
+}
 
-    async fn collect_tool_adapters(&self, working_dir: &str) -> Vec<Arc<dyn Tool>> {
-        ExtensionRunner::collect_tool_adapters_typed(self, working_dir).await
-    }
-
-    async fn collect_tool_prompt_metadata(
+#[async_trait::async_trait]
+impl PromptContributor for ExtensionRunner {
+    async fn collect_prompt_contributions(
         &self,
-    ) -> std::collections::HashMap<String, ToolPromptMetadata> {
-        ExtensionRunner::collect_tool_prompt_metadata_typed(self).await
+        ctx: PromptBuildContext,
+    ) -> Result<PromptContributions, ExtensionError> {
+        ExtensionRunner::collect_prompt_contributions_typed(self, ctx).await
     }
+}
 
+#[async_trait::async_trait]
+impl ToolCatalogProvider for ExtensionRunner {
+    async fn tool_catalog(&self, working_dir: &str) -> Result<ToolCatalogSnapshot, ExtensionError> {
+        Ok(ExtensionRunner::tool_catalog_snapshot_typed(self, working_dir).await)
+    }
+}
+
+impl RuntimeSnapshotProvider for ExtensionRunner {
+    fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
+        let publication = self.runtime_publication.lock();
+        if publication.active_writers == 0 {
+            RuntimeSnapshotState::Stable(publication.generation)
+        } else {
+            RuntimeSnapshotState::Updating
+        }
+    }
+}
+
+impl SessionOperationsProvider for ExtensionRunner {
     fn session_ops(&self) -> Option<Arc<dyn SessionOperations>> {
         let ops_ref = self.session_ops_ref();
         let guard = ops_ref.read().unwrap_or_else(|e| e.into_inner());

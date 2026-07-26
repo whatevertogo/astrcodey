@@ -1,4 +1,4 @@
-//! Tool registry for kernel-managed tool dispatch.
+//! Immutable tool registry snapshots owned by the session layer.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -7,7 +7,7 @@ use std::{
 };
 
 use astrcode_core::{
-    extension::ChildToolPolicy,
+    extension::SessionToolSelection,
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolPromptMetadata,
         ToolResult,
@@ -115,47 +115,8 @@ impl ToolRegistry {
         self.tools.get(name).map(|entry| entry.definition.clone())
     }
 
-    pub fn into_tools(self) -> Vec<Arc<dyn Tool>> {
-        self.tools.into_values().map(|entry| entry.tool).collect()
-    }
-
-    pub fn unregister(&mut self, name: &str) {
-        self.tools.remove(name);
-    }
-
-    pub fn clone_with_child_policy(&self, policy: Option<&ChildToolPolicy>) -> Self {
-        let mut cloned = self.clone();
-        if let Some(policy) = policy {
-            cloned.apply_child_tool_policy(policy);
-        }
-        cloned
-    }
-
-    fn apply_child_tool_policy(&mut self, policy: &ChildToolPolicy) {
-        match policy {
-            ChildToolPolicy::Deny { tools } => {
-                for name in tools {
-                    if self.find_definition(name).is_none() {
-                        tracing::debug!(tool = %name, "deny policy mentions unknown tool, skipping");
-                        continue;
-                    }
-                    self.unregister(name);
-                }
-            },
-            ChildToolPolicy::Allow { tools } => {
-                let allow: std::collections::HashSet<&str> =
-                    tools.iter().map(String::as_str).collect();
-                let to_remove: Vec<String> = self
-                    .tools
-                    .keys()
-                    .filter(|name| !allow.contains(name.as_str()))
-                    .cloned()
-                    .collect();
-                for name in to_remove {
-                    self.unregister(&name);
-                }
-            },
-        }
+    pub(crate) fn apply_tool_selection(&mut self, selection: &SessionToolSelection) {
+        self.tools.retain(|name, _| selection.allows(name.as_str()));
     }
 }
 
@@ -316,18 +277,17 @@ mod tests {
     }
 
     #[test]
-    fn clone_with_child_policy_filters_without_rebuilding_tools() {
+    fn session_tool_selection_filters_registry_in_place() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("read", ExecutionMode::Parallel)));
         registry.register(Arc::new(NamedTool("shell", ExecutionMode::Sequential)));
 
-        let filtered = registry.clone_with_child_policy(Some(&ChildToolPolicy::Deny {
-            tools: vec!["shell".into()],
-        }));
+        registry.apply_tool_selection(&SessionToolSelection::All {
+            except: vec!["shell".into()],
+        });
 
-        assert!(registry.find_definition("shell").is_some());
-        assert!(filtered.find_definition("shell").is_none());
-        assert!(filtered.find_definition("read").is_some());
+        assert!(registry.find_definition("shell").is_none());
+        assert!(registry.find_definition("read").is_some());
     }
 
     #[test]

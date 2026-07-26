@@ -12,7 +12,8 @@ use astrcode_core::{
     llm::{LlmMessage, LlmProvider},
     prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
 };
-use astrcode_session::{SessionHostServices, SessionRuntimeServices};
+use astrcode_extension_sdk::tool_pack::ToolPack;
+use astrcode_session::{SessionExtensionPorts, SessionHostServices, SessionRuntimeServices};
 
 pub fn test_runtime_services(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
     test_runtime_services_with_context(llm, ContextSettings::default())
@@ -21,6 +22,46 @@ pub fn test_runtime_services(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeSer
 pub fn test_runtime_services_with_context(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,
+) -> Arc<SessionRuntimeServices> {
+    test_runtime_services_with_context_and_extensions(
+        llm,
+        context,
+        SessionExtensionPorts::default(),
+        Vec::new(),
+    )
+}
+
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub fn test_runtime_services_with_extensions(
+    llm: Arc<dyn LlmProvider>,
+    extension_ports: SessionExtensionPorts,
+) -> Arc<SessionRuntimeServices> {
+    test_runtime_services_with_context_and_extensions(
+        llm,
+        ContextSettings::default(),
+        extension_ports,
+        Vec::new(),
+    )
+}
+
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub fn test_runtime_services_with_tool_packs(
+    llm: Arc<dyn LlmProvider>,
+    tool_packs: Vec<Arc<dyn ToolPack>>,
+) -> Arc<SessionRuntimeServices> {
+    test_runtime_services_with_context_and_extensions(
+        llm,
+        ContextSettings::default(),
+        SessionExtensionPorts::default(),
+        tool_packs,
+    )
+}
+
+fn test_runtime_services_with_context_and_extensions(
+    llm: Arc<dyn LlmProvider>,
+    context: ContextSettings,
+    extension_ports: SessionExtensionPorts,
+    tool_packs: Vec<Arc<dyn ToolPack>>,
 ) -> Arc<SessionRuntimeServices> {
     let context_assembler: Arc<dyn ContextAssembler> = Arc::new(NoopContextAssembler {
         settings: context.clone(),
@@ -33,7 +74,9 @@ pub fn test_runtime_services_with_context(
             context_assembler,
             Arc::new(StaticPromptProvider),
             Arc::new(StaticPromptFileProvider),
-        ),
+        )
+        .with_extension_ports(extension_ports)
+        .with_tool_packs(tool_packs),
     ))
 }
 

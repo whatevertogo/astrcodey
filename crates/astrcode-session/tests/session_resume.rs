@@ -3,18 +3,74 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    event::Phase,
+    extension::{ExtensionError, PromptBuildContext, PromptContributions, SessionToolSelection},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::EventStore,
-    tool::ToolDefinition,
-    types::new_session_id,
+    tool::{
+        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
+        ToolResult,
+    },
+    types::{ToolCallId, new_session_id, new_turn_id},
 };
-use astrcode_session::{Session, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_extension_sdk::{
+    runtime_ports::{NoopRuntimePorts, PromptContributor},
+    tool_pack::{ToolPack, ToolPackScope},
+};
+use astrcode_session::{
+    Session, SessionExtensionPorts, SessionRuntimeServices, SessionRuntimeState,
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
 mod common;
 
 struct UnusedLlm;
+
+struct FailingPromptContributor;
+
+struct ReadWriteToolPack;
+struct NamedTool(&'static str);
+
+impl ToolPack for ReadWriteToolPack {
+    fn tools(&self, _scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
+        vec![Arc::new(NamedTool("read")), Arc::new(NamedTool("write"))]
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for NamedTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.0.into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: false,
+            origin: ToolOrigin::Sdk,
+            execution_mode: ExecutionMode::Sequential,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _arguments: serde_json::Value,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolResult, ToolError> {
+        unreachable!("selection test does not execute tools")
+    }
+}
+
+#[async_trait::async_trait]
+impl PromptContributor for FailingPromptContributor {
+    async fn collect_prompt_contributions(
+        &self,
+        _ctx: PromptBuildContext,
+    ) -> Result<PromptContributions, ExtensionError> {
+        Err(ExtensionError::Internal(
+            "intentional prompt failure".into(),
+        ))
+    }
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for UnusedLlm {
@@ -65,7 +121,6 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
     )
     .await
     .unwrap();
-    session_a.refresh_tools(".").await;
     let wrote_a = session_a
         .refresh_prompt(".", Some("child agent body"), None)
         .await
@@ -95,8 +150,6 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
     )
     .await
     .unwrap();
-    session_b.refresh_tools(".").await;
-
     // handler 风格的调用 — extra=None，期望「保留」从 projection 恢复
     let stored_fp = state_after_first.system_prompt_fingerprint.clone();
     let wrote_b = session_b
@@ -120,4 +173,172 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         Some("child agent body"),
         "runtime_b should be hydrated from projection",
     );
+}
+
+#[tokio::test]
+async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let caps =
+        common::test_runtime_services_with_tool_packs(llm, vec![Arc::new(ReadWriteToolPack)]);
+    let parent_selection = SessionToolSelection::Only {
+        names: vec!["write".into(), "read".into()],
+    };
+    let parent = Session::create_with_id(
+        Arc::clone(&store),
+        new_session_id(),
+        ".",
+        "mock-model",
+        None,
+        Some(&parent_selection),
+        None,
+        Arc::new(SessionRuntimeState::new(
+            caps.llm(),
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        Arc::clone(&caps),
+    )
+    .await
+    .unwrap();
+
+    let direct_child = Session::create_with_id(
+        Arc::clone(&store),
+        new_session_id(),
+        ".",
+        "mock-model",
+        Some(parent.id()),
+        None,
+        None,
+        Arc::new(SessionRuntimeState::new(
+            caps.llm(),
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        Arc::clone(&caps),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        direct_child.read_model().await.unwrap().tool_selection,
+        Some(SessionToolSelection::Only {
+            names: vec!["read".into(), "write".into()]
+        }),
+        "every child creation path must persist the inherited parent boundary",
+    );
+
+    let child = parent
+        .spawn_child(
+            ".",
+            "mock-model",
+            "worker".into(),
+            "test selection boundary".into(),
+            None,
+            Some(SessionToolSelection::All {
+                except: vec!["read".into()],
+            }),
+            None,
+            ToolCallId::new("call-1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        child.read_model().await.unwrap().tool_selection,
+        Some(SessionToolSelection::Only {
+            names: vec!["write".into()]
+        })
+    );
+
+    let effective = child
+        .configure_tools(SessionToolSelection::All {
+            except: vec!["write".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        effective,
+        SessionToolSelection::Only {
+            names: vec!["read".into()]
+        }
+    );
+
+    let child_id = child.id().clone();
+    drop(child);
+    let reopened = Session::open(
+        Arc::clone(&store),
+        child_id,
+        Arc::new(SessionRuntimeState::new(
+            caps.llm(),
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        caps,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened.read_model().await.unwrap().tool_selection,
+        Some(SessionToolSelection::Only {
+            names: vec!["read".into()]
+        })
+    );
+
+    parent
+        .configure_tools(SessionToolSelection::Only {
+            names: vec!["write".into()],
+        })
+        .await
+        .unwrap();
+    let effective_registry = reopened.tool_registry_snapshot(".").await.unwrap();
+    assert!(
+        effective_registry.list_definitions().is_empty(),
+        "a reopened child must not retain tools removed from its parent boundary",
+    );
+}
+
+#[tokio::test]
+async fn turn_setup_failure_returns_session_to_idle() {
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let noop = Arc::new(NoopRuntimePorts);
+    let caps = common::test_runtime_services_with_extensions(
+        Arc::clone(&llm),
+        SessionExtensionPorts::new(
+            noop.clone(),
+            noop.clone(),
+            Arc::new(FailingPromptContributor),
+            noop.clone(),
+            noop,
+        ),
+    );
+    let session = Session::create_with_id(
+        Arc::clone(&store),
+        new_session_id(),
+        ".",
+        "mock-model",
+        None,
+        None,
+        None,
+        Arc::new(SessionRuntimeState::new(
+            llm,
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        caps,
+    )
+    .await
+    .unwrap();
+
+    let error = match session
+        .submit("hello".into(), Vec::new(), new_turn_id())
+        .await
+    {
+        Ok(_) => panic!("prompt contribution failure must reject turn setup"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("intentional prompt failure"));
+
+    let model = session.read_model().await.unwrap();
+    assert_eq!(model.phase, Phase::Idle);
+    assert!(model.pending_tool_calls.is_empty());
 }

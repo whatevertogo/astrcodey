@@ -5,17 +5,16 @@ use std::{
 };
 
 use astrcode_core::{
-    event::Event, extension::ChildToolPolicy, llm::LlmProvider, permission::ApprovalDecision,
-    tool::FileObservationStore, types::ToolCallId,
+    event::Event, llm::LlmProvider, permission::ApprovalDecision, tool::FileObservationStore,
+    types::ToolCallId,
 };
-use astrcode_kernel::ToolRegistry;
 use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::{
     compact_circuit_breaker::CompactCircuitBreaker, permission::ApprovalHistoryStore,
-    tool_exec::InMemoryFileObservationStore,
+    session_tools::SessionToolCache, tool_exec::InMemoryFileObservationStore,
 };
 
 pub struct PendingApprovalRegistration<'a> {
@@ -83,18 +82,7 @@ impl SessionModelBinding {
 /// 执行工具所需的进程内资源。
 struct ToolResources {
     file_observation_store: Arc<dyn FileObservationStore>,
-    registry: Mutex<Arc<ToolRegistry>>,
-}
-
-/// 参与每次 turn 装配的可变配置与其派生缓存。
-struct TurnConfiguration {
-    /// 子 session 专用的额外 system prompt，由 SpawnRequest 注入。
-    extra_system_prompt: Mutex<Option<String>>,
-    /// 子 session 工具集策略，由 SpawnRequest 注入；父 session 始终为 `None`。
-    ///
-    /// `refresh_tools` 在每次重建工具表时读取此字段，保证子 session 的所有 turn
-    /// 都看到一致的裁剪后工具集（含 resume 路径）。
-    tool_policy: Mutex<Option<ChildToolPolicy>>,
+    registry_snapshots: SessionToolCache,
 }
 
 /// 单个 session 在当前进程内持有的瞬态状态。
@@ -113,7 +101,8 @@ struct TurnConfiguration {
 pub struct SessionRuntimeState {
     model: Mutex<SessionModelBinding>,
     tools: ToolResources,
-    configuration: TurnConfiguration,
+    /// 子 session 专用的额外 system prompt，由 SpawnRequest 注入。
+    extra_system_prompt: Mutex<Option<String>>,
     /// 熔断器需要 &mut self 的状态转换（Open→HalfOpen）。
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
@@ -143,12 +132,9 @@ impl SessionRuntimeState {
             }),
             tools: ToolResources {
                 file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
-                registry: Mutex::new(Arc::new(ToolRegistry::new())),
+                registry_snapshots: SessionToolCache::new(),
             },
-            configuration: TurnConfiguration {
-                extra_system_prompt: Mutex::new(None),
-                tool_policy: Mutex::new(None),
-            },
+            extra_system_prompt: Mutex::new(None),
             compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
                 3,
                 Duration::from_secs(60),
@@ -197,32 +183,16 @@ impl SessionRuntimeState {
         Arc::clone(&self.tools.file_observation_store)
     }
 
-    pub fn loaded_tool_registry(&self) -> Arc<ToolRegistry> {
-        Arc::clone(&lock_parking(&self.tools.registry))
-    }
-
-    pub fn reset_tool_registry(&self) {
-        self.install_tool_registry(Arc::new(ToolRegistry::new()));
-    }
-
-    pub(crate) fn install_tool_registry(&self, registry: Arc<ToolRegistry>) {
-        *lock_parking(&self.tools.registry) = registry;
-    }
-
-    pub fn child_tool_policy(&self) -> Option<ChildToolPolicy> {
-        lock_parking(&self.configuration.tool_policy).clone()
-    }
-
-    pub(crate) fn apply_child_tool_policy(&self, policy: Option<ChildToolPolicy>) {
-        *lock_parking(&self.configuration.tool_policy) = policy;
+    pub(crate) fn tool_registry_cache(&self) -> &SessionToolCache {
+        &self.tools.registry_snapshots
     }
 
     pub fn prompt_extra(&self) -> Option<String> {
-        lock_parking(&self.configuration.extra_system_prompt).clone()
+        lock_parking(&self.extra_system_prompt).clone()
     }
 
     pub fn update_prompt_extra(&self, prompt: Option<String>) {
-        *lock_parking(&self.configuration.extra_system_prompt) = prompt;
+        *lock_parking(&self.extra_system_prompt) = prompt;
     }
 
     pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {

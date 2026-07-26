@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{extension::ChildToolPolicy, tool_access::ResourceAccess};
+use crate::{extension::SessionToolSelection, tool_access::ResourceAccess};
 
 /// 工具审批模式（全局配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -90,8 +90,7 @@ pub struct PermissionContext<'a> {
     pub resource_accesses: &'a [ResourceAccess],
     pub approval_mode: ApprovalMode,
     pub session_id: &'a str,
-    pub is_child_session: bool,
-    pub child_tool_policy: Option<&'a ChildToolPolicy>,
+    pub tool_selection: Option<&'a SessionToolSelection>,
 }
 
 /// 单条权限策略。
@@ -174,8 +173,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
             session_id: "s1",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         }
     }
 

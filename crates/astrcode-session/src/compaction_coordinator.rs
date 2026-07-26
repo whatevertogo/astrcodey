@@ -14,7 +14,7 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::TurnId,
 };
-use astrcode_kernel::ExtensionRuntime;
+use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use astrcode_support::{hash::hex_fingerprint, sync::lock_parking};
 
 use crate::{
@@ -62,7 +62,7 @@ pub(crate) struct CompactionHost<'a> {
     pub session: &'a Session,
     pub llm: &'a Arc<dyn astrcode_core::llm::LlmProvider>,
     pub shared: &'a SharedTurnContext,
-    pub extension_runner: &'a dyn ExtensionRuntime,
+    pub extension_runner: &'a dyn TurnHooks,
 }
 
 async fn try_provider_input_tokens(

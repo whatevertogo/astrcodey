@@ -10,7 +10,7 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_kernel::ToolRegistry;
+use astrcode_session::ToolRegistry;
 
 // ─── Test extensions using register() ─────────────────────────────────────
 
@@ -257,7 +257,7 @@ async fn duplicate_extension_tools_keep_first_registration() {
         .await
         .unwrap();
 
-    let tools = runner.collect_tool_adapters_typed("/workspace").await;
+    let tools = runner.tool_catalog_snapshot_typed("/workspace").await.tools;
     let mut tool_registry = ToolRegistry::new();
     for tool in tools.into_iter().rev() {
         tool_registry.register(tool);
@@ -292,7 +292,7 @@ async fn extension_tools_are_adapted_into_tool_registry() {
     let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(EchoToolExtension)).await.unwrap();
 
-    let tools = runner.collect_tool_adapters_typed("/workspace").await;
+    let tools = runner.tool_catalog_snapshot_typed("/workspace").await.tools;
     let mut tool_registry = ToolRegistry::new();
     for tool in tools.into_iter().rev() {
         tool_registry.register(tool);

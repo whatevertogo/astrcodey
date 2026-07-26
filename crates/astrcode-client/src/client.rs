@@ -244,7 +244,7 @@ mod tests {
                 model_id: "model-1".into(),
                 parent_session_id: None,
                 source_extension: None,
-                tool_policy: None,
+                tool_selection: None,
             },
         );
         let transport = StubTransport::new(vec![ClientNotification::Event(event)]);

@@ -12,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 26 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 25 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -340,7 +340,7 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 
 ## Crates
 
-The Cargo workspace under [`crates/`](crates/) contains **26 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**27 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
+The Cargo workspace under [`crates/`](crates/) contains **25 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**26 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
 
 ### Layer 0: Foundation Contracts
 
@@ -349,7 +349,6 @@ The Cargo workspace under [`crates/`](crates/) contains **26 crates**, plus [`sr
 | [`astrcode-core`](crates/astrcode-core) | 9.5k | Shared domain types, traits, config system, extension contracts, prompt composition |
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
 | [`astrcode-support`](crates/astrcode-support) | 1.3k | Host utilities: path resolution, shell detection, tool result persistence |
-| [`astrcode-kernel`](crates/astrcode-kernel) | 0.5k | Embeddable kernel: tool pack composition, tool registry, extension runtime abstraction |
 
 ### Layer 1: Core Implementations
 
@@ -404,7 +403,7 @@ The Cargo workspace under [`crates/`](crates/) contains **26 crates**, plus [`sr
 |---|---|---|
 | [`astrcode-eval`](crates/astrcode-eval) | 2.0k | Benchmark runner: HTTP server control, event-log metrics, structured reports |
 
-**Totals:** ~104.4k lines of Rust (26 crates + Tauri), **326** `.rs` files; ~12.4k lines of TypeScript in `frontend/` (~**116.8k** lines overall).
+**Totals:** ~104.4k lines of Rust (25 crates + Tauri; 26 workspace members), **326** `.rs` files; ~12.4k lines of TypeScript in `frontend/` (~**116.8k** lines overall).
 
 ## Key Design Decisions
 

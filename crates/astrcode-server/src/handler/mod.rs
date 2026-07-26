@@ -76,7 +76,7 @@ pub enum HandlerError {
     #[error(transparent)]
     Session(astrcode_session::SessionError),
     #[error(transparent)]
-    Turn(astrcode_session::turn_context::TurnError),
+    Turn(astrcode_session::TurnError),
     #[error(transparent)]
     Compact(astrcode_core::context::CompactError),
     #[error("LLM error: {0}")]

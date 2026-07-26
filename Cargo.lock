@@ -500,7 +500,6 @@ version = "0.3.11"
 dependencies = [
  "astrcode-core",
  "astrcode-extension-sdk",
- "astrcode-kernel",
  "astrcode-storage",
  "astrcode-support",
  "async-trait",
@@ -519,16 +518,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "walkdir",
-]
-
-[[package]]
-name = "astrcode-kernel"
-version = "0.3.11"
-dependencies = [
- "astrcode-core",
- "async-trait",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -565,7 +554,6 @@ dependencies = [
  "astrcode-extension-mode",
  "astrcode-extension-skill",
  "astrcode-extensions",
- "astrcode-kernel",
  "astrcode-log",
  "astrcode-protocol",
  "astrcode-session",
@@ -597,7 +585,7 @@ dependencies = [
  "arc-swap",
  "astrcode-ai",
  "astrcode-core",
- "astrcode-kernel",
+ "astrcode-extension-sdk",
  "astrcode-storage",
  "astrcode-support",
  "async-trait",
@@ -650,7 +638,7 @@ name = "astrcode-tools"
 version = "0.3.11"
 dependencies = [
  "astrcode-core",
- "astrcode-kernel",
+ "astrcode-extension-sdk",
  "astrcode-support",
  "async-trait",
  "base64 0.22.1",

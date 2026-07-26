@@ -12,8 +12,8 @@ use std::{
 
 use astrcode_extension_sdk::{
     extension::{
-        ChildToolPolicy, Extension, ExtensionCapability, ExtensionError, PromptBuildContext,
-        PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     text::compact_inline,
@@ -249,10 +249,7 @@ impl ToolHandler for AgentToolHandler {
                     working_dir: None,
                     system_prompt: Some(enhance_agent_prompt(&matched.body, working_dir)),
                     model_preference: Some(model_preference),
-                    // TODO： A BETTER policy 设计
-                    tool_policy: Some(ChildToolPolicy::Deny {
-                        tools: vec!["agent".into()],
-                    }),
+                    tool_selection: matched.tool_selection.clone(),
                     source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
                     tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
@@ -462,6 +459,7 @@ mod tests {
             name: String::from("code-reviewer"),
             description: String::from("Use for behavior-focused code review"),
             body: String::from("Review carefully."),
+            tool_selection: None,
         }];
 
         let output = format_agents_for_model(&agents);

@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 26 个 crate + Tauri 桌面壳，支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 25 个 crate + Tauri 桌面壳（共 26 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
 
@@ -18,7 +18,7 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 
 - `Session` 是系统唯一的持久事实来源，同时持有进程内瞬态资源
 - 持久层：`EventStore` 负责 JSONL 事件日志，`SessionReadModel` 是投影结果
-- 瞬态层：`SessionRuntimeState` 持有工具表快照、file observation store 和 session 级 broadcast channel
+- 瞬态层：`SessionRuntimeState` 持有 file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
 - 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `runtime_states` HashMap 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
 - 不需要"保存 session"——事件已经写回了
 
@@ -198,6 +198,21 @@ Identity → System → Task Guidelines → Communication → Environment
 - LLM 输出的 JSON 参数解析失败时尝试修复（`parse_and_repair_json`），容错弱模型的格式问题
 - 工具结果有**全局消息预算**：总字符数超限时按大小降序优先持久化最大的结果
 
+### Turn 固定工具快照
+
+- 工具目录属于 `Session` 运行时，不属于插件宿主或独立 kernel。每个 turn 在准备阶段解析一次 `Arc<ToolRegistry>`，prompt、provider schema 和工具执行共同持有这一个不可变快照。
+- 快照缓存键包含 extension runtime generation、working directory、session 工具选择和各 tool pack 的配置版本；配置发生 A→B→A 变化时仍会产生新版本，不依赖 server 手工广播失效。
+- 同一 session 的并发未命中通过 single-flight 合并，只构建一次目录。完整目录可稳定复用；部分目录只缓存 30 秒，随后自动重试发现。
+- 插件动态发现超时不会丢弃静态工具或其他插件工具，而是返回 `Partial` catalog 和结构化 diagnostics。
+- 插件注册/重载期间 runtime 标记为 `Updating`。Session 在 30 秒稳定预算内使用 5–100ms 封顶退避重试，只有稳定 generation 前后相同时才发布缓存。
+
+### Session 工具选择
+
+- 工具选择是可重放的 session 事实：`SessionStarted.tool_selection` 提供初值，`SessionToolsConfigured` 更新后续 turn 的边界。子 session 每轮会与当前父链重新取交集，因此父会话收紧边界后不会留下权限更宽的后代。
+- 根 session 可选择“全部但排除”或“仅指定名称”；子 session 的选择始终与父边界取交集，不能通过插件调用扩大祖先权限。
+- 活跃 turn 保留已经固定的 registry；新选择只影响后续 turn。
+- HTTP 使用 `PUT /api/sessions/{id}/tools`，扩展使用 `astrcode.session.control.configure_tools`。边界 DTO 显式映射到内部策略，不直接暴露内部 enum 作为线缆契约。
+
 ---
 
 ## 6. 扩展 / Hook 系统
@@ -229,7 +244,11 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 延迟绑定
 
-`ExtensionRuntime` 在 server 完全启动前允许扩展注册工具，等 session projection 就绪后通过 `bind()` 注入实际能力。子 agent 嵌套深度限制为 3 层，原子计数器保护。
+`ExtensionRunner` 在 server 完全启动前允许扩展注册工具，等 session projection 就绪后注入实际宿主能力。子 agent 嵌套深度限制为 3 层，原子计数器保护。
+
+Session 只消费五个窄端口：runtime publication、tool catalog、prompt contribution、
+turn hooks 和 session operations。工具与 prompt 通过 generation 组成一致快照；hooks
+是实时策略面，故意不随工具快照固定，重载后的安全/审批策略可以立即作用于活跃 turn。
 
 ### 插件化模式系统
 
@@ -299,13 +318,15 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 
 工具是运行时基础能力，extension、SDK、MCP 都只是 tool source。所有工具走同一条执行路径，确保可观测性和统一调度。
 
-### 内核化嵌入边界
+### Session 嵌入边界
 
-`astrcode-session` 只依赖 `astrcode-core` / `astrcode-kernel` / storage/support 等内核契约，
+`astrcode-session` 只依赖 `astrcode-core` / `astrcode-extension-sdk` / storage/support 等内核契约，
 不直接依赖 first-party 的 context、tools、extensions 或 server 默认实现。嵌入宿主通过
-`SessionHostServices` 注入 context、prompt、extension runtime、post-compact enrichment 和 tool packs。
+`SessionHostServices` 注入 context、prompt、窄 extension ports、post-compact enrichment 和 tool packs。
+每个 turn 固定持有同一份不可变 `ToolRegistry`；session 只按 extension runtime 代次、
+工作目录、子会话工具策略和 tool-pack 配置版本缓存快照，无需 server 广播失效。
 
-最小嵌入方式与可替换能力清单见 [kernel-embedding.md](kernel-embedding.md)。
+最小嵌入方式与可替换能力清单见 [session-embedding.md](session-embedding.md)。
 
 ### 前后端分离
 

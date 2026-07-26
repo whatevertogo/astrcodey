@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use astrcode_core::{
     event::Phase,
-    extension::{ChildToolPolicy, CompactStrategy},
+    extension::CompactStrategy,
     llm::{LlmContent, LlmMessage},
     storage::{
         AgentSessionLinkView, AgentSessionStatus, EventReader, SequencedLlmMessage,
@@ -20,7 +20,7 @@ use astrcode_extension_sdk::{
         SessionInspectPendingApproval, SessionInspectPendingInteraction,
         SessionInspectProviderMessagesOutput, SessionInspectReadModel,
         SessionInspectReadModelOutput, SessionInspectSequencedMessage, SessionInspectSnapshot,
-        SessionInspectSnapshotOutput, SessionInspectToolPolicy,
+        SessionInspectSnapshotOutput,
     },
 };
 use serde::Serialize;
@@ -187,7 +187,7 @@ fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
         created_at: model.created_at,
         updated_at: model.updated_at,
         parent_session_id: model.parent_session_id.map(|id| id.to_string()),
-        tool_policy: model.tool_policy.map(tool_policy_dto),
+        tool_selection: model.tool_selection.map(Into::into),
         source_extension: model.source_extension,
         agent_sessions: model
             .agent_sessions
@@ -263,19 +263,6 @@ fn content_dto(content: LlmContent) -> SessionInspectContent {
             tool_call_id,
             content,
             is_error,
-        },
-    }
-}
-
-fn tool_policy_dto(policy: ChildToolPolicy) -> SessionInspectToolPolicy {
-    match policy {
-        ChildToolPolicy::Allow { tools } => SessionInspectToolPolicy {
-            mode: "allow".into(),
-            tools,
-        },
-        ChildToolPolicy::Deny { tools } => SessionInspectToolPolicy {
-            mode: "deny".into(),
-            tools,
         },
     }
 }

@@ -118,7 +118,7 @@ impl CommandHandler {
 
 /// Completion watcher：等待 TurnHandle 完成，交给 scheduler 统一收尾。
 async fn run_completion_watcher(
-    mut handle: astrcode_session::turn_handle::TurnHandle,
+    mut handle: astrcode_session::TurnHandle,
     scheduler: Arc<TurnScheduler>,
     actor_tx: mpsc::Sender<CommandMessage>,
     sid: SessionId,

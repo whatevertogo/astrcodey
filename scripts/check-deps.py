@@ -3,7 +3,7 @@
 
 Layer hierarchy:
   L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Infrastructure: astrcode-kernel, astrcode-support, astrcode-protocol, astrcode-ai
+  L1 Infrastructure: astrcode-support, astrcode-protocol, astrcode-ai
   L2 Domain:       astrcode-log, astrcode-storage, astrcode-context,
                    astrcode-tools, astrcode-extensions, astrcode-client
   L3 Extensions:   astrcode-extension-*, astrcode-bundled-extensions
@@ -30,7 +30,6 @@ LAYERS: dict[str, int] = {
     "astrcode-core": 0,
     "astrcode-desktop": 0,
     # L1 – Infrastructure
-    "astrcode-kernel": 1,
     "astrcode-support": 1,
     "astrcode-protocol": 1,
     "astrcode-ai": 1,

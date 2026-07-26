@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
-    extension::ChildToolPolicy,
+    extension::SessionToolSelection,
     llm::{LlmMessage, LlmTokenUsage},
     message_attachment::MessageAttachment,
     tool::ToolResult,
@@ -60,7 +60,7 @@ pub enum ToolOutputStream {
 /// 使用 `#[serde(tag = "type")]` 实现扁平化的 JSON 序列化，
 /// 每个变体在序列化时会自动带上 `"type"` 字段用于区分。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EventPayload {
     /// 会话已创建。
     SessionStarted {
@@ -71,13 +71,12 @@ pub enum EventPayload {
         /// 父会话 ID，用于子会话场景。根会话为 `None`。
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_session_id: Option<SessionId>,
-        /// 子会话出生时被注入的工具集策略。
+        /// Session 创建时生效的工具集策略。
         ///
-        /// 写在子 session 的事件日志而不仅仅父 session 的 `AgentSessionSpawned`，
-        /// 是为了让子 session resume 时能从自己的事件流里恢复 policy，不必跨 session 查父。
-        /// 根会话始终为 `None`。
+        /// 写在 session 自己的事件日志中，使 resume 能从本地事件流恢复工具边界。
+        /// `None` 表示不限制工具；子 session 每轮还会与当前父链边界取交集。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_policy: Option<ChildToolPolicy>,
+        tool_selection: Option<SessionToolSelection>,
         /// 创建该子 session 的扩展 ID，用于按插件组织存储目录。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_extension: Option<String>,
@@ -88,6 +87,9 @@ pub enum EventPayload {
     /// 由 handler 在运行时配置的 model_id 与 session 创建时不同时写入，
     /// 确保 session 始终反映当前生效的模型。
     ModelIdChanged { model_id: String },
+
+    /// 后续 turn 使用的 session 工具边界已变更。
+    SessionToolsConfigured { selection: SessionToolSelection },
 
     /// 会话 system prompt 已固定。
     ///
@@ -118,11 +120,11 @@ pub enum EventPayload {
         child_session_id: SessionId,
         agent_name: String,
         task: String,
-        /// 子会话生效的工具集策略（`None` 表示继承父全集）。
+        /// 子会话创建时生效的工具选择（`None` 表示继承父 session 当前边界）。
         ///
-        /// 持久化以便子 session resume 时重建相同的工具表。
+        /// 持久化以便子 session resume；每轮仍会与当前父链边界取交集。
         #[serde(default)]
-        tool_policy: Option<ChildToolPolicy>,
+        tool_selection: Option<SessionToolSelection>,
         /// 触发此子会话的工具调用 ID（用于 TUI 路由子 session 事件）。
         tool_call_id: ToolCallId,
     },
@@ -830,7 +832,7 @@ mod tests {
             child_session_id: "child-1".into(),
             agent_name: "reviewer".into(),
             task: "review current diff".into(),
-            tool_policy: None,
+            tool_selection: None,
             tool_call_id: "call-42".into(),
         };
 
@@ -841,11 +843,28 @@ mod tests {
         assert_eq!(value["child_session_id"], "child-1");
         assert_eq!(value["agent_name"], "reviewer");
         assert_eq!(value["task"], "review current diff");
-        assert!(value["tool_policy"].is_null());
+        assert!(value["tool_selection"].is_null());
         assert_eq!(value["tool_call_id"], "call-42");
 
         let round_trip: EventPayload = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, payload);
+    }
+
+    #[test]
+    fn legacy_tool_policy_is_rejected_instead_of_widening_session_access() {
+        let legacy = serde_json::json!({
+            "type": "session_started",
+            "working_dir": ".",
+            "model_id": "mock",
+            "parent_session_id": "parent",
+            "tool_policy": {
+                "mode": "deny",
+                "tools": ["agent"]
+            }
+        });
+
+        let error = serde_json::from_value::<EventPayload>(legacy).unwrap_err();
+        assert!(error.to_string().contains("unknown field `tool_policy`"));
     }
 
     #[test]
@@ -884,7 +903,7 @@ mod tests {
                 working_dir: ".".into(),
                 model_id: "m".into(),
                 parent_session_id: None,
-                tool_policy: None,
+                tool_selection: None,
                 source_extension: None,
             },
             EventPayload::ModelIdChanged {
@@ -900,7 +919,7 @@ mod tests {
                 child_session_id: "c".into(),
                 agent_name: "a".into(),
                 task: "t".into(),
-                tool_policy: None,
+                tool_selection: None,
                 tool_call_id: "tc".into(),
             },
             EventPayload::AgentRunStarted,

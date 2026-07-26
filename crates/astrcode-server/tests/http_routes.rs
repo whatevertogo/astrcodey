@@ -16,9 +16,9 @@ use astrcode_core::{
     },
     event::{Event, EventPayload},
     extension::{
-        ChildToolPolicy, Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
+        Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar, SessionToolSelection,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     storage::{
@@ -33,9 +33,9 @@ use astrcode_protocol::{
     events::ClientNotification,
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
-        CompactSessionResponse, ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto,
-        CreateSessionResponseDto, PromptSubmitResponse, ProviderCatalogResponseDto,
-        SlashCommandListResponseDto,
+        CompactSessionResponse, ConfigureSessionToolsResponse, ConversationErrorEnvelopeDto,
+        ConversationSnapshotResponseDto, CreateSessionResponseDto, PromptSubmitResponse,
+        ProviderCatalogResponseDto, SlashCommandListResponseDto, ToolSelectionDto,
     },
     wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -230,6 +230,95 @@ async fn http_routes_require_bearer_token() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let created = post_json_owned(
+        app.clone(),
+        "/api/sessions",
+        r#"{"workingDir":".","toolSelection":{"mode":"all","except":[" shell ","shell"]}}"#.into(),
+        &token,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let session_id = serde_json::from_slice::<CreateSessionResponseDto>(&body_bytes(created).await)
+        .unwrap()
+        .session_id;
+    let initial_model = runtime
+        .event_store()
+        .session_read_model(&SessionId::new(&session_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        initial_model.tool_selection,
+        Some(SessionToolSelection::All {
+            except: vec!["shell".into()]
+        })
+    );
+
+    let uri = format!("/api/sessions/{session_id}/tools");
+
+    let configured = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    r#"{"selection":{"mode":"only","names":["write"," read ","write"]}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let configured_status = configured.status();
+    let configured_body = body_bytes(configured).await;
+    assert_eq!(
+        configured_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&configured_body)
+    );
+    let configured =
+        serde_json::from_slice::<ConfigureSessionToolsResponse>(&configured_body).unwrap();
+    assert_eq!(
+        configured.selection,
+        ToolSelectionDto::Only {
+            names: vec!["read".into(), "write".into()]
+        }
+    );
+
+    let read_model = runtime
+        .event_store()
+        .session_read_model(&SessionId::new(&session_id))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_model.tool_selection,
+        Some(SessionToolSelection::Only {
+            names: vec!["read".into(), "write".into()]
+        })
+    );
+
+    let invalid = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(r#"{"selection":{"mode":"all","except":[" "]}}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -957,7 +1046,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
                 child_session_id: child_sid.clone(),
                 agent_name: "worker".into(),
                 task: "check fanout routing".into(),
-                tool_policy: None,
+                tool_selection: None,
                 tool_call_id: "child-call".into(),
             },
         ))
@@ -1469,7 +1558,7 @@ impl EventStore for TestEventStore {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_policy: Option<&ChildToolPolicy>,
+        tool_selection: Option<&SessionToolSelection>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
         self.inner
@@ -1478,7 +1567,7 @@ impl EventStore for TestEventStore {
                 working_dir,
                 model_id,
                 parent_session_id,
-                tool_policy,
+                tool_selection,
                 source_extension,
             )
             .await
