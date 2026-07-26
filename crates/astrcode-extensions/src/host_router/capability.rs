@@ -1,7 +1,13 @@
 //! Host capability 的类型化标识与单一元数据注册表。
 
 use astrcode_core::extension::ExtensionCapability;
-use astrcode_extension_sdk::s5r::{CapabilityDescriptor, ErrorPayload};
+use astrcode_extension_sdk::{
+    s5r::{CapabilityDescriptor, ErrorPayload},
+    session::{
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionToolSelectionDto,
+    },
+};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,6 +81,9 @@ enum CapabilitySchema {
     LlmMessages,
     SessionId,
     SessionCreate,
+    SessionCreateOutput,
+    SessionSubmitTurn,
+    SessionSubmitTurnOutput,
     SessionToolSelection,
     SessionToolSelectionOutput,
     WorkspaceWrite,
@@ -204,7 +213,7 @@ pub(super) const HOST_CAPABILITY_SPECS: &[HostCapabilitySpec] = &[
         required: Some(ExtensionCapability::SessionControl),
         description: "Create a child session",
         input_schema: CapabilitySchema::SessionCreate,
-        output_schema: CapabilitySchema::Object,
+        output_schema: CapabilitySchema::SessionCreateOutput,
         supports_stream: false,
         cancelable: false,
         catalog: true,
@@ -244,12 +253,17 @@ pub(super) const HOST_CAPABILITY_SPECS: &[HostCapabilitySpec] = &[
         cancelable: true,
         catalog: true,
     },
-    spec!(
-        HostCapability::Session(SessionCapability::SubmitTurn),
-        "astrcode.session.control.submit_turn",
-        Some(ExtensionCapability::SessionControl),
-        "Submit a turn to a session"
-    ),
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::SubmitTurn),
+        name: "astrcode.session.control.submit_turn",
+        required: Some(ExtensionCapability::SessionControl),
+        description: "Submit a turn to a session",
+        input_schema: CapabilitySchema::SessionSubmitTurn,
+        output_schema: CapabilitySchema::SessionSubmitTurnOutput,
+        supports_stream: false,
+        cancelable: false,
+        catalog: true,
+    },
     spec!(
         HostCapability::Session(SessionCapability::InspectList),
         "astrcode.session.inspect.list",
@@ -422,33 +436,6 @@ fn capability_descriptor(spec: &HostCapabilitySpec) -> CapabilityDescriptor {
     }
 }
 
-fn tool_selection_schema(description: &'static str) -> Value {
-    json!({
-        "type": "object",
-        "description": description,
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "mode": { "const": "all" },
-                    "except": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["mode"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "mode": { "const": "only" },
-                    "names": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["mode"],
-                "additionalProperties": false
-            }
-        ]
-    })
-}
-
 fn capability_schema(schema: CapabilitySchema) -> Value {
     match schema {
         CapabilitySchema::Object => json!({ "type": "object" }),
@@ -461,25 +448,15 @@ fn capability_schema(schema: CapabilitySchema) -> Value {
             "properties": { "session_id": { "type": "string" } },
             "required": ["session_id"]
         }),
-        CapabilitySchema::SessionCreate => json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "working_dir": { "type": "string" },
-                "system_prompt": { "type": "string" },
-                "model_preference": { "type": "string" },
-                "ephemeral": { "type": "boolean" },
-                "tool_call_id": { "type": "string" },
-                "tool_selection": tool_selection_schema(
-                    "Child session tool visibility for subsequent turns."
-                )
-            }
-        }),
+        CapabilitySchema::SessionCreate => HostCreateSessionRequest::wire_schema(),
+        CapabilitySchema::SessionCreateOutput => HostCreateSessionOutput::wire_schema(),
+        CapabilitySchema::SessionSubmitTurn => HostSubmitTurnRequest::wire_schema(),
+        CapabilitySchema::SessionSubmitTurnOutput => HostSubmitTurnOutput::wire_schema(),
         CapabilitySchema::SessionToolSelection => json!({
             "type": "object",
             "properties": {
                 "session_id": { "type": "string" },
-                "selection": tool_selection_schema(
+                "selection": SessionToolSelectionDto::wire_schema(
                     "Session tool visibility for subsequent turns."
                 )
             },
@@ -488,7 +465,7 @@ fn capability_schema(schema: CapabilitySchema) -> Value {
         CapabilitySchema::SessionToolSelectionOutput => json!({
             "type": "object",
             "properties": {
-                "selection": tool_selection_schema(
+                "selection": SessionToolSelectionDto::wire_schema(
                     "Effective session tool visibility for subsequent turns."
                 )
             },

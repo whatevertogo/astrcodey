@@ -7,10 +7,16 @@ use astrcode_core::{
     storage::EventReader,
     tool::{
         CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
-        SubmitTurnRequest, SubmitTurnResult,
+        SubmitTurnRequest,
     },
 };
-use astrcode_extension_sdk::{s5r::ErrorPayload, session::SessionToolSelectionDto};
+use astrcode_extension_sdk::{
+    s5r::ErrorPayload,
+    session::{
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionToolSelectionDto,
+    },
+};
 use serde_json::{Value, json};
 
 use super::{InvokeContext, block_on_async, capability::SessionCapability, session_inspect};
@@ -128,15 +134,20 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
             "session_ops not available in context",
         )
     })?;
+    let wire_request =
+        parse_wire_request::<HostCreateSessionRequest>(input, "session.control.create")?;
     let request = CreateSessionRequest {
-        name: input["name"].as_str().unwrap_or("child").to_string(),
-        working_dir: input["working_dir"].as_str().map(str::to_string),
-        system_prompt: input["system_prompt"].as_str().map(str::to_string),
-        model_preference: input["model_preference"].as_str().map(str::to_string),
-        tool_selection: parse_tool_selection(input)?,
+        name: wire_request.name,
+        working_dir: wire_request.working_dir,
+        system_prompt: wire_request.system_prompt,
+        model_preference: wire_request.model_preference,
+        tool_selection: wire_request
+            .tool_selection
+            .map(|selection| map_tool_selection(selection, "tool_selection"))
+            .transpose()?,
         source_extension: Some(ctx.extension_id.clone()),
-        ephemeral: input["ephemeral"].as_bool().unwrap_or(false),
-        tool_call_id: input["tool_call_id"].as_str().unwrap_or("").to_string(),
+        ephemeral: wire_request.ephemeral,
+        tool_call_id: wire_request.tool_call_id.unwrap_or_default(),
     };
     let parent = ctx
         .session_id
@@ -144,10 +155,14 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
         .ok_or_else(|| ErrorPayload::new("invalid_input", "parent session_id required"))?;
     let ops = Arc::clone(ops);
     block_on_async(async move {
-        ops.create_session(&parent, request)
+        let handle = ops
+            .create_session(&parent, request)
             .await
-            .map(|handle| json!({ "session_id": handle.session_id }))
-            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))?;
+        serialize_wire_response(
+            HostCreateSessionOutput::from(handle),
+            "session.control.create",
+        )
     })?
 }
 
@@ -164,8 +179,9 @@ fn configure_tools(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPay
 }
 
 fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let wait_for_result = input["wait_for_result"].as_bool().unwrap_or(true);
-    if ctx.on_peer_io_thread && wait_for_result {
+    let wire_request =
+        parse_wire_request::<HostSubmitTurnRequest>(input, "session.control.submit_turn")?;
+    if ctx.on_peer_io_thread && wire_request.wait_for_result {
         return Err(ErrorPayload::new(
             "invalid_request",
             "wait_for_result cannot be used from peer synchronous host invokes (deadlock risk); \
@@ -182,29 +198,25 @@ fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload
         .session_id
         .clone()
         .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
-    let target_session_id = input["target_session_id"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?
-        .to_string();
-    let user_prompt = input["user_prompt"]
-        .as_str()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "user_prompt required"))?
-        .to_string();
-    let request = SubmitTurnRequest::for_child(caller, target_session_id, user_prompt)
-        .wait_for_result(wait_for_result)
-        .notify_parent_on_complete(
-            input["notify_parent_on_complete"]
-                .as_str()
-                .map(str::to_string),
-        )
-        .recycle_on_complete(input["recycle_on_complete"].as_bool().unwrap_or(false))
-        .tool_call_id(input["tool_call_id"].as_str().map(str::to_string));
+    let request = SubmitTurnRequest::for_child(
+        caller,
+        wire_request.target_session_id,
+        wire_request.user_prompt,
+    )
+    .wait_for_result(wire_request.wait_for_result)
+    .notify_parent_on_complete(wire_request.notify_parent_on_complete)
+    .recycle_on_complete(wire_request.recycle_on_complete)
+    .tool_call_id(wire_request.tool_call_id);
     let ops = Arc::clone(ops);
     block_on_async(async move {
-        ops.submit_turn(request)
+        let result = ops
+            .submit_turn(request)
             .await
-            .map(submit_turn_result_json)
-            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))?;
+        serialize_wire_response(
+            HostSubmitTurnOutput::from(result),
+            "session.control.submit_turn",
+        )
     })?
 }
 
@@ -285,22 +297,6 @@ fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPay
     })?
 }
 
-fn submit_turn_result_json(result: SubmitTurnResult) -> Value {
-    match result {
-        SubmitTurnResult::Completed { content } => {
-            json!({ "status": "completed", "content": content })
-        },
-        SubmitTurnResult::Backgrounded {
-            task_id,
-            session_id,
-        } => json!({
-            "status": "backgrounded",
-            "task_id": task_id,
-            "session_id": session_id
-        }),
-    }
-}
-
 fn session_delivery_outcome_json(outcome: SessionDeliveryOutcome) -> Value {
     match outcome {
         SessionDeliveryOutcome::Started { turn_id } => {
@@ -349,16 +345,6 @@ fn required_session_content(input: &Value) -> Result<String, ErrorPayload> {
         .ok_or_else(|| ErrorPayload::new("invalid_input", "content required"))
 }
 
-fn parse_tool_selection(input: &Value) -> Result<Option<SessionToolSelection>, ErrorPayload> {
-    let Some(value) = input.get("tool_selection") else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    parse_tool_selection_value(value, "tool_selection").map(Some)
-}
-
 fn parse_session_tool_selection(input: &Value) -> Result<SessionToolSelection, ErrorPayload> {
     let value = input
         .get("selection")
@@ -376,6 +362,13 @@ fn parse_tool_selection_value(
                 "expected {\"mode\":\"all\",\"except\":[]} or {\"mode\":\"only\",\"names\":[]}",
             )
         })?;
+    map_tool_selection(selection, field)
+}
+
+fn map_tool_selection(
+    selection: SessionToolSelectionDto,
+    field: &str,
+) -> Result<SessionToolSelection, ErrorPayload> {
     match selection {
         SessionToolSelectionDto::All { except } => Ok(SessionToolSelection::All {
             except: validated_tool_names(except, &format!("{field}.except"))?,
@@ -402,4 +395,28 @@ fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, 
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     Ok(tools.into_iter().collect())
+}
+
+fn parse_wire_request<'de, T>(input: &'de Value, capability: &str) -> Result<T, ErrorPayload>
+where
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(input).map_err(|error| {
+        ErrorPayload::new(
+            "invalid_input",
+            format!("invalid {capability} request: {error}"),
+        )
+    })
+}
+
+fn serialize_wire_response<T>(output: T, capability: &str) -> Result<Value, ErrorPayload>
+where
+    T: serde::Serialize,
+{
+    serde_json::to_value(output).map_err(|error| {
+        ErrorPayload::new(
+            "serialization_failed",
+            format!("failed to serialize {capability} response: {error}"),
+        )
+    })
 }

@@ -26,6 +26,9 @@ pub use registry::{
 };
 use serde_json::{Value, json};
 
+pub use crate::session::{
+    HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+};
 use crate::{
     extension::ContinueAfterStopOptions,
     runtime::{CancelToken, InvokeHandler, InvokeReply, Peer, ProcessStdioTransport},

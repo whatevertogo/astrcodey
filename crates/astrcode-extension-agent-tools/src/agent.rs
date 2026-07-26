@@ -3,9 +3,9 @@
 //! 扫描优先级（从低到高）：内置 → 用户级 → 项目级。
 //! 项目级从根到当前目录依次扫描，最近的目录覆盖最远的。
 
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
-use astrcode_extension_sdk::{frontmatter, hostpaths};
+use astrcode_extension_sdk::{extension::SessionToolSelection, frontmatter, hostpaths};
 
 /// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
@@ -17,6 +17,8 @@ pub struct AgentConfig {
     pub description: String,
     /// 系统提示词正文。
     pub body: String,
+    /// 子 session 的工具边界；`None` 表示继承父 session。
+    pub tool_selection: Option<SessionToolSelection>,
 }
 
 // ─── 内置 Agent ─────────────────────────────────────────────────────
@@ -110,9 +112,16 @@ fn merge_dir(agents: &mut Vec<AgentConfig>, dir: &std::path::Path, override_exis
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(agent) = parse(&path.to_string_lossy(), &content) else {
-            tracing::warn!(path = %path.display(), "skipping agent file: parse failed");
-            continue;
+        let agent = match parse(&path.to_string_lossy(), &content) {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "skipping invalid agent file"
+                );
+                continue;
+            },
         };
         if override_existing {
             // 移除同 ID 的旧 Agent，实现覆盖
@@ -176,12 +185,17 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
         .or_else(|| mapping_str(m, "systemPrompt"))
         .or_else(|| mapping_str(m, "prompt"))
         .unwrap_or_default();
+    let tool_selection = build_tool_selection(
+        mapping_string_list(m, "tools")?,
+        mapping_string_list(m, "disallowedTools")?,
+    );
 
     Ok(AgentConfig {
         id,
         name,
         description,
         body,
+        tool_selection,
     })
 }
 
@@ -189,6 +203,89 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
 fn mapping_str(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
     let v = m.get(serde_yaml::Value::String(key.into()))?;
     v.as_str().map(String::from)
+}
+
+fn mapping_string_list(
+    mapping: &serde_yaml::Mapping,
+    key: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = mapping.get(serde_yaml::Value::String(key.into())) else {
+        return Ok(None);
+    };
+    match value {
+        serde_yaml::Value::Null => return Ok(None),
+        serde_yaml::Value::String(value) => validate_tool_list_entry(value, key)?,
+        serde_yaml::Value::Sequence(values) => {
+            for value in values {
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| format!("{key} must contain only strings"))?;
+                validate_tool_list_entry(value, key)?;
+            }
+        },
+        _ => {
+            return Err(format!(
+                "{key} must be a comma-separated string or string list"
+            ));
+        },
+    }
+    Ok(Some(frontmatter::yaml_parse_tools_list(Some(value))))
+}
+
+fn validate_tool_list_entry(value: &str, key: &str) -> Result<(), String> {
+    if value.split(',').any(|name| name.trim().is_empty()) {
+        return Err(format!("{key} must contain non-empty tool names"));
+    }
+    Ok(())
+}
+
+fn build_tool_selection(
+    allowed: Option<Vec<String>>,
+    denied: Option<Vec<String>>,
+) -> Option<SessionToolSelection> {
+    let denied = normalized_agent_tool_names(denied.unwrap_or_default());
+    let has_denied_tools = !denied.is_empty();
+    let denied_selection = SessionToolSelection::All { except: denied };
+    match allowed {
+        Some(allowed) => Some(
+            SessionToolSelection::Only {
+                names: normalized_agent_tool_names(allowed),
+            }
+            .intersection(&denied_selection),
+        ),
+        None if has_denied_tools => Some(denied_selection),
+        None => None,
+    }
+}
+
+fn normalized_agent_tool_names(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| canonical_agent_tool_name(name))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn canonical_agent_tool_name(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "read" => "read".into(),
+        "grep" => "grep".into(),
+        "glob" => "glob".into(),
+        "edit" => "edit".into(),
+        "write" => "write".into(),
+        "bash" | "shell" => "shell".into(),
+        "agent" | "task" => "agent".into(),
+        "webfetch" | "fetch-url" => "fetch-url".into(),
+        "websearch" | "web-search" => "web-search".into(),
+        "skill" => "Skill".into(),
+        "askuserquestion" | "askuser" => "askUser".into(),
+        "todowrite" => "todoWrite".into(),
+        _ => name.into(),
+    }
 }
 
 /// 将 Agent 名称标准化为 ID 格式。
@@ -219,9 +316,25 @@ mod tests {
     #[test]
     fn builtin_agents_load() {
         let agents = builtin_agents();
-        assert!(agents.iter().any(|a| a.id == "explore"));
-        assert!(agents.iter().any(|a| a.id == "reviewer"));
-        assert!(agents.iter().any(|a| a.id == "execute"));
+        let selection = |id| {
+            agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .and_then(|agent| agent.tool_selection.clone())
+        };
+        assert_eq!(
+            selection("explore"),
+            Some(SessionToolSelection::Only {
+                names: vec!["glob".into(), "grep".into(), "read".into()]
+            })
+        );
+        assert_eq!(
+            selection("reviewer"),
+            Some(SessionToolSelection::Only {
+                names: vec!["glob".into(), "grep".into(), "read".into()]
+            })
+        );
+        assert_eq!(selection("execute"), None);
     }
 
     #[test]
@@ -239,5 +352,43 @@ This is the system prompt."#;
     fn normalizes_agent_id() {
         assert_eq!(normalize_id("Code Reviewer"), "code-reviewer");
         assert_eq!(normalize_id("my_agent!"), "my-agent");
+    }
+
+    #[test]
+    fn parses_claude_tool_allow_and_deny_lists_into_one_boundary() {
+        let markdown = r#"---
+name: test-agent
+description: Test tool selection
+tools: [Read, Bash, WebSearch, customTool, Task]
+disallowedTools: Bash, Task
+---
+Review the workspace."#;
+
+        let agent = parse("test.md", markdown).unwrap();
+
+        assert_eq!(
+            agent.tool_selection,
+            Some(SessionToolSelection::Only {
+                names: vec!["customTool".into(), "read".into(), "web-search".into()]
+            })
+        );
+
+        let error = parse(
+            "invalid.yaml",
+            "description: Invalid tool list\ntools: [Read, 42]",
+        )
+        .unwrap_err();
+        assert!(error.contains("tools must contain only strings"));
+
+        let null_tools =
+            parse("null.yaml", "description: Null means inherit\ntools: null").unwrap();
+        assert_eq!(null_tools.tool_selection, None);
+
+        let error = parse(
+            "empty-name.yaml",
+            "description: Empty tool name\ntools: Read,",
+        )
+        .unwrap_err();
+        assert!(error.contains("tools must contain non-empty tool names"));
     }
 }

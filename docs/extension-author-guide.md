@@ -367,54 +367,45 @@ fn tool_context_from_event(event: &serde_json::Value) -> (&str, &str, &str) {
 创建子会话：
 
 ```rust
-let (parent_id, tool_call_id, working_dir) = tool_context_from_event(&event);
+let (_parent_id, tool_call_id, working_dir) = tool_context_from_event(&event);
 
-let created = HostClient::call(
-    "astrcode.session.control.create",
-    serde_json::json!({
-        "name": agent_name,
-        "system_prompt": system_prompt,
-        "model_preference": model,
-        "ephemeral": true,
-        "tool_call_id": tool_call_id,
-        "working_dir": working_dir,
-        "tool_selection": {
-            "mode": "all",
-            "except": ["agent"]
-        }
-    }),
-).await?;
-let child_id = created["session_id"].as_str().unwrap();
+let mut request = HostCreateSessionRequest::new(agent_name);
+request.system_prompt = Some(system_prompt);
+request.model_preference = Some(model);
+request.ephemeral = true;
+request.tool_call_id = Some(tool_call_id.into());
+request.working_dir = Some(working_dir.into());
+request.tool_selection = Some(SessionToolSelectionDto::all_except(["agent"]));
+
+let created = HostClient::create_child_session(request).await?;
+let child_id = created.session_id;
 ```
 
 `tool_selection` 是子会话工具可见性策略。外置 agent 默认建议使用
-`{"mode":"all","except":["agent"]}`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
-`{"mode":"only","names":["tool_a","tool_b"]}` 白名单。
+`SessionToolSelectionDto::all_except(["agent"])`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
+`SessionToolSelectionDto::only(["tool_a", "tool_b"])` 白名单。
 
 提交 turn（**外置扩展请用异步**，避免 peer 死锁）：
 
 ```rust
-let submitted = HostClient::call(
-    "astrcode.session.control.submit_turn",
-    serde_json::json!({
-        "target_session_id": child_id,
-        "user_prompt": args.prompt,
-        "wait_for_result": false,
-        "notify_parent_on_complete": format!(
-            "Subagent '{}' finished: {}", agent_name, args.description
-        ),
-        "recycle_on_complete": true,
-        "tool_call_id": tool_call_id
-    }),
-).await?;
-// status == "backgrounded" → 返回说明文本给主 Agent
+let mut request = HostSubmitTurnRequest::background(child_id, args.prompt);
+request.notify_parent_on_complete = Some(format!(
+    "Subagent '{}' finished: {}", agent_name, args.description
+));
+request.tool_call_id = Some(tool_call_id.into());
+
+let submitted = HostClient::submit_session_turn(request).await?;
+// HostSubmitTurnOutput::Backgrounded { .. } → 返回说明文本给主 Agent
 ```
 
 若用户传 `waitForResult: true`，外置实现应降级为 `false` 并说明「外置插件仅支持后台子 Agent」，或返回带 hint 的 `ErrorPayload`。
 
 ### Agent 定义文件从哪来？
 
-内置扩展用 `astrcode-support` 扫描 `~/.astrcode/agents`、`项目/.astrcode/agents` 下的 Markdown+frontmatter。  
+内置扩展通过 SDK 的宿主路径 API 扫描 `~/.claude/agents`、`~/.astrcode/agents` 以及对应的项目目录。
+Agent frontmatter 支持 `tools` 白名单和 `disallowedTools` 黑名单；省略两者时继承父 session 的工具边界，
+两者同时存在时黑名单优先。无论配置如何，内置 Agent 扩展都会移除 `agent`，避免递归委派。
+
 外置二进制可：
 
 - 在插件内**复制/简化**扫描逻辑（只依赖 `std` + 简单 frontmatter 解析），或

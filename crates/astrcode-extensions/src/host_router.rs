@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn session_tool_selection_schema_matches_strict_wire_contract() {
+    fn session_control_schemas_match_strict_wire_contracts() {
         let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
         let create = caps
             .iter()
@@ -525,6 +525,21 @@ mod tests {
             variants
                 .iter()
                 .all(|variant| variant["additionalProperties"] == false)
+        );
+        assert_eq!(create.input_schema["additionalProperties"], false);
+        assert_eq!(create.output_schema["additionalProperties"], false);
+
+        let submit = caps
+            .iter()
+            .find(|cap| cap.name == "astrcode.session.control.submit_turn")
+            .expect("submit turn capability");
+        assert_eq!(submit.input_schema["additionalProperties"], false);
+        assert_eq!(
+            submit.output_schema["oneOf"]
+                .as_array()
+                .expect("submit output variants")
+                .len(),
+            2
         );
     }
 
@@ -730,6 +745,7 @@ mod tests {
             .invoke_sync(
                 "astrcode.session.control.create",
                 &json!({
+                    "name": "worker",
                     "tool_selection": {
                         "mode": "only",
                         "names": []

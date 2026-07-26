@@ -343,58 +343,60 @@ impl SessionToolSelection {
         }
     }
 
-    /// 将子 session 请求限制在父 session 已有的工具边界内。
+    /// 返回当前工具边界与另一个边界的交集。
+    pub fn intersection(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::All { except: current }, Self::All { except: other }) => Self::All {
+                except: current
+                    .iter()
+                    .chain(other)
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            },
+            (Self::All { except }, Self::Only { names })
+            | (Self::Only { names }, Self::All { except }) => {
+                let excluded = except.iter().collect::<BTreeSet<_>>();
+                Self::Only {
+                    names: names
+                        .iter()
+                        .filter(|name| !excluded.contains(name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                }
+            },
+            (Self::Only { names: current }, Self::Only { names: other }) => {
+                let other = other.iter().collect::<BTreeSet<_>>();
+                Self::Only {
+                    names: current
+                        .iter()
+                        .filter(|name| other.contains(name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                }
+            },
+        }
+    }
+
+    /// 将明确的工具请求限制在可选的父 session 工具边界内。
+    pub fn restrict(parent: Option<&Self>, requested: &Self) -> Self {
+        parent.map_or_else(
+            || requested.normalized(),
+            |parent| parent.intersection(requested),
+        )
+    }
+
+    /// 将可选的子 session 请求限制在可选的父 session 工具边界内。
     pub fn intersect(parent: Option<&Self>, requested: Option<&Self>) -> Option<Self> {
         match (parent, requested) {
             (None, None) => None,
-            (Some(selection), None) | (None, Some(selection)) => Some(selection.normalized()),
-            (Some(Self::All { except: parent }), Some(Self::All { except: requested })) => {
-                Some(Self::All {
-                    except: parent
-                        .iter()
-                        .chain(requested)
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                })
-            },
-            (Some(Self::All { except }), Some(Self::Only { names })) => {
-                let excluded = except.iter().collect::<BTreeSet<_>>();
-                Some(Self::Only {
-                    names: names
-                        .iter()
-                        .filter(|name| !excluded.contains(name))
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                })
-            },
-            (Some(Self::Only { names }), Some(Self::All { except })) => {
-                let excluded = except.iter().collect::<BTreeSet<_>>();
-                Some(Self::Only {
-                    names: names
-                        .iter()
-                        .filter(|name| !excluded.contains(name))
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                })
-            },
-            (Some(Self::Only { names: parent }), Some(Self::Only { names: requested })) => {
-                let requested = requested.iter().collect::<BTreeSet<_>>();
-                Some(Self::Only {
-                    names: parent
-                        .iter()
-                        .filter(|name| requested.contains(name))
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                })
-            },
+            (Some(parent), None) => Some(parent.normalized()),
+            (parent, Some(requested)) => Some(Self::restrict(parent, requested)),
         }
     }
 }
@@ -1001,6 +1003,12 @@ mod tests {
             Some(SessionToolSelection::Only {
                 names: vec!["b".into()]
             })
+        );
+        assert_eq!(
+            only_ab.intersection(&SessionToolSelection::Only {
+                names: vec!["c".into()]
+            }),
+            SessionToolSelection::Only { names: Vec::new() }
         );
         assert_eq!(
             SessionToolSelection::intersect(

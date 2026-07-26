@@ -371,9 +371,7 @@ impl Session {
             },
             None => None,
         };
-        let tool_selection =
-            SessionToolSelection::intersect(parent_selection.as_ref(), Some(&requested))
-                .unwrap_or_else(|| requested.normalized());
+        let tool_selection = SessionToolSelection::restrict(parent_selection.as_ref(), &requested);
         self.emit_durable(
             None,
             EventPayload::SessionToolsConfigured {

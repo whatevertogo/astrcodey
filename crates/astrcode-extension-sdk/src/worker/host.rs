@@ -10,7 +10,10 @@ use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
-    session::SessionToolSelectionDto,
+    session::{
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionToolSelectionDto,
+    },
     session_inspect::{
         SessionInspectListOutput, SessionInspectProviderMessagesOutput,
         SessionInspectReadModelOutput, SessionInspectSnapshotOutput,
@@ -406,6 +409,30 @@ impl HostClient {
         deserialize_response(output, "session.control.execution_view")
     }
 
+    /// 创建子 session（manifest 须声明 `session_control`）。
+    pub async fn create_child_session(
+        request: HostCreateSessionRequest,
+    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.control.create",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.control.create")
+    }
+
+    /// 向子 session 提交 turn（manifest 须声明 `session_control`）。
+    pub async fn submit_session_turn(
+        request: HostSubmitTurnRequest,
+    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.control.submit_turn",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.control.submit_turn")
+    }
+
     /// 配置 session 后续 turn 使用的工具边界（manifest 须声明 `session_control`）。
     pub async fn configure_session_tools(
         request: HostConfigureSessionToolsRequest,
@@ -572,10 +599,69 @@ mod host_tests {
         assert_eq!(response.body, "ok");
     }
 
+    #[test]
+    fn session_control_contracts_match_wire_shape_and_safe_worker_defaults() {
+        let mut create = HostCreateSessionRequest::new("reviewer");
+        create.tool_selection = Some(SessionToolSelectionDto::only(["read", "grep"]));
+        create.ephemeral = true;
+        let value = serialize_request(create).expect("serialize create session request");
+        assert_eq!(value["name"], "reviewer");
+        assert_eq!(value["tool_selection"]["mode"], "only");
+        assert_eq!(value["tool_selection"]["names"], json!(["read", "grep"]));
+        assert_eq!(value["ephemeral"], true);
+        assert!(value.get("working_dir").is_none());
+
+        let submit = HostSubmitTurnRequest::background("child-1", "review this");
+        let value = serialize_request(submit).expect("serialize submit turn request");
+        assert_eq!(value["target_session_id"], "child-1");
+        assert_eq!(value["wait_for_result"], false);
+        assert_eq!(value["recycle_on_complete"], true);
+
+        let synchronous_default: HostSubmitTurnRequest = serde_json::from_value(json!({
+            "target_session_id": "child-1",
+            "user_prompt": "review this"
+        }))
+        .expect("deserialize submit turn defaults");
+        assert!(synchronous_default.wait_for_result);
+        assert!(!synchronous_default.recycle_on_complete);
+        assert!(
+            serde_json::from_value::<HostCreateSessionRequest>(json!({
+                "name": "reviewer",
+                "unknown": true
+            }))
+            .is_err()
+        );
+
+        let output = deserialize_response::<HostSubmitTurnOutput>(
+            json!({
+                "status": "backgrounded",
+                "task_id": "turn-1",
+                "session_id": "child-1"
+            }),
+            "session.control.submit_turn",
+        )
+        .expect("deserialize submit turn response");
+        assert_eq!(
+            output,
+            HostSubmitTurnOutput::Backgrounded {
+                task_id: "turn-1".into(),
+                session_id: "child-1".into()
+            }
+        );
+    }
+
     #[async_trait]
     impl HostApi for MockHost {
         async fn call(&self, capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
-            Ok(json!({ "capability": capability }))
+            match capability {
+                "astrcode.session.control.create" => Ok(json!({ "session_id": "child-1" })),
+                "astrcode.session.control.submit_turn" => Ok(json!({
+                    "status": "backgrounded",
+                    "task_id": "turn-1",
+                    "session_id": "child-1"
+                })),
+                _ => Ok(json!({ "capability": capability })),
+            }
         }
 
         async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
@@ -588,5 +674,22 @@ mod host_tests {
         let _ = inject_host_api(Arc::new(MockHost));
         let out = HostClient::call("astrcode.test", json!({})).await.unwrap();
         assert_eq!(out["capability"], "astrcode.test");
+
+        let created = HostClient::create_child_session(HostCreateSessionRequest::new("reviewer"))
+            .await
+            .unwrap();
+        assert_eq!(created.session_id, "child-1");
+
+        let submitted =
+            HostClient::submit_session_turn(HostSubmitTurnRequest::background("child-1", "review"))
+                .await
+                .unwrap();
+        assert_eq!(
+            submitted,
+            HostSubmitTurnOutput::Backgrounded {
+                task_id: "turn-1".into(),
+                session_id: "child-1".into()
+            }
+        );
     }
 }
