@@ -1,0 +1,10 @@
+.git
+.astrcode
+docker/*
+!docker/swebench-*
+**/target
+frontend/node_modules
+frontend/dist
+src-tauri/binaries
+*.log
+.DS_Store

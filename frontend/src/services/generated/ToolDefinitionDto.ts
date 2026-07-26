@@ -3,4 +3,4 @@ import type { ExecutionModeDto } from "./ExecutionModeDto";
 import type { ToolOriginDto } from "./ToolOriginDto";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type ToolDefinitionDto = { name: string, description: string, parameters: JsonValue, origin: ToolOriginDto, execution_mode: ExecutionModeDto, };
+export type ToolDefinitionDto = { name: string, description: string, parameters: JsonValue, strict: boolean, origin: ToolOriginDto, execution_mode: ExecutionModeDto, };

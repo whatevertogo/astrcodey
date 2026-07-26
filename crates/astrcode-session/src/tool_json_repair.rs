@@ -13,11 +13,18 @@ use std::borrow::Cow;
 /// - 末尾缺少闭合括号
 /// - 末尾有多余的逗号
 /// - 引号不匹配
-pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Value {
+///
+/// 无法安全修复时返回原始解析错误。调用方必须拒绝执行，而不是把坏参数
+/// 静默替换成 `{}`，否则既会丢失 provider 原始输出，也可能误执行无参工具。
+pub(crate) fn parse_and_repair_json(
+    arguments: &str,
+    tool_name: &str,
+) -> serde_json::Result<serde_json::Value> {
     // 首先尝试直接解析
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
-        return value;
-    }
+    let original_error = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
 
     // 记录原始错误信息
     tracing::warn!(
@@ -36,7 +43,7 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
                 tool = %tool_name,
                 "Successfully repaired JSON by removing trailing comma"
             );
-            return value;
+            return Ok(value);
         }
     }
 
@@ -50,7 +57,7 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
                 tool = %tool_name,
                 "Successfully repaired JSON by escaping control characters in strings"
             );
-            return value;
+            return Ok(value);
         }
     }
 
@@ -62,7 +69,7 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
                 tool = %tool_name,
                 "Successfully repaired JSON by escaping control chars and closing truncated content"
             );
-            return value;
+            return Ok(value);
         }
     }
 
@@ -74,17 +81,18 @@ pub fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Va
                 tool = %tool_name,
                 "Successfully repaired JSON by closing truncated content"
             );
-            return value;
+            return Ok(value);
         }
     }
 
-    // 所有修复尝试都失败，返回空对象
+    // 所有修复尝试都失败，保留原始错误供调用方生成可观测的配对失败。
     tracing::error!(
         tool = %tool_name,
         arguments_preview = %arguments.chars().take(500).collect::<String>(),
-        "All JSON repair attempts failed, using empty object"
+        error = %original_error,
+        "All JSON repair attempts failed"
     );
-    serde_json::json!({})
+    Err(original_error)
 }
 
 /// 将 JSON 字符串值内的原始控制字符转义为 JSON 合法形式。
@@ -253,14 +261,19 @@ mod tests {
 
     #[test]
     fn parse_and_repair_json_handles_truncated_string() {
-        let result = parse_and_repair_json(r#"{"todos": [{"status": "com"#, "testTool");
+        let result = parse_and_repair_json(r#"{"todos": [{"status": "com"#, "testTool").unwrap();
         assert_eq!(result["todos"][0]["status"], "com");
     }
 
     #[test]
-    fn parse_and_repair_json_returns_empty_on_garbage() {
-        let result = parse_and_repair_json("not json at all {{{", "testTool");
-        assert_eq!(result, serde_json::json!({}));
+    fn parse_and_repair_json_reports_original_error_on_garbage() {
+        let error = parse_and_repair_json(
+            r#"{"segments":[{"emotion":"NORMAL","text">"news"}]}"#,
+            "interact",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected `:`"));
     }
 
     #[test]
@@ -291,7 +304,7 @@ mod tests {
     fn parse_and_repair_json_handles_raw_newlines_in_string() {
         // Simulates what weak LLMs produce: real newlines inside JSON string values
         let input = "{\"newStr\": \"use std::sync::Arc;\n\nuse agent::AgentConfig;\"}";
-        let result = parse_and_repair_json(input, "edit");
+        let result = parse_and_repair_json(input, "edit").unwrap();
         assert_eq!(
             result["newStr"],
             "use std::sync::Arc;\n\nuse agent::AgentConfig;"
@@ -302,7 +315,7 @@ mod tests {
     fn parse_and_repair_json_handles_raw_newlines_and_truncation() {
         // Both raw newlines AND truncation
         let input = "{\"newStr\": \"line1\nline2";
-        let result = parse_and_repair_json(input, "edit");
+        let result = parse_and_repair_json(input, "edit").unwrap();
         assert_eq!(result["newStr"], "line1\nline2");
     }
 
@@ -331,7 +344,7 @@ mod tests {
         // LLM generates large edit JSON with \+real-newline in string values
         let input = "{\"edits\": [{\"newStr\": \"use std::sync::Arc;\\\n\\\nuse \
                      agent::AgentConfig;\", \"oldStr\": \"use std::sync::Arc;\"}]}";
-        let result = parse_and_repair_json(input, "edit");
+        let result = parse_and_repair_json(input, "edit").unwrap();
         assert_eq!(
             result["edits"][0]["newStr"],
             "use std::sync::Arc;\n\nuse agent::AgentConfig;"

@@ -690,6 +690,8 @@ pub struct ToolDefinitionDto {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub strict: bool,
     pub origin: ToolOriginDto,
     #[serde(default)]
     pub execution_mode: ExecutionModeDto,
@@ -701,6 +703,7 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
             name: value.name,
             description: value.description,
             parameters: value.parameters,
+            strict: value.strict,
             origin: value.origin.into(),
             execution_mode: value.execution_mode.into(),
         }
@@ -845,6 +848,7 @@ pub struct ProviderSpecCapabilitiesDto {
     pub prompt_cache_key: bool,
     pub stream_usage: bool,
     pub reasoning_effort: bool,
+    pub strict_tool_use: bool,
 }
 
 /// POST /api/config/provider-preset/apply 请求。
@@ -1083,11 +1087,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_definition_dto_preserves_legacy_wire_shape() {
+    fn tool_definition_dto_round_trips_strict_and_defaults_legacy_input() {
         let dto: ToolDefinitionDto = astrcode_core::tool::ToolDefinition {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: false,
             origin: astrcode_core::tool::ToolOrigin::Bundled,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }
@@ -1099,9 +1104,29 @@ mod tests {
                 "name": "read",
                 "description": "Read a file",
                 "parameters": {"type": "object"},
+                "strict": false,
                 "origin": "bundled",
                 "execution_mode": "parallel"
             })
         );
+
+        let legacy: ToolDefinitionDto = serde_json::from_value(serde_json::json!({
+            "name": "legacy",
+            "description": "",
+            "parameters": {"type": "object"},
+            "origin": "extension"
+        }))
+        .unwrap();
+        assert!(!legacy.strict);
+
+        let strict: ToolDefinitionDto = serde_json::from_value(serde_json::json!({
+            "name": "strict",
+            "description": "",
+            "parameters": {"type": "object"},
+            "strict": true,
+            "origin": "extension"
+        }))
+        .unwrap();
+        assert!(strict.strict);
     }
 }

@@ -329,6 +329,7 @@ fn web_search_tool_definition() -> ToolDefinition {
             },
             "required": ["query"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
     }
@@ -353,6 +354,7 @@ fn fetch_url_tool_definition() -> ToolDefinition {
             },
             "required": ["url", "prompt"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
     }

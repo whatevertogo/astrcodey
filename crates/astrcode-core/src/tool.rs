@@ -43,6 +43,11 @@ pub struct ToolDefinition {
     pub description: String,
     /// 工具参数的 JSON Schema 定义。
     pub parameters: serde_json::Value,
+    /// 是否要求支持该能力的 provider 严格遵守参数 schema。
+    ///
+    /// Provider profile 还必须声明 `supportsStrictToolUse`；否则该字段不会映射到 wire。
+    #[serde(default)]
+    pub strict: bool,
     /// 工具来源。来源只影响诊断、策略和优先级，不创建额外执行路径。
     pub origin: ToolOrigin,
     /// 工具执行模式。运行时用它判断该工具能否和其他并行工具同批执行。

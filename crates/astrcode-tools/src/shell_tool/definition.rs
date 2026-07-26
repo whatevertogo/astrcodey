@@ -52,7 +52,13 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                  server process/session or was cleaned up; stop polling that id.\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
                 "- Set `cwd` instead of using `cd`. Use `stdin` to pipe data.\n",
-                "- Non-zero exit codes produce errors.\n",
+                "- Pipeline failures are strict by default on bash/zsh/WSL: failure in any stage \
+                 produces an error. For intentional display-only pipelines such as `grep | head`, \
+                 set `pipelinePolicy` to `lastCommand`; result metadata records the effective \
+                 scope. On shells without pipefail support, strict pipelines are rejected before \
+                 execution instead of silently accepting an unreliable exit status.\n",
+                "- Non-zero exit codes produce errors. Check `executionStatus`, `exitCode`, and \
+                 `timedOut` in result metadata instead of inferring success from output text.\n",
                 "- Foreground output is returned when the command finishes (not streamed live).\n",
                 "- Very large output may be persisted to tool-results/; use `read` with \
                  charOffset and maxChars to paginate the saved path (do not re-run the command \
@@ -63,6 +69,7 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
             default_poll_tokens = DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
             max_poll_tokens = MAX_STATUS_OUTPUT_MAX_TOKENS,
         ),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({
@@ -86,6 +93,12 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "stdin": {
                     "type": "string",
                     "description": "Pipe data into stdin (jq, wc, python, etc.)."
+                },
+                "pipelinePolicy": {
+                    "type": "string",
+                    "enum": ["strict", "lastCommand"],
+                    "default": "strict",
+                    "description": "Pipeline exit behavior. strict (default) fails when any stage fails on bash/zsh/WSL and rejects pipelines on unsupported shells. lastCommand intentionally uses the final stage's exit status for display-only pipelines."
                 },
                 "runInBackground": {
                     "type": "boolean",

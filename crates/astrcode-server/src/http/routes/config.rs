@@ -370,6 +370,7 @@ fn provider_spec_to_dto(spec: &ProviderSpec) -> ProviderSpecDto {
             prompt_cache_key: spec.capabilities.prompt_cache_key,
             stream_usage: spec.capabilities.stream_usage,
             reasoning_effort: spec.capabilities.reasoning_effort,
+            strict_tool_use: spec.capabilities.strict_tool_use,
         },
     }
 }
@@ -438,6 +439,7 @@ fn profile_from_provider_spec(
             supports_prompt_cache_key: spec.capabilities.prompt_cache_key.then_some(true),
             prompt_cache_retention: None,
             supports_stream_usage: spec.capabilities.stream_usage.then_some(true),
+            supports_strict_tool_use: spec.capabilities.strict_tool_use.then_some(true),
         },
         models: vec![ModelConfig {
             id: model_id,

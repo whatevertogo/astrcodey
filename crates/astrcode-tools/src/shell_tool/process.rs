@@ -1,10 +1,153 @@
 #[cfg(windows)]
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::{process::ExitStatus, sync::OnceLock};
 
 use astrcode_support::shell::{ShellFamily, ShellInfo};
 use regex::Regex;
 use tokio::process::Command;
+
+/// Determines which command in a shell pipeline controls the reported exit status.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PipelinePolicy {
+    /// Report failure when any command in a pipeline fails, when the selected shell supports it.
+    #[default]
+    Strict,
+    /// Preserve the shell's native behavior where the final command controls the exit status.
+    LastCommand,
+}
+
+/// The pipeline behavior requested for a concrete shell invocation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PipelineSemantics {
+    policy: PipelinePolicy,
+    enforced: bool,
+}
+
+impl PipelineSemantics {
+    pub(crate) fn policy_name(self) -> &'static str {
+        match self.policy {
+            PipelinePolicy::Strict => "strict",
+            PipelinePolicy::LastCommand => "lastCommand",
+        }
+    }
+
+    pub(crate) fn status_scope(self) -> &'static str {
+        if self.policy == PipelinePolicy::Strict && self.enforced {
+            "allPipelineStages"
+        } else {
+            "lastPipelineStage"
+        }
+    }
+
+    pub(crate) fn is_enforced(self) -> bool {
+        self.enforced
+    }
+}
+
+/// Applies the requested pipeline policy without changing the selected shell.
+///
+/// Bash, zsh, ksh, and WSL bash support `pipefail`. Strict pipelines on other shells fail closed;
+/// ordinary commands still run because they do not need pipeline-specific status handling.
+pub(crate) fn apply_pipeline_policy(
+    shell: &ShellInfo,
+    command: &str,
+    policy: PipelinePolicy,
+) -> Result<(String, PipelineSemantics), String> {
+    let has_pipeline = has_pipeline_operator(shell, command);
+    let strict_supported = supports_pipefail(shell);
+    if policy == PipelinePolicy::Strict && has_pipeline && !strict_supported {
+        return Err(format!(
+            "pipelinePolicy=strict cannot be enforced by shell '{}'. Run the command without a \
+             pipeline, select bash/zsh, or explicitly set pipelinePolicy=lastCommand when only \
+             the final stage should determine success",
+            shell.name
+        ));
+    }
+
+    let enforced = policy == PipelinePolicy::LastCommand || !has_pipeline || strict_supported;
+    let command = if policy == PipelinePolicy::Strict && strict_supported {
+        format!("set -o pipefail\n{command}")
+    } else {
+        command.to_string()
+    };
+    Ok((command, PipelineSemantics { policy, enforced }))
+}
+
+/// Finds a shell pipeline operator while ignoring quoted or escaped `|` characters and `||`.
+///
+/// This intentionally recognizes only the common quoting rules shared by supported shells. It is
+/// used to fail closed when strict pipeline semantics are unavailable, not to parse shell syntax.
+fn has_pipeline_operator(shell: &ShellInfo, command: &str) -> bool {
+    #[derive(Clone, Copy)]
+    enum Quote {
+        Single,
+        Double,
+    }
+
+    let mut quote = None;
+    let mut escaped = false;
+    let mut chars = command.chars().peekable();
+    while let Some(character) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some(Quote::Single) => {
+                if character == '\'' {
+                    quote = None;
+                }
+            },
+            Some(Quote::Double) => match character {
+                '"' => quote = None,
+                character if is_escape_character(shell, character) => escaped = true,
+                _ => {},
+            },
+            None => match character {
+                '\'' if shell.family != ShellFamily::Cmd => quote = Some(Quote::Single),
+                '"' => quote = Some(Quote::Double),
+                character if is_escape_character(shell, character) => escaped = true,
+                '|' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                },
+                '|' => return true,
+                _ => {},
+            },
+        }
+    }
+    false
+}
+
+fn is_escape_character(shell: &ShellInfo, character: char) -> bool {
+    match shell.family {
+        ShellFamily::Posix | ShellFamily::Wsl => character == '\\',
+        ShellFamily::PowerShell => character == '`',
+        ShellFamily::Cmd => character == '^',
+    }
+}
+
+fn supports_pipefail(shell: &ShellInfo) -> bool {
+    if shell.family == ShellFamily::Wsl {
+        return true;
+    }
+    if shell.family != ShellFamily::Posix {
+        return false;
+    }
+
+    let executable = shell
+        .name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(shell.name.as_str())
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    executable == "bash"
+        || executable.starts_with("bash ")
+        || executable == "zsh"
+        || executable.starts_with("zsh ")
+        || matches!(executable.as_str(), "ksh" | "mksh")
+}
 
 /// Windows 上在 POSIX shell（Git Bash / MSYS）里，将 `>nul` / `2>nul` 改写为 `/dev/null`，
 /// 避免创建名为 `nul` 的 literal 文件（Windows 保留设备名）。
@@ -51,6 +194,17 @@ pub(crate) fn command_args(shell: &ShellInfo, command: &str) -> Vec<String> {
         ShellFamily::Posix => vec!["-lc".to_string(), command.to_string()],
         ShellFamily::Wsl => vec!["bash".to_string(), "-lc".to_string(), command.to_string()],
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn exit_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn exit_signal(_: &ExitStatus) -> Option<i32> {
+    None
 }
 
 #[cfg(windows)]

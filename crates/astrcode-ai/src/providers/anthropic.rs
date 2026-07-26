@@ -17,6 +17,7 @@ use crate::{
         report_stream_error, retry_policy_from_config, send_event, stream_text_delta,
         stream_with_event_type, token_usage_has_value,
     },
+    strict_tools::{StrictToolProvider, prepare_strict_tools},
     wire::anthropic as anthropic_wire,
 };
 
@@ -58,6 +59,7 @@ impl AnthropicProvider {
         anthropic_wire::AnthropicRequestConfig {
             model_id: &self.model_id,
             max_output_tokens: self.model_limits_val.max_output_tokens,
+            supports_strict_tool_use: self.config.supports_strict_tool_use,
         }
     }
 
@@ -96,9 +98,14 @@ impl LlmProvider for AnthropicProvider {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
+        mut tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        prepare_strict_tools(
+            &mut tools,
+            self.config.supports_strict_tool_use,
+            StrictToolProvider::Anthropic,
+        )?;
         let request_body = self.build_request_body(&messages, &tools, true);
         let endpoint = self.endpoint();
         let mut headers = self.headers();
@@ -140,8 +147,13 @@ impl LlmProvider for AnthropicProvider {
     async fn count_input_tokens(
         &self,
         messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
+        mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
+        prepare_strict_tools(
+            &mut tools,
+            self.config.supports_strict_tool_use,
+            StrictToolProvider::Anthropic,
+        )?;
         let value = HttpPostRequest {
             client: self.client.clone(),
             endpoint: self.count_tokens_endpoint(),
@@ -471,6 +483,7 @@ mod tests {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: false,
             origin: astrcode_core::tool::ToolOrigin::Builtin,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }];
@@ -487,6 +500,39 @@ mod tests {
         assert!(body["tools"].is_array());
         assert!(body.get("stream").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_invalid_strict_schema_before_transport() {
+        let provider = AnthropicProvider::new(
+            LlmClientConfig {
+                base_url: "https://api.anthropic.com/v1".into(),
+                supports_strict_tool_use: true,
+                ..LlmClientConfig::default()
+            },
+            "claude-test".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let invalid = ToolDefinition {
+            name: "bounded".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "string"}),
+            strict: true,
+            origin: astrcode_core::tool::ToolOrigin::Builtin,
+            execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
+        };
+
+        let result = provider
+            .generate(vec![LlmMessage::user("hi")], vec![invalid])
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::Unsupported(message))
+                if message.contains("strict tool `bounded` schema at `$`")
+        ));
     }
 
     #[test]

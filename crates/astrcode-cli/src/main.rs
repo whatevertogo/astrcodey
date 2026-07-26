@@ -169,6 +169,12 @@ enum Commands {
         /// 报告输出路径（默认 stdout）
         #[arg(long)]
         output: Option<std::path::PathBuf>,
+        /// 每完成一个 case 后追加一行的 JSONL checkpoint 路径。
+        #[arg(long)]
+        checkpoint_output: Option<std::path::PathBuf>,
+        /// 从已有 checkpoint 恢复，严格校验并跳过已经完成的 case。
+        #[arg(long, requires = "checkpoint_output")]
+        resume_checkpoint: bool,
         /// 输出格式
         #[arg(long, default_value = "json")]
         format: EvalOutputFormat,
@@ -190,6 +196,36 @@ enum Commands {
         /// Auth token
         #[arg(long)]
         auth_token: Option<String>,
+        /// 在官方 SWE-bench x86_64 instance image 中逐例求解。
+        #[arg(long)]
+        swe_instance_solver_binary: Option<std::path::PathBuf>,
+        /// instance server 配置；provider 必须指向可信 gateway，且不能包含秘密。
+        #[arg(long, requires = "swe_instance_solver_binary")]
+        swe_instance_server_config: Option<std::path::PathBuf>,
+        /// 官方预构建 SWE-bench image namespace。
+        #[arg(long, default_value = "swebench")]
+        swe_instance_image_namespace: String,
+        /// 无 NAT、仅供宿主机控制 instance server 的 Docker 网络。
+        #[arg(long, default_value = "astrcode-swebench-control")]
+        swe_instance_control_network: String,
+        /// 按例接入隔离网络的可信 provider gateway 容器。
+        #[arg(long, default_value = "astrcode-swebench-egress")]
+        swe_instance_provider_gateway_container: String,
+        /// instance server 使用的 HTTP(S) 白名单代理。
+        #[arg(long, default_value = "http://astrcode-swebench-egress:8888")]
+        swe_instance_proxy: String,
+        /// 可信控制 relay 镜像；该容器不执行模型生成的命令。
+        #[arg(long, default_value = "astrcode-swebench-egress:gateway")]
+        swe_instance_control_relay_image: String,
+        /// instance session、server log 与元数据审计目录。
+        #[arg(long, default_value = "target/astrcode-eval/swebench-instance-audit")]
+        swe_instance_audit_dir: std::path::PathBuf,
+        /// instance 容器名前缀；正式运行应包含唯一 run ID。
+        #[arg(long, default_value = "astrcode-swebench-instance")]
+        swe_instance_container_prefix: String,
+        /// 每例求解后立即调用官方 harness 判分，再删除 instance image。
+        #[arg(long, requires = "swe_instance_solver_binary")]
+        swe_instance_streaming_harness: bool,
         /// 将 SWE-bench predictions 聚合输出为官方 harness 可消费的 JSONL。
         #[arg(long)]
         swe_predictions_output: Option<std::path::PathBuf>,
@@ -310,6 +346,8 @@ async fn main() -> ExitCode {
             cases,
             swe,
             output,
+            checkpoint_output,
+            resume_checkpoint,
             format,
             concurrency,
             tags,
@@ -317,6 +355,16 @@ async fn main() -> ExitCode {
             storage,
             server_addr,
             auth_token,
+            swe_instance_solver_binary,
+            swe_instance_server_config,
+            swe_instance_image_namespace,
+            swe_instance_control_network,
+            swe_instance_provider_gateway_container,
+            swe_instance_proxy,
+            swe_instance_control_relay_image,
+            swe_instance_audit_dir,
+            swe_instance_container_prefix,
+            swe_instance_streaming_harness,
             swe_predictions_output,
             swe_harness,
             swe_harness_dataset,
@@ -325,6 +373,41 @@ async fn main() -> ExitCode {
             swe_harness_max_workers,
             swe_harness_python,
         } => {
+            let streaming_harness = swe_instance_streaming_harness.then(|| {
+                astrcode_eval::SweBenchStreamingHarnessConfig {
+                    python: std::path::PathBuf::from(&swe_harness_python),
+                    dataset_name: swe_harness_dataset.clone(),
+                    split: swe_harness_split.clone(),
+                    run_id: format!("{swe_harness_run_id}-streaming"),
+                    timeout_secs: 1800,
+                }
+            });
+            let swe_bench_instance = match (swe_instance_solver_binary, swe_instance_server_config)
+            {
+                (Some(solver_binary), Some(server_config)) => {
+                    Some(astrcode_eval::SweBenchInstanceConfig {
+                        solver_binary,
+                        server_config,
+                        image_namespace: swe_instance_image_namespace,
+                        control_network: swe_instance_control_network,
+                        provider_gateway_container: swe_instance_provider_gateway_container,
+                        proxy_url: swe_instance_proxy,
+                        control_relay_image: swe_instance_control_relay_image,
+                        audit_dir: swe_instance_audit_dir,
+                        container_prefix: swe_instance_container_prefix,
+                        streaming_harness,
+                    })
+                },
+                (Some(_), None) => {
+                    eprintln!("--swe-instance-solver-binary requires --swe-instance-server-config");
+                    return ExitCode::from(2);
+                },
+                (None, Some(_)) => {
+                    eprintln!("--swe-instance-server-config requires --swe-instance-solver-binary");
+                    return ExitCode::from(2);
+                },
+                (None, None) => None,
+            };
             let config = astrcode_eval::EvalConfig {
                 cases_dir: cases,
                 source: swe.map_or(astrcode_eval::EvalSource::TomlDir, swe_to_source),
@@ -334,6 +417,9 @@ async fn main() -> ExitCode {
                 storage_root: storage,
                 server_addr,
                 auth_token,
+                checkpoint_path: checkpoint_output,
+                resume_checkpoint,
+                swe_bench_instance,
             };
             match astrcode_eval::run_eval(config).await {
                 Ok(report) => {
@@ -365,9 +451,6 @@ async fn main() -> ExitCode {
                             path.display()
                         );
                     }
-                    if !report.all_passed() {
-                        return ExitCode::from(1);
-                    }
                     if swe_harness {
                         let Some(path) = predictions_output.as_deref() else {
                             eprintln!("SWE-bench harness requires a predictions output path");
@@ -384,6 +467,9 @@ async fn main() -> ExitCode {
                             eprintln!("SWE-bench harness failed: {e}");
                             return ExitCode::from(1);
                         }
+                    }
+                    if !report.all_passed() {
+                        return ExitCode::from(1);
                     }
                 },
                 Err(e) => {

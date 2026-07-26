@@ -15,6 +15,7 @@ use crate::{serialization::ContentMapper, tool_result_wire::anthropic_tool_resul
 pub(crate) struct AnthropicRequestConfig<'a> {
     pub model_id: &'a str,
     pub max_output_tokens: usize,
+    pub supports_strict_tool_use: bool,
 }
 
 pub(crate) fn endpoint_url(base_url: &str) -> String {
@@ -56,7 +57,7 @@ pub(crate) fn build_request_body(
         request_body["system"] = sys;
     }
     if !tools.is_empty() {
-        request_body["tools"] = convert_tools(tools);
+        request_body["tools"] = convert_tools(tools, config.supports_strict_tool_use);
     }
     request_body
 }
@@ -146,17 +147,21 @@ impl ContentMapper for AnthropicMapper {
         })
     }
 
-    fn tool_call(call_id: &str, name: &str, arguments: &serde_json::Value) -> serde_json::Value {
-        let args_str = match arguments {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
+    fn tool_call(
+        call_id: &str,
+        name: &str,
+        arguments: &serde_json::Value,
+        raw_arguments: Option<&str>,
+    ) -> serde_json::Value {
+        // Anthropic requires `input` to be JSON. Keep malformed provider text
+        // in the durable model, but replay a protocol-valid placeholder next
+        // to the paired error result.
+        let input = raw_arguments.map_or_else(|| arguments.clone(), |_| serde_json::json!({}));
         serde_json::json!({
             "type": "tool_use",
             "id": call_id,
             "name": name,
-            "input": serde_json::from_str::<serde_json::Value>(&args_str)
-                .unwrap_or(serde_json::json!({}))
+            "input": input
         })
     }
 
@@ -208,15 +213,19 @@ fn has_only_tool_results(msg: &serde_json::Value) -> bool {
     !content.is_empty() && content.iter().all(|b| b["type"] == "tool_result")
 }
 
-fn convert_tools(tools: &[ToolDefinition]) -> serde_json::Value {
+fn convert_tools(tools: &[ToolDefinition], supports_strict_tool_use: bool) -> serde_json::Value {
     let mut converted: Vec<serde_json::Value> = tools
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut converted = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "input_schema": t.parameters,
-            })
+            });
+            if supports_strict_tool_use && t.strict {
+                converted["strict"] = serde_json::json!(true);
+            }
+            converted
         })
         .collect();
     if let Some(last) = converted.last_mut() {
@@ -271,11 +280,20 @@ mod tests {
     fn assistant_message_converts_tool_call() {
         let msg = LlmMessage {
             role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: "call_1".into(),
-                name: "read".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            }],
+            content: vec![
+                LlmContent::ToolCall {
+                    call_id: "call_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                    raw_arguments: None,
+                },
+                LlmContent::ToolCall {
+                    call_id: "call_bad".into(),
+                    name: "read".into(),
+                    arguments: serde_json::Value::String(r#"{"path":"#.into()),
+                    raw_arguments: Some(r#"{"path":"#.into()),
+                },
+            ],
             name: None,
             reasoning_content: None,
         };
@@ -285,6 +303,7 @@ mod tests {
         assert_eq!(block["id"], "call_1");
         assert_eq!(block["name"], "read");
         assert_eq!(block["input"]["path"], "foo.rs");
+        assert_eq!(json["content"][1]["input"], serde_json::json!({}));
     }
 
     #[test]
@@ -333,12 +352,14 @@ mod tests {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: false,
             origin: ToolOrigin::Builtin,
             execution_mode: ExecutionMode::Parallel,
         }];
         let config = AnthropicRequestConfig {
             model_id: "claude-test",
             max_output_tokens: 1024,
+            supports_strict_tool_use: false,
         };
         let body = build_count_tokens_body(
             config,
@@ -356,6 +377,34 @@ mod tests {
         assert!(body["tools"].is_array());
         assert!(body.get("stream").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn serializes_anthropic_strict_only_when_declared_and_supported() {
+        for (strict, supported, expected) in [
+            (true, true, Some(true)),
+            (true, false, None),
+            (false, true, None),
+        ] {
+            let serialized = convert_tools(
+                &[ToolDefinition {
+                    name: "lookup".into(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict,
+                    origin: ToolOrigin::Builtin,
+                    execution_mode: ExecutionMode::Parallel,
+                }],
+                supported,
+            );
+
+            assert_eq!(
+                serialized
+                    .pointer("/0/strict")
+                    .and_then(serde_json::Value::as_bool),
+                expected
+            );
+        }
     }
 
     #[test]

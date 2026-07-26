@@ -25,12 +25,12 @@ use definition::shell_tool_definition;
 use output::capture_stream;
 use output::{
     BackgroundTransfer, CapturedOutput, capture_stream_with_background_transfer,
-    detect_shell_output_diagnostic, foreground_shell_metadata, is_auto_background_allowed,
-    render_shell_output,
+    detect_shell_output_diagnostic, foreground_shell_metadata, insert_pipeline_metadata,
+    is_auto_background_allowed, render_shell_output,
 };
 pub(crate) use process::{
-    command_args, hide_command_window, preprocess_shell_command, setup_process_group,
-    terminate_child_tree,
+    PipelinePolicy, PipelineSemantics, apply_pipeline_policy, command_args, exit_signal,
+    hide_command_window, preprocess_shell_command, setup_process_group, terminate_child_tree,
 };
 
 /// 前台命令超过此时间仍运行时，自动收编为后台 shell（参考 Claude Code assistant blocking budget）。
@@ -52,7 +52,7 @@ pub struct ShellTool {
 
 /// shell 工具的参数。
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShellArgs {
     /// 要执行的 shell 命令（与 `shell_id` 互斥；省略时须提供 `shell_id`）。
     #[serde(default)]
@@ -69,6 +69,9 @@ struct ShellArgs {
     /// 通过 stdin 传入命令的输入数据。
     #[serde(default)]
     stdin: Option<String>,
+    /// 管道退出状态策略。默认 strict；lastCommand 用于有意忽略上游状态的展示型管道。
+    #[serde(default)]
+    pipeline_policy: Option<PipelinePolicyArg>,
     /// 为 true 时在后台运行，立即返回 `shellId`；之后通过 `shellId` 查询增量输出。
     #[serde(default)]
     run_in_background: Option<bool>,
@@ -81,6 +84,23 @@ struct ShellArgs {
     /// 与 `shellId` 联用：本次增量输出预览的 token 预算。
     #[serde(default, rename = "maxOutputTokens")]
     max_output_tokens: Option<usize>,
+}
+
+/// Shell tool wire contract for selecting pipeline exit behavior.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PipelinePolicyArg {
+    Strict,
+    LastCommand,
+}
+
+impl From<PipelinePolicyArg> for PipelinePolicy {
+    fn from(value: PipelinePolicyArg) -> Self {
+        match value {
+            PipelinePolicyArg::Strict => Self::Strict,
+            PipelinePolicyArg::LastCommand => Self::LastCommand,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -133,6 +153,11 @@ impl Tool for ShellTool {
                     "cannot specify both shellId and runInBackground".into(),
                 ));
             }
+            if args.pipeline_policy.is_some() {
+                return Err(ToolError::InvalidArguments(
+                    "pipelinePolicy can only be used when starting a shell command".into(),
+                ));
+            }
             return execute_background_shell_wait(
                 shell_id,
                 args.block_until_ms.unwrap_or(0),
@@ -173,6 +198,10 @@ impl ShellTool {
     ) -> Result<ToolResult, ToolError> {
         let shell = resolve_shell();
         let command = preprocess_shell_command(&args.command, &shell);
+        let pipeline_policy = args.pipeline_policy.map(Into::into).unwrap_or_default();
+        let (command, pipeline_semantics) =
+            apply_pipeline_policy(&shell, &command, pipeline_policy)
+                .map_err(ToolError::InvalidArguments)?;
         let command_args = command_args(&shell, &command);
         let cwd = args
             .cwd
@@ -181,7 +210,7 @@ impl ShellTool {
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs).min(600);
         let can_auto_background =
-            is_auto_background_allowed(&command) && ctx.capabilities.session.ops.is_some();
+            is_auto_background_allowed(&args.command) && ctx.capabilities.session.ops.is_some();
 
         let mut command_builder = Command::new(&shell.path);
         command_builder
@@ -261,6 +290,7 @@ impl ShellTool {
                         &args,
                         &command,
                         &shell,
+                        pipeline_semantics,
                         &cwd,
                         timeout_secs,
                         started_at,
@@ -283,6 +313,7 @@ impl ShellTool {
                             &args,
                             &command,
                             &shell,
+                            pipeline_semantics,
                             &cwd,
                             timeout_secs,
                             started_at,
@@ -307,15 +338,18 @@ impl ShellTool {
             }
         };
 
-        let (exit, timed_out) = match adopt_result {
-            ForegroundWaitOutcome::Completed(status) => {
-                (status.ok().and_then(|s| s.code()).unwrap_or(-1), false)
+        let (exit_code, signal, wait_error, timed_out) = match adopt_result {
+            ForegroundWaitOutcome::Completed(Ok(status)) => {
+                (status.code(), exit_signal(&status), None, false)
+            },
+            ForegroundWaitOutcome::Completed(Err(error)) => {
+                (None, None, Some(error.to_string()), false)
             },
             ForegroundWaitOutcome::TimedOut => {
                 if let Some(running) = child.as_mut() {
                     let _ = running.wait().await;
                 }
-                (-1, true)
+                (None, None, None, true)
             },
         };
         let stdout_capture = out_h
@@ -335,8 +369,11 @@ impl ShellTool {
             &args.command,
             args.intent.as_deref(),
             &shell,
+            pipeline_semantics,
             &cwd,
-            exit,
+            exit_code,
+            signal,
+            wait_error.as_deref(),
             timed_out,
             &stdout_capture,
             &stderr_capture,
@@ -360,7 +397,18 @@ impl ShellTool {
             }
         }
 
-        let is_error = timed_out || exit != 0 || diagnostic.is_some();
+        let is_error =
+            timed_out || exit_code != Some(0) || wait_error.is_some() || diagnostic.is_some();
+        meta.insert(
+            "executionStatus".into(),
+            serde_json::json!(if timed_out {
+                "timed_out"
+            } else if is_error {
+                "failed"
+            } else {
+                "succeeded"
+            }),
+        );
         let error = if timed_out {
             let timeout_msg = format!("shell command timed out after {timeout_secs}s");
             if output == "(no output)" {
@@ -372,10 +420,23 @@ impl ShellTool {
             Some(timeout_msg)
         } else if let Some(diagnostic) = diagnostic {
             Some(diagnostic.message().to_string())
-        } else if exit == 0 {
+        } else if let Some(wait_error) = wait_error {
+            let message = format!("failed to wait for shell process: {wait_error}");
+            if output == "(no output)" {
+                output = message.clone();
+            } else {
+                output.push_str("\n\n");
+                output.push_str(&message);
+            }
+            Some(message)
+        } else if exit_code == Some(0) {
             None
         } else {
-            Some(format!("exit code {exit}"))
+            Some(match (exit_code, signal) {
+                (Some(code), _) => format!("exit code {code}"),
+                (None, Some(signal)) => format!("terminated by signal {signal}"),
+                (None, None) => "shell process failed without an exit code".into(),
+            })
         };
 
         Ok(ToolResult {

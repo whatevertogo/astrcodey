@@ -216,6 +216,10 @@ fn resolve_llm_settings(
             .supports_prompt_cache_key
             .unwrap_or(false),
         supports_stream_usage: profile.capabilities.supports_stream_usage.unwrap_or(false),
+        supports_strict_tool_use: profile
+            .capabilities
+            .supports_strict_tool_use
+            .unwrap_or(false),
         prompt_cache_retention: profile.capabilities.prompt_cache_retention,
         reasoning,
         thinking_level,
@@ -648,6 +652,7 @@ mod tests {
         };
         let effective = config.into_effective().unwrap();
         assert_eq!(effective.llm.model_id, "deepseek-chat");
+        assert!(!effective.llm.supports_strict_tool_use);
         // 未配置小模型时回退到主模型
         assert_eq!(effective.small_llm.model_id, "deepseek-chat");
     }
@@ -666,6 +671,7 @@ mod tests {
                     supports_prompt_cache_key: Some(true),
                     prompt_cache_retention: None,
                     supports_stream_usage: Some(true),
+                    supports_strict_tool_use: Some(true),
                 },
                 models: vec![ModelConfig {
                     id: "gpt-4.1".into(),
@@ -682,6 +688,7 @@ mod tests {
         let effective = config.into_effective().unwrap();
 
         assert!(effective.llm.supports_prompt_cache_key);
+        assert!(effective.llm.supports_strict_tool_use);
         assert_eq!(effective.llm.prompt_cache_retention, None);
     }
 

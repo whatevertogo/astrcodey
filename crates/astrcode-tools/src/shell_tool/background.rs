@@ -7,8 +7,9 @@ use astrcode_support::{
 };
 
 use super::{
-    AUTO_BACKGROUND_AFTER_MS, BackgroundTransfer, CapturedOutput, ShellArgs, ShellTool,
-    detect_shell_output_diagnostic, preprocess_shell_command,
+    AUTO_BACKGROUND_AFTER_MS, BackgroundTransfer, CapturedOutput, PipelineSemantics, ShellArgs,
+    ShellTool, apply_pipeline_policy, detect_shell_output_diagnostic, insert_pipeline_metadata,
+    preprocess_shell_command,
 };
 use crate::{
     background_shell::{
@@ -26,6 +27,7 @@ impl ShellTool {
         args: &ShellArgs,
         command: &str,
         shell: &ShellInfo,
+        pipeline_semantics: PipelineSemantics,
         cwd: &Path,
         timeout_secs: u64,
         started_at: Instant,
@@ -98,9 +100,13 @@ impl ShellTool {
         let mut meta = BTreeMap::new();
         meta.insert("backgrounded".into(), serde_json::json!(true));
         meta.insert("autoBackgrounded".into(), serde_json::json!(true));
+        meta.insert("executionStatus".into(), serde_json::json!("running"));
+        meta.insert("exitCode".into(), serde_json::Value::Null);
+        meta.insert("timedOut".into(), serde_json::json!(false));
         meta.insert("shellId".into(), serde_json::json!(adopted.shell_id));
         meta.insert("outputPath".into(), serde_json::json!(path));
         meta.insert("command".into(), serde_json::json!(args.command));
+        insert_pipeline_metadata(&mut meta, pipeline_semantics);
         if let Some(intent) = args
             .intent
             .as_ref()
@@ -138,6 +144,10 @@ impl ShellTool {
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs).min(600);
         let command = preprocess_shell_command(&args.command, &shell);
+        let pipeline_policy = args.pipeline_policy.map(Into::into).unwrap_or_default();
+        let (command, pipeline_semantics) =
+            apply_pipeline_policy(&shell, &command, pipeline_policy)
+                .map_err(ToolError::InvalidArguments)?;
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
             session_id: ctx.session_id.to_string(),
             command,
@@ -157,9 +167,13 @@ impl ShellTool {
         );
         let mut meta = BTreeMap::new();
         meta.insert("backgrounded".into(), serde_json::json!(true));
+        meta.insert("executionStatus".into(), serde_json::json!("running"));
+        meta.insert("exitCode".into(), serde_json::Value::Null);
+        meta.insert("timedOut".into(), serde_json::json!(false));
         meta.insert("shellId".into(), serde_json::json!(spawned.shell_id));
         meta.insert("outputPath".into(), serde_json::json!(path));
         meta.insert("command".into(), serde_json::json!(args.command));
+        insert_pipeline_metadata(&mut meta, pipeline_semantics);
         if let Some(intent) = args.intent.filter(|intent| !intent.trim().is_empty()) {
             meta.insert("intent".into(), serde_json::json!(intent));
         }
@@ -223,25 +237,45 @@ pub(super) async fn execute_background_shell_wait(
         )
     } else if let Some(diagnostic) = diagnostic {
         format!(
-            "{}\n\nShell {shell_id} finished (status: {}, exit_code: {:?}).\nOutput file: \
-             {path}\n\n{output_label}:\n{rendered_output}",
+            "{}\n\nShell {shell_id} finished (status: {}, exit_code: {:?}, signal: {:?}).\nOutput \
+             file: {path}\n\n{output_label}:\n{rendered_output}",
             diagnostic.message(),
             status.status,
-            status.exit_code
+            status.exit_code,
+            status.signal
         )
     } else {
         format!(
-            "Shell {shell_id} finished (status: {}, exit_code: {:?}).\nOutput file: \
+            "Shell {shell_id} finished (status: {}, exit_code: {:?}, signal: {:?}).\nOutput file: \
              {path}\n\n{output_label}:\n{rendered_output}",
-            status.status, status.exit_code
+            status.status, status.exit_code, status.signal
         )
     };
     let is_error =
         matches!(status.status.as_str(), "failed" | "timed_out" | "killed") || diagnostic.is_some();
+    let execution_status = if diagnostic.is_some() {
+        "failed"
+    } else {
+        match status.status.as_str() {
+            "running" => "running",
+            "completed" => "succeeded",
+            "timed_out" => "timed_out",
+            "killed" => "cancelled",
+            _ => "failed",
+        }
+    };
     let mut meta = BTreeMap::new();
     meta.insert("shellId".into(), serde_json::json!(shell_id));
     meta.insert("outputPath".into(), serde_json::json!(path));
     meta.insert("running".into(), serde_json::json!(status.running));
+    meta.insert(
+        "executionStatus".into(),
+        serde_json::json!(execution_status),
+    );
+    meta.insert(
+        "timedOut".into(),
+        serde_json::json!(status.status == "timed_out"),
+    );
     meta.insert(
         "outputTruncated".into(),
         serde_json::json!(status.output_truncated),
@@ -264,8 +298,9 @@ pub(super) async fn execute_background_shell_wait(
         serde_json::json!(status.max_output_tokens),
     );
     meta.insert("status".into(), serde_json::json!(status.status));
-    if let Some(code) = status.exit_code {
-        meta.insert("exitCode".into(), serde_json::json!(code));
+    meta.insert("exitCode".into(), serde_json::json!(status.exit_code));
+    if let Some(signal) = status.signal {
+        meta.insert("signal".into(), serde_json::json!(signal));
     }
     if let Some(diagnostic) = diagnostic {
         meta.insert("semanticError".into(), serde_json::json!(diagnostic.code()));
@@ -310,6 +345,9 @@ fn stale_background_shell_result(
     meta.insert("shellId".into(), serde_json::json!(shell_id));
     meta.insert("running".into(), serde_json::json!(false));
     meta.insert("status".into(), serde_json::json!("unknown_stale_shell_id"));
+    meta.insert("executionStatus".into(), serde_json::json!("unknown"));
+    meta.insert("exitCode".into(), serde_json::Value::Null);
+    meta.insert("timedOut".into(), serde_json::json!(false));
     meta.insert("hasNewOutput".into(), serde_json::json!(false));
     meta.insert("outputTruncated".into(), serde_json::json!(false));
     meta.insert("outputTokens".into(), serde_json::json!(0));

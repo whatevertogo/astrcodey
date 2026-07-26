@@ -542,6 +542,7 @@ fn terminal_tool_definition() -> &'static ToolDefinition {
             "- Output is a UTF-8 lossy view of raw PTY bytes (may include ANSI escape codes).",
         )
             .into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

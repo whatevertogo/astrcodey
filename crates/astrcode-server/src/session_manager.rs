@@ -680,6 +680,7 @@ mod tests {
                     name: self.tool_name.into(),
                     description: self.description.into(),
                     parameters: serde_json::json!({"type": "object"}),
+                    strict: false,
                     origin: ToolOrigin::Extension,
                     execution_mode: ExecutionMode::Sequential,
                 },

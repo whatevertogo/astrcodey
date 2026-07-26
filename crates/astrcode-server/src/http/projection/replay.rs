@@ -43,10 +43,15 @@ pub(in crate::http) fn event_to_replay_deltas(
         call_id,
         tool_name,
         arguments,
+        raw_arguments,
     } = &event.payload
     {
         return vec![ConversationDeltaDto::AppendBlock {
-            block: streaming_tool_call_block(call_id.to_string(), tool_name, Some(arguments)),
+            block: streaming_tool_call_block(
+                call_id.to_string(),
+                tool_name,
+                raw_arguments.is_none().then_some(arguments),
+            ),
         }];
     }
     if let EventPayload::ToolCallInteractionPending {

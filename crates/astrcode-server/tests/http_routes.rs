@@ -321,6 +321,16 @@ async fn provider_catalog_route_returns_endpoint_presets() {
             .any(|endpoint| endpoint.base_url.as_deref()
                 == Some("https://dashscope.aliyuncs.com/compatible-mode/v1"))
     );
+    assert!(!qwen.capabilities.strict_tool_use);
+
+    for provider_id in ["openai", "anthropic"] {
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+            .expect("strict provider preset exists");
+        assert!(provider.capabilities.strict_tool_use);
+    }
 
     let ark = catalog
         .providers
@@ -1167,6 +1177,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({ "path": read_fixture }),
+                raw_arguments: None,
             },
         ))
         .await
@@ -1519,6 +1530,7 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             retry_base_delay_ms: 0,
             supports_prompt_cache_key: false,
             supports_stream_usage: false,
+            supports_strict_tool_use: false,
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
@@ -1538,6 +1550,7 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             retry_base_delay_ms: 0,
             supports_prompt_cache_key: false,
             supports_stream_usage: false,
+            supports_strict_tool_use: false,
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,

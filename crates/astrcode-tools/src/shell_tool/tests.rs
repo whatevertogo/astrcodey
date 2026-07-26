@@ -1,10 +1,11 @@
 use std::time::Instant;
 
-use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext};
+use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext, ToolResult};
 use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
 
 use super::{
-    MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, capture_stream, command_args, preprocess_shell_command,
+    MAX_CAPTURE_BYTES_PER_STREAM, PipelinePolicy, ShellTool, apply_pipeline_policy, capture_stream,
+    command_args, preprocess_shell_command,
 };
 
 fn empty_ctx() -> ToolExecutionContext {
@@ -25,6 +26,35 @@ fn ctx_with_session(session_id: &str) -> ToolExecutionContext {
         None,
         ToolCapabilities::default(),
     )
+}
+
+async fn poll_background_shell_to_terminal(
+    tool: &ShellTool,
+    shell_id: &str,
+    ctx: &ToolExecutionContext,
+) -> Vec<ToolResult> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut polls = Vec::new();
+        loop {
+            let poll = tool
+                .execute(
+                    serde_json::json!({
+                        "shellId": shell_id,
+                        "blockUntilMs": 5_000
+                    }),
+                    ctx,
+                )
+                .await
+                .expect("background shell poll should succeed");
+            let running = poll.metadata["running"] == serde_json::json!(true);
+            polls.push(poll);
+            if !running {
+                return polls;
+            }
+        }
+    })
+    .await
+    .expect("background shell should reach a terminal state")
 }
 
 fn command_with_stderr() -> String {
@@ -103,6 +133,36 @@ fn command_args_match_resolved_shell_family() {
         path: "bash".into(),
     };
     assert_eq!(command_args(&posix, command), vec!["-lc", command]);
+
+    let (strict_command, strict_semantics) =
+        apply_pipeline_policy(&posix, "false | true", PipelinePolicy::Strict)
+            .expect("bash supports strict pipelines");
+    assert_eq!(strict_command, "set -o pipefail\nfalse | true");
+    assert!(strict_semantics.is_enforced());
+    assert_eq!(strict_semantics.status_scope(), "allPipelineStages");
+
+    let sh = ShellInfo {
+        family: ShellFamily::Posix,
+        name: "sh".into(),
+        path: "/bin/sh".into(),
+    };
+    let unsupported = apply_pipeline_policy(&sh, "false | true", PipelinePolicy::Strict)
+        .expect_err("sh pipeline must fail closed when strict status is unavailable");
+    assert!(unsupported.contains("cannot be enforced"));
+
+    for command in ["printf '%s' '|'", "false || true"] {
+        let (prepared, semantics) = apply_pipeline_policy(&sh, command, PipelinePolicy::Strict)
+            .expect("quoted pipes and boolean OR are not pipelines");
+        assert_eq!(prepared, command);
+        assert!(semantics.is_enforced());
+    }
+
+    let (last_command, last_command_semantics) =
+        apply_pipeline_policy(&sh, "false | true", PipelinePolicy::LastCommand)
+            .expect("last-command semantics are available on every shell");
+    assert_eq!(last_command, "false | true");
+    assert!(last_command_semantics.is_enforced());
+    assert_eq!(last_command_semantics.status_scope(), "lastPipelineStage");
 }
 
 #[test]
@@ -202,6 +262,10 @@ async fn shell_timeout_returns_partial_output() {
         result.content
     );
     assert_eq!(result.metadata["timedOut"], serde_json::json!(true));
+    assert_eq!(
+        result.metadata["executionStatus"],
+        serde_json::json!("timed_out")
+    );
     assert_eq!(result.metadata["streamed"], serde_json::json!(false));
 }
 
@@ -232,7 +296,7 @@ async fn shell_stdin_pipes_data_to_command() {
 }
 
 #[tokio::test]
-async fn shell_rejects_empty_command() {
+async fn shell_rejects_empty_commands_and_unknown_fields() {
     let tool = ShellTool {
         working_dir: std::env::current_dir().expect("cwd should exist"),
         timeout_secs: 30,
@@ -244,6 +308,21 @@ async fn shell_rejects_empty_command() {
     assert!(
         err.to_string().contains("empty"),
         "error should mention empty: {err}"
+    );
+
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "command": "echo ok",
+                "unknownOption": true
+            }),
+            &empty_ctx(),
+        )
+        .await;
+    let err = result.expect_err("unknown fields should fail at the tool boundary");
+    assert!(
+        err.to_string().contains("unknown field `unknownOption`"),
+        "unexpected error: {err}"
     );
 }
 
@@ -264,11 +343,92 @@ async fn shell_nonzero_exit_code_is_error() {
         .await
         .expect("shell should execute");
     assert!(result.is_error, "non-zero exit should be error");
+    assert_eq!(
+        result.metadata["executionStatus"],
+        serde_json::json!("failed")
+    );
     let exit_code = result.metadata["exitCode"].as_i64().expect("exitCode");
     assert_ne!(
         exit_code, 0,
         "exit code should be non-zero, got {exit_code}"
     );
+}
+
+#[tokio::test]
+async fn shell_pipeline_policy_controls_foreground_and_background_status() {
+    let shell = resolve_shell();
+    let Ok(_) = apply_pipeline_policy(&shell, "false | true", PipelinePolicy::Strict) else {
+        return;
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let session_id = format!("sess-pipeline-policy-{}", uuid::Uuid::new_v4());
+    let ctx = ctx_with_session(&session_id);
+    let tool = ShellTool {
+        working_dir: temp.path().to_path_buf(),
+        timeout_secs: 30,
+    };
+
+    let strict = tool
+        .execute(serde_json::json!({ "command": "false | true" }), &ctx)
+        .await
+        .expect("strict pipeline should execute");
+    assert!(strict.is_error, "{strict:?}");
+    assert_eq!(
+        strict.metadata["executionStatus"],
+        serde_json::json!("failed")
+    );
+    assert_eq!(
+        strict.metadata["pipelinePolicy"],
+        serde_json::json!("strict")
+    );
+    assert_eq!(
+        strict.metadata["pipelineStatusScope"],
+        serde_json::json!("allPipelineStages")
+    );
+
+    let last_command = tool
+        .execute(
+            serde_json::json!({
+                "command": "false | true",
+                "pipelinePolicy": "lastCommand"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("last-command pipeline should execute");
+    assert!(!last_command.is_error, "{last_command:?}");
+    assert_eq!(
+        last_command.metadata["executionStatus"],
+        serde_json::json!("succeeded")
+    );
+    assert_eq!(
+        last_command.metadata["pipelineStatusScope"],
+        serde_json::json!("lastPipelineStage")
+    );
+
+    let background = tool
+        .execute(
+            serde_json::json!({
+                "command": "false | true",
+                "runInBackground": true
+            }),
+            &ctx,
+        )
+        .await
+        .expect("strict background pipeline should start");
+    let shell_id = background.metadata["shellId"]
+        .as_str()
+        .expect("shellId metadata");
+    let polls = poll_background_shell_to_terminal(&tool, shell_id, &ctx).await;
+    let completed = polls.last().expect("terminal poll");
+    assert!(completed.is_error, "{completed:?}");
+    assert_eq!(
+        completed.metadata["executionStatus"],
+        serde_json::json!("failed")
+    );
+
+    crate::background_shell::cleanup_background_shells_for_session(&session_id);
 }
 
 #[tokio::test]
@@ -357,6 +517,10 @@ async fn shell_metadata_includes_shell_info_and_cwd() {
     assert!(result.metadata.contains_key("exitCode"));
     assert_eq!(result.metadata["streamed"], serde_json::json!(false));
     assert_eq!(result.metadata["timedOut"], serde_json::json!(false));
+    assert_eq!(
+        result.metadata["executionStatus"],
+        serde_json::json!("succeeded")
+    );
 }
 
 #[tokio::test]
@@ -427,16 +591,8 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
         .as_str()
         .expect("shellId metadata");
 
-    let final_poll = tool
-        .execute(
-            serde_json::json!({
-                "shellId": shell_id,
-                "blockUntilMs": 5_000
-            }),
-            &ctx,
-        )
-        .await
-        .expect("first terminal poll should succeed");
+    let polls = poll_background_shell_to_terminal(&tool, shell_id, &ctx).await;
+    let final_poll = polls.last().expect("terminal poll");
     assert!(!final_poll.is_error, "{final_poll:?}");
     assert_eq!(final_poll.metadata["running"], serde_json::json!(false));
     assert_eq!(
@@ -444,9 +600,8 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
         serde_json::json!("completed")
     );
     assert!(
-        final_poll.content.contains("done"),
-        "first terminal poll should include final output: {}",
-        final_poll.content
+        polls.iter().any(|poll| poll.content.contains("done")),
+        "polls should include final output: {polls:?}"
     );
 
     let repeated_poll = tool

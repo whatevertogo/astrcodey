@@ -20,7 +20,7 @@ use walkdir::WalkDir;
 
 use crate::{
     EvalError,
-    case::{DEFAULT_TIMEOUT_SECS, EvalCase, JudgeConfig, Setup},
+    case::{DEFAULT_TIMEOUT_SECS, EvalCase, JudgeConfig, NO_TIMEOUT_SECS, Setup},
 };
 
 /// 外部 benchmark 适配器。
@@ -412,13 +412,14 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
         .problem_statement
         .or(record.question)
         .unwrap_or_else(|| format!("SWE case [{}]", id));
-    let hints_text = non_empty_text(record.hints_text);
     let mut prompts = vec![problem];
-    if let Some(hints) = record.hints {
-        prompts.extend(hints.into_iter().map(|hint| format!("Hint: {hint}")));
-    }
-    if let Some(hints_text) = hints_text {
-        prompts.push(format!("Hints:\n{hints_text}"));
+    if !official {
+        if let Some(hints) = record.hints {
+            prompts.extend(hints.into_iter().map(|hint| format!("Hint: {hint}")));
+        }
+        if let Some(hints_text) = non_empty_text(record.hints_text) {
+            prompts.push(format!("Hints:\n{hints_text}"));
+        }
     }
 
     let repo = record
@@ -460,7 +461,11 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
         },
         prompts,
         judges,
-        timeout_secs: record.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+        timeout_secs: record.timeout_secs.unwrap_or(if official {
+            NO_TIMEOUT_SECS
+        } else {
+            DEFAULT_TIMEOUT_SECS
+        }),
         tags,
     })
 }
@@ -492,10 +497,11 @@ mod tests {
                 "repo": "django/django",
                 "base_commit": "abc123",
                 "problem_statement": "Fix the issue.",
-                "hints_text": "Look at the parser.",
-                "FAIL_TO_PASS": "[\"tests.test_parser\"]",
+                "hints": ["SECRET_HINT_LIST"],
+                "hints_text": "SECRET_HINT_TEXT",
+                "FAIL_TO_PASS": "[\"SECRET_FAIL_TO_PASS\"]",
                 "PASS_TO_PASS": "[]",
-                "test_patch": "diff --git a/tests.py b/tests.py"
+                "test_patch": "SECRET_TEST_PATCH"
             }"#,
         )
         .unwrap();
@@ -504,17 +510,9 @@ mod tests {
 
         assert_eq!(case.id, "django__django-12345");
         assert_eq!(case.description, "Official SWE-bench case");
+        assert_eq!(case.timeout_secs, NO_TIMEOUT_SECS);
         assert!(case.tags.contains(&"official-swe-bench".to_string()));
-        assert!(
-            case.prompts
-                .iter()
-                .any(|prompt| prompt.contains("Fix the issue."))
-        );
-        assert!(
-            case.prompts
-                .iter()
-                .any(|prompt| prompt.contains("Look at the parser."))
-        );
+        assert_eq!(case.prompts, ["Fix the issue."]);
         assert!(matches!(
             case.judges.as_slice(),
             [JudgeConfig::SweBenchPatch { instance_id }] if instance_id == "django__django-12345"

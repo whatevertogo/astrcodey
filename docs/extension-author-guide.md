@@ -54,6 +54,29 @@ async fn run() -> Result<(), ErrorPayload> {
 
 现用 `worker.tool(def, handler)`：**同一次调用**写入 manifest 与 handler 表。
 
+SDK builder 创建的工具默认不启用 provider strict。只有确认 Schema 满足所有目标 provider 的
+strict JSON Schema 子集时才调用 `.strict()`：
+
+```rust
+tool("ping")
+    .description("Returns pong")
+    .parameters(serde_json::json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    }))
+    .strict()
+    .build()
+```
+
+宿主会将 strict 声明写入 S5R manifest，并在 profile 同时声明 `supportsStrictToolUse` 时为 OpenAI
+或 Anthropic 编译对应的 strict Schema；工具定义本身不需要复制两份 provider 专用 Schema。
+Provider strict 只支持完整 JSON Schema 的子集，而且不同 provider 的子集并不相同；例如
+`oneOf`、`patternProperties` 等关键字不能假定跨 provider 可用。显式 strict 但无法安全编译的
+结构会在发请求前返回带工具名与 Schema 路径的本地错误，避免悄悄削弱扩展作者声明的契约。
+MCP 工具保持 non-strict；Anthropic 达到单次请求 strict 聚合上限时，溢出工具只在 wire 副本上
+确定性降级并记录 warning。
+
 ## 类型化参数
 
 避免手写 `event["input"]["arguments"]["name"]`：

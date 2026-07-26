@@ -285,6 +285,7 @@ mod tests {
             name: "read".into(),
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
+            strict: true,
             origin: astrcode_core::tool::ToolOrigin::Builtin,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }];

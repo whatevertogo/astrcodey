@@ -94,7 +94,9 @@ where
 ///     .description("Say hello to someone")
 ///     .parameters(json!({
 ///         "type": "object",
-///         "properties": { "name": { "type": "string" } }
+///         "properties": { "name": { "type": "string" } },
+///         "required": ["name"],
+///         "additionalProperties": false
 ///     }))
 ///     .build();
 /// ```
@@ -103,6 +105,7 @@ pub fn tool(name: impl Into<String>) -> ToolDefinitionBuilder {
         name: name.into(),
         description: String::new(),
         parameters: serde_json::json!({"type": "object"}),
+        strict: false,
         execution_mode: ExecutionMode::Sequential,
     }
 }
@@ -111,6 +114,7 @@ pub struct ToolDefinitionBuilder {
     name: String,
     description: String,
     parameters: serde_json::Value,
+    strict: bool,
     execution_mode: ExecutionMode,
 }
 
@@ -125,6 +129,24 @@ impl ToolDefinitionBuilder {
         self
     }
 
+    /// Explicitly require provider-side schema-constrained tool arguments.
+    ///
+    /// Use this only when the schema satisfies every targeted provider's strict JSON Schema
+    /// subset. Provider-specific validation runs before the model request is sent.
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+
+    /// Use provider-side non-strict tool arguments.
+    ///
+    /// This is the builder default. The method remains useful when configuration code wants to
+    /// state the contract explicitly or override an earlier [`Self::strict`] call.
+    pub fn non_strict(mut self) -> Self {
+        self.strict = false;
+        self
+    }
+
     pub fn execution_mode(mut self, mode: ExecutionMode) -> Self {
         self.execution_mode = mode;
         self
@@ -135,6 +157,7 @@ impl ToolDefinitionBuilder {
             name: self.name,
             description: self.description,
             parameters: self.parameters,
+            strict: self.strict,
             origin: ToolOrigin::Extension,
             execution_mode: self.execution_mode,
         }
@@ -156,8 +179,12 @@ mod tests {
         let def = tool("test").description("A test tool").build();
         assert_eq!(def.name, "test");
         assert_eq!(def.description, "A test tool");
+        assert!(!def.strict);
         assert_eq!(def.origin, ToolOrigin::Extension);
         assert_eq!(def.execution_mode, ExecutionMode::Sequential);
+
+        assert!(tool("strict").strict().build().strict);
+        assert!(!tool("dynamic").strict().non_strict().build().strict);
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ pub struct EvalCase {
     pub prompts: Vec<String>,
     /// 判定条件列表。
     pub judges: Vec<JudgeConfig>,
-    /// 超时秒数。
+    /// 超时秒数。`0` 表示不限制完成时间。
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     /// 标签（用于过滤）。
@@ -36,6 +36,9 @@ fn default_timeout() -> u64 {
 
 /// 默认 case 超时时间（秒）。
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// 不限制 case 完成时间。
+pub const NO_TIMEOUT_SECS: u64 = 0;
 
 /// 工作目录准备策略。
 #[derive(Debug, Clone, Deserialize, Default)]

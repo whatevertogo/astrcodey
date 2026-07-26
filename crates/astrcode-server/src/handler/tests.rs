@@ -691,6 +691,7 @@ fn test_runtime_with_settings(
             retry_base_delay_ms: 0,
             supports_prompt_cache_key: false,
             supports_stream_usage: false,
+            supports_strict_tool_use: false,
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
@@ -710,6 +711,7 @@ fn test_runtime_with_settings(
             retry_base_delay_ms: 0,
             supports_prompt_cache_key: false,
             supports_stream_usage: false,
+            supports_strict_tool_use: false,
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
@@ -1388,6 +1390,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
                 call_id: "call-1".into(),
                 tool_name: "todoWrite".into(),
                 arguments: serde_json::json!({}),
+                raw_arguments: None,
             },
         ))
         .await
@@ -1463,6 +1466,7 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
                 call_id: "call-abort".into(),
                 tool_name: "shell".into(),
                 arguments: serde_json::json!({ "command": "sleep" }),
+                raw_arguments: None,
             },
         ))
         .await

@@ -1,6 +1,10 @@
 //! Tool registry for kernel-managed tool dispatch.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use astrcode_core::{
     extension::ChildToolPolicy,
@@ -10,6 +14,7 @@ use astrcode_core::{
     },
     tool_access::ResourceAccess,
 };
+use serde_json::Value;
 
 /// Registered tool plus the metadata cached from its implementation.
 #[derive(Clone)]
@@ -69,11 +74,20 @@ impl ToolRegistry {
     pub async fn execute(
         &self,
         name: &str,
-        args: serde_json::Value,
+        mut args: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         match self.tools.get(name) {
-            Some(entry) => entry.tool.execute(args, ctx).await,
+            Some(entry) => {
+                if entry.definition.strict {
+                    normalize_strict_arguments(
+                        &mut args,
+                        &entry.definition.parameters,
+                        &entry.definition.parameters,
+                    );
+                }
+                entry.tool.execute(args, ctx).await
+            },
             None => Err(ToolError::NotFound(name.into())),
         }
     }
@@ -145,6 +159,99 @@ impl ToolRegistry {
     }
 }
 
+fn normalize_strict_arguments(value: &mut Value, schema: &Value, root_schema: &Value) {
+    let schema = resolve_local_schema(schema, root_schema).unwrap_or(schema);
+    match (value, schema) {
+        (Value::Object(arguments), Value::Object(schema)) => {
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<HashSet<_>>();
+            let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+                return;
+            };
+            let names = arguments.keys().cloned().collect::<Vec<_>>();
+            for name in names {
+                let Some(property_schema) = properties.get(&name) else {
+                    continue;
+                };
+                let remove_provider_null = arguments.get(&name).is_some_and(|argument| {
+                    argument.is_null()
+                        && !required.contains(name.as_str())
+                        && !schema_allows_null(property_schema, root_schema, &mut Vec::new())
+                });
+                if remove_provider_null {
+                    arguments.remove(&name);
+                } else if let Some(argument) = arguments.get_mut(&name) {
+                    normalize_strict_arguments(argument, property_schema, root_schema);
+                }
+            }
+        },
+        (Value::Array(arguments), Value::Object(schema)) => {
+            if let Some(item_schema) = schema.get("items") {
+                for argument in arguments {
+                    normalize_strict_arguments(argument, item_schema, root_schema);
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+fn resolve_local_schema<'a>(schema: &'a Value, root_schema: &'a Value) -> Option<&'a Value> {
+    let reference = schema.get("$ref")?.as_str()?;
+    let pointer = reference.strip_prefix('#')?;
+    root_schema.pointer(pointer)
+}
+
+fn schema_allows_null(schema: &Value, root_schema: &Value, visited_refs: &mut Vec<String>) -> bool {
+    if schema.is_null()
+        || schema.get("const").is_some_and(Value::is_null)
+        || schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(Value::is_null))
+    {
+        return true;
+    }
+    if schema
+        .get("type")
+        .is_some_and(|schema_type| match schema_type {
+            Value::String(kind) => kind == "null",
+            Value::Array(kinds) => kinds.iter().any(|kind| kind == "null"),
+            _ => false,
+        })
+    {
+        return true;
+    }
+    if ["anyOf", "oneOf"].iter().any(|keyword| {
+        schema
+            .get(keyword)
+            .and_then(Value::as_array)
+            .is_some_and(|branches| {
+                branches
+                    .iter()
+                    .any(|branch| schema_allows_null(branch, root_schema, visited_refs))
+            })
+    }) {
+        return true;
+    }
+
+    let Some(reference) = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .filter(|reference| !visited_refs.iter().any(|visited| visited == reference))
+    else {
+        return false;
+    };
+    visited_refs.push(reference.to_string());
+    resolve_local_schema(schema, root_schema)
+        .is_some_and(|resolved| schema_allows_null(resolved, root_schema, visited_refs))
+}
+
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
@@ -164,6 +271,7 @@ mod tests {
                 name: self.0.to_string(),
                 description: String::new(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: false,
                 origin: astrcode_core::tool::ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
             }
@@ -220,5 +328,44 @@ mod tests {
         assert!(registry.find_definition("shell").is_some());
         assert!(filtered.find_definition("shell").is_none());
         assert!(filtered.find_definition("read").is_some());
+    }
+
+    #[test]
+    fn strict_argument_normalization_only_removes_synthetic_optional_nulls() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "required": {"type": "string"},
+                "optional": {"type": "string"},
+                "nullable": {"type": ["string", "null"]},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "flag": {"type": "boolean"}
+                        }
+                    }
+                }
+            },
+            "required": ["required"]
+        });
+        let mut arguments = serde_json::json!({
+            "required": "value",
+            "optional": null,
+            "nullable": null,
+            "items": [{"flag": null}]
+        });
+
+        normalize_strict_arguments(&mut arguments, &schema, &schema);
+
+        assert_eq!(
+            arguments,
+            serde_json::json!({
+                "required": "value",
+                "nullable": null,
+                "items": [{}]
+            })
+        );
     }
 }

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{EvalError, case::Setup};
+use crate::{EvalError, case::Setup, git::isolated_git_command};
 
 /// 根据 setup 配置创建临时工作目录，返回路径。
 pub async fn setup_workspace(setup: &Setup, cases_base_dir: &Path) -> Result<PathBuf, EvalError> {
@@ -35,7 +35,7 @@ pub async fn setup_workspace(setup: &Setup, cases_base_dir: &Path) -> Result<Pat
                 .map_err(|e| EvalError::Setup(format!("create tempdir: {e}")))?;
             let dest = dir.path().to_path_buf();
             std::mem::forget(dir);
-            let status = tokio::process::Command::new("git")
+            let status = isolated_git_command()
                 .args(["clone", "--no-checkout", repo, &dest.display().to_string()])
                 .status()
                 .await
@@ -43,7 +43,7 @@ pub async fn setup_workspace(setup: &Setup, cases_base_dir: &Path) -> Result<Pat
             if !status.success() {
                 return Err(EvalError::Setup(format!("git clone failed: {repo}")));
             }
-            let status = tokio::process::Command::new("git")
+            let status = isolated_git_command()
                 .args(["checkout", commit])
                 .current_dir(&dest)
                 .status()

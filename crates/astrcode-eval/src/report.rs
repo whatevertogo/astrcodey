@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::{judge::Verdict, metrics::Metrics};
 
 /// 单个 case 的评测结果。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 pub struct EvalResult {
     pub case_id: String,
     pub session_id: String,

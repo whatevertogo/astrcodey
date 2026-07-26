@@ -24,7 +24,7 @@ pub struct ApplyPatchTool {
 
 /// patch 工具的参数。
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApplyPatchArgs {
     /// 统一差异格式的补丁文本
     patch: String,
@@ -216,18 +216,19 @@ fn apply_patch_tool_definition() -> &'static ToolDefinition {
             "- Context lines must match the current file exactly (re-`read` first if unsure)",
         )
         .into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "patch": {
                     "type": "string",
                     "description": "Unified diff text. Context must match exactly; a/`b/` prefixes stripped. New file: --- /dev/null → +++ path. Per-file hunk failure rolls back that file; other files may still apply."
                 }
             },
-            "required": ["patch"],
-            "additionalProperties": false
+            "required": ["patch"]
         }),
     })
 }
@@ -862,5 +863,21 @@ fn patch_error(call_id: &str, started_at: Instant, error: &str) -> ToolResult {
             ("filesFailed".into(), serde_json::json!(0)),
         ]),
         duration_ms: Some(started_at.elapsed().as_millis() as u64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_arguments_reject_unknown_fields() {
+        let error = serde_json::from_value::<ApplyPatchArgs>(serde_json::json!({
+            "patch": "",
+            "unexpected": true
+        }))
+        .expect_err("strict patch arguments must reject unknown fields");
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
     }
 }

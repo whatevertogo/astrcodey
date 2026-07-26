@@ -616,6 +616,7 @@ fn tool_definition(server_name: &str, tool: &McpTool) -> Option<ToolDefinition> 
             .input_schema
             .clone()
             .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        strict: false,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     })
@@ -653,6 +654,7 @@ fn tool_search_tool_definition() -> ToolDefinition {
             },
             "required": ["query"]
         }),
+        strict: false,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
     }

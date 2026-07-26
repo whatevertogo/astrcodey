@@ -175,6 +175,7 @@ pub(in crate::http) fn messages_to_blocks(
                         call_id,
                         name,
                         arguments,
+                        raw_arguments,
                     } = content
                     else {
                         continue;
@@ -183,7 +184,7 @@ pub(in crate::http) fn messages_to_blocks(
                     blocks.push(streaming_tool_call_block(
                         call_id.clone(),
                         name,
-                        Some(arguments),
+                        raw_arguments.is_none().then_some(arguments),
                     ));
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }

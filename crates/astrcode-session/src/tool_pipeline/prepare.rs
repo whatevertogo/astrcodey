@@ -33,7 +33,10 @@ impl ToolCalls {
         tools: &[ToolDefinition],
         deduplicator: &mut ToolCallDeduplicator,
     ) -> Result<PreparedToolInvocation, TurnError> {
-        let args: serde_json::Value = parse_and_repair_json(&tc.arguments, &tc.name);
+        let args = match parse_and_repair_json(&tc.arguments, &tc.name) {
+            Ok(arguments) => arguments,
+            Err(error) => return Ok(reject_malformed_tool_call(tc, index, &error)),
+        };
 
         if !tool_is_visible(tools, &tc.name) {
             let guidance =
@@ -51,6 +54,7 @@ impl ToolCalls {
                 call_id: tc.call_id.clone(),
                 name: tc.name.clone(),
                 tool_input: args,
+                raw_arguments: None,
                 mode: ExecutionMode::Sequential,
                 outcome: PreparedToolInvocationOutcome::Blocked(blocked_result),
             });
@@ -131,6 +135,7 @@ impl ToolCalls {
             call_id: tc.call_id.clone(),
             name: tc.name.clone(),
             tool_input,
+            raw_arguments: None,
             mode,
             outcome,
         })
@@ -263,5 +268,64 @@ impl ToolCalls {
                 duration_ms: None,
             }),
         }
+    }
+}
+
+fn reject_malformed_tool_call(
+    tool_call: &StreamedToolCall,
+    index: usize,
+    error: &serde_json::Error,
+) -> PreparedToolInvocation {
+    let message = format!(
+        "tool call arguments are invalid JSON: {error}. Generate a new `{}` call with valid JSON \
+         matching its schema",
+        tool_call.name
+    );
+    PreparedToolInvocation {
+        index,
+        call_id: tool_call.call_id.clone(),
+        name: tool_call.name.clone(),
+        // `Value::String` keeps the provider output serializable and exact in
+        // ToolCallRequested instead of disguising a parse failure as `{}`.
+        tool_input: serde_json::Value::String(tool_call.arguments.clone()),
+        raw_arguments: Some(tool_call.arguments.clone()),
+        mode: ExecutionMode::Sequential,
+        outcome: PreparedToolInvocationOutcome::Blocked(ToolResult {
+            call_id: tool_call.call_id.clone(),
+            content: message.clone(),
+            is_error: true,
+            error: Some(message),
+            metadata: Default::default(),
+            duration_ms: None,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_tool_call_preserves_provider_arguments_and_is_blocked() {
+        let raw = r#"{"segments":[{"emotion":"NORMAL","text">"news"}]}"#;
+        let tool_call = StreamedToolCall {
+            call_id: "call-invalid".into(),
+            name: "interact".into(),
+            arguments: raw.into(),
+        };
+        let error = serde_json::from_str::<serde_json::Value>(raw)
+            .expect_err("fixture should be malformed JSON");
+
+        let prepared = reject_malformed_tool_call(&tool_call, 3, &error);
+
+        assert_eq!(prepared.index, 3);
+        assert_eq!(prepared.tool_input, serde_json::Value::String(raw.into()));
+        assert_eq!(prepared.raw_arguments.as_deref(), Some(raw));
+        let PreparedToolInvocationOutcome::Blocked(result) = prepared.outcome else {
+            panic!("malformed arguments must never be executable");
+        };
+        assert!(result.is_error);
+        assert!(result.content.contains("invalid JSON"));
+        assert!(result.content.contains("expected `:`"));
     }
 }

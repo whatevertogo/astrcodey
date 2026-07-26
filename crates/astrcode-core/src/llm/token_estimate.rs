@@ -56,11 +56,15 @@ fn estimate_content_tokens(content: &LlmContent) -> usize {
             call_id,
             name,
             arguments,
+            raw_arguments,
         } => {
             TOOL_CALL_BASE_TOKENS
                 + estimate_text_tokens(call_id)
                 + estimate_text_tokens(name)
-                + estimate_text_tokens(&arguments.to_string())
+                + raw_arguments.as_deref().map_or_else(
+                    || estimate_text_tokens(&arguments.to_string()),
+                    estimate_text_tokens,
+                )
         },
         LlmContent::ToolResult {
             tool_call_id,
@@ -88,6 +92,7 @@ mod tests {
                 call_id: "1".into(),
                 name: String::new(),
                 arguments: json!({}),
+                raw_arguments: None,
             },
             LlmContent::ToolResult {
                 tool_call_id: String::new(),

@@ -142,6 +142,7 @@ fn write_file_tool_definition() -> &'static ToolDefinition {
             "- Full-file rewrite after `read`",
         )
         .into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Sequential,
         parameters: serde_json::json!({

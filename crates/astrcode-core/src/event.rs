@@ -273,6 +273,9 @@ pub enum EventPayload {
         tool_name: String,
         /// 完整的工具调用参数（JSON 值）。
         arguments: serde_json::Value,
+        /// Provider 返回但无法解析的原始参数；合法 JSON 参数不写该字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_arguments: Option<String>,
     },
 
     /// 工具执行过程中的输出增量（stdout/stderr 流）。
@@ -691,6 +694,7 @@ mod tests {
                 call_id: "c1".into(),
                 tool_name: "shell".into(),
                 arguments: serde_json::json!({"cmd": "pwd"}),
+                raw_arguments: None,
             }
             .is_durable()
         );
@@ -968,6 +972,7 @@ mod tests {
                 call_id: "c".into(),
                 tool_name: "t".into(),
                 arguments: serde_json::json!({}),
+                raw_arguments: None,
             },
             EventPayload::ToolOutputDelta {
                 call_id: "c".into(),

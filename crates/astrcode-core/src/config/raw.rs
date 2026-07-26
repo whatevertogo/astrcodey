@@ -164,6 +164,8 @@ pub struct ProviderCapabilities {
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// 是否支持流式用量统计。
     pub supports_stream_usage: Option<bool>,
+    /// 是否支持 OpenAI / Anthropic strict tool use。
+    pub supports_strict_tool_use: Option<bool>,
 }
 
 /// 模型配置，定义一个具体模型的参数。

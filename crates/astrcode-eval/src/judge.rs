@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use astrcode_core::event::Event;
 
-use crate::{case::JudgeConfig, metrics::Metrics};
+use crate::{case::JudgeConfig, git::isolated_git_command, metrics::Metrics};
 
 /// 判定上下文。
 pub struct JudgeContext<'a> {
@@ -14,7 +14,7 @@ pub struct JudgeContext<'a> {
 }
 
 /// 判定结果。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Verdict {
     Pass,
@@ -249,6 +249,8 @@ fn evaluate_event_log(condition: &str, metrics: &Metrics) -> Verdict {
 
 // ─── SWE-bench Prediction Judge ─────────────────────────────────────────
 
+pub(crate) const SWE_BENCH_PREDICTION_FILE: &str = ".astrcode-swebench-prediction.json";
+
 async fn evaluate_swe_bench_patch(work_dir: &Path, instance_id: &str) -> Verdict {
     let patch = match collect_model_patch(work_dir).await {
         Ok(patch) => patch,
@@ -270,7 +272,7 @@ async fn evaluate_swe_bench_patch(work_dir: &Path, instance_id: &str) -> Verdict
         "model_name_or_path": "astrcode-eval",
         "model_patch": patch,
     });
-    let prediction_path = work_dir.join(".astrcode-swebench-prediction.json");
+    let prediction_path = work_dir.join(SWE_BENCH_PREDICTION_FILE);
     let content = match serde_json::to_string_pretty(&prediction) {
         Ok(content) => content,
         Err(e) => {
@@ -289,7 +291,11 @@ async fn evaluate_swe_bench_patch(work_dir: &Path, instance_id: &str) -> Verdict
 }
 
 async fn collect_model_patch(work_dir: &Path) -> Result<String, std::io::Error> {
-    let mut patch = run_git_capture(work_dir, &["diff", "--binary", "HEAD", "--"]).await?;
+    let mut patch = run_git_capture(
+        work_dir,
+        &["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+    )
+    .await?;
     for path in collect_untracked_paths(work_dir).await? {
         let file_patch = run_git_capture_path(
             work_dir,
@@ -303,7 +309,7 @@ async fn collect_model_patch(work_dir: &Path) -> Result<String, std::io::Error> 
 }
 
 async fn collect_untracked_paths(work_dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
-    let output = tokio::process::Command::new("git")
+    let output = isolated_git_command()
         .args(["ls-files", "--others", "--exclude-standard", "-z"])
         .current_dir(work_dir)
         .output()
@@ -320,11 +326,12 @@ async fn collect_untracked_paths(work_dir: &Path) -> Result<Vec<PathBuf>, std::i
         .split(|byte| *byte == 0)
         .filter(|raw| !raw.is_empty())
         .map(|raw| PathBuf::from(String::from_utf8_lossy(raw).into_owned()))
+        .filter(|path| path != Path::new(SWE_BENCH_PREDICTION_FILE))
         .collect())
 }
 
 async fn run_git_capture(work_dir: &Path, args: &[&str]) -> Result<String, std::io::Error> {
-    let output = tokio::process::Command::new("git")
+    let output = isolated_git_command()
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -343,7 +350,7 @@ async fn run_git_capture_path(
     args: &[&str],
     path: &Path,
 ) -> Result<String, std::io::Error> {
-    let output = tokio::process::Command::new("git")
+    let output = isolated_git_command()
         .args(args)
         .arg(path)
         .current_dir(work_dir)
@@ -391,7 +398,7 @@ mod tests {
         let verdict = evaluate_swe_bench_patch(dir.path(), "repo__project-1").await;
         assert!(verdict.is_pass());
 
-        let prediction_path = dir.path().join(".astrcode-swebench-prediction.json");
+        let prediction_path = dir.path().join(SWE_BENCH_PREDICTION_FILE);
         let prediction: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(prediction_path).unwrap()).unwrap();
         let patch = prediction["model_patch"].as_str().unwrap();
@@ -402,6 +409,10 @@ mod tests {
         assert!(patch.contains("+after"));
         assert!(patch.contains("diff --git a/new.txt b/new.txt"));
         assert!(patch.contains("+new file"));
+
+        let second_patch = collect_model_patch(dir.path()).await.unwrap();
+        assert_eq!(second_patch, patch);
+        assert!(!second_patch.contains(SWE_BENCH_PREDICTION_FILE));
     }
 
     fn run_git(work_dir: &Path, args: &[&str]) {

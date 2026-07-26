@@ -185,6 +185,7 @@ fn glob_tool_definition() -> &'static ToolDefinition {
              `read` on tool-results paths",
         )
         .into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({

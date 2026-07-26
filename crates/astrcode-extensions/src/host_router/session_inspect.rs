@@ -249,6 +249,7 @@ fn content_dto(content: LlmContent) -> SessionInspectContent {
             call_id,
             name,
             arguments,
+            ..
         } => SessionInspectContent::ToolCall {
             call_id,
             name,

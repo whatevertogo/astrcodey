@@ -22,6 +22,7 @@ pub(crate) struct OpenAiRequestConfig<'a> {
     pub max_output_tokens: usize,
     pub supports_stream_usage: bool,
     pub supports_prompt_cache_key: bool,
+    pub supports_strict_tool_use: bool,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub thinking_level: Option<ThinkingLevel>,
 }
@@ -104,7 +105,7 @@ fn build_chat_request_body(
     }
 
     if !tools.is_empty() {
-        body["tools"] = tools_to_json(tools);
+        body["tools"] = tools_to_json(tools, config.supports_strict_tool_use);
         body["tool_choice"] = serde_json::json!("auto");
     }
     apply_prompt_cache_fields(config, &mut body, messages, tools);
@@ -132,7 +133,7 @@ fn build_responses_request_body(
 
     if !tools.is_empty() {
         body["parallel_tool_calls"] = serde_json::json!(true);
-        body["tools"] = responses_tools_json(tools);
+        body["tools"] = responses_tools_json(tools, config.supports_strict_tool_use);
     }
     if let Some(level) = config.thinking_level {
         body["reasoning"] = serde_json::json!({
@@ -158,7 +159,8 @@ fn apply_prompt_cache_fields(
         config.api_mode,
         config.model_id,
         messages,
-        tools
+        tools,
+        config.supports_strict_tool_use
     ));
     if let Some(retention) = config.prompt_cache_retention {
         body["prompt_cache_retention"] = serde_json::json!(prompt_cache_retention_wire_value(
@@ -173,11 +175,12 @@ fn prompt_cache_key(
     model_id: &str,
     messages: &[LlmMessage],
     tools: &[ToolDefinition],
+    supports_strict_tool_use: bool,
 ) -> String {
     let sys = system_text(messages);
     let tools_json = match api_mode {
-        OpenAiApiMode::ChatCompletions => tools_to_json(tools),
-        OpenAiApiMode::Responses => responses_tools_json(tools),
+        OpenAiApiMode::ChatCompletions => tools_to_json(tools, supports_strict_tool_use),
+        OpenAiApiMode::Responses => responses_tools_json(tools, supports_strict_tool_use),
     };
     let tools_text = serde_json::to_string(&tools_json).unwrap_or_default();
     format!(

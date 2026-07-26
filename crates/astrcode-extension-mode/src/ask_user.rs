@@ -148,6 +148,7 @@ pub fn ask_user_tool_definition() -> ToolDefinition {
             },
             "required": ["questions"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }

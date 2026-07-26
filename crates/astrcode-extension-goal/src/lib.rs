@@ -242,7 +242,13 @@ impl ToolHandler for GoalToolHandler {
 
         Ok(match tool_name {
             GET_GOAL_TOOL_NAME => {
-                handle_get_goal(&store, &self.runtime, ctx.scope.session_id.as_str()).await
+                handle_get_goal(
+                    &store,
+                    &self.runtime,
+                    ctx.scope.session_id.as_str(),
+                    arguments,
+                )
+                .await
             },
             CREATE_GOAL_TOOL_NAME => {
                 handle_create_goal(
@@ -461,6 +467,10 @@ impl CommandHandler for GoalSlashCommandHandler {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetGoalArgs {}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateGoalArgs {
     objective: String,
@@ -514,7 +524,21 @@ struct TokenUsageSnapshot {
     model_context_window: Option<usize>,
 }
 
-async fn handle_get_goal(store: &GoalStore, runtime: &GoalRuntime, session_id: &str) -> ToolResult {
+async fn handle_get_goal(
+    store: &GoalStore,
+    runtime: &GoalRuntime,
+    session_id: &str,
+    arguments: Value,
+) -> ToolResult {
+    if let Err(error) = serde_json::from_value::<GetGoalArgs>(arguments) {
+        let message = format!("invalid args for {GET_GOAL_TOOL_NAME}: {error}");
+        return ToolResult::text(
+            message.clone(),
+            true,
+            tool_metadata([("error", json!(message))]),
+        );
+    }
+
     let report = build_goal_report(store, runtime, session_id).await;
     ToolResult::text(
         goal_report_text(&report),
@@ -858,6 +882,7 @@ fn get_goal_tool_definition() -> ToolDefinition {
             "properties": {},
             "required": []
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }
@@ -883,6 +908,7 @@ fn create_goal_tool_definition() -> ToolDefinition {
             },
             "required": ["objective"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }
@@ -904,6 +930,7 @@ fn update_goal_tool_definition() -> ToolDefinition {
             },
             "required": ["status"]
         }),
+        strict: true,
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Sequential,
     }
@@ -912,6 +939,15 @@ fn update_goal_tool_definition() -> ToolDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_goal_arguments_match_empty_object_schema() {
+        serde_json::from_value::<GetGoalArgs>(json!({})).expect("empty object should be accepted");
+        let error = serde_json::from_value::<GetGoalArgs>(json!({"unexpected": true}))
+            .expect_err("unknown fields should be rejected");
+
+        assert!(error.to_string().contains("unknown field `unexpected`"));
+    }
 
     fn goal(objective: &str) -> GoalState {
         GoalState::new(objective.to_string(), Some(100), Some(10))

@@ -211,6 +211,7 @@ mod tests {
                 call_id: call_id.to_string(),
                 name: call_id.to_string(),
                 tool_input: serde_json::json!({}),
+                raw_arguments: None,
                 mode,
                 outcome: crate::tool_types::PreparedToolInvocationOutcome::Ready,
             },

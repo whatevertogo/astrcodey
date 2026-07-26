@@ -131,6 +131,8 @@ pub fn extension_enabled(extension_states: &BTreeMap<String, bool>, extension_id
 
 #[cfg(test)]
 mod tests {
+    use astrcode_extension_sdk::extension::Registrar;
+
     use super::*;
 
     #[test]
@@ -149,5 +151,37 @@ mod tests {
         ]);
         assert!(extension_enabled(&states, "astrcode.memory"));
         assert!(!extension_enabled(&states, "astrcode-mode"));
+    }
+
+    #[test]
+    fn bundled_tools_request_provider_strict_tool_use_except_mcp() {
+        let states = bundled_extension_ids()
+            .into_iter()
+            .map(|id| (id.to_string(), true))
+            .collect();
+        let mut errors = Vec::new();
+        let extensions = bundled_extensions(&states, &mut errors);
+        assert!(errors.is_empty());
+
+        let mut non_strict = Vec::new();
+        for extension in extensions {
+            if extension.id() == "astrcode-mcp" {
+                continue;
+            }
+            let mut registrar = Registrar::new();
+            extension.register(&mut registrar);
+            non_strict.extend(
+                registrar
+                    .tools()
+                    .iter()
+                    .filter(|(definition, _)| !definition.strict)
+                    .map(|(definition, _)| format!("{}:{}", extension.id(), definition.name)),
+            );
+        }
+
+        assert!(
+            non_strict.is_empty(),
+            "bundled tools must opt into strict tool use: {non_strict:?}"
+        );
     }
 }

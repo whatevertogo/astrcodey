@@ -12,11 +12,35 @@ pub struct EvalClient {
 }
 
 impl EvalClient {
-    pub fn new(base_url: &str, token: &str) -> Self {
-        Self {
+    pub fn new(base_url: &str, token: &str) -> Result<Self, EvalError> {
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| EvalError::Client(format!("build eval HTTP client: {error}")))?;
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: token.to_string(),
-            http: reqwest::Client::new(),
+            http,
+        })
+    }
+
+    /// 检查 server 配置端点是否可认证访问。
+    pub async fn health_check(&self) -> Result<(), EvalError> {
+        let response = self
+            .http
+            .get(format!("{}/api/config", self.base_url))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|error| EvalError::Server(format!("health check request: {error}")))?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(EvalError::Server(format!(
+                "server health check failed: {}",
+                response.status()
+            )))
         }
     }
 
@@ -61,23 +85,38 @@ impl EvalClient {
         Ok(())
     }
 
-    /// 等待 session 完成（轮询 phase 直到 idle 或超时）。
+    /// 等待 session 完成（轮询 phase 直到 idle）。
+    ///
+    /// `timeout_secs` 为 `0` 时无限等待；正数表示到期后中止 session。
     pub async fn wait_completion(
         &self,
         session_id: &str,
         timeout_secs: u64,
     ) -> Result<(), EvalError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+        let deadline = (timeout_secs > 0)
+            .then(|| tokio::time::Instant::now() + Duration::from_secs(timeout_secs));
+        let mut consecutive_errors = 0;
         loop {
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 self.abort(session_id).await.ok();
                 return Err(EvalError::Client("timeout".into()));
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             match self.get_phase(session_id).await {
-                Ok(phase) if phase == "idle" || phase == "error" => return Ok(()),
-                Ok(_) => continue,
-                Err(_) => continue,
+                Ok(phase) if phase == "idle" => return Ok(()),
+                Ok(phase) if phase == "error" => {
+                    return Err(EvalError::Client("session entered error phase".into()));
+                },
+                Ok(_) => consecutive_errors = 0,
+                Err(error) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= 5 {
+                        return Err(EvalError::Client(format!(
+                            "lost contact with session after {consecutive_errors} attempts: \
+                             {error}"
+                        )));
+                    }
+                },
             }
         }
     }
@@ -112,6 +151,9 @@ impl EvalClient {
             .json()
             .await
             .map_err(|e| EvalError::Client(format!("get_phase body: {e}")))?;
-        Ok(body["phase"].as_str().unwrap_or("unknown").to_string())
+        body["phase"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| EvalError::Client("conversation response is missing phase".into()))
     }
 }

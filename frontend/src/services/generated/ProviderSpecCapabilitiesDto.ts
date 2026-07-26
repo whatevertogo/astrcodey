@@ -3,4 +3,4 @@
 /**
  * Provider catalog 暴露给 UI 的能力摘要。
  */
-export type ProviderSpecCapabilitiesDto = { promptCacheKey: boolean, streamUsage: boolean, reasoningEffort: boolean, };
+export type ProviderSpecCapabilitiesDto = { promptCacheKey: boolean, streamUsage: boolean, reasoningEffort: boolean, strictToolUse: boolean, };

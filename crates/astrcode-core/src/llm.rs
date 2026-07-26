@@ -63,6 +63,9 @@ pub enum LlmContent {
         name: String,
         /// 工具调用参数（JSON 值）。
         arguments: serde_json::Value,
+        /// Provider 返回但无法解析的原始参数。旧记录和合法 JSON 参数为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_arguments: Option<String>,
     },
     /// 工具执行结果内容。
     ToolResult {
@@ -629,6 +632,8 @@ pub struct LlmClientConfig {
     pub retry_base_delay_ms: u64,
     /// 当前模型是否为 reasoning/thinking 模式。
     pub reasoning: bool,
+    /// 当前 profile 是否允许把工具的 strict 声明发送给 provider。
+    pub supports_strict_tool_use: bool,
     /// Provider 特有选项。
     pub extras: ProviderExtras,
     /// 额外的 HTTP 请求头。
@@ -673,6 +678,7 @@ impl Default for LlmClientConfig {
             max_retries: 2,
             retry_base_delay_ms: 250,
             reasoning: false,
+            supports_strict_tool_use: false,
             extras: ProviderExtras::None,
             extra_headers: std::collections::HashMap::new(),
         }
@@ -772,6 +778,7 @@ mod tests {
                     call_id: "call-1".into(),
                     name: "shell".into(),
                     arguments: serde_json::json!({"command": "sleep"}),
+                    raw_arguments: None,
                 }],
                 name: None,
                 reasoning_content: None,

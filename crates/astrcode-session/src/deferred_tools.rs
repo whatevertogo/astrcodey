@@ -199,6 +199,7 @@ mod tests {
             name: name.into(),
             description: String::new(),
             parameters: serde_json::json!({}),
+            strict: false,
             origin: ToolOrigin::Builtin,
             execution_mode: Default::default(),
         }

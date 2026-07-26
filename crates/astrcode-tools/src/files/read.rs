@@ -247,6 +247,7 @@ fn read_file_tool_definition() -> &'static ToolDefinition {
             "Notes: copy text without line-number prefixes; paginate large files via parameters.",
         )
         .into(),
+        strict: true,
         origin: ToolOrigin::Builtin,
         execution_mode: ExecutionMode::Parallel,
         parameters: serde_json::json!({

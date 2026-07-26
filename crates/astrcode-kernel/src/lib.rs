@@ -84,6 +84,7 @@ mod tests {
                 name: "static".into(),
                 description: String::new(),
                 parameters: serde_json::json!({"type": "object"}),
+                strict: false,
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
             }
