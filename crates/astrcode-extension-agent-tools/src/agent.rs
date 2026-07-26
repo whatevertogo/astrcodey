@@ -314,7 +314,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_agents_load() {
+    fn builtin_agent_tool_boundaries_come_from_frontmatter() {
         let agents = builtin_agents();
         let selection = |id| {
             agents
@@ -334,7 +334,12 @@ mod tests {
                 names: vec!["glob".into(), "grep".into(), "read".into()]
             })
         );
-        assert_eq!(selection("execute"), None);
+        assert_eq!(
+            selection("execute"),
+            Some(SessionToolSelection::All {
+                except: vec!["agent".into()]
+            })
+        );
     }
 
     #[test]

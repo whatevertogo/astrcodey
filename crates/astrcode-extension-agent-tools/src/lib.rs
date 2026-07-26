@@ -13,7 +13,7 @@ use std::{
 use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, SessionToolSelection, ToolHandler,
+        PromptContributions, Registrar, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     text::compact_inline,
@@ -249,7 +249,7 @@ impl ToolHandler for AgentToolHandler {
                     working_dir: None,
                     system_prompt: Some(enhance_agent_prompt(&matched.body, working_dir)),
                     model_preference: Some(model_preference),
-                    tool_selection: Some(child_tool_selection(matched)),
+                    tool_selection: matched.tool_selection.clone(),
                     source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
                     tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
@@ -412,16 +412,6 @@ fn resolve_child_small_model(
         })
 }
 
-fn child_tool_selection(agent: &agent::AgentConfig) -> SessionToolSelection {
-    let without_nested_agents = SessionToolSelection::All {
-        except: vec!["agent".into()],
-    };
-    match &agent.tool_selection {
-        Some(selection) => selection.intersection(&without_nested_agents),
-        None => without_nested_agents,
-    }
-}
-
 /// 为子 agent 的 body 追加共享增强内容：环境信息 + 行为规范。
 fn enhance_agent_prompt(agent_body: &str, working_dir: &str) -> String {
     let os = std::env::consts::OS;
@@ -478,26 +468,6 @@ mod tests {
         assert!(output.contains("code-reviewer"));
         assert!(output.contains("Use for behavior-focused code review"));
         assert!(output.contains("subagentType"));
-    }
-
-    #[test]
-    fn child_tool_selection_honors_agent_boundary_and_forbids_nested_agents() {
-        let agent = agent::AgentConfig {
-            id: "custom".into(),
-            name: "custom".into(),
-            description: "Custom agent".into(),
-            body: "Work carefully.".into(),
-            tool_selection: Some(SessionToolSelection::Only {
-                names: vec!["agent".into(), "read".into()],
-            }),
-        };
-
-        assert_eq!(
-            child_tool_selection(&agent),
-            SessionToolSelection::Only {
-                names: vec!["read".into()]
-            }
-        );
     }
 
     #[test]
