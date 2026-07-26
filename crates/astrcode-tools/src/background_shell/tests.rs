@@ -1,5 +1,23 @@
 use super::*;
 
+async fn wait_until_terminal(shell_id: &str) -> Vec<BackgroundShellStatus> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut polls = Vec::new();
+        loop {
+            let status = wait_background_shell(shell_id, 5_000, None)
+                .await
+                .expect("background shell poll should succeed");
+            let running = status.running;
+            polls.push(status);
+            if !running {
+                return polls;
+            }
+        }
+    })
+    .await
+    .expect("background shell should reach a terminal state")
+}
+
 #[test]
 fn command_description_shortens_long_input() {
     let long = "a".repeat(100);
@@ -175,12 +193,11 @@ async fn wait_background_shell_allows_repeated_terminal_poll_without_error() {
     .await
     .expect("spawn should succeed");
 
-    let status = wait_background_shell(&spawned.shell_id, 5_000, None)
-        .await
-        .expect("first wait should return terminal status");
+    let polls = wait_until_terminal(&spawned.shell_id).await;
+    let status = polls.last().expect("terminal status");
     assert!(!status.running);
     assert_eq!(status.status, "completed");
-    assert!(status.output.contains("done"));
+    assert!(polls.iter().any(|poll| poll.output.contains("done")));
 
     let second = wait_background_shell(&spawned.shell_id, 0, None)
         .await

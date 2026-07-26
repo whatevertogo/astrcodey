@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext};
+use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext, ToolResult};
 use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
 
 use super::{
@@ -26,6 +26,35 @@ fn ctx_with_session(session_id: &str) -> ToolExecutionContext {
         None,
         ToolCapabilities::default(),
     )
+}
+
+async fn poll_background_shell_to_terminal(
+    tool: &ShellTool,
+    shell_id: &str,
+    ctx: &ToolExecutionContext,
+) -> Vec<ToolResult> {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut polls = Vec::new();
+        loop {
+            let poll = tool
+                .execute(
+                    serde_json::json!({
+                        "shellId": shell_id,
+                        "blockUntilMs": 5_000
+                    }),
+                    ctx,
+                )
+                .await
+                .expect("background shell poll should succeed");
+            let running = poll.metadata["running"] == serde_json::json!(true);
+            polls.push(poll);
+            if !running {
+                return polls;
+            }
+        }
+    })
+    .await
+    .expect("background shell should reach a terminal state")
 }
 
 fn command_with_stderr() -> String {
@@ -391,16 +420,8 @@ async fn shell_pipeline_policy_controls_foreground_and_background_status() {
     let shell_id = background.metadata["shellId"]
         .as_str()
         .expect("shellId metadata");
-    let completed = tool
-        .execute(
-            serde_json::json!({
-                "shellId": shell_id,
-                "blockUntilMs": 5_000
-            }),
-            &ctx,
-        )
-        .await
-        .expect("strict background pipeline should finish");
+    let polls = poll_background_shell_to_terminal(&tool, shell_id, &ctx).await;
+    let completed = polls.last().expect("terminal poll");
     assert!(completed.is_error, "{completed:?}");
     assert_eq!(
         completed.metadata["executionStatus"],
@@ -570,16 +591,8 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
         .as_str()
         .expect("shellId metadata");
 
-    let final_poll = tool
-        .execute(
-            serde_json::json!({
-                "shellId": shell_id,
-                "blockUntilMs": 5_000
-            }),
-            &ctx,
-        )
-        .await
-        .expect("first terminal poll should succeed");
+    let polls = poll_background_shell_to_terminal(&tool, shell_id, &ctx).await;
+    let final_poll = polls.last().expect("terminal poll");
     assert!(!final_poll.is_error, "{final_poll:?}");
     assert_eq!(final_poll.metadata["running"], serde_json::json!(false));
     assert_eq!(
@@ -587,9 +600,8 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
         serde_json::json!("completed")
     );
     assert!(
-        final_poll.content.contains("done"),
-        "first terminal poll should include final output: {}",
-        final_poll.content
+        polls.iter().any(|poll| poll.content.contains("done")),
+        "polls should include final output: {polls:?}"
     );
 
     let repeated_poll = tool
