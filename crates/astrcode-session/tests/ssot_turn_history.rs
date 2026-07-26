@@ -56,14 +56,13 @@ async fn spawn_session_with_store(
         working_dir: working_dir.to_string_lossy().into_owned(),
         model_id: "mock-model".into(),
         parent: None,
-        tool_policy: None,
+        tool_selection: None,
         source_extension: None,
         runtime,
         caps,
     })
     .await
     .unwrap();
-    session.refresh_tools(&working_dir.to_string_lossy()).await;
     (session, store, sid)
 }
 

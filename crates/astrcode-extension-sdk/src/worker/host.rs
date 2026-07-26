@@ -10,6 +10,7 @@ use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
+    session::SessionToolSelectionDto,
     session_inspect::{
         SessionInspectListOutput, SessionInspectProviderMessagesOutput,
         SessionInspectReadModelOutput, SessionInspectSnapshotOutput,
@@ -304,6 +305,17 @@ pub struct HostSessionExecutionView {
     pub queued_inputs: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostConfigureSessionToolsRequest {
+    pub session_id: String,
+    pub selection: SessionToolSelectionDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostConfigureSessionToolsOutput {
+    pub selection: SessionToolSelectionDto,
+}
+
 impl HostClient {
     /// 调用宿主主模型（manifest 须声明 `main_model`）。
     pub async fn main_chat(messages: Value) -> Result<Value, ErrorPayload> {
@@ -392,6 +404,18 @@ impl HostClient {
         )
         .await?;
         deserialize_response(output, "session.control.execution_view")
+    }
+
+    /// 配置 session 后续 turn 使用的工具边界（manifest 须声明 `session_control`）。
+    pub async fn configure_session_tools(
+        request: HostConfigureSessionToolsRequest,
+    ) -> Result<HostConfigureSessionToolsOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.control.configure_tools",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.control.configure_tools")
     }
 
     /// 创建或替换工作区文件（manifest 须声明 `workspace_write`）。

@@ -1,15 +1,17 @@
 //! Session 生命周期与对话快照路由。
 
-use astrcode_core::{storage::SessionSummary, types::SessionId};
+use std::collections::BTreeSet;
+
+use astrcode_core::{extension::SessionToolSelection, storage::SessionSummary, types::SessionId};
 use astrcode_protocol::{
     commands::ClientCommand,
     http::{
         CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
         CommandInvokeRequest, CommandInvokeResponse, CompactSessionRequest, CompactSessionResponse,
-        CreateSessionRequest, CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest,
-        PromptSubmitResponse, SessionListItemDto, SessionListResponseDto,
-        SlashCommandListResponseDto, ToolApprovalRequest, ToolUiRespondRequest,
-        ToolUiRespondResponse,
+        ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, CreateSessionRequest,
+        CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse,
+        SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto,
+        ToolApprovalRequest, ToolSelectionDto, ToolUiRespondRequest, ToolUiRespondResponse,
     },
 };
 use axum::{
@@ -21,7 +23,8 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::{
-    HttpState, handler_error_response, internal_error_response, not_found_response,
+    HttpState, bad_request_response, handler_error_response, internal_error_response,
+    not_found_response,
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
 use crate::handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission};
@@ -36,8 +39,16 @@ pub(in crate::http) async fn create_session(
     State(state): State<HttpState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Response {
+    let tool_selection = match request.tool_selection.map(map_tool_selection).transpose() {
+        Ok(selection) => selection,
+        Err(message) => return bad_request_response("invalid_tool_selection", message),
+    };
     tracing::info!(working_dir = %request.working_dir, "POST /api/sessions — create_session");
-    match state.handler.create_session(request.working_dir).await {
+    match state
+        .handler
+        .create_session_with_tool_selection(request.working_dir, tool_selection)
+        .await
+    {
         Ok(session_id) => {
             tracing::info!(session_id = %session_id, "session created");
             Json(CreateSessionResponseDto {
@@ -50,6 +61,68 @@ pub(in crate::http) async fn create_session(
             internal_error_response("create_failed", error)
         },
     }
+}
+
+pub(in crate::http) async fn configure_session_tools(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<ConfigureSessionToolsRequest>,
+) -> Response {
+    let selection = match map_tool_selection(request.selection) {
+        Ok(selection) => selection,
+        Err(message) => return bad_request_response("invalid_tool_selection", message),
+    };
+    let session_id = SessionId::from(session_id);
+    let session = match state
+        .runtime
+        .session_manager()
+        .open(session_id.clone())
+        .await
+    {
+        Ok(session) => session,
+        Err(error) => return not_found_response("session_not_found", error),
+    };
+
+    match session.configure_tools(selection).await {
+        Ok(effective) => {
+            state
+                .runtime
+                .session_manager()
+                .sync_durable_events(&session_id)
+                .await;
+            Json(ConfigureSessionToolsResponse {
+                selection: effective.into(),
+            })
+            .into_response()
+        },
+        Err(error) => internal_error_response("configure_tools_failed", error),
+    }
+}
+
+fn map_tool_selection(selection: ToolSelectionDto) -> Result<SessionToolSelection, String> {
+    match selection {
+        ToolSelectionDto::All { except } => Ok(SessionToolSelection::All {
+            except: normalized_tool_names(except)?,
+        }),
+        ToolSelectionDto::Only { names } => Ok(SessionToolSelection::Only {
+            names: normalized_tool_names(names)?,
+        }),
+    }
+}
+
+fn normalized_tool_names(names: Vec<String>) -> Result<Vec<String>, String> {
+    names
+        .into_iter()
+        .map(|name| {
+            let name = name.trim();
+            if name.is_empty() {
+                Err("tool names must not be empty".to_string())
+            } else {
+                Ok(name.to_owned())
+            }
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|names| names.into_iter().collect())
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {

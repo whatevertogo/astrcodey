@@ -567,8 +567,9 @@ async fn s5r_turn_end_continuations_and_pipeline() {
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let tool = runner
-        .collect_tool_adapters_typed("/tmp")
+        .tool_catalog_snapshot_typed("/tmp")
         .await
+        .tools
         .into_iter()
         .find(|t| t.definition().name == "pipeline_status")
         .expect("pipeline_status");

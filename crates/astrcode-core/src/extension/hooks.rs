@@ -305,25 +305,108 @@ pub enum ExtensionToolOutcome {
     Text { content: String, is_error: bool },
 }
 
-/// 子 session 的工具集策略。
-///
-/// 由 [`ExtensionToolOutcome::RunSession::tool_policy`] 携带，决定子 session 在
-/// `build_tool_registry_snapshot` 时如何裁剪工具表。
+/// Session 的工具可见性策略。
 ///
 /// 语义：
-/// - `Deny`：从父全集中排除指定工具。常见场景是 `["agent"]` 防止递归生 agent。
-/// - `Allow`：仅保留指定工具。空白名单视为非法配置，spawner 应拒绝。
+/// - `All`：使用可用全集，但排除 `except` 中的工具。
+/// - `Only`：仅使用 `names` 中的工具；空名单表示明确禁用全部工具。
 ///
-/// 过滤在工具表构建阶段一次性完成，避免 LLM 拿到的 schema 与运行时可见性脱节。
+/// 根 session 可以直接配置；子 session 的策略会与父边界取交集。过滤在工具表
+/// 构建阶段一次性完成，避免 LLM 拿到的 schema 与运行时可见性脱节。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub enum ChildToolPolicy {
-    /// 从父工具全集中排除这些工具。空数组等价于不传。
-    Deny { tools: Vec<String> },
-    /// 仅保留这些工具。空数组在 spawner 处会被拒绝。
-    Allow { tools: Vec<String> },
+pub enum SessionToolSelection {
+    /// 使用全部工具，但排除指定名称。
+    All { except: Vec<String> },
+    /// 仅使用指定名称。
+    Only { names: Vec<String> },
 }
 
+impl SessionToolSelection {
+    /// 判断指定工具是否在当前选择边界内。
+    pub fn allows(&self, tool_name: &str) -> bool {
+        match self {
+            Self::All { except } => !except.iter().any(|name| name == tool_name),
+            Self::Only { names } => names.iter().any(|name| name == tool_name),
+        }
+    }
+
+    /// 返回按名称排序、去重后的等价策略。
+    pub fn normalized(&self) -> Self {
+        match self {
+            Self::All { except } => Self::All {
+                except: normalized_tool_names(except),
+            },
+            Self::Only { names } => Self::Only {
+                names: normalized_tool_names(names),
+            },
+        }
+    }
+
+    /// 将子 session 请求限制在父 session 已有的工具边界内。
+    pub fn intersect(parent: Option<&Self>, requested: Option<&Self>) -> Option<Self> {
+        match (parent, requested) {
+            (None, None) => None,
+            (Some(selection), None) | (None, Some(selection)) => Some(selection.normalized()),
+            (Some(Self::All { except: parent }), Some(Self::All { except: requested })) => {
+                Some(Self::All {
+                    except: parent
+                        .iter()
+                        .chain(requested)
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                })
+            },
+            (Some(Self::All { except }), Some(Self::Only { names })) => {
+                let excluded = except.iter().collect::<BTreeSet<_>>();
+                Some(Self::Only {
+                    names: names
+                        .iter()
+                        .filter(|name| !excluded.contains(name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                })
+            },
+            (Some(Self::Only { names }), Some(Self::All { except })) => {
+                let excluded = except.iter().collect::<BTreeSet<_>>();
+                Some(Self::Only {
+                    names: names
+                        .iter()
+                        .filter(|name| !excluded.contains(name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                })
+            },
+            (Some(Self::Only { names: parent }), Some(Self::Only { names: requested })) => {
+                let requested = requested.iter().collect::<BTreeSet<_>>();
+                Some(Self::Only {
+                    names: parent
+                        .iter()
+                        .filter(|name| requested.contains(name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                })
+            },
+        }
+    }
+}
+
+fn normalized_tool_names(tools: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
 // ───  Typed Extension API ────────────────────────────────
 
@@ -869,4 +952,70 @@ pub struct DiscoveredTool {
     pub definition: ToolDefinition,
     pub handler: Arc<dyn ToolHandler>,
     pub prompt_metadata: Option<ToolPromptMetadata>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionToolSelection;
+
+    #[test]
+    fn tool_selection_intersection_preserves_parent_boundary() {
+        let all_except_a = SessionToolSelection::All {
+            except: vec!["a".into()],
+        };
+        let all_except_b = SessionToolSelection::All {
+            except: vec!["b".into()],
+        };
+        let only_ab = SessionToolSelection::Only {
+            names: vec!["a".into(), "b".into()],
+        };
+        let only_bc = SessionToolSelection::Only {
+            names: vec!["b".into(), "c".into()],
+        };
+
+        assert_eq!(SessionToolSelection::intersect(None, None), None);
+        assert_eq!(
+            SessionToolSelection::intersect(Some(&all_except_a), None),
+            Some(all_except_a.clone())
+        );
+        assert_eq!(
+            SessionToolSelection::intersect(Some(&all_except_a), Some(&all_except_b)),
+            Some(SessionToolSelection::All {
+                except: vec!["a".into(), "b".into()]
+            })
+        );
+        assert_eq!(
+            SessionToolSelection::intersect(Some(&all_except_a), Some(&only_ab)),
+            Some(SessionToolSelection::Only {
+                names: vec!["b".into()]
+            })
+        );
+        assert_eq!(
+            SessionToolSelection::intersect(Some(&only_ab), Some(&all_except_b)),
+            Some(SessionToolSelection::Only {
+                names: vec!["a".into()]
+            })
+        );
+        assert_eq!(
+            SessionToolSelection::intersect(Some(&only_ab), Some(&only_bc)),
+            Some(SessionToolSelection::Only {
+                names: vec!["b".into()]
+            })
+        );
+        assert_eq!(
+            SessionToolSelection::intersect(
+                None,
+                Some(&SessionToolSelection::Only {
+                    names: vec!["b".into(), "a".into(), "b".into()]
+                })
+            ),
+            Some(SessionToolSelection::Only {
+                names: vec!["a".into(), "b".into()]
+            })
+        );
+        assert!(only_ab.allows("a"));
+        assert!(!only_ab.allows("c"));
+        assert!(!all_except_a.allows("a"));
+        assert!(all_except_a.allows("b"));
+    }
 }

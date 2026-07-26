@@ -23,7 +23,6 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
-use astrcode_kernel::extension_runtime::NoopExtensionRuntime;
 use astrcode_session::{
     Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
     compact::persist_compact_result,
@@ -197,7 +196,7 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
         llm,
         effective,
         SessionHostServices {
-            extension_runner: Arc::new(NoopExtensionRuntime),
+            extension_ports: Default::default(),
             context_assembler,
             post_compact_enricher: Arc::new(NoopPostCompactEnricher),
             prompt_provider: Arc::new(TestPromptProvider),
@@ -227,14 +226,13 @@ async fn spawn_session(
         working_dir: working_dir.to_string_lossy().into_owned(),
         model_id: "mock-model".into(),
         parent: None,
-        tool_policy: None,
+        tool_selection: None,
         source_extension: None,
         runtime,
         caps,
     })
     .await
     .unwrap();
-    session.refresh_tools(&working_dir.to_string_lossy()).await;
     (session, store)
 }
 
@@ -586,12 +584,13 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
 
     let state = session.read_model().await.unwrap();
     let caps = test_caps(race_llm.clone(), context);
-    let extension_runner = caps.extension_runner_arc();
+    let extension_runner = caps.turn_hooks_arc();
     let context_assembler = caps.context_assembler_arc();
     let llm = caps.llm();
     let tools = session
-        .refresh_tools(&state.working_dir)
+        .tool_registry_snapshot(&state.working_dir)
         .await
+        .unwrap()
         .list_definitions();
     let provider_messages = state.provider_messages();
 

@@ -8,10 +8,11 @@ mod prepare;
 use std::sync::Arc;
 
 use astrcode_core::{storage::ToolResultArtifactReader, tool::ToolDefinition};
-use astrcode_kernel::{ExtensionRuntime, ToolRegistry};
+use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    ToolRegistry,
     early_tool_scheduler::EarlyToolScheduler,
     session::Session,
     tool_exec::{ToolCallRuntimeContext, TurnToolContext},
@@ -21,7 +22,7 @@ use crate::{
 pub struct ToolCalls {
     turn: TurnToolContext,
     tool_registry: Arc<ToolRegistry>,
-    extension_runner: Arc<dyn ExtensionRuntime>,
+    extension_runner: Arc<dyn TurnHooks>,
     session: Session,
     cancellation_token: CancellationToken,
 }
@@ -30,7 +31,7 @@ impl ToolCalls {
     pub fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
-        extension_runner: Arc<dyn ExtensionRuntime>,
+        extension_runner: Arc<dyn TurnHooks>,
         session: Session,
         cancellation_token: CancellationToken,
     ) -> Self {

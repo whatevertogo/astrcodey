@@ -190,7 +190,7 @@ impl ConfigManager {
             old_effective.extensions.extension_configs != new_effective.extensions.extension_configs
         };
         self.shell_timeout_secs
-            .store(new_effective.agent.shell_timeout_secs, Ordering::Relaxed);
+            .store(new_effective.agent.shell_timeout_secs, Ordering::Release);
         self.capabilities.update_effective(new_effective);
         self.rebuild_provider_from_effective();
         if changed {

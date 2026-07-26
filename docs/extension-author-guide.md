@@ -235,7 +235,7 @@ let _ = inject_host_api(Arc::new(MockHost));
 
 | 目标 | 推荐 |
 |------|------|
-| 与内置 agent-tools 完全等价（同步等待子 Agent、`tool_policy` 禁嵌套 agent 等） | 在仓库内新增 `astrcode-extension-*` **bundled**  crate，用 `prelude` |
+| 与内置 agent-tools 完全等价（同步等待子 Agent、`tool_selection` 禁嵌套 agent 等） | 在仓库内新增 `astrcode-extension-*` **bundled**  crate，用 `prelude` |
 | 独立安装包、`extension.json` 启动、用户目录分发 | s5r **Worker** + 下文结构 |
 | 仅需「后台派生子 Agent + 完成后通知」 | 外置 Worker **可行**（`wait_for_result: false`） |
 | 必须在 tool 内**同步阻塞**等子 Agent 跑完 | 外置目前受限：peer 线程上 `wait_for_result: true` 会死锁，宿主会拒绝 |
@@ -378,18 +378,18 @@ let created = HostClient::call(
         "ephemeral": true,
         "tool_call_id": tool_call_id,
         "working_dir": working_dir,
-        "tool_policy": {
-            "mode": "deny",
-            "tools": ["agent"]
+        "tool_selection": {
+            "mode": "all",
+            "except": ["agent"]
         }
     }),
 ).await?;
 let child_id = created["session_id"].as_str().unwrap();
 ```
 
-`tool_policy` 是子会话工具可见性策略。外置 agent 默认建议使用
-`{"mode":"deny","tools":["agent"]}`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
-`{"mode":"allow","tools":["tool_a","tool_b"]}` 白名单。
+`tool_selection` 是子会话工具可见性策略。外置 agent 默认建议使用
+`{"mode":"all","except":["agent"]}`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
+`{"mode":"only","names":["tool_a","tool_b"]}` 白名单。
 
 提交 turn（**外置扩展请用异步**，避免 peer 死锁）：
 

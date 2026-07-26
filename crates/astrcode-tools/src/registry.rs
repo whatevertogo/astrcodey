@@ -3,33 +3,64 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
 
 use astrcode_core::{config::defaults::DEFAULT_SHELL_TIMEOUT_SECS, tool::Tool};
-use astrcode_kernel::{ToolPack, ToolPackScope};
+use astrcode_extension_sdk::tool_pack::{ToolPack, ToolPackScope};
 
 /// First-party file, shell, and terminal tools.
 pub struct BuiltinToolPack {
     shell_timeout_secs: Arc<AtomicU64>,
+    observed_config: Mutex<ObservedToolPackConfig>,
+}
+
+#[derive(Clone, Copy)]
+struct ObservedToolPackConfig {
+    shell_timeout_secs: u64,
+    version: u64,
 }
 
 impl BuiltinToolPack {
     pub fn new(shell_timeout_secs: u64) -> Self {
         Self {
             shell_timeout_secs: Arc::new(AtomicU64::new(shell_timeout_secs)),
+            observed_config: Mutex::new(ObservedToolPackConfig {
+                shell_timeout_secs,
+                version: 0,
+            }),
         }
     }
 
     pub fn with_shell_timeout_source(shell_timeout_secs: Arc<AtomicU64>) -> Self {
-        Self { shell_timeout_secs }
+        let initial_timeout = shell_timeout_secs.load(Ordering::Acquire);
+        Self {
+            shell_timeout_secs,
+            observed_config: Mutex::new(ObservedToolPackConfig {
+                shell_timeout_secs: initial_timeout,
+                version: 0,
+            }),
+        }
     }
 
     pub fn set_shell_timeout_secs(&self, shell_timeout_secs: u64) {
         self.shell_timeout_secs
-            .store(shell_timeout_secs, Ordering::Relaxed);
+            .store(shell_timeout_secs, Ordering::Release);
+    }
+
+    fn observe_config(&self) -> ObservedToolPackConfig {
+        let mut observed = self
+            .observed_config
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let shell_timeout_secs = self.shell_timeout_secs.load(Ordering::Acquire);
+        if observed.shell_timeout_secs != shell_timeout_secs {
+            observed.shell_timeout_secs = shell_timeout_secs;
+            observed.version = observed.version.wrapping_add(1);
+        }
+        *observed
     }
 }
 
@@ -40,11 +71,13 @@ impl Default for BuiltinToolPack {
 }
 
 impl ToolPack for BuiltinToolPack {
+    fn snapshot_version(&self) -> u64 {
+        self.observe_config().version
+    }
+
     fn tools(&self, scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
-        builtin_tools(
-            PathBuf::from(scope.working_dir),
-            self.shell_timeout_secs.load(Ordering::Relaxed),
-        )
+        let config = self.observe_config();
+        builtin_tools(PathBuf::from(scope.working_dir), config.shell_timeout_secs)
     }
 }
 
@@ -97,75 +130,40 @@ mod tests {
         tool::ExecutionMode,
         tool_access::{FileOperation, ResourceAccess},
     };
-    use astrcode_kernel::ToolRegistry;
 
     use super::*;
 
     #[test]
-    fn builtins_expose_patch_after_parser_is_wired() {
-        let mut registry = ToolRegistry::new();
-        for tool in builtin_tools(PathBuf::from("."), 30) {
-            registry.register(tool);
-        }
+    fn builtins_expose_expected_contract() {
+        let pack = BuiltinToolPack::new(30);
+        let initial_version = pack.snapshot_version();
+        pack.set_shell_timeout_secs(60);
+        assert!(pack.snapshot_version() > initial_version);
 
-        let names = registry
-            .list_definitions()
-            .into_iter()
-            .map(|definition| definition.name)
+        let tools = builtin_tools(PathBuf::from("."), 30);
+        let definitions = tools
+            .iter()
+            .map(|tool| tool.definition())
             .collect::<Vec<_>>();
-
-        assert!(names.iter().any(|name| name == "patch"));
-        assert!(names.iter().any(|name| name == "edit"));
-        assert!(names.iter().any(|name| name == "shell"));
-    }
-
-    #[test]
-    fn builtins_carry_builtin_origin() {
-        let mut registry = ToolRegistry::new();
-        for tool in builtin_tools(PathBuf::from("."), 30) {
-            registry.register(tool);
-        }
-
+        let names = definitions
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
         assert!(
-            registry
-                .list_definitions()
+            ["patch", "edit", "shell"]
                 .iter()
-                .all(|definition| definition.origin == astrcode_core::tool::ToolOrigin::Builtin)
+                .all(|name| names.contains(name))
         );
-    }
+        assert!(definitions.iter().all(|definition| {
+            definition.origin == astrcode_core::tool::ToolOrigin::Builtin && definition.strict
+        }));
 
-    #[test]
-    fn builtins_request_provider_strict_tool_use() {
-        let mut registry = ToolRegistry::new();
-        for tool in builtin_tools(PathBuf::from("."), 30) {
-            registry.register(tool);
-        }
-
-        let non_strict = registry
-            .list_definitions()
-            .into_iter()
-            .filter(|definition| !definition.strict)
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(
-            non_strict.is_empty(),
-            "built-in tools must opt into strict tool use: {non_strict:?}"
-        );
-    }
-
-    #[test]
-    fn builtins_declare_resource_accesses() {
-        let mut registry = ToolRegistry::new();
-        for tool in builtin_tools(PathBuf::from("."), 30) {
-            registry.register(tool);
-        }
-
-        let read_access = registry
-            .resource_accesses(
-                "read",
-                &serde_json::json!({"path": "src/main.rs"}),
-                Path::new("."),
-            )
+        let read = tools
+            .iter()
+            .find(|tool| tool.definition().name == "read")
+            .unwrap();
+        let read_access = read
+            .resource_accesses(&serde_json::json!({"path": "src/main.rs"}), Path::new("."))
             .unwrap();
         assert_eq!(read_access.len(), 1);
         assert!(matches!(
@@ -176,25 +174,16 @@ mod tests {
             }
         ));
 
-        let shell_access = registry
-            .resource_accesses(
-                "shell",
-                &serde_json::json!({"command": "echo hi"}),
-                Path::new("."),
-            )
+        let shell = tools
+            .iter()
+            .find(|tool| tool.definition().name == "shell")
+            .unwrap();
+        let shell_access = shell
+            .resource_accesses(&serde_json::json!({"command": "echo hi"}), Path::new("."))
             .unwrap();
         assert_eq!(shell_access, vec![ResourceAccess::all()]);
-    }
 
-    #[test]
-    fn builtins_use_read_parallel_write_sequential_modes() {
-        let mut registry = ToolRegistry::new();
-        for tool in builtin_tools(PathBuf::from("."), 30) {
-            registry.register(tool);
-        }
-
-        let modes = registry
-            .list_definitions()
+        let modes = definitions
             .into_iter()
             .map(|definition| (definition.name, definition.execution_mode))
             .collect::<BTreeMap<_, _>>();

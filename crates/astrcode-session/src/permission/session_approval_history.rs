@@ -134,8 +134,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
             session_id: "s",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         };
         assert_eq!(policy.evaluate(&ctx), PermissionDecision::Allow);
     }
@@ -153,8 +152,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
             session_id: "s",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         };
         assert_eq!(policy.evaluate(&ctx), PermissionDecision::Allow);
     }

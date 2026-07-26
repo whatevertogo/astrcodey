@@ -304,6 +304,20 @@ pub trait SessionOperations: Send + Sync {
         ))
     }
 
+    /// 配置目标 session 后续 turn 使用的工具边界。
+    ///
+    /// 当前活跃 turn 继续使用已经固定的工具快照。子 session 的请求不能扩大
+    /// 当前父 session 的工具边界。
+    async fn configure_tools(
+        &self,
+        _access: SessionAccess<'_>,
+        _selection: crate::extension::SessionToolSelection,
+    ) -> Result<crate::extension::SessionToolSelection, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "session tool configuration is not supported by this host".into(),
+        ))
+    }
+
     /// 向目标 session 提交一个 turn。
     async fn submit_turn(
         &self,
@@ -365,7 +379,7 @@ pub struct CreateSessionRequest {
     /// 模型偏好。`None` 表示继承父 session。
     pub model_preference: Option<String>,
     /// 子会话工具集策略。
-    pub tool_policy: Option<crate::extension::ChildToolPolicy>,
+    pub tool_selection: Option<crate::extension::SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。

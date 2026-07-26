@@ -37,13 +37,11 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_session::{
-    Session, SessionError,
+    Session, SessionError, TurnHandle, emit_interrupted_tool_results, emit_turn_aborted_context,
     payload::{
         TURN_FINISH_ABORTED, TURN_FINISH_INTERRUPTED, agent_run_completed_payload,
         turn_completed_payload,
     },
-    session::{emit_interrupted_tool_results, emit_turn_aborted_context},
-    turn_handle::TurnHandle,
 };
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -72,7 +70,7 @@ pub enum TurnScheduleError {
     #[error(transparent)]
     Session(SessionError),
     #[error(transparent)]
-    Turn(#[from] astrcode_session::turn_context::TurnError),
+    Turn(#[from] astrcode_session::TurnError),
     #[error("event emit failed")]
     EventEmit(#[source] SessionError),
 }

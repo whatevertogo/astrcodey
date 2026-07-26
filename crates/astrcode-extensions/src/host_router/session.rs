@@ -1,16 +1,16 @@
 //! Session history, control, and inspection capabilities.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use astrcode_core::{
-    extension::ChildToolPolicy,
+    extension::SessionToolSelection,
     storage::EventReader,
     tool::{
         CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
         SubmitTurnRequest, SubmitTurnResult,
     },
 };
-use astrcode_extension_sdk::s5r::ErrorPayload;
+use astrcode_extension_sdk::{s5r::ErrorPayload, session::SessionToolSelectionDto};
 use serde_json::{Value, json};
 
 use super::{InvokeContext, block_on_async, capability::SessionCapability, session_inspect};
@@ -35,6 +35,7 @@ impl SessionGroup {
         match capability {
             SessionCapability::ReadEvents => self.read_events(&input, ctx),
             SessionCapability::Create => create_session(&input, ctx),
+            SessionCapability::ConfigureTools => configure_tools(&input, ctx),
             SessionCapability::SubmitTurn => submit_turn(&input, ctx),
             SessionCapability::InterruptAndSubmit => interrupt_and_submit(&input, ctx),
             SessionCapability::Inject => inject_input(&input, ctx),
@@ -132,7 +133,7 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
         working_dir: input["working_dir"].as_str().map(str::to_string),
         system_prompt: input["system_prompt"].as_str().map(str::to_string),
         model_preference: input["model_preference"].as_str().map(str::to_string),
-        tool_policy: parse_child_tool_policy(input)?,
+        tool_selection: parse_tool_selection(input)?,
         source_extension: Some(ctx.extension_id.clone()),
         ephemeral: input["ephemeral"].as_bool().unwrap_or(false),
         tool_call_id: input["tool_call_id"].as_str().unwrap_or("").to_string(),
@@ -146,6 +147,18 @@ fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayl
         ops.create_session(&parent, request)
             .await
             .map(|handle| json!({ "session_id": handle.session_id }))
+            .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
+    })?
+}
+
+fn configure_tools(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+    let ops = required_session_ops(ctx)?;
+    let access = session_access_from_input(input, ctx)?;
+    let selection = parse_session_tool_selection(input)?;
+    block_on_async(async move {
+        ops.configure_tools(access.as_access(), selection)
+            .await
+            .map(|effective| json!({ "selection": SessionToolSelectionDto::from(effective) }))
             .map_err(|error| ErrorPayload::new("session_error", error.to_string()))
     })?
 }
@@ -336,39 +349,57 @@ fn required_session_content(input: &Value) -> Result<String, ErrorPayload> {
         .ok_or_else(|| ErrorPayload::new("invalid_input", "content required"))
 }
 
-fn parse_child_tool_policy(input: &Value) -> Result<Option<ChildToolPolicy>, ErrorPayload> {
-    let Some(value) = input.get("tool_policy") else {
+fn parse_tool_selection(input: &Value) -> Result<Option<SessionToolSelection>, ErrorPayload> {
+    let Some(value) = input.get("tool_selection") else {
         return Ok(None);
     };
     if value.is_null() {
         return Ok(None);
     }
-
-    let policy = serde_json::from_value::<ChildToolPolicy>(value.clone()).map_err(|error| {
-        ErrorPayload::new("invalid_input", format!("invalid tool_policy: {error}"))
-            .with_hint("expected {\"mode\":\"allow|deny\",\"tools\":[\"tool_name\"]}")
-    })?;
-    validate_child_tool_policy(&policy)?;
-    Ok(Some(policy))
+    parse_tool_selection_value(value, "tool_selection").map(Some)
 }
 
-fn validate_child_tool_policy(policy: &ChildToolPolicy) -> Result<(), ErrorPayload> {
-    let tools = match policy {
-        ChildToolPolicy::Deny { tools } => tools,
-        ChildToolPolicy::Allow { tools } if tools.is_empty() => {
-            return Err(ErrorPayload::new(
-                "invalid_input",
-                "tool_policy allow mode requires at least one tool",
-            ));
-        },
-        ChildToolPolicy::Allow { tools } => tools,
-    };
+fn parse_session_tool_selection(input: &Value) -> Result<SessionToolSelection, ErrorPayload> {
+    let value = input
+        .get("selection")
+        .ok_or_else(|| ErrorPayload::new("invalid_input", "selection required"))?;
+    parse_tool_selection_value(value, "selection")
+}
 
-    if tools.iter().any(|tool| tool.trim().is_empty()) {
-        return Err(ErrorPayload::new(
-            "invalid_input",
-            "tool_policy tools must be non-empty strings",
-        ));
+fn parse_tool_selection_value(
+    value: &Value,
+    field: &str,
+) -> Result<SessionToolSelection, ErrorPayload> {
+    let selection =
+        serde_json::from_value::<SessionToolSelectionDto>(value.clone()).map_err(|error| {
+            ErrorPayload::new("invalid_input", format!("invalid {field}: {error}")).with_hint(
+                "expected {\"mode\":\"all\",\"except\":[]} or {\"mode\":\"only\",\"names\":[]}",
+            )
+        })?;
+    match selection {
+        SessionToolSelectionDto::All { except } => Ok(SessionToolSelection::All {
+            except: validated_tool_names(except, &format!("{field}.except"))?,
+        }),
+        SessionToolSelectionDto::Only { names } => Ok(SessionToolSelection::Only {
+            names: validated_tool_names(names, &format!("{field}.names"))?,
+        }),
     }
-    Ok(())
+}
+
+fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, ErrorPayload> {
+    let tools = tools
+        .into_iter()
+        .map(|tool| {
+            let tool = tool.trim();
+            if tool.is_empty() {
+                Err(ErrorPayload::new(
+                    "invalid_input",
+                    format!("{field} must contain non-empty strings"),
+                ))
+            } else {
+                Ok(tool.to_owned())
+            }
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(tools.into_iter().collect())
 }

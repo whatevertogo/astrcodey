@@ -199,7 +199,7 @@ impl EventStore for InMemoryEventStore {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_policy: Option<&astrcode_core::extension::ChildToolPolicy>,
+        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
         let mut event = Event::new(
@@ -209,7 +209,7 @@ impl EventStore for InMemoryEventStore {
                 working_dir: working_dir.into(),
                 model_id: model_id.into(),
                 parent_session_id: parent_session_id.cloned(),
-                tool_policy: tool_policy.cloned(),
+                tool_selection: tool_selection.cloned(),
                 source_extension: source_extension.map(String::from),
             },
         );

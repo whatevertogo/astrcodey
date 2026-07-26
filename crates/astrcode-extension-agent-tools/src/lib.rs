@@ -12,8 +12,8 @@ use std::{
 
 use astrcode_extension_sdk::{
     extension::{
-        ChildToolPolicy, Extension, ExtensionCapability, ExtensionError, PromptBuildContext,
-        PromptBuildHandler, PromptContributions, Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, SessionToolSelection, ToolHandler,
     },
     render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
     text::compact_inline,
@@ -249,9 +249,8 @@ impl ToolHandler for AgentToolHandler {
                     working_dir: None,
                     system_prompt: Some(enhance_agent_prompt(&matched.body, working_dir)),
                     model_preference: Some(model_preference),
-                    // TODO： A BETTER policy 设计
-                    tool_policy: Some(ChildToolPolicy::Deny {
-                        tools: vec!["agent".into()],
+                    tool_selection: Some(SessionToolSelection::All {
+                        except: vec!["agent".into()],
                     }),
                     source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,

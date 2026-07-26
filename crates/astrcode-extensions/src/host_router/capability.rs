@@ -37,6 +37,7 @@ capability_enum!(LlmCapability {
 capability_enum!(SessionCapability {
     ReadEvents,
     Create,
+    ConfigureTools,
     SubmitTurn,
     InterruptAndSubmit,
     Inject,
@@ -74,6 +75,8 @@ enum CapabilitySchema {
     LlmMessages,
     SessionId,
     SessionCreate,
+    SessionToolSelection,
+    SessionToolSelectionOutput,
     WorkspaceWrite,
     WorkspaceEdit,
     ProcessSpawn,
@@ -182,6 +185,17 @@ pub(super) const HOST_CAPABILITY_SPECS: &[HostCapabilitySpec] = &[
         output_schema: CapabilitySchema::Object,
         supports_stream: false,
         cancelable: true,
+        catalog: true,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::ConfigureTools),
+        name: "astrcode.session.control.configure_tools",
+        required: Some(ExtensionCapability::SessionControl),
+        description: "Configure the tool-name boundary used by subsequent session turns",
+        input_schema: CapabilitySchema::SessionToolSelection,
+        output_schema: CapabilitySchema::SessionToolSelectionOutput,
+        supports_stream: false,
+        cancelable: false,
         catalog: true,
     },
     HostCapabilitySpec {
@@ -408,6 +422,33 @@ fn capability_descriptor(spec: &HostCapabilitySpec) -> CapabilityDescriptor {
     }
 }
 
+fn tool_selection_schema(description: &'static str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "mode": { "const": "all" },
+                    "except": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["mode"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "mode": { "const": "only" },
+                    "names": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["mode"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
 fn capability_schema(schema: CapabilitySchema) -> Value {
     match schema {
         CapabilitySchema::Object => json!({ "type": "object" }),
@@ -429,31 +470,29 @@ fn capability_schema(schema: CapabilitySchema) -> Value {
                 "model_preference": { "type": "string" },
                 "ephemeral": { "type": "boolean" },
                 "tool_call_id": { "type": "string" },
-                "tool_policy": {
-                    "type": "object",
-                    "description": "Child session tool visibility policy.",
-                    "oneOf": [
-                        {
-                            "properties": {
-                                "mode": { "const": "deny" },
-                                "tools": { "type": "array", "items": { "type": "string" } }
-                            },
-                            "required": ["mode", "tools"]
-                        },
-                        {
-                            "properties": {
-                                "mode": { "const": "allow" },
-                                "tools": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "minItems": 1
-                                }
-                            },
-                            "required": ["mode", "tools"]
-                        }
-                    ]
-                }
+                "tool_selection": tool_selection_schema(
+                    "Child session tool visibility for subsequent turns."
+                )
             }
+        }),
+        CapabilitySchema::SessionToolSelection => json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "selection": tool_selection_schema(
+                    "Session tool visibility for subsequent turns."
+                )
+            },
+            "required": ["session_id", "selection"]
+        }),
+        CapabilitySchema::SessionToolSelectionOutput => json!({
+            "type": "object",
+            "properties": {
+                "selection": tool_selection_schema(
+                    "Effective session tool visibility for subsequent turns."
+                )
+            },
+            "required": ["selection"]
         }),
         CapabilitySchema::WorkspaceWrite => json!({
             "type": "object",

@@ -148,7 +148,7 @@ pub trait EventStore: EventReader + Send + Sync {
     /// - `working_dir`：工作目录路径
     /// - `model_id`：使用的模型标识
     /// - `parent_session_id`：父会话 ID（子会话场景），可为 `None`
-    /// - `tool_policy`：子会话工具集策略，根会话为 `None`
+    /// - `tool_selection`：session 初始工具选择，`None` 表示不限制
     /// - `source_extension`：创建该子 session 的扩展 ID，根会话为 `None`
     async fn create_session(
         &self,
@@ -156,7 +156,7 @@ pub trait EventStore: EventReader + Send + Sync {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_policy: Option<&crate::extension::ChildToolPolicy>,
+        tool_selection: Option<&crate::extension::SessionToolSelection>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError>;
 
@@ -551,12 +551,12 @@ pub struct SessionReadModel {
     pub updated_at: String,
     /// 父会话 ID。
     pub parent_session_id: Option<SessionId>,
-    /// 子会话生效的工具集策略。
+    /// Session 生效的工具集策略。
     ///
-    /// 来自 `SessionStarted.tool_policy`，由 `Session::open` 注入到 runtime
-    /// 让 resume 后的工具表与首次创建一致。根会话始终为 `None`。
+    /// 初始值来自 `SessionStarted.tool_selection`，后续可由
+    /// `SessionToolsConfigured` 更新。`None` 表示不限制工具。
     #[serde(default)]
-    pub tool_policy: Option<crate::extension::ChildToolPolicy>,
+    pub tool_selection: Option<crate::extension::SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     #[serde(default)]
     pub source_extension: Option<String>,
@@ -592,7 +592,7 @@ impl SessionReadModel {
             created_at: String::new(),
             updated_at: String::new(),
             parent_session_id: None,
-            tool_policy: None,
+            tool_selection: None,
             source_extension: None,
             agent_sessions: Vec::new(),
             compact_boundaries: Vec::new(),

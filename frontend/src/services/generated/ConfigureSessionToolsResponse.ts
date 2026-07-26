@@ -2,6 +2,6 @@
 import type { ToolSelectionDto } from "./ToolSelectionDto";
 
 /**
- * 新建会话请求。
+ * 配置 Session 工具边界后的有效选择。
  */
-export type CreateSessionRequest = { workingDir: string, toolSelection?: ToolSelectionDto | null, };
+export type ConfigureSessionToolsResponse = { selection: ToolSelectionDto, };

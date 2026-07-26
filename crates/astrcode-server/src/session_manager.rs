@@ -8,14 +8,14 @@ use std::{
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    extension::ExtensionEvent,
+    extension::{ExtensionEvent, SessionToolSelection},
     lifecycle::SessionResourceCleanup,
     storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
 };
 use astrcode_session::{
     Session, SessionError, SessionRuntimeServices, SessionRuntimeState,
-    session::emit_lifecycle_for_read_model,
+    emit_lifecycle_for_read_model,
 };
 use parking_lot::Mutex;
 
@@ -123,14 +123,17 @@ impl SessionManager {
         self.runtime_registry.insert(sid, runtime);
     }
 
-    /// 让所有已打开 session 的工具快照失效；下一次 turn 会按当前扩展集重建。
-    pub(crate) fn invalidate_tool_registries(&self) {
-        self.runtime_registry.invalidate_tool_registries();
-    }
-
     pub(crate) async fn create(
         &self,
         working_dir: &str,
+    ) -> Result<CreatedSession, SessionManagerError> {
+        self.create_with_tool_selection(working_dir, None).await
+    }
+
+    pub(crate) async fn create_with_tool_selection(
+        &self,
+        working_dir: &str,
+        tool_selection: Option<&SessionToolSelection>,
     ) -> Result<CreatedSession, SessionManagerError> {
         let model_id = self.config.read_effective().llm.model_id.clone();
         // 先在 registry 里登记 runtime，再创建 Session 让两者共享同一份。
@@ -143,7 +146,7 @@ impl SessionManager {
             working_dir,
             &model_id,
             None,
-            None,
+            tool_selection,
             None,
             runtime,
             Arc::clone(&self.capabilities),
@@ -583,12 +586,6 @@ impl SessionRuntimeRegistry {
         }
     }
 
-    fn invalidate_tool_registries(&self) {
-        for entry in self.states.lock().values() {
-            entry.runtime().reset_tool_registry();
-        }
-    }
-
     fn sync_model_bindings(
         &self,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
@@ -646,114 +643,5 @@ impl Drop for SessionResumeGuard<'_> {
             self.registry
                 .fail_session_resume(&self.session_id, &self.runtime);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
-
-    use astrcode_core::{
-        extension::{Extension, Registrar, ToolHandler},
-        tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
-    };
-    use astrcode_extensions::runner::ExtensionRunner;
-    use astrcode_session::session_setup::{
-        SystemPromptSnapshotInput, build_system_prompt_snapshot, build_tool_registry_snapshot,
-    };
-
-    struct StaticToolExtension {
-        id: &'static str,
-        tool_name: &'static str,
-        description: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl Extension for StaticToolExtension {
-        fn id(&self) -> &str {
-            self.id
-        }
-
-        fn register(&self, reg: &mut Registrar) {
-            reg.tool(
-                ToolDefinition {
-                    name: self.tool_name.into(),
-                    description: self.description.into(),
-                    parameters: serde_json::json!({"type": "object"}),
-                    strict: false,
-                    origin: ToolOrigin::Extension,
-                    execution_mode: ExecutionMode::Sequential,
-                },
-                Arc::new(StaticToolHandler),
-            );
-        }
-    }
-
-    struct StaticToolHandler;
-
-    #[async_trait::async_trait]
-    impl ToolHandler for StaticToolHandler {
-        async fn execute(
-            &self,
-            tool_name: &str,
-            _arguments: serde_json::Value,
-            _working_dir: &str,
-            _ctx: &astrcode_core::tool::ToolExecutionContext,
-        ) -> Result<ToolResult, astrcode_core::extension::ExtensionError> {
-            Err(astrcode_core::extension::ExtensionError::NotFound(
-                tool_name.into(),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn child_extra_system_prompt_participates_in_snapshot_build() {
-        let runner = ExtensionRunner::new(Duration::from_secs(1));
-        let (system_prompt, fingerprint) =
-            build_system_prompt_snapshot(SystemPromptSnapshotInput {
-                extension_runner: &runner,
-                prompt_provider: &astrcode_context::prompt_engine::DefaultPromptProvider,
-                prompt_file_provider: &astrcode_context::prompt_engine::DefaultPromptFileProvider,
-                session_id: "session-1",
-                working_dir: ".",
-                model_id: "mock",
-                tools: &[],
-                extra_system_prompt: Some("child body"),
-                tool_prompt_metadata: HashMap::new(),
-                include_agents_rules: true,
-            })
-            .await
-            .unwrap();
-
-        assert!(system_prompt.contains("child body"));
-        assert!(!fingerprint.is_empty());
-    }
-
-    #[tokio::test]
-    async fn tool_snapshot_precedence_is_explicit() {
-        let runner = ExtensionRunner::new(Duration::from_secs(1));
-        runner
-            .register(Arc::new(StaticToolExtension {
-                id: "first",
-                tool_name: "shell",
-                description: "first extension shell",
-            }))
-            .await
-            .unwrap();
-        runner
-            .register(Arc::new(StaticToolExtension {
-                id: "second",
-                tool_name: "shell",
-                description: "second extension shell",
-            }))
-            .await
-            .unwrap();
-
-        let default_tool_packs = astrcode_tools::registry::default_tool_packs();
-        let registry = build_tool_registry_snapshot(&runner, &default_tool_packs, ".", None).await;
-        let shell = registry.find_definition("shell").unwrap();
-
-        assert_eq!(shell.origin, ToolOrigin::Extension);
-        assert_eq!(shell.description, "first extension shell");
     }
 }

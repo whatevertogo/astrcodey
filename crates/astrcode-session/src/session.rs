@@ -1,31 +1,33 @@
 //! Session 句柄 — 带存储能力的会话操作入口。
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    extension::{ChildToolPolicy, ExtensionEvent},
+    extension::{ExtensionEvent, SessionToolSelection},
     llm::LlmMessage,
-    prompt::SystemPromptInput,
     storage::{
         CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
         ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
     },
     types::*,
 };
-use astrcode_kernel::ToolRegistry;
-use astrcode_support::{hash::hex_fingerprint, perf_snapshot, shell::resolve_shell};
+use astrcode_extension_sdk::runtime_ports::RuntimeSnapshotState;
+use astrcode_support::perf_snapshot;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    ToolRegistry,
     payload::{
         TURN_FINISH_ABORTED, agent_run_completed_payload, compact_boundary_payload,
         session_continued_from_compaction_payload, system_prompt_configured_payload,
         turn_completed_payload,
     },
+    runtime_stability::RuntimeStabilityBudget,
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
+    session_tools::{ToolCacheLookup, ToolRegistryCacheKey},
     tool_exec::interrupted_tool_result,
     turn_context::{SharedTurnContext, TurnError},
     turn_handle::TurnHandle,
@@ -42,7 +44,7 @@ pub struct SessionCreateParams {
     pub working_dir: String,
     pub model_id: String,
     pub parent: Option<SessionId>,
-    pub tool_policy: Option<ChildToolPolicy>,
+    pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
     pub runtime: Arc<SessionRuntimeState>,
     pub caps: Arc<SessionRuntimeServices>,
@@ -51,7 +53,7 @@ pub struct SessionCreateParams {
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
 /// 字段语义：
-/// - `runtime`：进程内瞬态资源（工具表、file_obs、event_tx）。broadcast 在 runtime 上而不是 Session
+/// - `runtime`：进程内瞬态资源（file_obs、event_tx 等）。broadcast 在 runtime 上而不是 Session
 ///   上：同 sid 多次 `Session::open` / `clone` 仍共享同一个
 ///   broadcast，订阅者一处订阅就能看到所有实例上发出的事件。
 /// - `caps`：跨 session 共享的基础设施（LLM、扩展、上下文组装器、配置）。
@@ -72,7 +74,17 @@ impl Session {
     /// 实例会有不同的 broadcast、不同的工具表、不同的 event_tx，订阅者只能看到自己那份
     /// 实例上发出的事件。生产路径走 `SessionManager`，由其内部的 `runtime_states` HashMap
     /// 保证唯一；CLI / 测试若直接调本入口须自行维护一份 sid→runtime 映射，或接受隔离语义。
-    pub async fn create_with_params(params: SessionCreateParams) -> Result<Self, SessionError> {
+    pub async fn create_with_params(mut params: SessionCreateParams) -> Result<Self, SessionError> {
+        params.tool_selection = resolve_initial_tool_selection(
+            params.store.as_ref(),
+            params.parent.as_ref(),
+            params.tool_selection.as_ref(),
+        )
+        .await?;
+        Self::create_persisted(params).await
+    }
+
+    async fn create_persisted(params: SessionCreateParams) -> Result<Self, SessionError> {
         params
             .store
             .create_session(
@@ -80,13 +92,10 @@ impl Session {
                 &params.working_dir,
                 &params.model_id,
                 params.parent.as_ref(),
-                params.tool_policy.as_ref(),
+                params.tool_selection.as_ref(),
                 params.source_extension.as_deref(),
             )
             .await?;
-        if let Some(policy) = &params.tool_policy {
-            params.runtime.apply_child_tool_policy(Some(policy.clone()));
-        }
         Ok(Self {
             id: params.sid,
             store: params.store,
@@ -103,7 +112,7 @@ impl Session {
         working_dir: &str,
         model_id: &str,
         parent: Option<&SessionId>,
-        tool_policy: Option<&ChildToolPolicy>,
+        tool_selection: Option<&SessionToolSelection>,
         source_extension: Option<&str>,
         runtime: Arc<SessionRuntimeState>,
         caps: Arc<SessionRuntimeServices>,
@@ -114,7 +123,7 @@ impl Session {
             working_dir: working_dir.to_string(),
             model_id: model_id.to_string(),
             parent: parent.cloned(),
-            tool_policy: tool_policy.cloned(),
+            tool_selection: tool_selection.cloned(),
             source_extension: source_extension.map(str::to_string),
             runtime,
             caps,
@@ -130,12 +139,6 @@ impl Session {
         caps: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
-        if runtime.child_tool_policy().is_none() {
-            let model = store.session_read_model(&id).await?;
-            if let Some(policy) = model.tool_policy {
-                runtime.apply_child_tool_policy(Some(policy));
-            }
-        }
         Ok(Self {
             id,
             store,
@@ -167,10 +170,6 @@ impl Session {
     pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Arc<Event>> {
         self.runtime.subscribe()
     }
-
-    pub(crate) fn resolve_shell_name() -> String {
-        resolve_shell().name
-    }
 }
 
 #[async_trait::async_trait]
@@ -197,6 +196,51 @@ pub enum SessionError {
     Extension(#[from] astrcode_core::extension::ExtensionError),
     #[error("invalid session cursor (expected u64 event seq): {0}")]
     InvalidCursor(Cursor),
+    #[error("extension runtime changed during session preparation after {attempts} attempts")]
+    RuntimeUnstable { attempts: usize },
+    #[error("session parent chain contains a cycle at {session_id}")]
+    ParentCycle { session_id: SessionId },
+}
+
+async fn resolve_initial_tool_selection(
+    store: &dyn EventStore,
+    parent_session_id: Option<&SessionId>,
+    requested: Option<&SessionToolSelection>,
+) -> Result<Option<SessionToolSelection>, SessionError> {
+    let Some(parent_session_id) = parent_session_id else {
+        return Ok(SessionToolSelection::intersect(None, requested));
+    };
+    let parent = store.session_read_model(parent_session_id).await?;
+    let parent_selection =
+        resolve_effective_tool_selection(store, parent_session_id, &parent).await?;
+    Ok(SessionToolSelection::intersect(
+        parent_selection.as_ref(),
+        requested,
+    ))
+}
+
+async fn resolve_effective_tool_selection(
+    store: &dyn EventStore,
+    session_id: &SessionId,
+    model: &SessionReadModel,
+) -> Result<Option<SessionToolSelection>, SessionError> {
+    let mut visited = HashSet::from([session_id.clone()]);
+    let mut selection = SessionToolSelection::intersect(None, model.tool_selection.as_ref());
+    let mut parent_session_id = model.parent_session_id.clone();
+
+    while let Some(parent_id) = parent_session_id {
+        if !visited.insert(parent_id.clone()) {
+            return Err(SessionError::ParentCycle {
+                session_id: parent_id,
+            });
+        }
+        let parent = store.session_read_model(&parent_id).await?;
+        selection =
+            SessionToolSelection::intersect(parent.tool_selection.as_ref(), selection.as_ref());
+        parent_session_id = parent.parent_session_id;
+    }
+
+    Ok(selection)
 }
 
 // ── Storage operations ──
@@ -310,6 +354,35 @@ impl Session {
         .await
         .map(Some)
     }
+
+    /// 配置后续 turn 使用的工具边界。
+    ///
+    /// 子 session 不能扩大父 session 当前边界；活跃 turn 保留已固定的不可变快照。
+    pub async fn configure_tools(
+        &self,
+        requested: SessionToolSelection,
+    ) -> Result<SessionToolSelection, SessionError> {
+        let model = self.read_model().await?;
+        let parent_selection = match model.parent_session_id {
+            Some(parent_session_id) => {
+                let parent_model = self.store.session_read_model(&parent_session_id).await?;
+                self.effective_tool_selection(&parent_session_id, &parent_model)
+                    .await?
+            },
+            None => None,
+        };
+        let tool_selection =
+            SessionToolSelection::intersect(parent_selection.as_ref(), Some(&requested))
+                .unwrap_or_else(|| requested.normalized());
+        self.emit_durable(
+            None,
+            EventPayload::SessionToolsConfigured {
+                selection: tool_selection.clone(),
+            },
+        )
+        .await?;
+        Ok(tool_selection)
+    }
 }
 
 /// 发射 session 生命周期事件，不要求构造完整 [`Session`]。
@@ -320,45 +393,43 @@ pub async fn emit_lifecycle_for_read_model(
     event: ExtensionEvent,
 ) -> Result<(), SessionError> {
     let ctx = SharedTurnContext::from_read_model(session_id, model).lifecycle_ctx();
-    caps.extension_runner().emit_lifecycle(event, ctx).await?;
+    caps.turn_hooks().emit_lifecycle(event, ctx).await?;
     Ok(())
 }
 
 // ── Tool & runtime init ──
 
 impl Session {
-    pub async fn refresh_tools(&self, working_dir: &str) -> Arc<ToolRegistry> {
-        let tool_policy = self.runtime.child_tool_policy();
-        let registry = crate::session_setup::build_tool_registry_snapshot(
-            self.caps.extension_runner(),
-            self.caps.tool_packs(),
-            working_dir,
-            tool_policy.as_ref(),
-        )
-        .await;
-        let registry = Arc::new(registry);
-        self.runtime.install_tool_registry(Arc::clone(&registry));
-        registry
+    /// Resolves the immutable tool registry used by one operation or turn.
+    ///
+    /// The registry is returned to the caller and pinned for the operation.
+    /// Session state only caches immutable snapshots by runtime generation,
+    /// so prompt construction, provider schemas, and execution share one
+    /// exact registry without explicit invalidation.
+    pub async fn tool_registry_snapshot(
+        &self,
+        working_dir: &str,
+    ) -> Result<Arc<ToolRegistry>, SessionError> {
+        let model = self.read_model().await?;
+        let tool_selection = self.effective_tool_selection(&self.id, &model).await?;
+        let mut stability = RuntimeStabilityBudget::new();
+        Ok(self
+            .resolve_tool_registry_snapshot(working_dir, tool_selection.as_ref(), &mut stability)
+            .await?
+            .registry)
     }
 
     pub async fn initialize_runtime(&self, working_dir: &str) -> Result<(), SessionError> {
-        self.refresh_tools(working_dir).await;
         self.refresh_prompt(working_dir, None, None).await?;
         Ok(())
     }
 
     pub async fn ensure_runtime_ready(&self) -> Result<(), SessionError> {
         let state = self.read_model().await?;
-        if self
-            .runtime
-            .loaded_tool_registry()
-            .list_definitions()
-            .is_empty()
-        {
-            self.refresh_tools(&state.working_dir).await;
-        }
         if state.system_prompt.is_none() {
-            self.refresh_prompt(&state.working_dir, None, None).await?;
+            let model_id = self.runtime.model_id();
+            self.refresh_prompt_with_state(&state.working_dir, None, None, Some(&state), &model_id)
+                .await?;
         }
         Ok(())
     }
@@ -373,7 +444,93 @@ pub(crate) fn normalize_extra_system_prompt(extra_system_prompt: Option<&str>) -
     })
 }
 
+struct PreparedSystemPrompt {
+    text: String,
+    fingerprint: String,
+    resolved_extra: Option<String>,
+}
+
+struct PreparedRuntimeSnapshot {
+    registry: Arc<ToolRegistry>,
+    prompt: PreparedSystemPrompt,
+    tool_selection: Option<SessionToolSelection>,
+}
+
+struct ResolvedToolRegistrySnapshot {
+    registry: Arc<ToolRegistry>,
+    key: ToolRegistryCacheKey,
+}
+
+async fn retry_runtime_snapshot(
+    stability: &mut RuntimeStabilityBudget,
+) -> Result<(), SessionError> {
+    stability
+        .retry_after_change()
+        .await
+        .map_err(|attempts| SessionError::RuntimeUnstable { attempts })
+}
+
 impl Session {
+    async fn resolve_tool_registry_snapshot(
+        &self,
+        working_dir: &str,
+        tool_selection: Option<&SessionToolSelection>,
+        stability: &mut RuntimeStabilityBudget,
+    ) -> Result<ResolvedToolRegistrySnapshot, SessionError> {
+        loop {
+            let RuntimeSnapshotState::Stable(runtime_generation) =
+                self.caps.runtime_snapshot_state()
+            else {
+                retry_runtime_snapshot(stability).await?;
+                continue;
+            };
+            let key = self.tool_registry_cache_key(working_dir, runtime_generation, tool_selection);
+            let cache = self.runtime.tool_registry_cache();
+            let build = match cache.lookup_or_reserve(&key) {
+                ToolCacheLookup::Hit(registry) => {
+                    return Ok(ResolvedToolRegistrySnapshot { registry, key });
+                },
+                ToolCacheLookup::Wait(mut notification) => {
+                    let _ = notification.changed().await;
+                    continue;
+                },
+                ToolCacheLookup::Build(build) => build,
+            };
+
+            let built = crate::session_setup::build_tool_registry_snapshot(
+                self.caps.tool_catalog(),
+                self.caps.tool_packs(),
+                working_dir,
+                key.tool_selection.as_ref(),
+            )
+            .await?;
+            let registry = Arc::new(built.registry);
+            if self.caps.runtime_snapshot_state()
+                == RuntimeSnapshotState::Stable(runtime_generation)
+                && self.caps.tool_pack_versions() == key.tool_pack_versions
+            {
+                build.complete(key.clone(), Arc::clone(&registry), built.completeness);
+                return Ok(ResolvedToolRegistrySnapshot { registry, key });
+            }
+            drop(build);
+            retry_runtime_snapshot(stability).await?;
+        }
+    }
+
+    fn tool_registry_cache_key(
+        &self,
+        working_dir: &str,
+        runtime_generation: u64,
+        tool_selection: Option<&SessionToolSelection>,
+    ) -> ToolRegistryCacheKey {
+        ToolRegistryCacheKey {
+            runtime_generation,
+            tool_pack_versions: self.caps.tool_pack_versions(),
+            working_dir: working_dir.to_owned(),
+            tool_selection: tool_selection.cloned(),
+        }
+    }
+
     pub async fn refresh_prompt(
         &self,
         working_dir: &str,
@@ -391,7 +548,7 @@ impl Session {
         .await
     }
 
-    pub(crate) async fn refresh_prompt_with_state(
+    async fn refresh_prompt_with_state(
         &self,
         working_dir: &str,
         extra_system_prompt: Option<&str>,
@@ -399,105 +556,143 @@ impl Session {
         cached_state: Option<&SessionReadModel>,
         model_id: &str,
     ) -> Result<bool, SessionError> {
-        let resolved_extra = self
-            .resolve_extra_system_prompt(extra_system_prompt, cached_state)
+        let prepared = self
+            .prepare_runtime_snapshot(working_dir, extra_system_prompt, cached_state, model_id)
             .await?;
-        let is_subagent = match cached_state {
-            Some(state) => state.parent_session_id.is_some(),
-            None => self.read_model().await?.parent_session_id.is_some(),
-        };
-        let (text, fingerprint) = self
-            .build_cached_system_prompt(
-                working_dir,
-                model_id,
-                resolved_extra.as_deref(),
-                is_subagent,
-            )
-            .await?;
+        self.persist_system_prompt(prepared.prompt, stored_fingerprint)
+            .await
+    }
 
-        if stored_fingerprint == Some(fingerprint.as_str()) {
-            self.runtime.update_prompt_extra(resolved_extra);
+    async fn prepare_runtime_snapshot(
+        &self,
+        working_dir: &str,
+        extra_system_prompt: Option<&str>,
+        cached_state: Option<&SessionReadModel>,
+        model_id: &str,
+    ) -> Result<PreparedRuntimeSnapshot, SessionError> {
+        let mut stability = RuntimeStabilityBudget::new();
+        let loaded_state;
+        let state = match cached_state {
+            Some(state) => state,
+            None => {
+                loaded_state = self.read_model().await?;
+                &loaded_state
+            },
+        };
+        let resolved_extra = self.resolve_extra_system_prompt(extra_system_prompt, state);
+        let is_subagent = state.parent_session_id.is_some();
+        let tool_selection = self.effective_tool_selection(&self.id, state).await?;
+
+        loop {
+            let tool_snapshot = self
+                .resolve_tool_registry_snapshot(
+                    working_dir,
+                    tool_selection.as_ref(),
+                    &mut stability,
+                )
+                .await?;
+            let (text, fingerprint) = self
+                .build_system_prompt(
+                    working_dir,
+                    model_id,
+                    resolved_extra.as_deref(),
+                    is_subagent,
+                    tool_snapshot.registry.as_ref(),
+                )
+                .await?;
+            if self.caps.runtime_snapshot_state()
+                == RuntimeSnapshotState::Stable(tool_snapshot.key.runtime_generation)
+                && self.caps.tool_pack_versions() == tool_snapshot.key.tool_pack_versions
+            {
+                return Ok(PreparedRuntimeSnapshot {
+                    registry: tool_snapshot.registry,
+                    prompt: PreparedSystemPrompt {
+                        text,
+                        fingerprint,
+                        resolved_extra,
+                    },
+                    tool_selection,
+                });
+            }
+            retry_runtime_snapshot(&mut stability).await?;
+        }
+    }
+
+    async fn effective_tool_selection(
+        &self,
+        session_id: &SessionId,
+        model: &SessionReadModel,
+    ) -> Result<Option<SessionToolSelection>, SessionError> {
+        resolve_effective_tool_selection(self.store.as_ref(), session_id, model).await
+    }
+
+    async fn persist_system_prompt(
+        &self,
+        prepared: PreparedSystemPrompt,
+        stored_fingerprint: Option<&str>,
+    ) -> Result<bool, SessionError> {
+        if stored_fingerprint == Some(prepared.fingerprint.as_str()) {
+            self.runtime.update_prompt_extra(prepared.resolved_extra);
             return Ok(false);
         }
 
-        self.runtime.update_prompt_extra(resolved_extra.clone());
+        self.runtime
+            .update_prompt_extra(prepared.resolved_extra.clone());
         self.emit_durable(
             None,
-            system_prompt_configured_payload(text, fingerprint, resolved_extra),
+            system_prompt_configured_payload(
+                prepared.text,
+                prepared.fingerprint,
+                prepared.resolved_extra,
+            ),
         )
         .await?;
         Ok(true)
     }
 
-    async fn resolve_extra_system_prompt(
+    fn resolve_extra_system_prompt(
         &self,
         extra_system_prompt: Option<&str>,
-        cached_state: Option<&SessionReadModel>,
-    ) -> Result<Option<String>, SessionError> {
+        state: &SessionReadModel,
+    ) -> Option<String> {
         if extra_system_prompt.is_some() {
-            return Ok(normalize_extra_system_prompt(extra_system_prompt));
+            return normalize_extra_system_prompt(extra_system_prompt);
         }
         if let Some(extra) = self.runtime.prompt_extra() {
-            return Ok(Some(extra));
+            return Some(extra);
         }
-        Ok(match cached_state {
-            Some(state) => state.extra_system_prompt.clone(),
-            None => self.read_model().await?.extra_system_prompt,
-        })
+        state.extra_system_prompt.clone()
     }
 
-    pub(crate) async fn build_cached_system_prompt(
+    async fn build_system_prompt(
         &self,
         working_dir: &str,
         model_id: &str,
         resolved_extra: Option<&str>,
         is_subagent: bool,
+        tool_registry: &ToolRegistry,
     ) -> Result<(String, String), SessionError> {
-        let prompt_files = self
-            .caps
-            .prompt_file_provider()
-            .load(working_dir, !is_subagent)
-            .await;
-        let tools_with_meta = self
-            .runtime
-            .loaded_tool_registry()
-            .list_definitions_with_prompt_metadata();
+        let tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
         let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
         let tool_prompt_metadata = tools_with_meta
             .into_iter()
             .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
             .collect();
-        let ext_data = crate::session_setup::collect_extension_prompt_data(
-            self.caps.extension_runner(),
-            self.id.as_str(),
-            working_dir,
-            model_id,
-            &tools,
-            tool_prompt_metadata,
+        Ok(crate::session_setup::build_system_prompt_snapshot(
+            crate::session_setup::SystemPromptSnapshotInput {
+                prompt_contributor: self.caps.prompt_contributor(),
+                prompt_provider: self.caps.prompt_provider(),
+                prompt_file_provider: self.caps.prompt_file_provider(),
+                session_id: self.id.as_str(),
+                working_dir,
+                model_id,
+                tools: &tools,
+                extra_system_prompt: resolved_extra,
+                tool_prompt_metadata,
+                include_agents_rules: !is_subagent,
+            },
         )
-        .await?;
-        let prompt_input = SystemPromptInput {
-            working_dir: working_dir.to_string(),
-            os: std::env::consts::OS.into(),
-            shell: Self::resolve_shell_name(),
-            gh_cli_available: astrcode_support::shell::is_gh_cli_available(),
-            identity: prompt_files.identity,
-            user_rules: prompt_files.user_rules,
-            project_rules: prompt_files.project_rules,
-            tools,
-            tool_prompt_metadata: ext_data.merged_tool_metadata,
-            extension_blocks: ext_data.extension_blocks,
-            extra_instructions: resolved_extra.map(str::to_string),
-        };
-        let text = self
-            .caps
-            .prompt_provider()
-            .assemble(prompt_input)
-            .await
-            .system_prompt
-            .unwrap_or_default();
-        let fingerprint = hex_fingerprint(text.as_bytes());
-        Ok((text, fingerprint))
+        .await?)
     }
 }
 
@@ -575,10 +770,16 @@ impl Session {
         agent_name: String,
         task: String,
         extra_system_prompt: Option<String>,
-        tool_policy: Option<ChildToolPolicy>,
+        tool_selection: Option<SessionToolSelection>,
         source_extension: Option<&str>,
         tool_call_id: ToolCallId,
     ) -> Result<Self, SessionError> {
+        let tool_selection = resolve_initial_tool_selection(
+            self.store.as_ref(),
+            Some(&self.id),
+            tool_selection.as_ref(),
+        )
+        .await?;
         let primary_llm = primary_llm_for_model_id(&self.caps, model_id);
         let child_runtime = Arc::new(SessionRuntimeState::new(
             primary_llm,
@@ -588,24 +789,18 @@ impl Session {
         if extra_system_prompt.is_some() {
             child_runtime.update_prompt_extra(extra_system_prompt);
         }
-        let parent_working_dir = self.read_model().await?.working_dir;
-        let parent_registry = self.runtime.loaded_tool_registry();
-        if parent_working_dir == working_dir && !parent_registry.list_definitions().is_empty() {
-            let child_registry = parent_registry.clone_with_child_policy(tool_policy.as_ref());
-            child_runtime.install_tool_registry(Arc::new(child_registry));
-        }
         let child_sid = new_session_id();
-        let child = Session::create_with_id(
-            Arc::clone(&self.store),
-            child_sid.clone(),
-            working_dir,
-            model_id,
-            Some(&self.id),
-            tool_policy.as_ref(),
-            source_extension,
-            child_runtime,
-            Arc::clone(&self.caps),
-        )
+        let child = Session::create_persisted(SessionCreateParams {
+            store: Arc::clone(&self.store),
+            sid: child_sid.clone(),
+            working_dir: working_dir.to_owned(),
+            model_id: model_id.to_owned(),
+            parent: Some(self.id.clone()),
+            tool_selection: tool_selection.clone(),
+            source_extension: source_extension.map(str::to_owned),
+            runtime: child_runtime,
+            caps: Arc::clone(&self.caps),
+        })
         .await?;
 
         self.append_event(Event::new(
@@ -615,7 +810,7 @@ impl Session {
                 child_session_id: child_sid,
                 agent_name,
                 task,
-                tool_policy,
+                tool_selection,
                 tool_call_id,
             },
         ))
@@ -682,7 +877,7 @@ impl Session {
         };
         match self
             .caps()
-            .extension_runner_arc()
+            .turn_hooks_arc()
             .emit_user_message_envelope(ctx)
             .await?
         {
@@ -710,40 +905,21 @@ impl Session {
 
         let pre_state = self.read_model().await?;
         let working_dir = pre_state.working_dir.clone();
-
-        if self
-            .runtime
-            .loaded_tool_registry()
-            .list_definitions()
-            .is_empty()
-        {
-            self.refresh_tools(&working_dir).await;
-        }
-
         let stored_fingerprint = pre_state.system_prompt_fingerprint.clone();
-        let prompt_changed = match self
-            .refresh_prompt_with_state(
-                &working_dir,
-                None,
-                stored_fingerprint.as_deref(),
-                Some(&pre_state),
-                model.model_id(),
-            )
-            .await
-        {
-            Ok(changed) => changed,
-            Err(e) => {
-                tracing::warn!(session_id = %self.id, error = %e, "configure system prompt failed");
-                false
-            },
-        };
+        let prepared = self
+            .prepare_runtime_snapshot(&working_dir, None, Some(&pre_state), model.model_id())
+            .await?;
+        let prompt_changed = self
+            .persist_system_prompt(prepared.prompt, stored_fingerprint.as_deref())
+            .await?;
 
-        let session_state = if prompt_changed {
+        let mut session_state = if prompt_changed {
             // refresh_prompt 可能写入了 durable event，需重读 projection。
             self.read_model().await?
         } else {
             pre_state
         };
+        session_state.tool_selection = prepared.tool_selection;
         let session_store_dir = self.session_store_dir().await;
         let cancellation_token = CancellationToken::new();
         TurnLoop::new_with_llm(
@@ -751,6 +927,7 @@ impl Session {
             &session_state,
             session_store_dir,
             Arc::clone(&model.llm),
+            prepared.registry,
             cancellation_token,
         )
     }
@@ -831,7 +1008,13 @@ impl Session {
             .await?;
         self.emit_turn_start_events(&text, &attachments, &turn_id)
             .await?;
-        let agent = self.prepare_turn_runner().await?;
+        let agent = match self.prepare_turn_runner().await {
+            Ok(agent) => agent,
+            Err(error) => {
+                self.settle_failed_turn_setup(&turn_id, &error).await;
+                return Err(error);
+            },
+        };
         let cancellation_token = agent.cancellation_token();
         let (completion_tx, completion_rx) = oneshot::channel();
         let turn_id_for_task = turn_id.clone();
@@ -855,6 +1038,40 @@ impl Session {
             cancellation_token,
             completion_rx,
         ))
+    }
+
+    async fn settle_failed_turn_setup(&self, turn_id: &TurnId, error: &TurnError) {
+        if let Err(persist_error) = self
+            .emit_durable(
+                Some(turn_id),
+                EventPayload::ErrorOccurred {
+                    code: -32603,
+                    message: error.to_string(),
+                    recoverable: false,
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                session_id = %self.id,
+                %turn_id,
+                error = %persist_error,
+                "failed to persist turn setup error"
+            );
+        }
+        if let Err(persist_error) = self
+            .emit_durable(Some(turn_id), turn_completed_payload("error"))
+            .await
+        {
+            tracing::error!(
+                session_id = %self.id,
+                %turn_id,
+                error = %persist_error,
+                "failed to complete turn after setup error"
+            );
+        }
+        self.emit_live(Some(turn_id), agent_run_completed_payload("error"))
+            .await;
     }
 }
 

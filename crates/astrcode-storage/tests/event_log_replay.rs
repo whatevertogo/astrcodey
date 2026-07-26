@@ -22,7 +22,7 @@ async fn append_replay_after_preserves_order_and_seq() {
                 working_dir: ".".into(),
                 model_id: "test".into(),
                 parent_session_id: None,
-                tool_policy: None,
+                tool_selection: None,
                 source_extension: None,
             },
         ),

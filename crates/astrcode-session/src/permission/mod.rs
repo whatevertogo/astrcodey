@@ -1,6 +1,5 @@
 //! Tool Gate 权限策略与链组装。
 
-mod child_session_deny;
 mod configured;
 mod cwd_outside_write_ask;
 mod default_read_approve;
@@ -10,6 +9,7 @@ mod git_path_ask;
 mod paths;
 mod sensitive_file_ask;
 mod session_approval_history;
+mod session_tool_selection;
 mod shell_broad_access_ask;
 mod yolo_mode_approve;
 
@@ -30,7 +30,7 @@ pub fn build_default_chain(
         Box::new(configured::ConfiguredDenyPolicy::new(
             &effective.permissions.deny,
         )),
-        Box::new(child_session_deny::ChildSessionDenyPolicy),
+        Box::new(session_tool_selection::SessionToolSelectionPolicy),
         Box::new(yolo_mode_approve::YoloModeApprovePolicy),
         Box::new(session_approval_history::SessionApprovalHistoryPolicy::new(
             Arc::clone(&history),
@@ -125,8 +125,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
             session_id: "s1",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         };
         let decision = chain.decide(&ctx);
         assert!(matches!(decision, PermissionDecision::Ask { .. }));
@@ -145,8 +144,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Yolo,
             session_id: "s1",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         };
         assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);
     }
@@ -164,8 +162,7 @@ mod tests {
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
             session_id: "s1",
-            is_child_session: false,
-            child_tool_policy: None,
+            tool_selection: None,
         };
         assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);
     }

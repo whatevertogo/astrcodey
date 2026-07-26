@@ -301,7 +301,7 @@ impl ExtensionEvents {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::sync::Arc;
 
     use astrcode_core::{
         config::{
@@ -318,21 +318,21 @@ mod tests {
             AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
             CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
             ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
-            PostToolUseResult, PreToolUseContext, PreToolUseResult, PromptBuildContext,
-            PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
-            UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            PostToolUseResult, PreToolUseContext, PreToolUseResult, ProviderContext, ProviderEvent,
+            ProviderResult, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
-        tool::{SessionOperations, Tool, ToolDefinition, ToolPromptMetadata},
+        tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
     };
-    use astrcode_kernel::{ExtensionRuntime, extension_runtime::NoopExtensionRuntime};
+    use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, TurnHooks};
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::{
+        SessionExtensionPorts,
         session::{Session, SessionCreateParams},
         session_runtime::SessionRuntimeState,
         session_runtime_services::{SessionHostServices, SessionRuntimeServices},
@@ -407,12 +407,10 @@ mod tests {
     }
 
     fn test_caps() -> Arc<SessionRuntimeServices> {
-        test_caps_with_runtime(Arc::new(NoopExtensionRuntime))
+        test_caps_with_runtime(Arc::new(NoopRuntimePorts))
     }
 
-    fn test_caps_with_runtime(
-        extension_runner: Arc<dyn ExtensionRuntime>,
-    ) -> Arc<SessionRuntimeServices> {
+    fn test_caps_with_runtime(turn_hooks: Arc<dyn TurnHooks>) -> Arc<SessionRuntimeServices> {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
         let context_assembler = Arc::new(TestContextAssembler {
             settings: ContextSettings::default(),
@@ -468,7 +466,7 @@ mod tests {
             llm,
             effective,
             SessionHostServices {
-                extension_runner,
+                extension_ports: SessionExtensionPorts::with_turn_hooks(turn_hooks),
                 context_assembler,
                 post_compact_enricher: Arc::new(NoopPostCompactEnricher),
                 prompt_provider: Arc::new(TestPromptProvider),
@@ -497,14 +495,13 @@ mod tests {
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             model_id: "mock-model".into(),
             parent: None,
-            tool_policy: None,
+            tool_selection: None,
             source_extension: None,
             runtime,
             caps,
         })
         .await
         .unwrap();
-        session.refresh_tools(".").await;
         session
     }
 
@@ -565,7 +562,7 @@ mod tests {
     struct EmitEventRuntime;
 
     #[async_trait::async_trait]
-    impl ExtensionRuntime for EmitEventRuntime {
+    impl TurnHooks for EmitEventRuntime {
         async fn emit_pre_tool_use(
             &self,
             ctx: PreToolUseContext,
@@ -596,13 +593,6 @@ mod tests {
             _ctx: ProviderContext,
         ) -> Result<ProviderResult, ExtensionError> {
             Ok(ProviderResult::Allow)
-        }
-
-        async fn collect_prompt_contributions(
-            &self,
-            _ctx: PromptBuildContext,
-        ) -> Result<PromptContributions, ExtensionError> {
-            Ok(PromptContributions::default())
         }
 
         async fn emit_compact(
@@ -643,18 +633,6 @@ mod tests {
         ) -> Result<(), ExtensionError> {
             Ok(())
         }
-
-        async fn collect_tool_adapters(&self, _working_dir: &str) -> Vec<Arc<dyn Tool>> {
-            Vec::new()
-        }
-
-        async fn collect_tool_prompt_metadata(&self) -> HashMap<String, ToolPromptMetadata> {
-            HashMap::new()
-        }
-
-        fn session_ops(&self) -> Option<Arc<dyn SessionOperations>> {
-            None
-        }
     }
 
     #[tokio::test]
@@ -682,10 +660,7 @@ mod tests {
             extension_event_sink: None,
             session_store_dir: None,
         };
-        caps.extension_runner()
-            .emit_pre_tool_use(ctx)
-            .await
-            .unwrap();
+        caps.turn_hooks().emit_pre_tool_use(ctx).await.unwrap();
 
         bridge.shutdown(&mut shared).await;
 

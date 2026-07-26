@@ -79,6 +79,9 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     export!(
         CreateSessionRequest,
         CreateSessionResponseDto,
+        ToolSelectionDto,
+        ConfigureSessionToolsRequest,
+        ConfigureSessionToolsResponse,
         PromptAttachmentDto,
         PromptRequest,
         ToolApprovalRequest,

@@ -12,10 +12,10 @@
 use std::collections::VecDeque;
 
 use astrcode_core::tool::{ExecutionMode, ToolResult};
-use astrcode_kernel::ToolRegistry;
 use tokio::task::JoinSet;
 
 use crate::{
+    ToolRegistry,
     tool_exec::{ToolCallRuntimeContext, execute_tool_call},
     tool_types::PreparedToolInvocation,
     turn_context::TurnError,

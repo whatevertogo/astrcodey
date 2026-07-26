@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::CommandCompletions,
+    extension::{CommandCompletions, SessionToolSelection},
     types::{SessionId, TurnId},
 };
 use astrcode_protocol::commands::ClientCommand;
@@ -64,8 +64,21 @@ impl CommandHandle {
 
     /// 创建新会话，返回会话 ID。
     pub async fn create_session(&self, working_dir: String) -> Result<SessionId, HandlerError> {
-        self.request(|reply| CommandMessage::CreateSession { working_dir, reply })
+        self.create_session_with_tool_selection(working_dir, None)
             .await
+    }
+
+    pub async fn create_session_with_tool_selection(
+        &self,
+        working_dir: String,
+        tool_selection: Option<SessionToolSelection>,
+    ) -> Result<SessionId, HandlerError> {
+        self.request(|reply| CommandMessage::CreateSession {
+            working_dir,
+            tool_selection,
+            reply,
+        })
+        .await
     }
 
     /// 提交提示词，返回 Turn ID 和完成通知接收器。
@@ -221,6 +234,7 @@ pub(in crate::handler) enum CommandMessage {
     /// 创建会话
     CreateSession {
         working_dir: String,
+        tool_selection: Option<SessionToolSelection>,
         reply: oneshot::Sender<Result<SessionId, HandlerError>>,
     },
     /// 提交输入
@@ -444,8 +458,15 @@ impl CommandHandler {
             CommandMessage::ClientCommand { command, reply } => {
                 let _ = reply.send(self.handle(command).await);
             },
-            CommandMessage::CreateSession { working_dir, reply } => {
-                let _ = reply.send(self.create_session(working_dir).await);
+            CommandMessage::CreateSession {
+                working_dir,
+                tool_selection,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.create_session_with_tool_selection(working_dir, tool_selection)
+                        .await,
+                );
             },
             CommandMessage::SubmitInputForSession {
                 session_id,

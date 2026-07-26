@@ -12,7 +12,7 @@ use astrcode_core::{
     },
     llm::{self, LlmProvider},
 };
-use astrcode_kernel::ExtensionRuntime;
+use astrcode_extension_sdk::runtime_ports::TurnHooks;
 
 use crate::{Session, session::SessionError};
 
@@ -41,7 +41,7 @@ impl<'a> CompactHookContext<'a> {
 }
 
 pub async fn collect_compact_instructions(
-    extension_runner: &dyn ExtensionRuntime,
+    extension_runner: &dyn TurnHooks,
     input: CompactHookContext<'_>,
 ) -> Result<Vec<String>, ExtensionError> {
     let ctx = input.build_compact_context(None);
@@ -61,7 +61,7 @@ pub async fn collect_compact_instructions(
 }
 
 pub async fn dispatch_post_compact(
-    extension_runner: &dyn ExtensionRuntime,
+    extension_runner: &dyn TurnHooks,
     input: CompactHookContext<'_>,
     compaction: &CompactResult,
 ) -> Result<(), ExtensionError> {

@@ -9,13 +9,13 @@ use astrcode_core::{
         ToolError, ToolExecutionContext, ToolResult,
     },
 };
-use astrcode_kernel::ToolRegistry;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolInvocation,
 };
+use crate::ToolRegistry;
 
 // ─── Runtime context types ──────────────────────────────────────────────
 
@@ -51,8 +51,7 @@ impl TurnToolContext {
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
-            is_child_session: session_state.parent_session_id.is_some(),
-            child_tool_policy: session.runtime().child_tool_policy(),
+            tool_selection: session_state.tool_selection.clone(),
             permission_chain,
             approval_history,
         };

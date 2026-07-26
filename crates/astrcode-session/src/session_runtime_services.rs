@@ -16,13 +16,21 @@ use astrcode_core::{
     llm::LlmProvider,
     prompt::{PromptFileProvider, PromptProvider},
 };
-use astrcode_kernel::{ExtensionRuntime, ToolPack, extension_runtime::NoopExtensionRuntime};
+use astrcode_extension_sdk::{
+    runtime_ports::{
+        PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
+        SessionOperationsProvider, ToolCatalogProvider, TurnHooks,
+    },
+    tool_pack::ToolPack,
+};
+
+use crate::SessionExtensionPorts;
 
 pub struct SessionRuntimeServices {
     llm: ArcSwap<ProviderSlot>,
     /// 小模型 provider slot。未配置小模型时与主模型相同。
     small_llm: ArcSwap<ProviderSlot>,
-    extension_runner: Arc<dyn ExtensionRuntime>,
+    extension_ports: SessionExtensionPorts,
     context_assembler: Arc<dyn ContextAssembler>,
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
     prompt_provider: Arc<dyn PromptProvider>,
@@ -32,7 +40,7 @@ pub struct SessionRuntimeServices {
 }
 
 pub struct SessionHostServices {
-    pub extension_runner: Arc<dyn ExtensionRuntime>,
+    pub extension_ports: SessionExtensionPorts,
     pub context_assembler: Arc<dyn ContextAssembler>,
     pub post_compact_enricher: Arc<dyn PostCompactEnricher>,
     pub prompt_provider: Arc<dyn PromptProvider>,
@@ -51,7 +59,7 @@ impl SessionHostServices {
         prompt_file_provider: Arc<dyn PromptFileProvider>,
     ) -> Self {
         Self {
-            extension_runner: Arc::new(NoopExtensionRuntime),
+            extension_ports: SessionExtensionPorts::default(),
             context_assembler,
             post_compact_enricher: Arc::new(NoopPostCompactEnricher),
             prompt_provider,
@@ -60,8 +68,21 @@ impl SessionHostServices {
         }
     }
 
-    pub fn with_extension_runner(mut self, extension_runner: Arc<dyn ExtensionRuntime>) -> Self {
-        self.extension_runner = extension_runner;
+    pub fn with_extension_adapter<T>(mut self, adapter: Arc<T>) -> Self
+    where
+        T: ToolCatalogProvider
+            + PromptContributor
+            + RuntimeSnapshotProvider
+            + TurnHooks
+            + SessionOperationsProvider
+            + 'static,
+    {
+        self.extension_ports = SessionExtensionPorts::from_adapter(adapter);
+        self
+    }
+
+    pub fn with_extension_ports(mut self, extension_ports: SessionExtensionPorts) -> Self {
+        self.extension_ports = extension_ports;
         self
     }
 
@@ -95,7 +116,7 @@ impl SessionRuntimeServices {
             small_llm: ArcSwap::from_pointee(ProviderSlot {
                 provider: small_llm,
             }),
-            extension_runner: host_services.extension_runner,
+            extension_ports: host_services.extension_ports,
             context_assembler: host_services.context_assembler,
             post_compact_enricher: host_services.post_compact_enricher,
             prompt_provider: host_services.prompt_provider,
@@ -126,12 +147,24 @@ impl SessionRuntimeServices {
             .store(Arc::new(ProviderSlot { provider: new }));
     }
 
-    pub fn extension_runner(&self) -> &dyn ExtensionRuntime {
-        self.extension_runner.as_ref()
+    pub fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
+        self.extension_ports.tool_catalog()
     }
 
-    pub fn extension_runner_arc(&self) -> Arc<dyn ExtensionRuntime> {
-        Arc::clone(&self.extension_runner)
+    pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
+        self.extension_ports.runtime_snapshot_state()
+    }
+
+    pub fn prompt_contributor(&self) -> &dyn PromptContributor {
+        self.extension_ports.prompt_contributor()
+    }
+
+    pub fn turn_hooks(&self) -> &dyn TurnHooks {
+        self.extension_ports.turn_hooks()
+    }
+
+    pub fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
+        self.extension_ports.turn_hooks_arc()
     }
 
     pub fn context_assembler(&self) -> &dyn ContextAssembler {
@@ -170,6 +203,13 @@ impl SessionRuntimeServices {
         &self.tool_packs
     }
 
+    pub(crate) fn tool_pack_versions(&self) -> Vec<u64> {
+        self.tool_packs
+            .iter()
+            .map(|pack| pack.snapshot_version())
+            .collect()
+    }
+
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
         self.effective_config.load_full()
     }
@@ -178,9 +218,9 @@ impl SessionRuntimeServices {
         self.effective_config.store(Arc::new(new));
     }
 
-    /// 获取 session_ops 能力引用（从 extension_runner 读取）。
+    /// 获取 session_ops 能力引用。
     pub fn session_ops(&self) -> Option<Arc<dyn astrcode_core::tool::SessionOperations>> {
-        self.extension_runner.session_ops()
+        self.extension_ports.session_operations().session_ops()
     }
 }
 

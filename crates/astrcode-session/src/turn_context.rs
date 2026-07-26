@@ -8,7 +8,7 @@ use astrcode_core::{
     storage::SessionReadModel,
     types::*,
 };
-use astrcode_kernel::ExtensionRuntime;
+use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio::sync::mpsc;
 
 // ─── Turn event channel ──────────────────────────────────────────────────
@@ -24,7 +24,7 @@ pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) 
 
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
-    extension_runner: &dyn ExtensionRuntime,
+    extension_runner: &dyn TurnHooks,
     ctx: &LifecycleContext,
 ) {
     if let Err(error) = extension_runner
@@ -60,8 +60,7 @@ pub(crate) struct SharedTurnContext {
     /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_sender: Option<std::sync::Arc<crate::turn_publish::TurnEventSender>>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
-    pub(crate) is_child_session: bool,
-    pub(crate) child_tool_policy: Option<astrcode_core::extension::ChildToolPolicy>,
+    pub(crate) tool_selection: Option<astrcode_core::extension::SessionToolSelection>,
     pub(crate) permission_chain: std::sync::Arc<astrcode_core::permission::PermissionChain>,
     pub(crate) approval_history: std::sync::Arc<crate::permission::ApprovalHistoryStore>,
 }
@@ -76,8 +75,7 @@ impl SharedTurnContext {
             session_store_dir: None,
             turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
-            is_child_session: model.parent_session_id.is_some(),
-            child_tool_policy: None,
+            tool_selection: model.tool_selection.clone(),
             permission_chain: std::sync::Arc::new(astrcode_core::permission::PermissionChain::new(
                 vec![],
             )),

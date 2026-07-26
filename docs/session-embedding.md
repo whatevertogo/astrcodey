@@ -1,16 +1,16 @@
-# AstrCode 内核化嵌入边界
+# AstrCode Session 嵌入边界
 
 AstrCode 的可嵌入形态分为三层：
 
 | 层级 | Crate | 角色 |
 | --- | --- | --- |
-| 契约层 | `astrcode-core` | LLM、工具、prompt、context、storage、extension 事件等共享 trait / 数据契约 |
-| 内核层 | `astrcode-kernel`、`astrcode-session` | 运行时装配、session 生命周期、turn loop、工具调度、事件持久化 |
+| 契约层 | `astrcode-core`、`astrcode-extension-sdk` | LLM、工具、prompt、context、storage、extension 端口等共享 trait / 数据契约 |
+| 运行时层 | `astrcode-session` | session 生命周期、turn loop、工具快照与调度、事件持久化 |
 | 默认实现层 | `astrcode-context`、`astrcode-tools`、`astrcode-extensions`、`astrcode-server` | first-party prompt/context/工具/扩展/server 装配 |
 
 `astrcode-session` 不依赖 first-party 默认实现；宿主通过
 `SessionHostServices` 注入所需能力。这个边界对普通依赖和测试依赖都成立，避免
-session 单测通过默认 context/tools/extensions 间接锁死内核。
+session 单测通过默认 context/tools/extensions 间接锁死运行时核心。
 
 ## 最小宿主装配
 
@@ -25,7 +25,7 @@ session 单测通过默认 context/tools/extensions 间接锁死内核。
 
 其余能力默认可为空：
 
-- extension runtime：`NoopExtensionRuntime`
+- extension ports：`SessionExtensionPorts::default()`
 - post-compact enrichment：`NoopPostCompactEnricher`
 - tool packs：空列表
 
@@ -50,10 +50,10 @@ let services = Arc::new(SessionRuntimeServices::new(
 可运行示例：
 
 ```powershell
-cargo run -p astrcode-session --example embedded_kernel
+cargo run -p astrcode-session --example embedded_session
 ```
 
-该示例只使用 `astrcode-core`、`astrcode-kernel`、`astrcode-session` 和测试用
+该示例只使用 `astrcode-core`、`astrcode-extension-sdk`、`astrcode-session` 和测试用
 in-memory storage，演示自定义 `ContextAssembler`、`PromptProvider` 和
 `ToolPack` 的最小宿主装配。
 
@@ -65,13 +65,35 @@ in-memory storage，演示自定义 `ContextAssembler`、`PromptProvider` 和
 | post-compact enrichment | `astrcode_core::context::PostCompactEnricher` | `astrcode_context::post_compact_enricher::DefaultPostCompactEnricher` |
 | prompt assembly | `astrcode_core::prompt::PromptProvider` | `astrcode_context::prompt_engine::DefaultPromptProvider` |
 | prompt files/rules | `astrcode_core::prompt::PromptFileProvider` | `astrcode_context::prompt_engine::DefaultPromptFileProvider` |
-| extension hooks | `astrcode_kernel::ExtensionRuntime` | `astrcode_extensions::runner::ExtensionRunner` |
-| tools | `astrcode_kernel::ToolPack` | `astrcode_tools::registry::default_tool_packs()` |
+| runtime publication | `astrcode_extension_sdk::runtime_ports::RuntimeSnapshotProvider` | `astrcode_extensions::runner::ExtensionRunner` |
+| tool catalog | `astrcode_extension_sdk::runtime_ports::ToolCatalogProvider` | `astrcode_extensions::runner::ExtensionRunner` |
+| prompt contribution | `astrcode_extension_sdk::runtime_ports::PromptContributor` | `astrcode_extensions::runner::ExtensionRunner` |
+| extension hooks | `astrcode_extension_sdk::runtime_ports::TurnHooks` | `astrcode_extensions::runner::ExtensionRunner` |
+| session operations | `astrcode_extension_sdk::runtime_ports::SessionOperationsProvider` | `astrcode_extensions::runner::ExtensionRunner` + server binding |
+| tools | `astrcode_extension_sdk::tool_pack::ToolPack` | `astrcode_tools::registry::default_tool_packs()` |
 
 The server binary exposes its first-party composition as
 `astrcode_server::default_host::first_party_host_services(...)`. That profile is
 just a host preset built from the same injectable contracts; it is not required
 by `astrcode-session`.
+
+## 运行时快照协议
+
+`RuntimeSnapshotProvider` 的 `Stable(generation)` / `Updating` 是唯一的 extension
+失效协议。Session 只会在同一个稳定 generation 内构建并发布工具快照；更新期间按
+有截止时间的退避预算等待，不读取半发布状态。
+
+`ToolCatalogProvider` 返回工具、`Complete` / `Partial` 完整度和 diagnostics。
+动态发现局部失败时，宿主保留静态工具与其他成功来源；partial 快照使用短 TTL，
+完整快照按 generation 和 tool-pack 版本稳定缓存。同一 session 的并发构建由
+single-flight 合并。
+
+每个 turn 固定一份 `Arc<ToolRegistry>`，用于 prompt、provider schema 和执行，
+避免同一轮看到不同工具集合。`TurnHooks` 则是实时策略端口，故意不固定到 generation：
+安全与审批 hook 重载后可以立即生效。
+
+Session 工具选择通过事件持久化。根 session 可以限制自己的工具；child 请求会与
+parent 当前边界取交集。配置变更仅影响后续 turn，活跃 turn 保留既有快照。
 
 ## 与 pi-mono 的对应关系
 
@@ -80,35 +102,35 @@ pi-mono 的 `coding-agent` 通过 core/session services 暴露可嵌入入口，
 
 | pi-mono 概念 | AstrCode 对应 |
 | --- | --- |
-| core/session runtime | `astrcode-session` + `astrcode-kernel` |
+| core/session runtime | `astrcode-session` |
 | session services | `SessionRuntimeServices` / `SessionHostServices` |
 | default resource loader / tool factories | `astrcode-server::default_host` + `astrcode-tools` |
-| extension runner | `astrcode_kernel::ExtensionRuntime` |
-| custom tools | `astrcode_kernel::ToolPack` |
+| extension runner | `astrcode_extension_sdk::runtime_ports::{RuntimeSnapshotProvider, ToolCatalogProvider, PromptContributor, TurnHooks}` |
+| custom tools | `astrcode_extension_sdk::tool_pack::ToolPack` |
 
-迁移到其他场景时，优先依赖 `astrcode-core`、`astrcode-kernel`、`astrcode-session`
+迁移到其他场景时，优先依赖 `astrcode-core`、`astrcode-extension-sdk`、`astrcode-session`
 和所需 storage 实现；不要从 `astrcode-server` 反向拿默认能力，除非目标场景就是
 复用 AstrCode 的 first-party profile。
 
 ## 边界规则
 
-- 内核 crate 不直接依赖默认工具、扩展 loader、server 或 prompt/context 默认实现。
+- 运行时核心 crate 不直接依赖默认工具、扩展 loader、server 或 prompt/context 默认实现。
 - 默认实现可以依赖核心契约，但不能反向要求宿主使用 first-party server 或 bundled extensions。
 - 新增跨边界数据时放入 `astrcode-core`；新增可替换行为时优先定义 trait，再由默认实现 crate 实现。
 - 内置插件不能依赖项目其他内容，只能依赖插件系统。
 
 ## 边界验证
 
-修改内核或默认实现装配后至少检查：
+修改运行时核心或默认实现装配后至少检查：
 
 ```powershell
 python scripts\check-deps.py
 cargo tree -p astrcode-session | Select-String "astrcode-context|astrcode-extensions|astrcode-tools"
-cargo run -p astrcode-session --example embedded_kernel
+cargo run -p astrcode-session --example embedded_session
 cargo test -p astrcode-session --test embedded_host
 ```
 
 `check-deps.py` 会在 CI 中执行，并禁止 `astrcode-session` 通过普通依赖或测试依赖
-重新依赖 first-party 默认实现。`cargo tree` 命令应无输出；`embedded_kernel`
+重新依赖 first-party 默认实现。`cargo tree` 命令应无输出；`embedded_session`
 和 `embedded_host` 证明 session 可以在没有 first-party context/tools/extensions
 的宿主中启动、组装 prompt 并注册自定义工具。

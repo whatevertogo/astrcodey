@@ -9,7 +9,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::types::{SessionId, TurnId};
-use astrcode_session::{Session, turn_handle::TurnShutdownHandle};
+use astrcode_session::{Session, TurnShutdownHandle};
 use parking_lot::Mutex;
 
 struct TurnEntry {

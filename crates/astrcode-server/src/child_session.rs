@@ -12,10 +12,7 @@ use astrcode_core::{
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
-use astrcode_session::{
-    TurnError,
-    turn_handle::{TurnHandle, TurnShutdownHandle},
-};
+use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
 use astrcode_support::channel_policy::CHILD_SESSION_COMPLETE_CAPACITY;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -185,7 +182,7 @@ impl ChildSessionCoordinator {
                 request.name,
                 String::new(),
                 request.system_prompt,
-                request.tool_policy,
+                request.tool_selection,
                 request.source_extension.as_deref(),
                 request.tool_call_id.into(),
             )

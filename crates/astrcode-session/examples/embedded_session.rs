@@ -18,7 +18,7 @@ use astrcode_core::{
     },
     types::new_session_id,
 };
-use astrcode_kernel::{ToolPack, ToolPackScope};
+use astrcode_extension_sdk::tool_pack::{ToolPack, ToolPackScope};
 use astrcode_session::{Session, SessionHostServices, SessionRuntimeServices, SessionRuntimeState};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "embedded-model",
         None,
         None,
-        Some("embedded-kernel-example"),
+        Some("embedded-session-example"),
         runtime,
         Arc::clone(&caps),
     )
@@ -176,7 +176,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     session.initialize_runtime("memory://workspace").await?;
 
-    let registry = session.runtime().loaded_tool_registry();
+    let registry = session.tool_registry_snapshot("memory://workspace").await?;
     let tool_names = registry
         .list_definitions()
         .into_iter()

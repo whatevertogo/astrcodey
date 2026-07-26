@@ -12,7 +12,7 @@ use astrcode_core::{
     storage::SessionReadModel,
     tool::ToolDefinition,
 };
-use astrcode_kernel::ExtensionRuntime;
+use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use astrcode_support::hash::hex_fingerprint;
 
 use crate::{
@@ -53,7 +53,7 @@ pub enum IdleCompactionError {
 /// 在无 active turn 时压缩会话历史并持久化。
 pub async fn compact_idle_session(
     session: &Session,
-    extension_runner: &dyn ExtensionRuntime,
+    extension_runner: &dyn TurnHooks,
     context_assembler: &dyn ContextAssembler,
     llm: Arc<dyn LlmProvider>,
     state: &SessionReadModel,

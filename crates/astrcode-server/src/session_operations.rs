@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    extension::SessionToolSelection,
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
         SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
@@ -134,6 +135,25 @@ impl SessionOperations for ServerSessionOperations {
         })
     }
 
+    async fn configure_tools(
+        &self,
+        access: SessionAccess<'_>,
+        selection: SessionToolSelection,
+    ) -> Result<SessionToolSelection, SessionApiError> {
+        let (_, target_sid) = self.verified_session_ids(access).await?;
+        let session = self
+            .session_manager
+            .open(target_sid.clone())
+            .await
+            .map_err(|error| SessionApiError::NotFound(error.to_string()))?;
+        let effective = session
+            .configure_tools(selection)
+            .await
+            .map_err(SessionApiError::internal)?;
+        self.session_manager.sync_durable_events(&target_sid).await;
+        Ok(effective)
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -249,12 +269,12 @@ impl SessionOperations for ServerSessionOperations {
             .runtime()
             .resolve_tool_approval(&astrcode_core::types::ToolCallId::from(call_id), decision)
             .map_err(|error| match error {
-                astrcode_session::session_runtime::ToolApprovalResolveError::NotPending {
-                    ..
-                } => SessionApiError::NotFound(error.to_string()),
-                astrcode_session::session_runtime::ToolApprovalResolveError::ReceiverDropped {
-                    ..
-                } => SessionApiError::SessionBusy(error.to_string()),
+                astrcode_session::ToolApprovalResolveError::NotPending { .. } => {
+                    SessionApiError::NotFound(error.to_string())
+                },
+                astrcode_session::ToolApprovalResolveError::ReceiverDropped { .. } => {
+                    SessionApiError::SessionBusy(error.to_string())
+                },
             })
     }
 
@@ -273,15 +293,13 @@ impl SessionOperations for ServerSessionOperations {
         session
             .runtime()
             .resolve_tool_ui_response(&astrcode_core::types::ToolCallId::from(call_id), answers)
-            .map_err(|error| {
-                match error {
-                astrcode_session::session_runtime::ToolUiResponseResolveError::NotPending {
-                    ..
-                } => SessionApiError::NotFound(error.to_string()),
-                astrcode_session::session_runtime::ToolUiResponseResolveError::ReceiverDropped {
-                    ..
-                } => SessionApiError::SessionBusy(error.to_string()),
-            }
+            .map_err(|error| match error {
+                astrcode_session::ToolUiResponseResolveError::NotPending { .. } => {
+                    SessionApiError::NotFound(error.to_string())
+                },
+                astrcode_session::ToolUiResponseResolveError::ReceiverDropped { .. } => {
+                    SessionApiError::SessionBusy(error.to_string())
+                },
             })
     }
 }

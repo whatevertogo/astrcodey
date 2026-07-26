@@ -14,14 +14,15 @@ use astrcode_extension_sdk::{
         AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler, AfterToolResultsResult,
         CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
-        PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent,
-        ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItem, StopReason,
-        ToolHandler, ToolHookTarget, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
-        UserMessageEnvelopeResult,
+        ContinueAfterStopResult, DiscoveredTool, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        StatusItem, StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
+    runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness},
     tool::{
         ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
         ToolResult,
@@ -64,6 +65,10 @@ struct ConfigChangeProbeState {
 struct StateProbeExtension;
 
 struct StateProbeTool;
+
+struct SlowToolDiscoveryExtension;
+
+struct SlowToolDiscovery;
 
 struct HttpProbeExtension {
     id: &'static str,
@@ -248,6 +253,24 @@ impl ToolHandler for StateProbeTool {
             false,
             Default::default(),
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for SlowToolDiscoveryExtension {
+    fn id(&self) -> &str {
+        "slow-discovery"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool_discovery(Arc::new(SlowToolDiscovery));
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDiscoveryHandler for SlowToolDiscovery {
+    async fn discover(&self, _working_dir: &str) -> Vec<DiscoveredTool> {
+        std::future::pending().await
     }
 }
 
@@ -757,8 +780,9 @@ async fn extension_tool_receives_session_state_by_default() {
         .await
         .unwrap();
     let tool = runner
-        .collect_tool_adapters_typed("D:/workspace")
+        .tool_catalog_snapshot_typed("D:/workspace")
         .await
+        .tools
         .into_iter()
         .next()
         .unwrap();
@@ -780,6 +804,31 @@ async fn extension_tool_receives_session_state_by_default() {
 }
 
 #[tokio::test]
+async fn timed_out_discovery_returns_partial_catalog_with_static_tools() {
+    let runner = ExtensionRunner::new(Duration::from_millis(5));
+    runner
+        .register(Arc::new(StateProbeExtension))
+        .await
+        .unwrap();
+    runner
+        .register(Arc::new(SlowToolDiscoveryExtension))
+        .await
+        .unwrap();
+
+    let snapshot = runner.tool_catalog_snapshot_typed("D:/workspace").await;
+
+    assert_eq!(snapshot.completeness, ToolCatalogCompleteness::Partial);
+    assert!(
+        snapshot
+            .tools
+            .iter()
+            .any(|tool| tool.definition().name == "stateProbe")
+    );
+    assert_eq!(snapshot.diagnostics.len(), 1);
+    assert_eq!(snapshot.diagnostics[0].extension_id, "slow-discovery");
+}
+
+#[tokio::test]
 async fn extension_tool_receives_small_model_only_when_declared() {
     for (small_model_allowed, session_control_allowed, expected) in [
         (false, false, "false"),
@@ -795,8 +844,9 @@ async fn extension_tool_receives_small_model_only_when_declared() {
             .await
             .unwrap();
         let tool = runner
-            .collect_tool_adapters_typed("D:/workspace")
+            .tool_catalog_snapshot_typed("D:/workspace")
             .await
+            .tools
             .into_iter()
             .next()
             .unwrap();
@@ -897,18 +947,32 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
         .register(Arc::new(ConfigChangeProbeExtension(Arc::clone(&state))))
         .await
         .unwrap();
+    let stable_generation = || match runner.runtime_snapshot_state() {
+        RuntimeSnapshotState::Stable(generation) => generation,
+        RuntimeSnapshotState::Updating => panic!("runtime must be stable after update completion"),
+    };
+    let registered_generation = stable_generation();
+    assert!(registered_generation > 0);
 
     runner.update_extension_configs(config(2));
     assert!(runner.notify_config_changed().await.is_empty());
+    let version_two_generation = stable_generation();
+    assert!(version_two_generation > registered_generation);
     assert!(runner.notify_config_changed().await.is_empty());
+    assert_eq!(stable_generation(), version_two_generation);
     assert_eq!(state.calls.load(Ordering::SeqCst), 1);
     assert_eq!(state.applied_version.load(Ordering::SeqCst), 2);
 
     state.fail_next.store(true, Ordering::SeqCst);
     runner.update_extension_configs(config(3));
     assert_eq!(runner.notify_config_changed().await.len(), 1);
+    let failed_generation = stable_generation();
+    assert!(failed_generation > version_two_generation);
     assert!(runner.notify_config_changed().await.is_empty());
+    let version_three_generation = stable_generation();
+    assert!(version_three_generation > failed_generation);
     assert!(runner.notify_config_changed().await.is_empty());
+    assert_eq!(stable_generation(), version_three_generation);
     assert_eq!(state.calls.load(Ordering::SeqCst), 3);
     assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
 
@@ -919,6 +983,10 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
         tokio::spawn(async move { runner.notify_config_changed().await })
     };
     state.entered.notified().await;
+    assert_eq!(
+        runner.runtime_snapshot_state(),
+        RuntimeSnapshotState::Updating
+    );
     runner.update_extension_configs(config(5));
     let notify_v5 = {
         let runner = Arc::clone(&runner);
@@ -929,6 +997,10 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
     state.release.notify_one();
     assert!(notify_v4.await.unwrap().is_empty());
     assert!(notify_v5.await.unwrap().is_empty());
+    assert!(matches!(
+        runner.runtime_snapshot_state(),
+        RuntimeSnapshotState::Stable(_)
+    ));
     assert_eq!(state.applied_version.load(Ordering::SeqCst), 5);
 
     state.block_version.store(6, Ordering::SeqCst);
@@ -1371,8 +1443,9 @@ async fn session_control_tools_declare_no_resource_conflicts() {
         .await
         .unwrap();
     let session_control_tool = runner
-        .collect_tool_adapters_typed("D:/workspace")
+        .tool_catalog_snapshot_typed("D:/workspace")
         .await
+        .tools
         .into_iter()
         .next()
         .unwrap();
@@ -1388,8 +1461,9 @@ async fn session_control_tools_declare_no_resource_conflicts() {
         .await
         .unwrap();
     let default_tool = runner
-        .collect_tool_adapters_typed("D:/workspace")
+        .tool_catalog_snapshot_typed("D:/workspace")
         .await
+        .tools
         .into_iter()
         .find(|tool| tool.definition().name == "stateProbe")
         .unwrap();

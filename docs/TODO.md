@@ -4,7 +4,7 @@
 
 - [ ] **插件系统 / 扩展（s5r + SDK）**
   - [ ] **宿主能力补齐（`HostRouter` / wire）**
-    - [x] `astrcode.session.control.create` 透出 `tool_policy`（外置 agent 禁嵌套 `agent`）
+    - [x] `astrcode.session.control.create` 透出 `tool_selection`（外置 agent 禁嵌套 `agent`）
     - [ ] 外置扩展安全路径下的同步子 Agent（`wait_for_result` 与 peer I/O 线程死锁方案）— 当前仅有 guard（peer 线程拒绝 `wait_for_result: true` 并降级为 `false`），外置扩展无法同步等待子 agent 结果
     - [x] 实现 `astrcode.process.spawn`、`astrcode.network.client`（并发、总超时、取消与 I/O 大小均有上限）
     - [x] 实现 public HTTP 路由与跨插件公开路由分发（含 s5r manifest/handler E2E）

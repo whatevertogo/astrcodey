@@ -86,14 +86,10 @@ impl CommandHandler {
         keep_recent_turns: Option<usize>,
     ) -> Result<(ManualCompactOutcome, usize), HandlerError> {
         let state = session.read_model().await.map_err(HandlerError::Session)?;
-        let tool_registry = {
-            let current = session.runtime().loaded_tool_registry();
-            if current.list_definitions().is_empty() {
-                session.refresh_tools(&state.working_dir).await
-            } else {
-                current
-            }
-        };
+        let tool_registry = session
+            .tool_registry_snapshot(&state.working_dir)
+            .await
+            .map_err(HandlerError::Session)?;
         let tools = tool_registry.list_definitions();
         let provider_messages = state.provider_messages();
 

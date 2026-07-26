@@ -12,13 +12,14 @@ pub use builder::{
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
 pub use host::{
-    HostApi, HostClient, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
-    HostProcessRequest, HostSessionDeliveryOutput, HostSessionExecutionView,
-    HostSessionInputRequest, HostSessionTargetRequest, HostWorkspaceEditOutput,
-    HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-    HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-    HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, inject_host_api,
+    HostApi, HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+    HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
+    HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+    HostSessionTargetRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
+    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
+    HostWorkspaceWriteRequest, inject_host_api,
 };
 pub use registry::{
     CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,

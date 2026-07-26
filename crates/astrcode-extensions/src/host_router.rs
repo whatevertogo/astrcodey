@@ -427,7 +427,7 @@ mod tests {
     };
 
     use astrcode_core::{
-        extension::ChildToolPolicy,
+        extension::SessionToolSelection,
         permission::ApprovalDecision,
         storage::{EventReader, EventStore},
         tool::{
@@ -458,6 +458,7 @@ mod tests {
         let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
         let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"astrcode.session.control.create"));
+        assert!(names.contains(&"astrcode.session.control.configure_tools"));
     }
 
     #[test]
@@ -509,14 +510,22 @@ mod tests {
     }
 
     #[test]
-    fn session_control_create_schema_includes_tool_policy() {
+    fn session_tool_selection_schema_matches_strict_wire_contract() {
         let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
         let create = caps
             .iter()
             .find(|cap| cap.name == "astrcode.session.control.create")
             .expect("create capability");
 
-        assert!(create.input_schema["properties"]["tool_policy"].is_object());
+        let variants = create.input_schema["properties"]["tool_selection"]["oneOf"]
+            .as_array()
+            .expect("tool selection variants");
+        assert_eq!(variants.len(), 2);
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant["additionalProperties"] == false)
+        );
     }
 
     #[test]
@@ -669,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn invoke_session_create_forwards_tool_policy() {
+    fn invoke_session_create_forwards_tool_selection() {
         let router = HostRouter::from_backends(HostBackends::default());
         let ops = Arc::new(CapturingSessionOps::default());
         let ctx = InvokeContext {
@@ -685,9 +694,9 @@ mod tests {
                 "astrcode.session.control.create",
                 &json!({
                     "name": "worker",
-                    "tool_policy": {
-                        "mode": "deny",
-                        "tools": ["agent"]
+                    "tool_selection": {
+                        "mode": "all",
+                        "except": ["agent"]
                     }
                 })
                 .to_string(),
@@ -699,38 +708,106 @@ mod tests {
         let requests = ops.creates.lock().expect("creates lock");
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].tool_policy,
-            Some(ChildToolPolicy::Deny {
-                tools: vec!["agent".into()]
+            requests[0].tool_selection,
+            Some(SessionToolSelection::All {
+                except: vec!["agent".into()]
             })
         );
     }
 
     #[test]
-    fn invoke_session_create_rejects_invalid_tool_policy() {
+    fn invoke_session_create_accepts_explicit_empty_tool_set() {
         let router = HostRouter::from_backends(HostBackends::default());
+        let ops = Arc::new(CapturingSessionOps::default());
         let ctx = InvokeContext {
             session_id: Some("parent".into()),
-            session_ops: Some(Arc::new(CapturingSessionOps::default())),
+            session_ops: Some(ops.clone()),
             declared_capabilities: vec![ExtensionCapability::SessionControl],
             ..Default::default()
         };
 
-        let err = router
+        let output = router
             .invoke_sync(
                 "astrcode.session.control.create",
                 &json!({
-                    "tool_policy": {
-                        "mode": "allow",
-                        "tools": []
+                    "tool_selection": {
+                        "mode": "only",
+                        "names": []
                     }
                 })
                 .to_string(),
                 &ctx,
             )
-            .unwrap_err();
+            .expect("create child session without tools");
 
-        assert_eq!(err.code, "invalid_input");
+        assert_eq!(output["session_id"], "child-1");
+        let requests = ops.creates.lock().expect("creates lock");
+        assert_eq!(
+            requests[0].tool_selection,
+            Some(SessionToolSelection::Only { names: Vec::new() })
+        );
+    }
+
+    #[test]
+    fn invoke_session_configure_tools_validates_and_canonicalizes_selection() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ops = Arc::new(CapturingSessionOps::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+
+        let output = router
+            .invoke_sync(
+                "astrcode.session.control.configure_tools",
+                &json!({
+                    "session_id": "child",
+                    "selection": {
+                        "mode": "only",
+                        "names": ["write", " read ", "write"]
+                    }
+                })
+                .to_string(),
+                &ctx,
+            )
+            .expect("configure session tools");
+
+        assert_eq!(
+            output["selection"],
+            json!({ "mode": "only", "names": ["read", "write"] })
+        );
+        assert_eq!(
+            ops.tool_configurations
+                .lock()
+                .expect("tool configurations")
+                .as_slice(),
+            &[(
+                "parent".into(),
+                "child".into(),
+                SessionToolSelection::Only {
+                    names: vec!["read".into(), "write".into()]
+                }
+            )]
+        );
+
+        let error = router
+            .invoke_sync(
+                "astrcode.session.control.configure_tools",
+                &json!({
+                    "session_id": "child",
+                    "selection": {
+                        "mode": "only",
+                        "names": ["read"],
+                        "except": ["write"]
+                    }
+                })
+                .to_string(),
+                &ctx,
+            )
+            .expect_err("cross-variant fields must be rejected");
+        assert_eq!(error.code, "invalid_input");
     }
 
     #[test]
@@ -809,6 +886,7 @@ mod tests {
     #[derive(Default)]
     struct CapturingSessionOps {
         creates: Mutex<Vec<CreateSessionRequest>>,
+        tool_configurations: Mutex<Vec<(String, String, SessionToolSelection)>>,
     }
 
     #[async_trait::async_trait]
@@ -842,6 +920,22 @@ mod tests {
             Ok(SessionDeliveryOutcome::Injected {
                 turn_id: "turn-injected".into(),
             })
+        }
+
+        async fn configure_tools(
+            &self,
+            access: SessionAccess<'_>,
+            selection: SessionToolSelection,
+        ) -> Result<SessionToolSelection, SessionApiError> {
+            self.tool_configurations
+                .lock()
+                .expect("tool configurations")
+                .push((
+                    access.caller_session_id.into(),
+                    access.target_session_id.into(),
+                    selection.clone(),
+                ));
+            Ok(selection)
         }
 
         async fn submit_turn(

@@ -20,7 +20,7 @@ pub fn first_party_host_services(
         Arc::new(DefaultPromptProvider),
         Arc::new(DefaultPromptFileProvider),
     )
-    .with_extension_runner(extension_runner)
+    .with_extension_adapter(extension_runner)
     .with_post_compact_enricher(Arc::new(DefaultPostCompactEnricher))
     .with_tool_packs(
         astrcode_tools::registry::default_tool_packs_with_shell_timeout_source(shell_timeout_secs),

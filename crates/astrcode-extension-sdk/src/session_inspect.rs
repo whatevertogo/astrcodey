@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::session::SessionToolSelectionDto;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInspectListItem {
@@ -108,13 +110,6 @@ pub struct SessionInspectPendingInteraction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionInspectToolPolicy {
-    pub mode: String,
-    pub tools: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
 pub struct SessionInspectAgentSession {
     pub child_session_id: String,
     pub tool_call_id: Option<String>,
@@ -160,7 +155,7 @@ pub struct SessionInspectReadModel {
     pub created_at: String,
     pub updated_at: String,
     pub parent_session_id: Option<String>,
-    pub tool_policy: Option<SessionInspectToolPolicy>,
+    pub tool_selection: Option<SessionToolSelectionDto>,
     pub source_extension: Option<String>,
     pub agent_sessions: Vec<SessionInspectAgentSession>,
     pub compact_boundaries: Vec<SessionInspectCompactBoundary>,

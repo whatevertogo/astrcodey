@@ -36,13 +36,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             working_dir,
             model_id,
             parent_session_id,
-            tool_policy,
+            tool_selection,
             source_extension,
         } => {
             model.working_dir = working_dir.clone();
             model.model_id = model_id.clone();
             model.parent_session_id = parent_session_id.clone();
-            model.tool_policy = tool_policy.clone();
+            model.tool_selection = tool_selection.clone();
             model.source_extension = source_extension.clone();
             model.phase = Phase::Idle;
             if model.created_at.is_empty() {
@@ -51,6 +51,9 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         },
         EventPayload::ModelIdChanged { model_id } => {
             model.model_id = model_id.clone();
+        },
+        EventPayload::SessionToolsConfigured { selection } => {
+            model.tool_selection = Some(selection.clone());
         },
         EventPayload::SessionDeleted => {
             model.phase = Phase::Idle;
@@ -70,7 +73,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             child_session_id,
             agent_name,
             task,
-            tool_policy: _,
+            tool_selection: _,
             tool_call_id,
         } => {
             model.agent_sessions.push(AgentSessionLinkView {
@@ -456,7 +459,7 @@ mod tests {
                     working_dir: ".".into(),
                     model_id: "mock".into(),
                     parent_session_id: None,
-                    tool_policy: None,
+                    tool_selection: None,
                     source_extension: None,
                 },
             ),
@@ -590,7 +593,7 @@ mod tests {
                     child_session_id: child_id.clone(),
                     agent_name: "explorer".into(),
                     task: "read the code".into(),
-                    tool_policy: None,
+                    tool_selection: None,
                     tool_call_id: "tool-call-1".into(),
                 },
             ),
