@@ -105,7 +105,7 @@ pub fn tool(name: impl Into<String>) -> ToolDefinitionBuilder {
         name: name.into(),
         description: String::new(),
         parameters: serde_json::json!({"type": "object"}),
-        strict: true,
+        strict: false,
         execution_mode: ExecutionMode::Sequential,
     }
 }
@@ -131,17 +131,17 @@ impl ToolDefinitionBuilder {
 
     /// Explicitly require provider-side schema-constrained tool arguments.
     ///
-    /// This is the builder default. The method remains useful when configuration code wants to
-    /// state the contract explicitly or override an earlier [`Self::non_strict`] call.
+    /// Use this only when the schema satisfies every targeted provider's strict JSON Schema
+    /// subset. Provider-specific validation runs before the model request is sent.
     pub fn strict(mut self) -> Self {
         self.strict = true;
         self
     }
 
-    /// Opt out of provider-side strict tool arguments.
+    /// Use provider-side non-strict tool arguments.
     ///
-    /// Use this only for intentionally open or dynamic schemas that cannot satisfy the selected
-    /// provider's strict JSON Schema subset.
+    /// This is the builder default. The method remains useful when configuration code wants to
+    /// state the contract explicitly or override an earlier [`Self::strict`] call.
     pub fn non_strict(mut self) -> Self {
         self.strict = false;
         self
@@ -179,12 +179,12 @@ mod tests {
         let def = tool("test").description("A test tool").build();
         assert_eq!(def.name, "test");
         assert_eq!(def.description, "A test tool");
-        assert!(def.strict);
+        assert!(!def.strict);
         assert_eq!(def.origin, ToolOrigin::Extension);
         assert_eq!(def.execution_mode, ExecutionMode::Sequential);
 
-        assert!(!tool("dynamic").non_strict().build().strict);
-        assert!(tool("strict").non_strict().strict().build().strict);
+        assert!(tool("strict").strict().build().strict);
+        assert!(!tool("dynamic").strict().non_strict().build().strict);
     }
 
     #[tokio::test]
