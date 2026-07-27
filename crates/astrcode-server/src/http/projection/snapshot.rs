@@ -13,8 +13,8 @@ use astrcode_protocol::http::{
 
 use super::{
     blocks::{
-        compact_summary_block, latest_compact_boundary, messages_to_blocks,
-        streaming_assistant_block,
+        compact_summary_block, latest_compact_boundary, streaming_assistant_block,
+        transcript_blocks,
     },
     live::control_from_phase,
     session_title_from_working_dir,
@@ -34,7 +34,10 @@ pub(in crate::http) fn conversation_to_dto(
     if let Some(boundary) = latest_compact_boundary(&session.compact_boundaries) {
         blocks.push(compact_summary_block(boundary));
     }
-    blocks.extend(messages_to_blocks(&session.messages));
+    blocks.extend(transcript_blocks(
+        &session.messages,
+        &session.transcript_artifacts,
+    ));
     apply_pending_tool_state(
         &mut blocks,
         &session.pending_tool_approvals,

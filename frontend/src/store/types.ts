@@ -8,6 +8,7 @@ import type {
   SessionListItem,
   SlashCommandInfo,
 } from '../services/types'
+import type { SessionStreamStatus } from './sessionStreamController'
 
 export type MessageDelivery = 'queued' | 'inject'
 
@@ -15,6 +16,10 @@ export interface PendingMessage {
   id: string
   text: string
   delivery: MessageDelivery
+}
+
+export interface ActiveSessionStream {
+  stop: () => void
 }
 
 export interface AppState {
@@ -35,7 +40,9 @@ export interface AppState {
   phase: Phase
   compactSubmitting: boolean
 
-  streamAbortController: AbortController | null
+  sessionStream: ActiveSessionStream | null
+  sessionStreamStatus: SessionStreamStatus
+  sessionStreamError: string | null
   modelRefreshKey: number
   agentSessions: AgentSessionLink[]
   statusItems: Record<string, string>
@@ -53,7 +60,7 @@ export interface AppState {
   deleteProject: (workingDir: string) => Promise<void>
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
-  refreshConversationSnapshot: () => Promise<void>
+  refreshConversationSnapshot: () => Promise<string | null>
   refreshExtensionData: () => Promise<void>
   refreshCommands: () => Promise<void>
   executeExtensionCommand: (

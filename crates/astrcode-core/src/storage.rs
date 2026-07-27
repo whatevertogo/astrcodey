@@ -399,6 +399,30 @@ pub struct SequencedLlmMessage {
     pub source: Option<String>,
 }
 
+/// 不进入 provider 上下文、但需要稳定显示在会话 transcript 中的 durable 记录。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum TranscriptArtifactView {
+    Error {
+        id: String,
+        message: String,
+        seq: u64,
+    },
+    SystemNote {
+        id: String,
+        text: String,
+        seq: u64,
+    },
+}
+
+impl TranscriptArtifactView {
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Error { seq, .. } | Self::SystemNote { seq, .. } => *seq,
+        }
+    }
+}
+
 // ─── extension Event Index ────────────────────────────────────────────────
 
 /// 插件事件索引条目——不存 payload，按需从 event log 取。
@@ -520,6 +544,9 @@ pub struct SessionReadModel {
     pub messages: Vec<SequencedLlmMessage>,
     /// provider 可见但不展示给普通 transcript 的上下文消息。
     pub context_messages: Vec<SequencedLlmMessage>,
+    /// 仅用于 transcript 展示、不进入 provider 上下文的 durable 记录。
+    #[serde(default)]
+    pub transcript_artifacts: Vec<TranscriptArtifactView>,
     /// 会话工作目录。
     pub working_dir: String,
     /// 模型标识。
@@ -580,6 +607,7 @@ impl SessionReadModel {
             session_id,
             messages: Vec::new(),
             context_messages: Vec::new(),
+            transcript_artifacts: Vec::new(),
             working_dir: String::new(),
             model_id: String::new(),
             phase: Phase::Idle,

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useAppStore } from '../../store/conversation'
+import type { SessionStreamStatus } from '../../store/sessionStreamController'
 import { cn } from '../../lib/utils'
 import { PHASE_BG_CLASS } from '../../lib/styles'
 import { Dropdown, Icon, IconButton } from '../ui'
@@ -17,6 +18,12 @@ const STATUS_LABELS: Record<string, string> = {
   running: '运行中',
   completed: '已完成',
   failed: '失败',
+}
+
+const STREAM_STATUS_LABELS: Partial<Record<SessionStreamStatus, string>> = {
+  connecting: '连接中',
+  reconnecting: '正在重连',
+  degraded: '实时连接异常',
 }
 
 interface TopBarProps {
@@ -45,6 +52,8 @@ export default function TopBar({
   const activeSessionTitle = useAppStore((s) => s.activeSessionTitle)
   const agentSessions = useAppStore((s) => s.agentSessions)
   const switchSession = useAppStore((s) => s.switchSession)
+  const sessionStreamStatus = useAppStore((s) => s.sessionStreamStatus)
+  const sessionStreamError = useAppStore((s) => s.sessionStreamError)
 
   const [subsessionMenuOpen, setSubsessionMenuOpen] = useState(false)
 
@@ -88,6 +97,20 @@ export default function TopBar({
           {phase !== 'idle' && (
             <span className="shrink-0 text-xs text-text-secondary">
               {PHASE_LABELS[phase] ?? phase}
+            </span>
+          )}
+          {STREAM_STATUS_LABELS[sessionStreamStatus] && (
+            <span
+              className={cn(
+                'shrink-0 text-xs',
+                sessionStreamStatus === 'degraded'
+                  ? 'text-danger'
+                  : 'text-text-secondary'
+              )}
+              title={sessionStreamError ?? undefined}
+              aria-live="polite"
+            >
+              {STREAM_STATUS_LABELS[sessionStreamStatus]}
             </span>
           )}
         </div>

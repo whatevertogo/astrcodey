@@ -301,16 +301,6 @@ export function decodeConversationStreamEnvelope(
   }
 }
 
-export function tryDecodeConversationStreamEnvelope(
-  value: unknown
-): ConversationStreamEnvelope | null {
-  try {
-    return decodeConversationStreamEnvelope(value)
-  } catch {
-    return null
-  }
-}
-
 export function decodeConversationSnapshot(
   value: unknown
 ): ConversationSnapshot {

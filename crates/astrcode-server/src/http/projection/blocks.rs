@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use astrcode_core::{
     event::{Event, EventPayload},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
-    storage::{CompactBoundaryView, SequencedLlmMessage},
+    storage::{CompactBoundaryView, SequencedLlmMessage, TranscriptArtifactView},
 };
 use astrcode_protocol::http::{ConversationBlockDto, ConversationBlockStatusDto};
 
@@ -137,9 +137,25 @@ pub(in crate::http) fn completed_block_from_payload(event: &Event) -> Option<Con
     }
 }
 
-pub(in crate::http) fn messages_to_blocks(
+pub(in crate::http) fn transcript_blocks(
     messages: &[SequencedLlmMessage],
+    artifacts: &[TranscriptArtifactView],
 ) -> Vec<ConversationBlockDto> {
+    let mut blocks = sequenced_message_blocks(messages);
+    blocks.extend(artifacts.iter().map(|artifact| SequencedConversationBlock {
+        seq: artifact.seq(),
+        block: transcript_artifact_block(artifact),
+    }));
+    blocks.sort_by_key(|entry| entry.seq);
+    blocks.into_iter().map(|entry| entry.block).collect()
+}
+
+struct SequencedConversationBlock {
+    seq: u64,
+    block: ConversationBlockDto,
+}
+
+fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedConversationBlock> {
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 
@@ -151,23 +167,29 @@ pub(in crate::http) fn messages_to_blocks(
         }
         let id = format!("snapshot-message-{index}");
         match message.role {
-            LlmRole::User => blocks.push(ConversationBlockDto::User {
-                id,
-                text: visible_message_text(message),
-                attachments: attachments_from_user_message(message)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                source: source.clone(),
+            LlmRole::User => blocks.push(SequencedConversationBlock {
+                seq: seq_msg.updated_seq,
+                block: ConversationBlockDto::User {
+                    id,
+                    text: visible_message_text(message),
+                    attachments: attachments_from_user_message(message)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    source: source.clone(),
+                },
             }),
             LlmRole::Assistant => {
                 let text = visible_message_text(message);
                 if !text.trim().is_empty() || message.reasoning_content.is_some() {
-                    blocks.push(ConversationBlockDto::Assistant {
-                        id,
-                        text,
-                        reasoning_content: message.reasoning_content.clone(),
-                        status: ConversationBlockStatusDto::Complete,
+                    blocks.push(SequencedConversationBlock {
+                        seq: seq_msg.updated_seq,
+                        block: ConversationBlockDto::Assistant {
+                            id,
+                            text,
+                            reasoning_content: message.reasoning_content.clone(),
+                            status: ConversationBlockStatusDto::Complete,
+                        },
                     });
                 }
                 for content in &message.content {
@@ -181,20 +203,32 @@ pub(in crate::http) fn messages_to_blocks(
                         continue;
                     };
                     let block_index = blocks.len();
-                    blocks.push(streaming_tool_call_block(
-                        call_id.clone(),
-                        name,
-                        raw_arguments.is_none().then_some(arguments),
-                    ));
+                    blocks.push(SequencedConversationBlock {
+                        seq: seq_msg.updated_seq,
+                        block: streaming_tool_call_block(
+                            call_id.clone(),
+                            name,
+                            raw_arguments.is_none().then_some(arguments),
+                        ),
+                    });
                     tool_block_indices.insert(call_id.clone(), block_index);
                 }
             },
             LlmRole::Tool => {
-                push_tool_result_block(&mut blocks, &tool_block_indices, message, id);
+                push_tool_result_block(
+                    &mut blocks,
+                    &tool_block_indices,
+                    message,
+                    id,
+                    seq_msg.updated_seq,
+                );
             },
-            LlmRole::System => blocks.push(ConversationBlockDto::SystemNote {
-                id,
-                text: visible_message_text(message),
+            LlmRole::System => blocks.push(SequencedConversationBlock {
+                seq: seq_msg.updated_seq,
+                block: ConversationBlockDto::SystemNote {
+                    id,
+                    text: visible_message_text(message),
+                },
             }),
         }
     }
@@ -203,10 +237,11 @@ pub(in crate::http) fn messages_to_blocks(
 }
 
 fn push_tool_result_block(
-    blocks: &mut Vec<ConversationBlockDto>,
+    blocks: &mut Vec<SequencedConversationBlock>,
     tool_block_indices: &BTreeMap<String, usize>,
     message: &LlmMessage,
     fallback_id: String,
+    seq: u64,
 ) {
     let fallback_name = message.name.clone().unwrap_or_else(|| "tool".into());
     let mut pushed_result = false;
@@ -226,9 +261,13 @@ fn push_tool_result_block(
             ConversationBlockStatusDto::Complete
         };
         if let Some(block_index) = tool_block_indices.get(tool_call_id) {
-            if let Some(ConversationBlockDto::ToolCall {
-                text,
-                status: block_status,
+            if let Some(SequencedConversationBlock {
+                block:
+                    ConversationBlockDto::ToolCall {
+                        text,
+                        status: block_status,
+                        ..
+                    },
                 ..
             }) = blocks.get_mut(*block_index)
             {
@@ -238,28 +277,47 @@ fn push_tool_result_block(
                 continue;
             }
         }
-        blocks.push(ConversationBlockDto::ToolCall {
-            id: tool_call_id.clone(),
-            name: fallback_name.clone(),
-            arguments: String::new(),
-            text: content.clone(),
-            status,
-            metadata: None,
-            arguments_json: None,
+        blocks.push(SequencedConversationBlock {
+            seq,
+            block: ConversationBlockDto::ToolCall {
+                id: tool_call_id.clone(),
+                name: fallback_name.clone(),
+                arguments: String::new(),
+                text: content.clone(),
+                status,
+                metadata: None,
+                arguments_json: None,
+            },
         });
         pushed_result = true;
     }
 
     if !pushed_result {
-        blocks.push(ConversationBlockDto::ToolCall {
-            id: fallback_id,
-            name: fallback_name,
-            arguments: String::new(),
-            text: visible_message_text(message),
-            status: ConversationBlockStatusDto::Complete,
-            metadata: None,
-            arguments_json: None,
+        blocks.push(SequencedConversationBlock {
+            seq,
+            block: ConversationBlockDto::ToolCall {
+                id: fallback_id,
+                name: fallback_name,
+                arguments: String::new(),
+                text: visible_message_text(message),
+                status: ConversationBlockStatusDto::Complete,
+                metadata: None,
+                arguments_json: None,
+            },
         });
+    }
+}
+
+fn transcript_artifact_block(artifact: &TranscriptArtifactView) -> ConversationBlockDto {
+    match artifact {
+        TranscriptArtifactView::Error { id, message, .. } => ConversationBlockDto::Error {
+            id: id.clone(),
+            message: message.clone(),
+        },
+        TranscriptArtifactView::SystemNote { id, text, .. } => ConversationBlockDto::SystemNote {
+            id: id.clone(),
+            text: text.clone(),
+        },
     }
 }
 
@@ -285,7 +343,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn messages_to_blocks_hides_turn_aborted_context() {
+    fn transcript_blocks_hides_turn_aborted_context() {
         let messages = vec![
             SequencedLlmMessage {
                 message: LlmMessage::user("visible"),
@@ -299,7 +357,7 @@ mod tests {
             },
         ];
 
-        let blocks = messages_to_blocks(&messages);
+        let blocks = transcript_blocks(&messages, &[]);
 
         assert_eq!(blocks.len(), 1);
         assert!(matches!(

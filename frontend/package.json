@@ -25,7 +25,8 @@
     "test:assistant-run": "esbuild src/components/Chat/assistantRunModel.ts --bundle --format=esm --outfile=../target/frontend-assistant-run/assistantRunModel.js && node scripts/assistant-run-model.test.mjs",
     "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
     "test:delta": "esbuild src/store/delta/coalesce.ts --bundle --format=esm --outfile=../target/frontend-delta/coalesce.js && node scripts/delta-coalesce.test.mjs",
-    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta"
+    "test:session-stream": "esbuild src/store/sessionStreamController.ts --bundle --platform=node --format=esm --outfile=../target/frontend-session-stream/sessionStreamController.js && node scripts/session-stream-controller.test.mjs",
+    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta && npm run test:session-stream"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

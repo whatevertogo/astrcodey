@@ -7,34 +7,38 @@ import {
   isDeferrableDelta,
   type CoalescedDelta,
 } from './delta/coalesce'
-import type { AppState } from './types'
+import {
+  SessionStreamController,
+  type SessionStreamScheduler,
+} from './sessionStreamController'
+import type { ActiveSessionStream, AppState } from './types'
 
 const SSE_RECONNECT_BASE_MS = 1000
 const SSE_RECONNECT_MAX_MS = 30_000
 const STREAM_FLUSH_FALLBACK_MS = 16
 type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 
-function sseReconnectDelayMs(attempt: number): number {
-  const capped = Math.min(
-    SSE_RECONNECT_MAX_MS,
-    SSE_RECONNECT_BASE_MS * 2 ** attempt
-  )
-  const jitter = Math.random() * 0.3 * capped
-  return Math.round(capped + jitter)
+const browserScheduler: SessionStreamScheduler = {
+  schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  cancel: (timer) => window.clearTimeout(timer as number),
+  reconnectDelayMs: (attempt) => {
+    const capped = Math.min(
+      SSE_RECONNECT_MAX_MS,
+      SSE_RECONNECT_BASE_MS * 2 ** attempt
+    )
+    const jitter = Math.random() * 0.3 * capped
+    return Math.round(capped + jitter)
+  },
 }
 
-export function connectSse(
+export function startSessionStream(
   sessionId: string,
   cursor: string,
-  reconnectAttempt: number,
   get: () => AppState,
   set: (
     partial: Partial<AppState> | ((s: AppState) => Partial<AppState>)
   ) => void
-): void {
-  const abortController = new AbortController()
-  set({ streamAbortController: abortController })
-
+): ActiveSessionStream {
   const pendingDeltas: ConversationDelta[] = []
   let latestCursor: string | null = null
   let rafId: number | null = null
@@ -49,7 +53,7 @@ export function connectSse(
     })
   }
 
-  const flushPending = () => {
+  const clearFlushSchedule = () => {
     if (rafId !== null) {
       cancelAnimationFrame(rafId)
       rafId = null
@@ -58,6 +62,10 @@ export function connectSse(
       clearTimeout(timeoutId)
       timeoutId = null
     }
+  }
+
+  const flushPending = () => {
+    clearFlushSchedule()
 
     if (pendingDeltas.length === 0) {
       if (latestCursor !== null) {
@@ -74,12 +82,12 @@ export function connectSse(
     const coalesced = coalesceDeltas(deltas)
     const blockDeltas: BlockDelta[] = []
 
-    for (const c of coalesced) {
-      if (c.kind === 'other') {
+    for (const coalescedDelta of coalesced) {
+      if (coalescedDelta.kind === 'other') {
         flushBlockDeltas(blockDeltas)
-        applyDeltaToState(get(), c.delta, get, set)
+        applyDeltaToState(get(), coalescedDelta.delta, get, set)
       } else {
-        blockDeltas.push(c)
+        blockDeltas.push(coalescedDelta)
       }
     }
 
@@ -98,57 +106,39 @@ export function connectSse(
     }
   }
 
-  consumeSseStream(
+  const controller = new SessionStreamController({
     sessionId,
-    cursor,
-    (envelope) => {
-      const current = get()
-      if (current.activeSessionId !== sessionId) return
-      if (envelope.cursor) {
+    initialCursor: cursor,
+    consume: consumeSseStream,
+    scheduler: browserScheduler,
+    host: {
+      isActive: () => get().activeSessionId === sessionId,
+      applyEnvelope: (envelope) => {
+        if (get().activeSessionId !== sessionId) return
         latestCursor = envelope.cursor.value
-      }
-      if (isDeferrableDelta(envelope.delta)) {
-        pendingDeltas.push(envelope.delta)
-        scheduleFlush()
-      } else {
-        flushPending()
-        applyDeltaToState(current, envelope.delta, get, set)
-      }
-    },
-    abortController.signal
-  )
-    .then((result) => {
-      if (abortController.signal.aborted) return
-      if (result === 'ended') {
-        const current = get()
-        if (current.activeSessionId === sessionId) {
-          const latestCursor = current.cursor ?? cursor
-          const delayMs = sseReconnectDelayMs(reconnectAttempt)
-          setTimeout(() => {
-            if (get().activeSessionId === sessionId) {
-              connectSse(
-                sessionId,
-                latestCursor,
-                reconnectAttempt + 1,
-                get,
-                set
-              )
-            }
-          }, delayMs)
+        if (isDeferrableDelta(envelope.delta)) {
+          pendingDeltas.push(envelope.delta)
+          scheduleFlush()
+        } else {
+          flushPending()
+          applyDeltaToState(get(), envelope.delta, get, set)
         }
-      }
-    })
-    .catch((err) => {
-      if (abortController.signal.aborted) return
-      const delayMs = sseReconnectDelayMs(reconnectAttempt)
-      console.error('SSE stream error, reconnecting in', delayMs, 'ms:', err)
-      if (get().activeSessionId === sessionId) {
-        const latestCursor = get().cursor ?? cursor
-        setTimeout(() => {
-          if (get().activeSessionId === sessionId) {
-            connectSse(sessionId, latestCursor, reconnectAttempt + 1, get, set)
-          }
-        }, delayMs)
-      }
-    })
+      },
+      rehydrate: () => get().refreshConversationSnapshot(),
+      updateStatus: (sessionStreamStatus, sessionStreamError) => {
+        if (get().activeSessionId !== sessionId) return
+        set({ sessionStreamStatus, sessionStreamError })
+      },
+    },
+  })
+
+  controller.start()
+  return {
+    stop: () => {
+      clearFlushSchedule()
+      pendingDeltas.length = 0
+      latestCursor = null
+      controller.stop()
+    },
+  }
 }

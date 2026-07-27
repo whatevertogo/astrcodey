@@ -10,7 +10,7 @@ import {
   resolvePhase,
   withTimeout,
 } from './delta/blockHelpers'
-import { connectSse } from './stream'
+import { startSessionStream } from './stream'
 import { canInjectMidTurn, isExecutionPhase } from './phaseHelpers'
 import {
   computeInitialProjectFolderOrder,
@@ -27,6 +27,9 @@ function resetSessionView(): Partial<AppState> {
     cursor: null,
     phase: 'idle',
     compactSubmitting: false,
+    sessionStream: null,
+    sessionStreamStatus: 'disconnected',
+    sessionStreamError: null,
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
@@ -50,7 +53,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   cursor: null,
   phase: 'idle',
   compactSubmitting: false,
-  streamAbortController: null,
+  sessionStream: null,
+  sessionStreamStatus: 'disconnected',
+  sessionStreamError: null,
   modelRefreshKey: 0,
   agentSessions: [],
   statusItems: {},
@@ -134,7 +139,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const state = get()
     if (state.activeSessionId === sessionId) {
-      state.streamAbortController?.abort()
+      state.sessionStream?.stop()
       set(resetSessionView())
     }
     await get().refreshSessions()
@@ -151,7 +156,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       (s) => s.sessionId === state.activeSessionId
     )
     if (activeSession && activeSession.workingDir === workingDir) {
-      state.streamAbortController?.abort()
+      state.sessionStream?.stop()
       set(resetSessionView())
     }
     await get().refreshSessions()
@@ -163,7 +168,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   switchSession: async (sessionId: string) => {
     const state = get()
-    state.streamAbortController?.abort()
+    state.sessionStream?.stop()
 
     set({
       activeSessionId: sessionId,
@@ -179,10 +184,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       slashCommands: [],
       keybindings: [],
       statusItems: {},
+      sessionStream: null,
+      sessionStreamStatus: 'connecting',
+      sessionStreamError: null,
     })
 
     try {
       const snapshot = await api.getConversation(sessionId)
+      if (get().activeSessionId !== sessionId) return
       const sessions = get().sessions
       const sessionItem = sessions.find((s) => s.sessionId === sessionId)
 
@@ -196,11 +205,24 @@ export const useAppStore = create<AppState>((set, get) => ({
         agentSessions: snapshot.agentSessions ?? [],
       })
 
-      connectSse(sessionId, snapshot.cursor.value, 0, get, set)
+      const sessionStream = startSessionStream(
+        sessionId,
+        snapshot.cursor.value,
+        get,
+        set
+      )
+      if (get().activeSessionId !== sessionId) {
+        sessionStream.stop()
+        return
+      }
+      set({ sessionStream })
       void get().refreshCommands()
     } catch (err) {
       console.error('Failed to switch session:', err)
+      if (get().activeSessionId !== sessionId) return
       set({
+        sessionStreamStatus: 'degraded',
+        sessionStreamError: err instanceof Error ? err.message : String(err),
         transientHint:
           err instanceof Error ? err.message : '加载会话失败，请重试',
       })
@@ -209,10 +231,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshConversationSnapshot: async () => {
     const { activeSessionId } = get()
-    if (!activeSessionId) return
+    if (!activeSessionId) return null
 
     try {
       const snapshot = await api.getConversation(activeSessionId)
+      if (get().activeSessionId !== activeSessionId) return null
       set({
         blocks: snapshot.blocks,
         control: snapshot.control,
@@ -221,11 +244,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeSessionTitle: snapshot.sessionTitle,
         agentSessions: snapshot.agentSessions ?? [],
       })
+      return snapshot.cursor.value
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
+      if (get().activeSessionId !== activeSessionId) return null
       set({
         transientHint: err instanceof Error ? err.message : '刷新会话快照失败',
       })
+      return null
     }
   },
 

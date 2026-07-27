@@ -7,7 +7,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     storage::{
         AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
-        SequencedLlmMessage, SessionReadModel,
+        SequencedLlmMessage, SessionReadModel, TranscriptArtifactView,
     },
     types::SessionId,
 };
@@ -59,6 +59,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::Idle;
             model.messages.clear();
             model.context_messages.clear();
+            model.transcript_artifacts.clear();
             model.system_prompt = None;
             model.extra_system_prompt = None;
             model.system_prompt_fingerprint = None;
@@ -340,12 +341,17 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .cloned()
                 .map(|message| SequencedLlmMessage {
                     message,
-                    updated_seq: event_seq,
+                    // retained_messages 属于 compact 基准游标之前的历史前缀。
+                    // 锚定到基准序号，确保 compact 计算期间写入的 tail 事件仍排在其后。
+                    updated_seq: base_event_seq,
                     source: None,
                 })
                 .collect();
             messages.extend(tail_messages);
             model.messages = messages;
+            model
+                .transcript_artifacts
+                .retain(|artifact| artifact.seq() > base_event_seq);
             // 不改变 phase，保留之前的状态。
             // auto compact 在 turn 期间发生，phase 应保持 Thinking/Streaming。
             // 手动 compact 时 phase 已经是 Idle（由 CompactBoundaryCreated 设置）。
@@ -375,7 +381,14 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 .collect();
             model.phase = Phase::Idle;
         },
-        EventPayload::ErrorOccurred { .. } => {
+        EventPayload::ErrorOccurred { message, .. } => {
+            model
+                .transcript_artifacts
+                .push(TranscriptArtifactView::Error {
+                    id: event.id.to_string(),
+                    message: message.clone(),
+                    seq: event_seq,
+                });
             model.phase = Phase::Error;
         },
         EventPayload::CompactionStarted => {
@@ -403,7 +416,15 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             };
         },
         EventPayload::Custom { .. } => {},
-        EventPayload::RecapGenerated { .. } => {},
+        EventPayload::RecapGenerated { text, .. } => {
+            model
+                .transcript_artifacts
+                .push(TranscriptArtifactView::SystemNote {
+                    id: event.id.to_string(),
+                    text: text.clone(),
+                    seq: event_seq,
+                });
+        },
         EventPayload::TokenUsageRecorded { .. } => {},
         EventPayload::ExtensionEvent {
             extension_id,
@@ -437,6 +458,7 @@ mod tests {
         extension::CompactStrategy,
         llm::{LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         permission::{ApprovalDecision, ApprovalSource},
+        storage::TranscriptArtifactView,
         types::{SessionId, new_message_id},
     };
 
@@ -513,6 +535,15 @@ mod tests {
             event(
                 5,
                 &session_id,
+                EventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "during compact".into(),
+                    attachments: vec![],
+                },
+            ),
+            event(
+                6,
+                &session_id,
                 EventPayload::CompactBoundaryCreated {
                     trigger: "auto_threshold".into(),
                     pre_tokens: 100,
@@ -525,7 +556,7 @@ mod tests {
                 },
             ),
             event(
-                6,
+                7,
                 &session_id,
                 EventPayload::SessionContinuedFromCompaction {
                     parent_session_id: session_id.clone(),
@@ -553,12 +584,23 @@ mod tests {
                 .iter()
                 .map(|m| m.message.clone())
                 .collect::<Vec<_>>(),
-            retained_messages
+            vec![
+                LlmMessage::user("recent user"),
+                LlmMessage::user("during compact"),
+            ]
+        );
+        assert_eq!(
+            compacted
+                .messages
+                .iter()
+                .map(|message| message.updated_seq)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
         );
         assert_eq!(compacted.compact_boundaries[0].base_event_seq, 4);
 
         events.push(event(
-            7,
+            8,
             &session_id,
             EventPayload::UserMessage {
                 message_id: new_message_id(),
@@ -576,6 +618,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 LlmMessage::user("recent user"),
+                LlmMessage::user("during compact"),
                 LlmMessage::user("after compact"),
             ]
         );
@@ -671,6 +714,71 @@ mod tests {
                 .any(|message| message.joined_display_text("").contains("<turn_aborted>")),
             "provider history should include the marker"
         );
+    }
+
+    #[test]
+    fn replay_keeps_transcript_artifacts_out_of_provider_history_and_compacts_them() {
+        let session_id = SessionId::from("session-transcript-artifacts");
+        let mut events = vec![
+            event(
+                1,
+                &session_id,
+                EventPayload::SessionStarted {
+                    working_dir: ".".into(),
+                    model_id: "mock".into(),
+                    parent_session_id: None,
+                    tool_selection: None,
+                    source_extension: None,
+                },
+            ),
+            event(
+                2,
+                &session_id,
+                EventPayload::ErrorOccurred {
+                    code: -32603,
+                    message: "provider failed".into(),
+                    recoverable: false,
+                },
+            ),
+            event(
+                3,
+                &session_id,
+                EventPayload::RecapGenerated {
+                    text: "recap after failure".into(),
+                    source: "manual".into(),
+                },
+            ),
+        ];
+
+        let model = replay(session_id.clone(), &events);
+        assert!(model.provider_messages().is_empty());
+        assert!(matches!(
+            model.transcript_artifacts.as_slice(),
+            [
+                TranscriptArtifactView::Error { message, seq: 2, .. },
+                TranscriptArtifactView::SystemNote { text, seq: 3, .. }
+            ] if message == "provider failed" && text == "recap after failure"
+        ));
+
+        events.push(event(
+            4,
+            &session_id,
+            EventPayload::SessionContinuedFromCompaction {
+                parent_session_id: session_id.clone(),
+                parent_cursor: "2".into(),
+                summary: "summary".into(),
+                transcript_path: None,
+                context_messages: vec![],
+                retained_messages: vec![],
+            },
+        ));
+
+        let compacted = replay(session_id, &events);
+        assert!(matches!(
+            compacted.transcript_artifacts.as_slice(),
+            [TranscriptArtifactView::SystemNote { text, seq: 3, .. }]
+                if text == "recap after failure"
+        ));
     }
 
     #[test]

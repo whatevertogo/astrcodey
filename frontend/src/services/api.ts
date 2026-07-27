@@ -139,6 +139,29 @@ export async function getConversation(
   )
 }
 
+/**
+ * 打开 conversation SSE。
+ *
+ * Tauri plugin-http 会缓冲响应体直到连接结束，因此流式连接必须使用 WebView fetch。
+ * URL、鉴权和平台差异仍由 service 边界统一管理，store 不接触这些细节。
+ */
+export function openConversationStream(
+  sessionId: string,
+  cursor: string | null,
+  signal: AbortSignal
+): Promise<Response> {
+  const params = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+  const url = `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/stream${params}`
+  return window.fetch(url, {
+    headers: {
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      ...authHeaders(),
+    },
+    signal,
+  })
+}
+
 /** Mid-turn steer: requires an active turn (unlike `submitPrompt`, which queues while busy). */
 export async function injectMessage(
   sessionId: string,

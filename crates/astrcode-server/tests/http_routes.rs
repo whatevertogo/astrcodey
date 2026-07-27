@@ -33,9 +33,10 @@ use astrcode_protocol::{
     events::ClientNotification,
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
-        CompactSessionResponse, ConfigureSessionToolsResponse, ConversationErrorEnvelopeDto,
-        ConversationSnapshotResponseDto, CreateSessionResponseDto, PromptSubmitResponse,
-        ProviderCatalogResponseDto, SlashCommandListResponseDto, ToolSelectionDto,
+        CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
+        ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto, CreateSessionResponseDto,
+        PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
+        ToolSelectionDto,
     },
     wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -52,7 +53,7 @@ use astrcode_support::event_fanout::EventFanout;
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{Method, Request, StatusCode},
+    http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
 use tokio::sync::mpsc;
@@ -230,6 +231,68 @@ async fn http_routes_require_bearer_token() {
         .await
         .unwrap();
     assert_eq!(authorized.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cors_allows_supported_tauri_origins_only() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, _token) = router(runtime, event_tx).unwrap();
+
+    for origin in [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/sessions/session-1/stream")
+                    .header(header::ORIGIN, origin)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "authorization,cache-control",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&origin.parse().unwrap())
+        );
+    }
+
+    let untrusted = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/sessions/session-1/stream")
+                .header(header::ORIGIN, "https://example.com")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization,cache-control",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(untrusted.status(), StatusCode::OK);
+    assert!(
+        untrusted
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -909,6 +972,115 @@ async fn stream_replays_events_after_snapshot_cursor() {
     assert!(body.contains("missed-message"));
     assert!(body.contains("completed response after snapshot"));
     assert!(!body.contains("already in snapshot"));
+}
+
+#[tokio::test]
+async fn snapshot_and_replay_preserve_durable_errors() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid.clone(),
+            None,
+            EventPayload::UserMessage {
+                message_id: "before-failure".into(),
+                text: "before failure".into(),
+                attachments: vec![],
+            },
+        ))
+        .await
+        .unwrap();
+    let before = get_json::<ConversationSnapshotResponseDto>(
+        app.clone(),
+        &format!("/api/sessions/{session_id}/conversation"),
+        &token,
+    )
+    .await;
+
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid.clone(),
+            None,
+            EventPayload::ErrorOccurred {
+                code: -32603,
+                message: "provider rejected the selected model".into(),
+                recoverable: false,
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid.clone(),
+            None,
+            EventPayload::UserMessage {
+                message_id: "after-failure".into(),
+                text: "retry after failure".into(),
+                attachments: vec![],
+            },
+        ))
+        .await
+        .unwrap();
+    runtime
+        .event_store()
+        .append_event(Event::new(
+            sid,
+            None,
+            EventPayload::TurnCompleted {
+                finish_reason: "error".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let replay = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!(
+                    "/api/sessions/{session_id}/stream?cursor={}",
+                    before.cursor.value
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let replay_body = read_sse_until(replay.into_body(), "retry after failure").await;
+    assert!(replay_body.contains(r#""kind":"error""#));
+    assert!(
+        replay_body.find("provider rejected").unwrap()
+            < replay_body.find("retry after failure").unwrap()
+    );
+
+    let latest = get_json::<ConversationSnapshotResponseDto>(
+        app,
+        &format!("/api/sessions/{session_id}/conversation"),
+        &token,
+    )
+    .await;
+    assert!(
+        latest.cursor.value.parse::<u64>().unwrap() > before.cursor.value.parse::<u64>().unwrap()
+    );
+    assert!(matches!(
+        latest.blocks.as_slice(),
+        [
+            ConversationBlockDto::User { text: before, .. },
+            ConversationBlockDto::Error { message, .. },
+            ConversationBlockDto::User { text: after, .. }
+        ] if before == "before failure"
+            && message == "provider rejected the selected model"
+            && after == "retry after failure"
+    ));
 }
 
 #[tokio::test]
