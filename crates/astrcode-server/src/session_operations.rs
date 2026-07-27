@@ -146,11 +146,11 @@ impl SessionOperations for ServerSessionOperations {
             .open(target_sid.clone())
             .await
             .map_err(|error| SessionApiError::NotFound(error.to_string()))?;
-        let effective = session
-            .configure_tools(selection)
+        let effective = self
+            .session_manager
+            .configure_session_tools(&session, selection)
             .await
             .map_err(SessionApiError::internal)?;
-        self.session_manager.sync_durable_events(&target_sid).await;
         Ok(effective)
     }
 

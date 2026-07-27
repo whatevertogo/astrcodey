@@ -76,7 +76,7 @@ async fn try_provider_input_tokens(
         Ok(count) => match usize::try_from(count.input_tokens) {
             Ok(tokens) => Some(tokens),
             Err(_) => {
-                let effective = session.caps().read_effective();
+                let effective = session.runtime_services().read_effective();
                 tracing::warn!(
                     provider = %effective.llm.provider_kind,
                     model = %effective.llm.model_id,
@@ -89,7 +89,7 @@ async fn try_provider_input_tokens(
             },
         },
         Err(error) => {
-            let effective = session.caps().read_effective();
+            let effective = session.runtime_services().read_effective();
             tracing::warn!(
                 provider = %effective.llm.provider_kind,
                 model = %effective.llm.model_id,
@@ -146,7 +146,7 @@ impl Compaction {
         model: &SessionReadModel,
         tools: &[ToolDefinition],
     ) -> Result<CompactionRequest, TurnError> {
-        let context_assembler = host.session.caps().context_assembler_arc();
+        let context_assembler = host.session.runtime_services().context_assembler_arc();
         let custom_instructions = self
             .compact_instructions(host, model, CompactTrigger::AutoThreshold)
             .await;
@@ -195,7 +195,7 @@ impl Compaction {
         request: CompactionRequest,
         publisher: &TurnEvents,
     ) -> Result<PreparedContextMessages, TurnError> {
-        let context_assembler = host.session.caps().context_assembler_arc();
+        let context_assembler = host.session.runtime_services().context_assembler_arc();
         let custom_instructions = self
             .compact_instructions(host, model, request.trigger)
             .await;
@@ -407,7 +407,7 @@ impl Compaction {
         let visible_tools = state.visible_tools();
         let provider_messages = model.provider_messages();
         host.session
-            .caps()
+            .runtime_services()
             .post_compact_enricher()
             .enrich(
                 compaction,

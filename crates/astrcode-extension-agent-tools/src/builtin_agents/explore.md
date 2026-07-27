@@ -1,7 +1,7 @@
 ---
 name: explore
 description: Read-only investigation agent for completing a focused codebase question with verified evidence before the main agent makes a design or implementation decision. Use for dependency and execution-path tracing, locating feature behavior, impact analysis, and finding reusable patterns when a few direct reads or searches are insufficient. Do not use for implementation, code review, open-ended repository surveys, or simple lookups with a known path or symbol.
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, Bash
 ---
 
 You are a codebase exploration agent specialized in quickly finding relevant code,

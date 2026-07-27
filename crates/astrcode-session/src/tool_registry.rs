@@ -115,8 +115,23 @@ impl ToolRegistry {
         self.tools.get(name).map(|entry| entry.definition.clone())
     }
 
-    pub(crate) fn apply_tool_selection(&mut self, selection: &SessionToolSelection) {
-        self.tools.retain(|name, _| selection.allows(name.as_str()));
+    pub(crate) fn filtered(&self, selection: &SessionToolSelection) -> Self {
+        let tools = match selection {
+            SessionToolSelection::All { except } => {
+                let excluded = except.iter().map(String::as_str).collect::<HashSet<_>>();
+                self.tools
+                    .iter()
+                    .filter(|(name, _)| !excluded.contains(name.as_str()))
+                    .map(|(name, tool)| (name.clone(), tool.clone()))
+                    .collect()
+            },
+            SessionToolSelection::Only { names } => names
+                .iter()
+                .filter_map(|name| self.tools.get_key_value(name))
+                .map(|(name, tool)| (name.clone(), tool.clone()))
+                .collect(),
+        };
+        Self { tools }
     }
 }
 
@@ -277,17 +292,22 @@ mod tests {
     }
 
     #[test]
-    fn session_tool_selection_filters_registry_in_place() {
+    fn session_tool_selection_derives_filtered_registry() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(NamedTool("read", ExecutionMode::Parallel)));
         registry.register(Arc::new(NamedTool("shell", ExecutionMode::Sequential)));
 
-        registry.apply_tool_selection(&SessionToolSelection::All {
+        let without_shell = registry.filtered(&SessionToolSelection::All {
             except: vec!["shell".into()],
         });
+        assert!(without_shell.find_definition("shell").is_none());
+        assert!(without_shell.find_definition("read").is_some());
 
-        assert!(registry.find_definition("shell").is_none());
-        assert!(registry.find_definition("read").is_some());
+        let only_shell = registry.filtered(&SessionToolSelection::Only {
+            names: vec!["missing".into(), "shell".into(), "shell".into()],
+        });
+        assert!(only_shell.find_definition("read").is_none());
+        assert!(only_shell.find_definition("shell").is_some());
     }
 
     #[test]

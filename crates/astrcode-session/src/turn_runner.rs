@@ -90,7 +90,7 @@ impl TurnLoop {
 
     fn max_parallel_tool_calls(&self) -> usize {
         self.session
-            .caps()
+            .runtime_services()
             .read_effective()
             .agent
             .tool_max_parallel_calls
@@ -115,16 +115,16 @@ impl TurnLoop {
     ) -> Result<Self, TurnError> {
         let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
         let runtime = session.runtime();
-        let caps = session.caps();
+        let runtime_services = session.runtime_services();
         let turn = TurnToolContext::for_turn(&session, session_state, session_store_dir);
         let tools = ToolCalls::new(
             turn,
             tool_registry,
-            caps.turn_hooks_arc(),
+            runtime_services.turn_hooks_arc(),
             session.clone(),
             cancellation_token.clone(),
         );
-        let context_settings = caps.context_assembler().settings().clone();
+        let context_settings = runtime_services.context_assembler().settings().clone();
         runtime.configure_compact_circuit_breaker(
             context_settings.compact_circuit_breaker_threshold,
             Duration::from_secs(context_settings.compact_circuit_breaker_cooldown_secs),
@@ -144,7 +144,7 @@ impl TurnLoop {
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
-        let extension_runner = self.session().caps().turn_hooks_arc();
+        let extension_runner = self.session().runtime_services().turn_hooks_arc();
         let event_bridge = ExtensionEvents::start(Arc::clone(publisher), self.tools.shared_mut());
         let result = self
             .process_prompt_inner(user_text, turn_id, publisher)
@@ -176,7 +176,7 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let all_tools = self.tools.list_definitions_with_prompt_metadata();
-        let extension_runner = self.session().caps().turn_hooks_arc();
+        let extension_runner = self.session().runtime_services().turn_hooks_arc();
 
         let lifecycle_ctx = self.shared().lifecycle_ctx();
         let (turn_start_res, prompt_submit_res) = tokio::join!(
@@ -543,7 +543,7 @@ impl TurnLoop {
         request_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
-        let effective = self.session.caps().read_effective();
+        let effective = self.session.runtime_services().read_effective();
         match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
             .await

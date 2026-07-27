@@ -156,7 +156,7 @@ impl CommandHandler {
 
             ClientCommand::ResolveToolApproval { call_id, decision } => {
                 let sid = self.ensure_session().await?;
-                let Some(ops) = self.runtime.capabilities().session_ops() else {
+                let Some(ops) = self.runtime.runtime_services().session_ops() else {
                     self.send_error(-32603, "session operations unavailable");
                     return Ok(());
                 };

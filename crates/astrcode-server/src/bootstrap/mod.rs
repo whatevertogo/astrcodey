@@ -75,7 +75,7 @@ pub struct ServerRuntime {
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) scheduler: Arc<TurnScheduler>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
-    pub(crate) capabilities: Arc<SessionRuntimeServices>,
+    pub(crate) runtime_services: Arc<SessionRuntimeServices>,
     pub(crate) startup_working_dir: PathBuf,
     pub(crate) shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -105,8 +105,8 @@ impl ServerRuntime {
         &self.extension_runner
     }
 
-    pub fn capabilities(&self) -> &Arc<SessionRuntimeServices> {
-        &self.capabilities
+    pub fn runtime_services(&self) -> &Arc<SessionRuntimeServices> {
+        &self.runtime_services
     }
 
     pub fn startup_working_dir(&self) -> &PathBuf {
@@ -157,7 +157,7 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 /// 5. 创建空的扩展运行器
 /// 6. 组装 ConfigManager（内部构建 providers）
 /// 7. 创建 turn scheduler 与 session ops
-/// 8. 加载扩展（从 capabilities 获取 LLM 与 session ops）
+/// 8. 加载扩展（从 runtime services 获取 LLM 与 session ops）
 /// 9. 返回共享运行时容器
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
     // 1. 读取配置并解析成 EffectiveConfig。
@@ -204,23 +204,24 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // ConfigManager 持有 Arc 引用，加载后的扩展对已创建的 session 立即可见。
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
 
-    // 6. 组装 ConfigManager 与 Capabilities。
+    // 6. 组装 ConfigManager 与 session runtime services。
     //
     // ConfigManager 内部从 effective 构建 providers，不需要外部注入。
-    // 二者共享同一份 effective/llm_provider 存储，配置写入直接更新 Capabilities。
-    let (config_manager, capabilities) = crate::config_manager::ConfigManager::from_loaded_config(
-        Arc::new(config_store),
-        config,
-        effective,
-        Arc::clone(&extension_runner),
-        Arc::clone(&context_assembler),
-    )?;
+    // 二者共享同一份 effective/llm_provider 存储，配置写入直接更新 runtime services。
+    let (config_manager, runtime_services) =
+        crate::config_manager::ConfigManager::from_loaded_config(
+            Arc::new(config_store),
+            config,
+            effective,
+            Arc::clone(&extension_runner),
+            Arc::clone(&context_assembler),
+        )?;
     let config_manager = Arc::new(config_manager);
 
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
-        Arc::clone(&capabilities),
+        Arc::clone(&runtime_services),
         vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
     ));
 
@@ -240,13 +241,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 
     // 7. 加载扩展。
     //
-    // HostServices 从 capabilities 获取 LLM，并携带 session ops 给声明了
+    // HostServices 从 runtime services 获取 LLM，并携带 session ops 给声明了
     // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。
     let host_services = Arc::new(
         ExtensionHostServices::new(
             Arc::clone(&event_store),
-            Some(capabilities.llm()),
-            Some(capabilities.small_llm()),
+            Some(runtime_services.llm()),
+            Some(runtime_services.small_llm()),
         )
         .with_session_ops(session_ops)
         .with_outbound_network(
@@ -255,7 +256,8 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     );
     extension_runner.bind_host_services(Arc::clone(&host_services));
     let load_errors =
-        load_extensions_into_runner(&extension_runner, &capabilities, &host_services, &cwd).await;
+        load_extensions_into_runner(&extension_runner, &runtime_services, &host_services, &cwd)
+            .await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
     }
@@ -268,7 +270,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         session_manager,
         scheduler,
         extension_runner,
-        capabilities,
+        runtime_services,
         startup_working_dir: cwd,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })
@@ -294,7 +296,7 @@ impl ServerRuntime {
         session_manager: Arc<SessionManager>,
         scheduler: Arc<TurnScheduler>,
         extension_runner: Arc<ExtensionRunner>,
-        capabilities: Arc<SessionRuntimeServices>,
+        runtime_services: Arc<SessionRuntimeServices>,
         startup_working_dir: PathBuf,
     ) -> Self {
         Self {
@@ -304,7 +306,7 @@ impl ServerRuntime {
             session_manager,
             scheduler,
             extension_runner,
-            capabilities,
+            runtime_services,
             startup_working_dir,
             shutdown_token: tokio_util::sync::CancellationToken::new(),
         }
@@ -321,13 +323,13 @@ impl ServerRuntime {
 
     /// 按当前配置重载扩展集合；新 turn 会直接解析新的工具快照。
     pub async fn reload_extensions(&self) -> Vec<String> {
-        let caps = self.capabilities();
+        let runtime_services = self.runtime_services();
         let mut host_services = ExtensionHostServices::new(
             Arc::clone(self.event_store()),
-            Some(caps.llm()),
-            Some(caps.small_llm()),
+            Some(runtime_services.llm()),
+            Some(runtime_services.small_llm()),
         );
-        if let Some(session_ops) = caps.session_ops() {
+        if let Some(session_ops) = runtime_services.session_ops() {
             host_services = host_services.with_session_ops(session_ops);
         }
         let outbound_network = self
@@ -340,7 +342,7 @@ impl ServerRuntime {
             .bind_host_services(Arc::clone(&host_services));
         let load_errors = load_extensions_into_runner(
             self.extension_runner(),
-            self.capabilities(),
+            self.runtime_services(),
             &host_services,
             self.startup_working_dir(),
         )
@@ -352,11 +354,11 @@ impl ServerRuntime {
 /// 将扩展加载到已有的 runner 中。
 async fn load_extensions_into_runner(
     runner: &Arc<ExtensionRunner>,
-    capabilities: &SessionRuntimeServices,
+    runtime_services: &SessionRuntimeServices,
     host_services: &Arc<ExtensionHostServices>,
     cwd: &std::path::Path,
 ) -> Vec<String> {
-    let effective = capabilities.read_effective();
+    let effective = runtime_services.read_effective();
 
     // 先将扩展配置注入运行器，这样 register 时可查到
     let configs: BTreeMap<_, _> = effective

@@ -14,7 +14,7 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session::{
-    Session, SessionError, SessionRuntimeServices, SessionRuntimeState,
+    Session, SessionCreateParams, SessionError, SessionRuntimeServices, SessionRuntimeState,
     emit_lifecycle_for_read_model,
 };
 use parking_lot::Mutex;
@@ -48,7 +48,7 @@ pub struct SessionManager {
     event_store: Arc<dyn EventStore>,
     config: Arc<ConfigManager>,
     runtime_registry: SessionRuntimeRegistry,
-    capabilities: Arc<SessionRuntimeServices>,
+    runtime_services: Arc<SessionRuntimeServices>,
     event_bus: OnceLock<Arc<ServerEventBus>>,
     resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
 }
@@ -59,14 +59,14 @@ impl SessionManager {
     pub fn new(
         event_store: Arc<dyn EventStore>,
         config: Arc<ConfigManager>,
-        capabilities: Arc<SessionRuntimeServices>,
+        runtime_services: Arc<SessionRuntimeServices>,
         resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
     ) -> Self {
         Self {
             event_store,
             config,
             runtime_registry: SessionRuntimeRegistry::default(),
-            capabilities,
+            runtime_services,
             event_bus: OnceLock::new(),
             resource_cleanups,
         }
@@ -102,8 +102,8 @@ impl SessionManager {
     fn new_runtime_state(&self) -> Arc<SessionRuntimeState> {
         let model_id = self.config.read_effective().llm.model_id.clone();
         Arc::new(SessionRuntimeState::new(
-            self.capabilities.llm(),
-            self.capabilities.small_llm(),
+            self.runtime_services.llm(),
+            self.runtime_services.small_llm(),
             model_id,
         ))
     }
@@ -123,6 +123,16 @@ impl SessionManager {
         self.runtime_registry.insert(sid, runtime);
     }
 
+    pub(crate) async fn configure_session_tools(
+        &self,
+        session: &Session,
+        selection: SessionToolSelection,
+    ) -> Result<SessionToolSelection, SessionError> {
+        let effective = session.configure_tools(selection).await?;
+        self.sync_durable_events(session.id()).await;
+        Ok(effective)
+    }
+
     pub(crate) async fn create(
         &self,
         working_dir: &str,
@@ -139,18 +149,17 @@ impl SessionManager {
         // 先在 registry 里登记 runtime，再创建 Session 让两者共享同一份。
         let sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&sid);
-        // SessionManager 调用 Session::create_with_id 而非 create_full：因为 sid 已生成。
-        let session = Session::create_with_id(
-            Arc::clone(&self.event_store),
-            sid.clone(),
-            working_dir,
-            &model_id,
-            None,
-            tool_selection,
-            None,
+        let session = Session::create_with_params(SessionCreateParams {
+            store: Arc::clone(&self.event_store),
+            session_id: sid.clone(),
+            working_dir: working_dir.to_owned(),
+            model_id,
+            parent_session_id: None,
+            tool_selection: tool_selection.cloned(),
+            source_extension: None,
             runtime,
-            Arc::clone(&self.capabilities),
-        )
+            runtime_services: Arc::clone(&self.runtime_services),
+        })
         .await?;
 
         self.attach_session_subscribers(&session);
@@ -179,7 +188,7 @@ impl SessionManager {
                         Arc::clone(&self.event_store),
                         session_id.clone(),
                         runtime,
-                        Arc::clone(&self.capabilities),
+                        Arc::clone(&self.runtime_services),
                     )
                     .await?;
                     self.attach_session_subscribers(&session);
@@ -198,7 +207,7 @@ impl SessionManager {
                         Arc::clone(&self.event_store),
                         session_id.clone(),
                         runtime,
-                        Arc::clone(&self.capabilities),
+                        Arc::clone(&self.runtime_services),
                     )
                     .await?;
                     session
@@ -227,7 +236,7 @@ impl SessionManager {
     ) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
         emit_lifecycle_for_read_model(
-            &self.capabilities,
+            &self.runtime_services,
             session_id,
             &model,
             ExtensionEvent::SessionShutdown,
@@ -326,15 +335,15 @@ impl SessionManager {
         }
     }
 
-    /// 将全局 caps 中的 provider / model_id 同步到本进程内所有已打开的 session runtime。
+    /// 将共享运行时服务中的 provider / model_id 同步到所有已打开的 session runtime。
     ///
     /// 配置热更新只改 `SessionRuntimeServices`；调用方在 `apply_raw_config_and_rebuild`
     /// 之后必须调用此方法，否则非 active session 的 turn 仍会用旧的 per-session binding。
     pub(crate) fn sync_all_model_bindings_from_config(&self) {
         let effective = self.config.read_effective();
         self.runtime_registry.sync_model_bindings(
-            self.capabilities.llm(),
-            self.capabilities.small_llm(),
+            self.runtime_services.llm(),
+            self.runtime_services.small_llm(),
             effective.llm.model_id.clone(),
         );
     }
@@ -400,17 +409,17 @@ impl SessionManager {
         let model_id = self.config.read_effective().llm.model_id.clone();
         let new_sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&new_sid);
-        let session = Session::create_with_id(
-            Arc::clone(&self.event_store),
-            new_sid.clone(),
-            &source_model.working_dir,
-            &model_id,
-            None,
-            None,
-            None,
+        let session = Session::create_with_params(SessionCreateParams {
+            store: Arc::clone(&self.event_store),
+            session_id: new_sid.clone(),
+            working_dir: source_model.working_dir.clone(),
+            model_id,
+            parent_session_id: None,
+            tool_selection: None,
+            source_extension: None,
             runtime,
-            Arc::clone(&self.capabilities),
-        )
+            runtime_services: Arc::clone(&self.runtime_services),
+        })
         .await?;
 
         self.attach_session_subscribers(&session);

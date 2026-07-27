@@ -176,6 +176,7 @@ mod tests {
         tool::ToolDefinition,
     };
     use astrcode_extensions::runner::ExtensionRunner;
+    use astrcode_session::SessionCreateParams;
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio_util::sync::CancellationToken;
 
@@ -201,7 +202,7 @@ mod tests {
         }
     }
 
-    fn test_caps() -> Arc<astrcode_session::SessionRuntimeServices> {
+    fn test_runtime_services() -> Arc<astrcode_session::SessionRuntimeServices> {
         let llm: Arc<dyn LlmProvider> = Arc::new(NeverLlm);
         let extension_runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
         let context_assembler = Arc::new(
@@ -273,17 +274,17 @@ mod tests {
             "mock".into(),
         ));
         Arc::new(
-            Session::create_with_id(
+            Session::create_with_params(SessionCreateParams {
                 store,
-                SessionId::from(sid),
-                ".",
-                "mock",
-                None,
-                None,
-                None,
+                session_id: SessionId::from(sid),
+                working_dir: ".".into(),
+                model_id: "mock".into(),
+                parent_session_id: None,
+                tool_selection: None,
+                source_extension: None,
                 runtime,
-                test_caps(),
-            )
+                runtime_services: test_runtime_services(),
+            })
             .await
             .unwrap(),
         )
