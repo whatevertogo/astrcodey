@@ -311,7 +311,6 @@ mod tests {
         context::{
             CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
             CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-            NoopPostCompactEnricher,
         },
         event::EventPayload,
         extension::{
@@ -406,11 +405,13 @@ mod tests {
         }
     }
 
-    fn test_caps() -> Arc<SessionRuntimeServices> {
-        test_caps_with_runtime(Arc::new(NoopRuntimePorts))
+    fn test_runtime_services() -> Arc<SessionRuntimeServices> {
+        test_runtime_services_with_hooks(Arc::new(NoopRuntimePorts))
     }
 
-    fn test_caps_with_runtime(turn_hooks: Arc<dyn TurnHooks>) -> Arc<SessionRuntimeServices> {
+    fn test_runtime_services_with_hooks(
+        turn_hooks: Arc<dyn TurnHooks>,
+    ) -> Arc<SessionRuntimeServices> {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
         let context_assembler = Arc::new(TestContextAssembler {
             settings: ContextSettings::default(),
@@ -465,40 +466,40 @@ mod tests {
             llm.clone(),
             llm,
             effective,
-            SessionHostServices {
-                extension_ports: SessionExtensionPorts::with_turn_hooks(turn_hooks),
+            SessionHostServices::embedded(
                 context_assembler,
-                post_compact_enricher: Arc::new(NoopPostCompactEnricher),
-                prompt_provider: Arc::new(TestPromptProvider),
-                prompt_file_provider: Arc::new(TestPromptFileProvider),
-                tool_packs: Vec::new(),
-            },
+                Arc::new(TestPromptProvider),
+                Arc::new(TestPromptFileProvider),
+            )
+            .with_extension_ports(SessionExtensionPorts::with_turn_hooks(turn_hooks)),
         ))
     }
 
     async fn test_session() -> Session {
-        test_session_with_caps(test_caps()).await
+        test_session_with_runtime_services(test_runtime_services()).await
     }
 
-    async fn test_session_with_caps(caps: Arc<SessionRuntimeServices>) -> Session {
+    async fn test_session_with_runtime_services(
+        runtime_services: Arc<SessionRuntimeServices>,
+    ) -> Session {
         let store: Arc<dyn astrcode_core::storage::EventStore> =
             Arc::new(InMemoryEventStore::new());
-        let sid = new_session_id();
+        let session_id = new_session_id();
         let runtime = Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
+            runtime_services.llm(),
+            runtime_services.small_llm(),
             "mock-model".into(),
         ));
         let session = Session::create_with_params(SessionCreateParams {
             store,
-            sid,
+            session_id,
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             model_id: "mock-model".into(),
-            parent: None,
+            parent_session_id: None,
             tool_selection: None,
             source_extension: None,
             runtime,
-            caps,
+            runtime_services,
         })
         .await
         .unwrap();
@@ -637,9 +638,11 @@ mod tests {
 
     #[tokio::test]
     async fn extension_event_bridge_delivers_hook_emit_to_store() {
-        let session =
-            test_session_with_caps(test_caps_with_runtime(Arc::new(EmitEventRuntime))).await;
-        let caps = session.caps();
+        let session = test_session_with_runtime_services(test_runtime_services_with_hooks(
+            Arc::new(EmitEventRuntime),
+        ))
+        .await;
+        let runtime_services = session.runtime_services();
 
         let turn_id = new_turn_id();
         let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone(), None));
@@ -660,7 +663,11 @@ mod tests {
             extension_event_sink: None,
             session_store_dir: None,
         };
-        caps.turn_hooks().emit_pre_tool_use(ctx).await.unwrap();
+        runtime_services
+            .turn_hooks()
+            .emit_pre_tool_use(ctx)
+            .await
+            .unwrap();
 
         bridge.shutdown(&mut shared).await;
 

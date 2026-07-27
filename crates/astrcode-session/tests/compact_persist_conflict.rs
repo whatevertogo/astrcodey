@@ -13,7 +13,7 @@ use astrcode_core::{
     context::{
         COMPACT_SUMMARY_MARKER, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
         CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-        NoopPostCompactEnricher, PreparedCompaction, is_compact_summary_message,
+        PreparedCompaction, is_compact_summary_message,
     },
     event::EventPayload,
     extension::CompactStrategy,
@@ -195,14 +195,11 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
         llm.clone(),
         llm,
         effective,
-        SessionHostServices {
-            extension_ports: Default::default(),
+        SessionHostServices::embedded(
             context_assembler,
-            post_compact_enricher: Arc::new(NoopPostCompactEnricher),
-            prompt_provider: Arc::new(TestPromptProvider),
-            prompt_file_provider: Arc::new(TestPromptFileProvider),
-            tool_packs: Vec::new(),
-        },
+            Arc::new(TestPromptProvider),
+            Arc::new(TestPromptFileProvider),
+        ),
     ))
 }
 
@@ -222,14 +219,14 @@ async fn spawn_session(
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
         store: Arc::clone(&store),
-        sid: sid.clone(),
+        session_id: sid.clone(),
         working_dir: working_dir.to_string_lossy().into_owned(),
         model_id: "mock-model".into(),
-        parent: None,
+        parent_session_id: None,
         tool_selection: None,
         source_extension: None,
         runtime,
-        caps,
+        runtime_services: caps,
     })
     .await
     .unwrap();

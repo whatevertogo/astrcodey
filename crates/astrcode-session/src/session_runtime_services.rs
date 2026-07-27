@@ -40,12 +40,12 @@ pub struct SessionRuntimeServices {
 }
 
 pub struct SessionHostServices {
-    pub extension_ports: SessionExtensionPorts,
-    pub context_assembler: Arc<dyn ContextAssembler>,
-    pub post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    pub prompt_provider: Arc<dyn PromptProvider>,
-    pub prompt_file_provider: Arc<dyn PromptFileProvider>,
-    pub tool_packs: Vec<Arc<dyn ToolPack>>,
+    extension_ports: SessionExtensionPorts,
+    context_assembler: Arc<dyn ContextAssembler>,
+    post_compact_enricher: Arc<dyn PostCompactEnricher>,
+    prompt_provider: Arc<dyn PromptProvider>,
+    prompt_file_provider: Arc<dyn PromptFileProvider>,
+    tool_packs: Vec<Arc<dyn ToolPack>>,
 }
 
 impl SessionHostServices {
@@ -147,7 +147,7 @@ impl SessionRuntimeServices {
             .store(Arc::new(ProviderSlot { provider: new }));
     }
 
-    pub fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
+    pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
         self.extension_ports.tool_catalog()
     }
 
@@ -155,11 +155,11 @@ impl SessionRuntimeServices {
         self.extension_ports.runtime_snapshot_state()
     }
 
-    pub fn prompt_contributor(&self) -> &dyn PromptContributor {
+    pub(crate) fn prompt_contributor(&self) -> &dyn PromptContributor {
         self.extension_ports.prompt_contributor()
     }
 
-    pub fn turn_hooks(&self) -> &dyn TurnHooks {
+    pub(crate) fn turn_hooks(&self) -> &dyn TurnHooks {
         self.extension_ports.turn_hooks()
     }
 
@@ -167,7 +167,7 @@ impl SessionRuntimeServices {
         self.extension_ports.turn_hooks_arc()
     }
 
-    pub fn context_assembler(&self) -> &dyn ContextAssembler {
+    pub(crate) fn context_assembler(&self) -> &dyn ContextAssembler {
         self.context_assembler.as_ref()
     }
 
@@ -175,31 +175,19 @@ impl SessionRuntimeServices {
         Arc::clone(&self.context_assembler)
     }
 
-    pub fn post_compact_enricher(&self) -> &dyn PostCompactEnricher {
+    pub(crate) fn post_compact_enricher(&self) -> &dyn PostCompactEnricher {
         self.post_compact_enricher.as_ref()
     }
 
-    pub fn post_compact_enricher_arc(&self) -> Arc<dyn PostCompactEnricher> {
-        Arc::clone(&self.post_compact_enricher)
-    }
-
-    pub fn prompt_provider(&self) -> &dyn PromptProvider {
+    pub(crate) fn prompt_provider(&self) -> &dyn PromptProvider {
         self.prompt_provider.as_ref()
     }
 
-    pub fn prompt_provider_arc(&self) -> Arc<dyn PromptProvider> {
-        Arc::clone(&self.prompt_provider)
-    }
-
-    pub fn prompt_file_provider(&self) -> &dyn PromptFileProvider {
+    pub(crate) fn prompt_file_provider(&self) -> &dyn PromptFileProvider {
         self.prompt_file_provider.as_ref()
     }
 
-    pub fn prompt_file_provider_arc(&self) -> Arc<dyn PromptFileProvider> {
-        Arc::clone(&self.prompt_file_provider)
-    }
-
-    pub fn tool_packs(&self) -> &[Arc<dyn ToolPack>] {
+    pub(crate) fn tool_packs(&self) -> &[Arc<dyn ToolPack>] {
         &self.tool_packs
     }
 

@@ -18,7 +18,8 @@ use astrcode_extension_sdk::{
     tool_pack::{ToolPack, ToolPackScope},
 };
 use astrcode_session::{
-    Session, SessionExtensionPorts, SessionRuntimeServices, SessionRuntimeState,
+    Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
+    SessionRuntimeState,
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
@@ -108,17 +109,17 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         "mock-model".into(),
     ));
     runtime_a.update_prompt_extra(Some("child agent body".into()));
-    let session_a = Session::create_with_id(
-        Arc::clone(&store),
-        sid.clone(),
-        ".",
-        "mock-model",
-        None,
-        None,
-        None,
-        Arc::clone(&runtime_a),
-        Arc::clone(&caps),
-    )
+    let session_a = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: sid.clone(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        runtime: Arc::clone(&runtime_a),
+        runtime_services: Arc::clone(&caps),
+    })
     .await
     .unwrap();
     let wrote_a = session_a
@@ -184,39 +185,39 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     let parent_selection = SessionToolSelection::Only {
         names: vec!["write".into(), "read".into()],
     };
-    let parent = Session::create_with_id(
-        Arc::clone(&store),
-        new_session_id(),
-        ".",
-        "mock-model",
-        None,
-        Some(&parent_selection),
-        None,
-        Arc::new(SessionRuntimeState::new(
+    let parent = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: new_session_id(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: Some(parent_selection),
+        source_extension: None,
+        runtime: Arc::new(SessionRuntimeState::new(
             caps.llm(),
             caps.small_llm(),
             "mock-model".into(),
         )),
-        Arc::clone(&caps),
-    )
+        runtime_services: Arc::clone(&caps),
+    })
     .await
     .unwrap();
 
-    let direct_child = Session::create_with_id(
-        Arc::clone(&store),
-        new_session_id(),
-        ".",
-        "mock-model",
-        Some(parent.id()),
-        None,
-        None,
-        Arc::new(SessionRuntimeState::new(
+    let direct_child = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: new_session_id(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: Some(parent.id().clone()),
+        tool_selection: None,
+        source_extension: None,
+        runtime: Arc::new(SessionRuntimeState::new(
             caps.llm(),
             caps.small_llm(),
             "mock-model".into(),
         )),
-        Arc::clone(&caps),
-    )
+        runtime_services: Arc::clone(&caps),
+    })
     .await
     .unwrap();
     assert_eq!(
@@ -303,29 +304,28 @@ async fn turn_setup_failure_returns_session_to_idle() {
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(
         Arc::clone(&llm),
-        SessionExtensionPorts::new(
-            noop.clone(),
+        SessionExtensionPorts::from_immutable_ports(
             noop.clone(),
             Arc::new(FailingPromptContributor),
             noop.clone(),
             noop,
         ),
     );
-    let session = Session::create_with_id(
-        Arc::clone(&store),
-        new_session_id(),
-        ".",
-        "mock-model",
-        None,
-        None,
-        None,
-        Arc::new(SessionRuntimeState::new(
+    let session = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: new_session_id(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        runtime: Arc::new(SessionRuntimeState::new(
             llm,
             caps.small_llm(),
             "mock-model".into(),
         )),
-        caps,
-    )
+        runtime_services: caps,
+    })
     .await
     .unwrap();
 

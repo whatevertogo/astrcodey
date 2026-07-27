@@ -2,10 +2,10 @@
 //!
 //! 封装 `config_store` / `raw_config` 的写入路径；`effective` 和 `llm_provider`
 //! 的存储位置统一在 [`SessionRuntimeServices`] 内，`ConfigManager` 只持有引用。
-//! 这样消除了「ConfigManager 持一份、Capabilities 持一份再手动 sync」的双份事实。
+//! 这样消除了 `ConfigManager` 与 session runtime services 各持一份再手动同步的双份事实。
 //!
 //! 写入路径（`apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` /
-//! `set_llm_provider`）会先更新原始配置，再尝试更新 `Capabilities` 内的 `llm` 与
+//! `set_llm_provider`）会先更新原始配置，再尝试更新 runtime services 内的 `llm` 与
 //! `effective_config`。若配置已持久化但当前环境暂时无法解析为 effective config（例如
 //! 缺少 API key 环境变量），原始配置仍保持为最新，运行时 provider 保持旧值。已打开的
 //! per-session `SessionRuntimeState` 需由
@@ -35,7 +35,7 @@ pub struct ConfigManager {
     /// 共享给所有 session 的运行时能力。
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
-    capabilities: Arc<SessionRuntimeServices>,
+    runtime_services: Arc<SessionRuntimeServices>,
     shell_timeout_secs: Arc<AtomicU64>,
 }
 
@@ -88,7 +88,7 @@ impl ConfigManager {
         context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
     ) -> Result<(Self, Arc<SessionRuntimeServices>), astrcode_core::llm::LlmError> {
         let shell_timeout_secs = Arc::new(AtomicU64::new(effective.agent.shell_timeout_secs));
-        let capabilities = Arc::new(SessionRuntimeServices::new(
+        let runtime_services = Arc::new(SessionRuntimeServices::new(
             build_provider_from_settings(&effective.llm)?,
             build_provider_from_settings(&effective.small_llm)?,
             effective,
@@ -102,26 +102,26 @@ impl ConfigManager {
             config_store,
             raw_config: RwLock::new(raw_config),
             extension_runner,
-            capabilities: Arc::clone(&capabilities),
+            runtime_services: Arc::clone(&runtime_services),
             shell_timeout_secs,
         };
-        Ok((manager, capabilities))
+        Ok((manager, runtime_services))
     }
 
-    /// 测试用构造：调用方负责传入预先组装好的 `Capabilities`。
+    /// 测试用构造：调用方负责传入预先组装好的 session runtime services。
     pub fn new(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,
         extension_runner: Arc<ExtensionRunner>,
         shell_timeout_secs: Arc<AtomicU64>,
-        capabilities: Arc<SessionRuntimeServices>,
+        runtime_services: Arc<SessionRuntimeServices>,
     ) -> Self {
         Self {
             config_store,
             raw_config: RwLock::new(raw_config),
             extension_runner,
             shell_timeout_secs,
-            capabilities,
+            runtime_services,
         }
     }
 
@@ -129,12 +129,12 @@ impl ConfigManager {
         &self.extension_runner
     }
 
-    pub fn capabilities(&self) -> &Arc<SessionRuntimeServices> {
-        &self.capabilities
+    pub fn runtime_services(&self) -> &Arc<SessionRuntimeServices> {
+        &self.runtime_services
     }
 
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
-        self.capabilities.read_effective()
+        self.runtime_services.read_effective()
     }
 
     pub fn raw_config_snapshot(&self) -> Config {
@@ -142,12 +142,12 @@ impl ConfigManager {
     }
 
     pub fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.capabilities.llm()
+        self.runtime_services.llm()
     }
 
     /// 读取小模型 provider。
     pub fn read_small_llm_provider(&self) -> Arc<dyn LlmProvider> {
-        self.capabilities.small_llm()
+        self.runtime_services.small_llm()
     }
 
     pub fn config_store(&self) -> &Arc<dyn ConfigStore> {
@@ -156,19 +156,19 @@ impl ConfigManager {
 
     #[cfg(test)]
     pub fn set_llm_provider(&self, provider: Arc<dyn LlmProvider>) {
-        self.capabilities.swap_llm(provider);
+        self.runtime_services.swap_llm(provider);
     }
 
     pub fn rebuild_provider_from_effective(&self) {
         let effective = self.read_effective();
         match build_provider_from_settings(&effective.llm) {
-            Ok(provider) => self.capabilities.swap_llm(provider),
+            Ok(provider) => self.runtime_services.swap_llm(provider),
             Err(error) => {
                 tracing::error!(%error, "failed to rebuild LLM provider, keeping previous");
             },
         }
         match build_provider_from_settings(&effective.small_llm) {
-            Ok(provider) => self.capabilities.swap_small_llm(provider),
+            Ok(provider) => self.runtime_services.swap_small_llm(provider),
             Err(error) => {
                 tracing::error!(%error, "failed to rebuild small LLM provider, keeping previous");
             },
@@ -191,7 +191,7 @@ impl ConfigManager {
         };
         self.shell_timeout_secs
             .store(new_effective.agent.shell_timeout_secs, Ordering::Release);
-        self.capabilities.update_effective(new_effective);
+        self.runtime_services.update_effective(new_effective);
         self.rebuild_provider_from_effective();
         if changed {
             // 原子替换运行器中的配置映射（同步），后续由调用方异步通知扩展

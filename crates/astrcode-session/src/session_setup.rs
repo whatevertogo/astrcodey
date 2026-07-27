@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use astrcode_core::{
     config::ModelSelection,
-    extension::{ExtensionError, PromptBuildContext, SessionToolSelection},
+    extension::{ExtensionError, PromptBuildContext},
     prompt::{
         ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
         SystemPromptInput,
@@ -23,7 +23,7 @@ use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 
 use crate::{ToolRegistry, session::normalize_extra_system_prompt};
 
-pub(crate) struct BuiltToolRegistry {
+pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
     pub completeness: ToolCatalogCompleteness,
 }
@@ -32,19 +32,13 @@ pub(crate) struct BuiltToolRegistry {
 ///
 /// Session 快照缓存未命中时调用；工具执行期间只读取构建出的快照。
 ///
-/// `tool_selection` 用于 session 的工具裁剪：
-/// - `None`：保留所有 builtin + extension 工具。
-/// - `Some(All)`：保留全集，但排除 `except` 中的工具。
-/// - `Some(Only)`：仅保留 `names` 中的工具。空名单表示明确禁用全部工具。
-///
-/// 过滤在表构建末尾一次完成，确保 LLM schema、prompt 渲染、运行时白名单三处
-/// 都看到同一份工具集。
-pub(crate) async fn build_tool_registry_snapshot(
+/// 返回未应用 session 工具边界的完整工具表。Session 在此快照之上派生筛选后的
+/// 不可变 registry，使工具边界变化不必重新执行动态工具发现。
+pub(crate) async fn build_base_tool_registry(
     tool_catalog: &dyn ToolCatalogProvider,
     tool_packs: &[std::sync::Arc<dyn ToolPack>],
     working_dir: &str,
-    tool_selection: Option<&SessionToolSelection>,
-) -> Result<BuiltToolRegistry, ExtensionError> {
+) -> Result<BuiltBaseToolRegistry, ExtensionError> {
     let mut tool_registry = ToolRegistry::new();
     let scope = ToolPackScope { working_dir };
 
@@ -69,11 +63,7 @@ pub(crate) async fn build_tool_registry_snapshot(
         tool_registry.register(tool);
     }
 
-    if let Some(selection) = tool_selection {
-        tool_registry.apply_tool_selection(selection);
-    }
-
-    Ok(BuiltToolRegistry {
+    Ok(BuiltBaseToolRegistry {
         registry: tool_registry,
         completeness: catalog.completeness,
     })
@@ -92,23 +82,16 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub include_agents_rules: bool,
 }
 
-/// 扩展动态贡献的收集结果。
-struct ExtensionPromptData {
-    pub extension_blocks: Vec<ExtensionPromptBlock>,
-    pub merged_tool_metadata: HashMap<String, ToolPromptMetadata>,
-}
-
 /// 收集扩展的 prompt 贡献。
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
-async fn collect_extension_prompt_data(
+async fn collect_extension_prompt_blocks(
     prompt_contributor: &dyn PromptContributor,
     session_id: &str,
     working_dir: &str,
     model_id: &str,
     tools: &[ToolDefinition],
-    base_tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
-) -> Result<ExtensionPromptData, ExtensionError> {
+) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
     let prompt_ctx = PromptBuildContext {
         session_id: session_id.to_string(),
         working_dir: working_dir.to_string(),
@@ -145,10 +128,7 @@ async fn collect_extension_prompt_data(
         });
     }
 
-    Ok(ExtensionPromptData {
-        extension_blocks,
-        merged_tool_metadata: base_tool_prompt_metadata,
-    })
+    Ok(extension_blocks)
 }
 
 /// 构建 system prompt 文本与指纹。
@@ -170,13 +150,12 @@ pub(crate) async fn build_system_prompt_snapshot(
         include_agents_rules,
     } = input;
 
-    let ext_data = collect_extension_prompt_data(
+    let extension_blocks = collect_extension_prompt_blocks(
         prompt_contributor,
         session_id,
         working_dir,
         model_id,
         tools,
-        tool_prompt_metadata,
     )
     .await?;
 
@@ -194,8 +173,8 @@ pub(crate) async fn build_system_prompt_snapshot(
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,
         tools: tools.to_vec(),
-        tool_prompt_metadata: ext_data.merged_tool_metadata,
-        extension_blocks: ext_data.extension_blocks,
+        tool_prompt_metadata,
+        extension_blocks,
         extra_instructions,
     };
 

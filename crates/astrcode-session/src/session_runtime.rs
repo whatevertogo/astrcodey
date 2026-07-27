@@ -95,9 +95,9 @@ struct ToolResources {
 /// 但所有实例必须共享同一份 `SessionRuntimeState`（含 EventFanout）才能让所有订阅者
 /// 看到全部事件。SessionRuntimeRegistry / SessionManager 保证 per-sid 唯一。
 ///
-/// 注意：直接通过 `Session::create_with_id` 而绕过 `SessionRuntimeRegistry` 创建的 session
-/// 会得到独立 runtime，订阅者不会跨实例可见——这是给 `spawn_child` 这类「我就是要新 runtime」
-/// 的场景用的。SessionManager 走 registry 路径。
+/// 注意：直接通过 `Session::create_with_params` 绕过 `SessionRuntimeRegistry` 时，runtime
+/// 完全由调用者提供；同一 sid 若使用不同 runtime，实例会彼此隔离，订阅者也不会跨实例可见。
+/// `spawn_child` 会有意创建新 runtime，SessionManager 则始终走 registry 路径。
 pub struct SessionRuntimeState {
     model: Mutex<SessionModelBinding>,
     tools: ToolResources,

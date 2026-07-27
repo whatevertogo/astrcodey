@@ -32,8 +32,8 @@ impl TurnToolContext {
         session_state: &astrcode_core::storage::SessionReadModel,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
-        let caps = session.caps();
-        let effective = caps.read_effective();
+        let runtime_services = session.runtime_services();
+        let effective = runtime_services.read_effective();
         let approval_history = session.runtime().approval_history();
         if let Some(dir) = session_store_dir.as_deref() {
             let path = crate::permission::approval_history_path(dir);
@@ -83,13 +83,13 @@ pub(crate) struct ToolRuntimeCapabilities {
 impl ToolRuntimeCapabilities {
     fn from_session(session: &Session, shared: &crate::turn_context::SharedTurnContext) -> Self {
         let runtime = Arc::clone(&session.runtime);
-        let caps = session.caps();
-        let effective = caps.read_effective();
+        let runtime_services = session.runtime_services();
+        let effective = runtime_services.read_effective();
         let main_model_id = shared.model_id.clone();
         let small_model_id = effective.small_llm.model_id.clone();
         Self {
             file_observation_store: Some(runtime.file_observation_store()),
-            session_ops: caps.session_ops(),
+            session_ops: runtime_services.session_ops(),
             small_model_id: Some(small_model_id.clone()),
             session_store_dir: shared.session_store_dir.clone(),
             main_model_id: Some(main_model_id.clone()),

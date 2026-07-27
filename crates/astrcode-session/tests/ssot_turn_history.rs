@@ -52,14 +52,14 @@ async fn spawn_session_with_store(
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
         store: Arc::clone(&store),
-        sid: sid.clone(),
+        session_id: sid.clone(),
         working_dir: working_dir.to_string_lossy().into_owned(),
         model_id: "mock-model".into(),
-        parent: None,
+        parent_session_id: None,
         tool_selection: None,
         source_extension: None,
         runtime,
-        caps,
+        runtime_services: caps,
     })
     .await
     .unwrap();

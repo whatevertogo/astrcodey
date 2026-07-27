@@ -371,7 +371,7 @@ impl ToolCalls {
         }
         let max_parallel = self
             .session
-            .caps()
+            .runtime_services()
             .read_effective()
             .agent
             .tool_max_parallel_calls

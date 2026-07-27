@@ -108,7 +108,7 @@ pub async fn compact_idle_session(
 
     let session_store_dir = session.session_store_dir().await;
     session
-        .caps()
+        .runtime_services()
         .post_compact_enricher()
         .enrich(
             &mut compaction,

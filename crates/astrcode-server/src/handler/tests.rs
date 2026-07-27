@@ -742,7 +742,7 @@ fn test_runtime_with_settings(
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
+    let runtime_services = Arc::new(astrcode_session::SessionRuntimeServices::new(
         llm_provider.clone(),
         llm_provider,
         effective,
@@ -759,12 +759,12 @@ fn test_runtime_with_settings(
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
         shell_timeout_secs,
-        Arc::clone(&capabilities),
+        Arc::clone(&runtime_services),
     ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config),
-        Arc::clone(&capabilities),
+        Arc::clone(&runtime_services),
         vec![],
     ));
     let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
@@ -782,7 +782,7 @@ fn test_runtime_with_settings(
         session_manager,
         scheduler,
         extension_runner,
-        capabilities,
+        runtime_services,
         startup_working_dir: std::env::temp_dir(),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })

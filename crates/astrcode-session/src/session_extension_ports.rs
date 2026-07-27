@@ -18,15 +18,15 @@ pub struct SessionExtensionPorts {
 }
 
 impl SessionExtensionPorts {
-    pub fn new(
-        runtime_snapshot: Arc<dyn RuntimeSnapshotProvider>,
+    /// Combines ports whose observable state never changes after construction.
+    pub fn from_immutable_ports(
         tool_catalog: Arc<dyn ToolCatalogProvider>,
         prompt_contributor: Arc<dyn PromptContributor>,
         turn_hooks: Arc<dyn TurnHooks>,
         session_operations: Arc<dyn SessionOperationsProvider>,
     ) -> Self {
         Self {
-            runtime_snapshot,
+            runtime_snapshot: Arc::new(NoopRuntimePorts),
             tool_catalog,
             prompt_contributor,
             turn_hooks,
@@ -43,19 +43,19 @@ impl SessionExtensionPorts {
             + SessionOperationsProvider
             + 'static,
     {
-        Self::new(
-            adapter.clone(),
-            adapter.clone(),
-            adapter.clone(),
-            adapter.clone(),
-            adapter,
-        )
+        Self {
+            runtime_snapshot: adapter.clone(),
+            tool_catalog: adapter.clone(),
+            prompt_contributor: adapter.clone(),
+            turn_hooks: adapter.clone(),
+            session_operations: adapter,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn with_turn_hooks(turn_hooks: Arc<dyn TurnHooks>) -> Self {
         let noop = Arc::new(NoopRuntimePorts);
-        Self::new(noop.clone(), noop.clone(), noop.clone(), turn_hooks, noop)
+        Self::from_immutable_ports(noop.clone(), noop.clone(), turn_hooks, noop)
     }
 
     pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {

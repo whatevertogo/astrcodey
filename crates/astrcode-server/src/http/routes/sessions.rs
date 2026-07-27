@@ -83,18 +83,16 @@ pub(in crate::http) async fn configure_session_tools(
         Err(error) => return not_found_response("session_not_found", error),
     };
 
-    match session.configure_tools(selection).await {
-        Ok(effective) => {
-            state
-                .runtime
-                .session_manager()
-                .sync_durable_events(&session_id)
-                .await;
-            Json(ConfigureSessionToolsResponse {
-                selection: effective.into(),
-            })
-            .into_response()
-        },
+    match state
+        .runtime
+        .session_manager()
+        .configure_session_tools(&session, selection)
+        .await
+    {
+        Ok(effective) => Json(ConfigureSessionToolsResponse {
+            selection: effective.into(),
+        })
+        .into_response(),
         Err(error) => internal_error_response("configure_tools_failed", error),
     }
 }
@@ -207,7 +205,7 @@ pub(in crate::http) async fn resolve_tool_approval(
     Json(request): Json<ToolApprovalRequest>,
 ) -> Response {
     let session_id_str = session_id.clone();
-    let Some(ops) = state.runtime.capabilities().session_ops() else {
+    let Some(ops) = state.runtime.runtime_services().session_ops() else {
         return internal_error_response(
             "session_ops_unavailable",
             "session operations unavailable",
@@ -231,7 +229,7 @@ pub(in crate::http) async fn submit_tool_ui_respond(
     Json(request): Json<ToolUiRespondRequest>,
 ) -> Response {
     let session_id_str = session_id.clone();
-    let Some(ops) = state.runtime.capabilities().session_ops() else {
+    let Some(ops) = state.runtime.runtime_services().session_ops() else {
         return internal_error_response(
             "session_ops_unavailable",
             "session operations unavailable",

@@ -27,7 +27,7 @@ use crate::{
     runtime_stability::RuntimeStabilityBudget,
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
-    session_tools::{ToolCacheLookup, ToolRegistryCacheKey},
+    session_tools::{BaseToolRegistryKey, ToolCacheLookup},
     tool_exec::interrupted_tool_result,
     turn_context::{SharedTurnContext, TurnError},
     turn_handle::TurnHandle,
@@ -40,14 +40,14 @@ use crate::{
 #[derive(Clone)]
 pub struct SessionCreateParams {
     pub store: Arc<dyn EventStore>,
-    pub sid: SessionId,
+    pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
-    pub parent: Option<SessionId>,
+    pub parent_session_id: Option<SessionId>,
     pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
     pub runtime: Arc<SessionRuntimeState>,
-    pub caps: Arc<SessionRuntimeServices>,
+    pub runtime_services: Arc<SessionRuntimeServices>,
 }
 
 /// 会话句柄 — 带存储能力的会话操作入口。
@@ -56,7 +56,7 @@ pub struct SessionCreateParams {
 /// - `runtime`：进程内瞬态资源（file_obs、event_tx 等）。broadcast 在 runtime 上而不是 Session
 ///   上：同 sid 多次 `Session::open` / `clone` 仍共享同一个
 ///   broadcast，订阅者一处订阅就能看到所有实例上发出的事件。
-/// - `caps`：跨 session 共享的基础设施（LLM、扩展、上下文组装器、配置）。
+/// - `runtime_services`：跨 session 共享的基础设施（LLM、扩展、上下文组装器、配置）。
 ///
 /// `Clone` 是廉价的 Arc clone，可以自由复制。
 #[derive(Clone)]
@@ -64,7 +64,7 @@ pub struct Session {
     pub(crate) id: SessionId,
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) runtime: Arc<SessionRuntimeState>,
-    pub(crate) caps: Arc<SessionRuntimeServices>,
+    pub(crate) runtime_services: Arc<SessionRuntimeServices>,
 }
 
 impl Session {
@@ -77,7 +77,7 @@ impl Session {
     pub async fn create_with_params(mut params: SessionCreateParams) -> Result<Self, SessionError> {
         params.tool_selection = resolve_initial_tool_selection(
             params.store.as_ref(),
-            params.parent.as_ref(),
+            params.parent_session_id.as_ref(),
             params.tool_selection.as_ref(),
         )
         .await?;
@@ -88,62 +88,35 @@ impl Session {
         params
             .store
             .create_session(
-                &params.sid,
+                &params.session_id,
                 &params.working_dir,
                 &params.model_id,
-                params.parent.as_ref(),
+                params.parent_session_id.as_ref(),
                 params.tool_selection.as_ref(),
                 params.source_extension.as_deref(),
             )
             .await?;
         Ok(Self {
-            id: params.sid,
+            id: params.session_id,
             store: params.store,
             runtime: params.runtime,
-            caps: params.caps,
+            runtime_services: params.runtime_services,
         })
     }
 
-    /// 用调用方指定的 sid 创建会话（参数展开版，兼容旧调用点）。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_with_id(
-        store: Arc<dyn EventStore>,
-        sid: SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent: Option<&SessionId>,
-        tool_selection: Option<&SessionToolSelection>,
-        source_extension: Option<&str>,
-        runtime: Arc<SessionRuntimeState>,
-        caps: Arc<SessionRuntimeServices>,
-    ) -> Result<Self, SessionError> {
-        Self::create_with_params(SessionCreateParams {
-            store,
-            sid,
-            working_dir: working_dir.to_string(),
-            model_id: model_id.to_string(),
-            parent: parent.cloned(),
-            tool_selection: tool_selection.cloned(),
-            source_extension: source_extension.map(str::to_string),
-            runtime,
-            caps,
-        })
-        .await
-    }
-
-    /// 从磁盘恢复已有会话并附带运行时/能力/事件广播。
+    /// 从磁盘恢复已有会话并附带运行时服务和事件广播。
     pub async fn open(
         store: Arc<dyn EventStore>,
         id: SessionId,
         runtime: Arc<SessionRuntimeState>,
-        caps: Arc<SessionRuntimeServices>,
+        runtime_services: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
         Ok(Self {
             id,
             store,
             runtime,
-            caps,
+            runtime_services,
         })
     }
 
@@ -159,8 +132,8 @@ impl Session {
         Arc::clone(&self.runtime)
     }
 
-    pub fn caps(&self) -> &SessionRuntimeServices {
-        &self.caps
+    pub(crate) fn runtime_services(&self) -> &SessionRuntimeServices {
+        &self.runtime_services
     }
 
     pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
@@ -336,7 +309,7 @@ impl Session {
 
     pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
         let model = self.read_model().await?;
-        emit_lifecycle_for_read_model(&self.caps, &self.id, &model, event).await
+        emit_lifecycle_for_read_model(&self.runtime_services, &self.id, &model, event).await
     }
 
     pub async fn update_model_id(&self, model_id: &str) -> Result<Option<Event>, SessionError> {
@@ -385,13 +358,16 @@ impl Session {
 
 /// 发射 session 生命周期事件，不要求构造完整 [`Session`]。
 pub async fn emit_lifecycle_for_read_model(
-    caps: &SessionRuntimeServices,
+    runtime_services: &SessionRuntimeServices,
     session_id: &SessionId,
     model: &SessionReadModel,
     event: ExtensionEvent,
 ) -> Result<(), SessionError> {
     let ctx = SharedTurnContext::from_read_model(session_id, model).lifecycle_ctx();
-    caps.turn_hooks().emit_lifecycle(event, ctx).await?;
+    runtime_services
+        .turn_hooks()
+        .emit_lifecycle(event, ctx)
+        .await?;
     Ok(())
 }
 
@@ -456,7 +432,7 @@ struct PreparedRuntimeSnapshot {
 
 struct ResolvedToolRegistrySnapshot {
     registry: Arc<ToolRegistry>,
-    key: ToolRegistryCacheKey,
+    base_key: BaseToolRegistryKey,
 }
 
 async fn retry_runtime_snapshot(
@@ -477,16 +453,17 @@ impl Session {
     ) -> Result<ResolvedToolRegistrySnapshot, SessionError> {
         loop {
             let RuntimeSnapshotState::Stable(runtime_generation) =
-                self.caps.runtime_snapshot_state()
+                self.runtime_services.runtime_snapshot_state()
             else {
                 retry_runtime_snapshot(stability).await?;
                 continue;
             };
-            let key = self.tool_registry_cache_key(working_dir, runtime_generation, tool_selection);
+            let base_key = self.base_tool_registry_key(working_dir, runtime_generation);
             let cache = self.runtime.tool_registry_cache();
-            let build = match cache.lookup_or_reserve(&key) {
-                ToolCacheLookup::Hit(registry) => {
-                    return Ok(ResolvedToolRegistrySnapshot { registry, key });
+            let build = match cache.lookup_or_reserve(&base_key) {
+                ToolCacheLookup::Hit(base_registry) => {
+                    let registry = cache.filtered_registry(base_registry, tool_selection);
+                    return Ok(ResolvedToolRegistrySnapshot { registry, base_key });
                 },
                 ToolCacheLookup::Wait(mut notification) => {
                     let _ = notification.changed().await;
@@ -495,37 +472,35 @@ impl Session {
                 ToolCacheLookup::Build(build) => build,
             };
 
-            let built = crate::session_setup::build_tool_registry_snapshot(
-                self.caps.tool_catalog(),
-                self.caps.tool_packs(),
+            let built = crate::session_setup::build_base_tool_registry(
+                self.runtime_services.tool_catalog(),
+                self.runtime_services.tool_packs(),
                 working_dir,
-                key.tool_selection.as_ref(),
             )
             .await?;
-            let registry = Arc::new(built.registry);
-            if self.caps.runtime_snapshot_state()
+            let base_registry = Arc::new(built.registry);
+            if self.runtime_services.runtime_snapshot_state()
                 == RuntimeSnapshotState::Stable(runtime_generation)
-                && self.caps.tool_pack_versions() == key.tool_pack_versions
+                && self.runtime_services.tool_pack_versions() == base_key.tool_pack_versions
             {
-                build.complete(key.clone(), Arc::clone(&registry), built.completeness);
-                return Ok(ResolvedToolRegistrySnapshot { registry, key });
+                build.complete(Arc::clone(&base_registry), built.completeness);
+                let registry = cache.filtered_registry(base_registry, tool_selection);
+                return Ok(ResolvedToolRegistrySnapshot { registry, base_key });
             }
             drop(build);
             retry_runtime_snapshot(stability).await?;
         }
     }
 
-    fn tool_registry_cache_key(
+    fn base_tool_registry_key(
         &self,
         working_dir: &str,
         runtime_generation: u64,
-        tool_selection: Option<&SessionToolSelection>,
-    ) -> ToolRegistryCacheKey {
-        ToolRegistryCacheKey {
+    ) -> BaseToolRegistryKey {
+        BaseToolRegistryKey {
             runtime_generation,
-            tool_pack_versions: self.caps.tool_pack_versions(),
+            tool_pack_versions: self.runtime_services.tool_pack_versions(),
             working_dir: working_dir.to_owned(),
-            tool_selection: tool_selection.cloned(),
         }
     }
 
@@ -598,9 +573,10 @@ impl Session {
                     tool_snapshot.registry.as_ref(),
                 )
                 .await?;
-            if self.caps.runtime_snapshot_state()
-                == RuntimeSnapshotState::Stable(tool_snapshot.key.runtime_generation)
-                && self.caps.tool_pack_versions() == tool_snapshot.key.tool_pack_versions
+            if self.runtime_services.runtime_snapshot_state()
+                == RuntimeSnapshotState::Stable(tool_snapshot.base_key.runtime_generation)
+                && self.runtime_services.tool_pack_versions()
+                    == tool_snapshot.base_key.tool_pack_versions
             {
                 return Ok(PreparedRuntimeSnapshot {
                     registry: tool_snapshot.registry,
@@ -678,9 +654,9 @@ impl Session {
             .collect();
         Ok(crate::session_setup::build_system_prompt_snapshot(
             crate::session_setup::SystemPromptSnapshotInput {
-                prompt_contributor: self.caps.prompt_contributor(),
-                prompt_provider: self.caps.prompt_provider(),
-                prompt_file_provider: self.caps.prompt_file_provider(),
+                prompt_contributor: self.runtime_services.prompt_contributor(),
+                prompt_provider: self.runtime_services.prompt_provider(),
+                prompt_file_provider: self.runtime_services.prompt_file_provider(),
                 session_id: self.id.as_str(),
                 working_dir,
                 model_id,
@@ -778,10 +754,10 @@ impl Session {
             tool_selection.as_ref(),
         )
         .await?;
-        let primary_llm = primary_llm_for_model_id(&self.caps, model_id);
+        let primary_llm = primary_llm_for_model_id(&self.runtime_services, model_id);
         let child_runtime = Arc::new(SessionRuntimeState::new(
             primary_llm,
-            self.caps.small_llm(),
+            self.runtime_services.small_llm(),
             model_id.to_string(),
         ));
         if extra_system_prompt.is_some() {
@@ -790,14 +766,14 @@ impl Session {
         let child_sid = new_session_id();
         let child = Session::create_persisted(SessionCreateParams {
             store: Arc::clone(&self.store),
-            sid: child_sid.clone(),
+            session_id: child_sid.clone(),
             working_dir: working_dir.to_owned(),
             model_id: model_id.to_owned(),
-            parent: Some(self.id.clone()),
+            parent_session_id: Some(self.id.clone()),
             tool_selection: tool_selection.clone(),
             source_extension: source_extension.map(str::to_owned),
             runtime: child_runtime,
-            caps: Arc::clone(&self.caps),
+            runtime_services: Arc::clone(&self.runtime_services),
         })
         .await?;
 
@@ -820,14 +796,14 @@ impl Session {
 /// 子 session 的 turn 使用 `SessionModelBinding.llm`；当目标 model_id 为小模型时选用 small
 /// provider。
 fn primary_llm_for_model_id(
-    caps: &SessionRuntimeServices,
+    runtime_services: &SessionRuntimeServices,
     model_id: &str,
 ) -> Arc<dyn astrcode_core::llm::LlmProvider> {
-    let effective = caps.read_effective();
+    let effective = runtime_services.read_effective();
     if model_id == effective.small_llm.model_id && model_id != effective.llm.model_id {
-        caps.small_llm()
+        runtime_services.small_llm()
     } else {
-        caps.llm()
+        runtime_services.llm()
     }
 }
 
@@ -874,7 +850,7 @@ impl Session {
             session_store_dir: self.session_store_dir().await,
         };
         match self
-            .caps()
+            .runtime_services()
             .turn_hooks_arc()
             .emit_user_message_envelope(ctx)
             .await?

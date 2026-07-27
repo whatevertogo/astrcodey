@@ -19,7 +19,9 @@ use astrcode_core::{
     types::new_session_id,
 };
 use astrcode_extension_sdk::tool_pack::{ToolPack, ToolPackScope};
-use astrcode_session::{Session, SessionHostServices, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_session::{
+    Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
+};
 use astrcode_storage::in_memory::InMemoryEventStore;
 use tokio::sync::mpsc;
 
@@ -143,7 +145,7 @@ impl Tool for EmbeddedEchoTool {
 async fn main() -> Result<(), Box<dyn Error>> {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(EmbeddedLlm);
-    let caps = Arc::new(SessionRuntimeServices::new(
+    let runtime_services = Arc::new(SessionRuntimeServices::new(
         Arc::clone(&llm),
         llm,
         effective_config(),
@@ -157,21 +159,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_tool_packs(vec![Arc::new(EmbeddedToolPack)]),
     ));
     let runtime = Arc::new(SessionRuntimeState::new(
-        caps.llm(),
-        caps.small_llm(),
+        runtime_services.llm(),
+        runtime_services.small_llm(),
         "embedded-model".into(),
     ));
-    let session = Session::create_with_id(
-        Arc::clone(&store),
-        new_session_id(),
-        "memory://workspace",
-        "embedded-model",
-        None,
-        None,
-        Some("embedded-session-example"),
+    let session = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: new_session_id(),
+        working_dir: "memory://workspace".into(),
+        model_id: "embedded-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: Some("embedded-session-example".into()),
         runtime,
-        Arc::clone(&caps),
-    )
+        runtime_services: Arc::clone(&runtime_services),
+    })
     .await?;
 
     session.initialize_runtime("memory://workspace").await?;
