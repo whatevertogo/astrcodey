@@ -1,37 +1,16 @@
-//! `askUser` tool — structured multiple-choice questions for the user.
-//!
-//! 后端在 `Registrar::tool_ui` 注册 `questionnaire` Approval；宿主投影 `metadata.toolUi`。
-//! 前端只提供通用 `QuestionnaireApprovalCard`，**不**在前端注册 askUser。
+use std::collections::{HashMap, HashSet};
 
-use astrcode_extension_sdk::tool::{
-    ExecutionMode, TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire,
-    ToolDefinition, ToolOrigin, ToolResult, ToolUiWire, tool_metadata,
-};
+use astrcode_extension_sdk::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
-/// Wire name for the ask-user tool (camelCase for LLM tool calls).
 pub const ASK_USER_TOOL_NAME: &str = "askUser";
-
-/// 等待用户填写 Approval UI（execute 已返回，不在线程内阻塞）。
-pub const TOOL_UI_AWAITING_USER_INPUT: &str = "awaiting_user_input";
-
-/// 提供该交互 UI 的扩展 id（诊断 / 多扩展并存时路由 resolve）。
-pub const ASK_USER_EXTENSION_ID_METADATA_KEY: &str = "extensionId";
-
-pub const MODE_EXTENSION_ID: &str = "astrcode-mode";
-
-/// Short label chip max width.
 pub const ASK_USER_HEADER_MAX_LEN: usize = 12;
-
-/// Max questions per call.
 pub const ASK_USER_MAX_QUESTIONS: usize = 4;
-
-/// Min/max options per question.
 pub const ASK_USER_MIN_OPTIONS: usize = 2;
 pub const ASK_USER_MAX_OPTIONS: usize = 4;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserOption {
     pub label: String,
@@ -40,7 +19,7 @@ pub struct AskUserOption {
     pub preview: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserQuestion {
     pub question: String,
@@ -50,14 +29,14 @@ pub struct AskUserQuestion {
     pub multi_select: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserInput {
     pub questions: Vec<AskUserQuestion>,
@@ -65,23 +44,50 @@ pub struct AskUserInput {
     pub metadata: Option<AskUserMetadata>,
 }
 
-/// 后端注册：askUser 使用宿主内置 `questionnaire` Approval 卡片。
-pub fn ask_user_tool_ui() -> ToolUiWire {
-    ToolUiWire {
-        input: None,
-        approval: Some(ToolApprovalUiWire::Builtin {
-            variant: "questionnaire".into(),
-        }),
-        result: None,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingQuestion {
+    pub session_id: String,
+    pub call_id: String,
+    pub questions: Vec<AskUserQuestion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AskUserMetadata>,
+}
+
+impl PendingQuestion {
+    pub fn new(session_id: String, call_id: String, input: AskUserInput) -> Self {
+        Self {
+            session_id,
+            call_id,
+            questions: input.questions,
+            metadata: input.metadata,
+        }
+    }
+
+    pub fn validate_answers(&self, answers: &HashMap<String, String>) -> Result<(), String> {
+        let expected = self
+            .questions
+            .iter()
+            .map(|question| question.question.as_str())
+            .collect::<HashSet<_>>();
+        let actual = answers.keys().map(String::as_str).collect::<HashSet<_>>();
+        if actual != expected {
+            return Err("answers must contain exactly one entry for every question".into());
+        }
+        if answers.values().any(|answer| answer.trim().is_empty()) {
+            return Err("answers must not be empty".into());
+        }
+        Ok(())
     }
 }
 
-pub fn ask_user_tool_ui_map() -> std::collections::HashMap<String, ToolUiWire> {
-    std::collections::HashMap::from([(ASK_USER_TOOL_NAME.to_string(), ask_user_tool_ui())])
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnswerRequest {
+    pub answers: HashMap<String, String>,
 }
 
-/// JSON Schema for LLM tool parameters (`additionalProperties: false`, camelCase).
-pub fn ask_user_tool_definition() -> ToolDefinition {
+pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: ASK_USER_TOOL_NAME.into(),
         description: ("Ask the user one to four multiple-choice questions to clarify \
@@ -110,7 +116,9 @@ pub fn ask_user_tool_definition() -> ToolDefinition {
                             },
                             "header": {
                                 "type": "string",
-                                "description": format!("Short chip label (max {ASK_USER_HEADER_MAX_LEN} chars).")
+                                "description": format!(
+                                    "Short chip label (max {ASK_USER_HEADER_MAX_LEN} chars)."
+                                )
                             },
                             "options": {
                                 "type": "array",
@@ -154,8 +162,7 @@ pub fn ask_user_tool_definition() -> ToolDefinition {
     }
 }
 
-/// Validate input shape and uniqueness rules before showing UI.
-pub fn validate_ask_user_input(input: &AskUserInput) -> Result<(), String> {
+pub fn validate_input(input: &AskUserInput) -> Result<(), String> {
     if input.questions.is_empty() {
         return Err("questions must contain at least one item".into());
     }
@@ -165,109 +172,46 @@ pub fn validate_ask_user_input(input: &AskUserInput) -> Result<(), String> {
         ));
     }
 
-    let mut seen_questions = std::collections::HashSet::new();
-    for q in &input.questions {
-        if q.header.chars().count() > ASK_USER_HEADER_MAX_LEN {
+    let mut seen_questions = HashSet::new();
+    for question in &input.questions {
+        if question.question.trim().is_empty() {
+            return Err("question text must not be empty".into());
+        }
+        if question.header.trim().is_empty() {
+            return Err("question header must not be empty".into());
+        }
+        if question.header.chars().count() > ASK_USER_HEADER_MAX_LEN {
             return Err(format!(
                 "header '{}' exceeds {ASK_USER_HEADER_MAX_LEN} characters",
-                q.header
+                question.header
             ));
         }
-        if !seen_questions.insert(&q.question) {
+        if !seen_questions.insert(&question.question) {
             return Err("question texts must be unique".into());
         }
-        if q.options.len() < ASK_USER_MIN_OPTIONS || q.options.len() > ASK_USER_MAX_OPTIONS {
+        if question.options.len() < ASK_USER_MIN_OPTIONS
+            || question.options.len() > ASK_USER_MAX_OPTIONS
+        {
             return Err(format!(
                 "question '{}' must have {ASK_USER_MIN_OPTIONS}-{ASK_USER_MAX_OPTIONS} options",
-                q.question
+                question.question
             ));
         }
-        let mut seen_labels = std::collections::HashSet::new();
-        for opt in &q.options {
-            if !seen_labels.insert(&opt.label) {
+        let mut seen_labels = HashSet::new();
+        for option in &question.options {
+            if option.label.trim().is_empty() {
+                return Err("option labels must not be empty".into());
+            }
+            if !seen_labels.insert(&option.label) {
                 return Err(format!(
                     "option labels must be unique within question '{}'",
-                    q.question
+                    question.question
                 ));
             }
-            if q.multi_select && opt.preview.is_some() {
+            if question.multi_select && option.preview.is_some() {
                 return Err("preview is not supported for multiSelect questions".into());
             }
         }
     }
     Ok(())
-}
-
-/// Extension tool handler：校验参数后立即返回 awaiting；完成走宿主 command。
-pub fn handle_ask_user(arguments: Value) -> Result<ToolResult, String> {
-    let input: AskUserInput = serde_json::from_value(arguments)
-        .map_err(|e| format!("invalid args for {ASK_USER_TOOL_NAME}: {e}"))?;
-    validate_ask_user_input(&input)?;
-    Ok(ask_user_awaiting_user_input_result(&input))
-}
-
-/// Phase-1 tool result：宿主按 `metadata.toolUi` 渲染 Approval UI；答案由 HTTP/command 写回。
-pub fn ask_user_awaiting_user_input_result(input: &AskUserInput) -> ToolResult {
-    let content = serde_json::to_string(&json!({
-        "status": TOOL_UI_AWAITING_USER_INPUT,
-        "questions": &input.questions,
-    }))
-    .unwrap_or_else(|_| "{}".into());
-
-    ToolResult {
-        content,
-        is_error: false,
-        error: None,
-        metadata: tool_metadata([
-            (TOOL_UI_METADATA_KEY, json!(ask_user_tool_ui())),
-            (TOOL_UI_PHASE_METADATA_KEY, json!("approval")),
-            (ASK_USER_EXTENSION_ID_METADATA_KEY, json!(MODE_EXTENSION_ID)),
-        ]),
-        duration_ms: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_input() -> AskUserInput {
-        AskUserInput {
-            questions: vec![AskUserQuestion {
-                question: "Which approach?".into(),
-                header: "Approach".into(),
-                options: vec![
-                    AskUserOption {
-                        label: "A".into(),
-                        description: "First".into(),
-                        preview: None,
-                    },
-                    AskUserOption {
-                        label: "B".into(),
-                        description: "Second".into(),
-                        preview: None,
-                    },
-                ],
-                multi_select: false,
-            }],
-            metadata: None,
-        }
-    }
-
-    #[test]
-    fn validate_accepts_minimal_question() {
-        assert!(validate_ask_user_input(&sample_input()).is_ok());
-    }
-
-    #[test]
-    fn validate_rejects_duplicate_question_text() {
-        let mut input = sample_input();
-        input.questions.push(input.questions[0].clone());
-        assert!(validate_ask_user_input(&input).is_err());
-    }
-
-    #[test]
-    fn tool_definition_has_expected_name() {
-        assert_eq!(ask_user_tool_definition().name, ASK_USER_TOOL_NAME);
-    }
 }

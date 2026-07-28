@@ -54,6 +54,7 @@ fn event_rejects_reserved_keys_in_extension_payload() {
             extension_id: "memory".into(),
             event_type: "memory.accepted".into(),
             schema_version: 1,
+            durable: true,
             payload: serde_json::json!({ "session_id": "fake" }),
         },
     };
@@ -64,6 +65,39 @@ fn event_rejects_reserved_keys_in_extension_payload() {
         err.to_string()
             .contains("ExtensionEvent payload contains reserved Event envelope key")
     );
+}
+
+#[test]
+fn extension_event_durability_is_runtime_only_for_durable_events() {
+    let durable = EventPayload::ExtensionEvent {
+        extension_id: "memory".into(),
+        event_type: "memory.accepted".into(),
+        schema_version: 1,
+        durable: true,
+        payload: serde_json::json!({ "value": 1 }),
+    };
+    let encoded = serde_json::to_value(&durable).unwrap();
+    assert!(durable.is_durable());
+    assert!(encoded.get("durable").is_none());
+
+    let live = EventPayload::ExtensionEvent {
+        extension_id: "ask-user".into(),
+        event_type: "ask_user.pending".into(),
+        schema_version: 1,
+        durable: false,
+        payload: serde_json::json!({ "callId": "call-1" }),
+    };
+    assert!(!live.is_durable());
+
+    let legacy: EventPayload = serde_json::from_value(serde_json::json!({
+        "type": "extension_event",
+        "extension_id": "memory",
+        "event_type": "memory.accepted",
+        "schema_version": 1,
+        "payload": {}
+    }))
+    .unwrap();
+    assert!(legacy.is_durable());
 }
 
 #[test]
@@ -505,6 +539,7 @@ fn event_payload_variants_stay_nested() {
             extension_id: "e".into(),
             event_type: "t".into(),
             schema_version: 1,
+            durable: true,
             payload: serde_json::json!({}),
         },
     ];

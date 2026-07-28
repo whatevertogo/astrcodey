@@ -356,11 +356,18 @@ pub fn emit_for_sink(
     payload: Value,
 ) -> Result<(), ExtensionError> {
     validate_emit(declarations, event_type, schema_version, &payload)?;
+    let durable = declarations
+        .get(event_type)
+        .map(|declaration| declaration.durable)
+        .ok_or_else(|| {
+            ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
+        })?;
     event_tx
         .send(EventPayload::ExtensionEvent {
             extension_id: extension_id.to_owned(),
             event_type: event_type.to_owned(),
             schema_version,
+            durable,
             payload,
         })
         .map_err(|_| ExtensionError::Internal("event channel closed".into()))

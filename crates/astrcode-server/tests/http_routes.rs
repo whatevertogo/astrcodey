@@ -89,12 +89,19 @@ impl Extension for HttpRoutesExtension {
     }
 
     fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::PublicHttp]
+        &[
+            ExtensionCapability::PublicHttp,
+            ExtensionCapability::AuthenticatedHttp,
+        ]
     }
 
     fn register(&self, registrar: &mut Registrar) {
         registrar.http_route(
             ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/plugin-probe/{id}"),
+            Arc::new(HttpRoutesHandler),
+        );
+        registrar.http_route(
+            ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Post, "/protected-probe/{id}"),
             Arc::new(HttpRoutesHandler),
         );
     }
@@ -389,7 +396,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
         .register(Arc::new(HttpRoutesExtension))
         .await
         .unwrap();
-    let (app, _token) = router(Arc::clone(&runtime)).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
         .clone()
@@ -404,6 +411,35 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
         .await
         .unwrap();
     assert_eq!(public.status(), StatusCode::CREATED);
+
+    let protected_path = "/api/extensions/http-routes-test/protected-probe/8";
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(protected_path)
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(protected_path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"authenticated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::CREATED);
 
     let invalid_json = app
         .clone()

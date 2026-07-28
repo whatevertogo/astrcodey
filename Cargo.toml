@@ -23,6 +23,7 @@ members = [
     "crates/astrcode-extension-skill",
     "crates/astrcode-extension-todo-tool",
     "crates/astrcode-extension-mode",
+    "crates/astrcode-extension-ask-user",
     "crates/astrcode-extension-goal",
     "crates/astrcode-extension-memory",
     "crates/astrcode-extension-channels",

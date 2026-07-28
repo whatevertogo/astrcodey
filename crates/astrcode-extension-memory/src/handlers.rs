@@ -234,7 +234,7 @@ impl ToolHandler for MemoryDeleteHandler {
                     "match": pattern_for_emit,
                     "deleted_count": removed.len(),
                 });
-                let _ = sink.emit("memory.deleted", 1, payload).await;
+                let _ = sink.emit("memory.deleted", 1, payload);
             }
         }
 

@@ -596,6 +596,13 @@ pub enum ConversationDeltaDto {
     },
     /// 扩展注册表发生变化，客户端应重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
+    /// 扩展发出的实时事件。客户端按 extension/event type 解释 payload。
+    ExtensionEvent {
+        extension_id: String,
+        event_type: String,
+        schema_version: u32,
+        payload: serde_json::Value,
+    },
     /// 合并 toolCall block 的 metadata（如 Tool Gate 审批挂起）。
     PatchToolMetadata {
         block_id: String,

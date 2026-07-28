@@ -1,15 +1,6 @@
-export interface AskUserOption {
-  label: string
-  description: string
-  preview?: string
-}
+import type { AskUserOption, AskUserQuestion } from '../../services/types'
 
-export interface AskUserQuestion {
-  question: string
-  header: string
-  options: AskUserOption[]
-  multiSelect?: boolean
-}
+export type { AskUserOption, AskUserQuestion } from '../../services/types'
 
 export interface AskUserInput {
   questions: AskUserQuestion[]

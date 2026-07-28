@@ -165,9 +165,8 @@ fn attach_extension_event_sink(
     bind_extension_event_sink(extension_id, decls, tx.clone())
 }
 
-#[async_trait::async_trait]
 impl ExtensionEventSink for BoundExtensionEventSink {
-    async fn emit(
+    fn emit(
         &self,
         event_type: &str,
         schema_version: u32,

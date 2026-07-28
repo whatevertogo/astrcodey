@@ -1,6 +1,9 @@
 import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
-import { decodeConversationSnapshot } from './protocol'
+import {
+  decodeConversationSnapshot,
+  decodePendingAskUserQuestionsResponse,
+} from './protocol'
 import type {
   ConfigReloadResponseDto,
   DeleteProjectResponseDto,
@@ -138,6 +141,41 @@ export async function getConversation(
     await request<unknown>(
       `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
     )
+  )
+}
+
+export async function listPendingAskUserQuestions(sessionId: string) {
+  return decodePendingAskUserQuestionsResponse(
+    await request<unknown>(
+      `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions`
+    )
+  )
+}
+
+export async function respondAskUserQuestion(
+  sessionId: string,
+  callId: string,
+  answers: Record<string, string>
+): Promise<void> {
+  await request<unknown>(
+    `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(callId)}/respond`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ answers }),
+    }
+  )
+}
+
+export async function rejectAskUserQuestion(
+  sessionId: string,
+  callId: string
+): Promise<void> {
+  await request<unknown>(
+    `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(callId)}/reject`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
   )
 }
 

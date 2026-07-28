@@ -69,6 +69,10 @@ pub fn bundled_extensions(
     if is_enabled(extension_states, "astrcode-mode") {
         extensions.push(astrcode_extension_mode::extension());
     }
+    #[cfg(feature = "ask-user")]
+    if is_enabled(extension_states, "astrcode-ask-user") {
+        extensions.push(astrcode_extension_ask_user::extension());
+    }
     #[cfg(feature = "goal")]
     if is_enabled(extension_states, "astrcode-goal") {
         extensions.push(astrcode_extension_goal::extension());
@@ -101,6 +105,8 @@ pub fn bundled_extension_ids() -> Vec<&'static str> {
         "astrcode-todo-tool",
         #[cfg(feature = "mode")]
         "astrcode-mode",
+        #[cfg(feature = "ask-user")]
+        "astrcode-ask-user",
         #[cfg(feature = "goal")]
         "astrcode-goal",
         #[cfg(feature = "memory")]

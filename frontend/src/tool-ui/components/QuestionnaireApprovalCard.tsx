@@ -1,10 +1,12 @@
 import { useCallback, useMemo, useReducer, useState } from 'react'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
-import { submitToolApprovalRespond } from '../commands'
+import {
+  rejectAskUserQuestion,
+  respondAskUserQuestion,
+} from '../../services/api'
 import type { ToolUiContext } from '../types'
 import {
-  isAwaitingUserInput,
   parseAskUserInput,
   parseAskUserOutput,
   type AskUserQuestion,
@@ -122,20 +124,21 @@ function CompletedAnswers({ answers }: { answers: Record<string, string> }) {
 /** 宿主内置 `approval.variant = questionnaire` 卡片（后端注册，非 askUser 硬编码）。 */
 export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
   const { block, sessionId } = ctx
-  const refreshConversationSnapshot = useAppStore(
-    (state) => state.refreshConversationSnapshot
+  const pendingQuestion = useAppStore(
+    (state) => state.pendingAskUserQuestions[block.id]
   )
   const input = useMemo(
-    () => parseAskUserInput(block.argumentsJson ?? ctx.args),
-    [block.argumentsJson, ctx.args]
+    () =>
+      pendingQuestion
+        ? {
+            questions: pendingQuestion.questions,
+            metadata: pendingQuestion.metadata,
+          }
+        : parseAskUserInput(block.argumentsJson ?? ctx.args),
+    [block.argumentsJson, ctx.args, pendingQuestion]
   )
   const completed = useMemo(() => parseAskUserOutput(block.text), [block.text])
-  const awaiting = useMemo(() => isAwaitingUserInput(block.text), [block.text])
-
-  const pending =
-    awaiting ||
-    block.status === 'streaming' ||
-    (block.status !== 'error' && input != null && completed == null)
+  const pending = pendingQuestion != null
 
   const [state, dispatch] = useReducer(reducer, {
     index: 0,
@@ -175,20 +178,27 @@ export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
     setSubmitting(true)
     setSubmitError(null)
     try {
-      await submitToolApprovalRespond({
-        sessionId,
-        toolCallId: block.id,
-        toolName: block.name,
-        answers,
-      })
+      await respondAskUserQuestion(sessionId, block.id, answers)
       setSubmittedAnswers(answers)
-      await refreshConversationSnapshot()
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e))
     } finally {
       setSubmitting(false)
     }
-  }, [allAnswers, sessionId, block.id, block.name, refreshConversationSnapshot])
+  }, [allAnswers, sessionId, block.id])
+
+  const handleReject = useCallback(async () => {
+    if (!sessionId) return
+    setSubmitting(true)
+    setSubmitError(null)
+    try {
+      await rejectAskUserQuestion(sessionId, block.id)
+    } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSubmitting(false)
+    }
+  }, [sessionId, block.id])
 
   const visibleCompletedAnswers = completed?.answers ?? submittedAnswers
 
@@ -340,6 +350,14 @@ export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
             {submitting ? '提交中…' : '提交回答'}
           </button>
         )}
+        <button
+          type="button"
+          disabled={!sessionId || submitting}
+          className="rounded-md border border-border px-3 py-1.5 text-[12px] text-text-secondary hover:bg-surface disabled:opacity-40"
+          onClick={() => void handleReject()}
+        >
+          拒绝
+        </button>
       </div>
       {submitError && <p className="text-[12px] text-red-500">{submitError}</p>}
     </div>

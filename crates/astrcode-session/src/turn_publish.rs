@@ -582,6 +582,15 @@ mod tests {
                 extension_id: "emit-probe".into(),
                 event_type: "emit.probe".into(),
                 schema_version: 1,
+                durable: true,
+                payload: serde_json::json!({ "probe": true }),
+            })
+            .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
+            tx.send(EventPayload::ExtensionEvent {
+                extension_id: "emit-probe".into(),
+                event_type: "emit.live".into(),
+                schema_version: 1,
+                durable: false,
                 payload: serde_json::json!({ "probe": true }),
             })
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
@@ -678,6 +687,10 @@ mod tests {
                 event_type,
                 ..
             } if extension_id == "emit-probe" && event_type == "emit.probe"
+        )));
+        assert!(!events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::ExtensionEvent { event_type, .. } if event_type == "emit.live"
         )));
     }
 

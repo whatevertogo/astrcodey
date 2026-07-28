@@ -220,6 +220,7 @@ name = "astrcode-bundled-extensions"
 version = "0.3.12"
 dependencies = [
  "astrcode-extension-agent-tools",
+ "astrcode-extension-ask-user",
  "astrcode-extension-channels",
  "astrcode-extension-goal",
  "astrcode-extension-mcp",
@@ -362,6 +363,19 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tracing",
+]
+
+[[package]]
+name = "astrcode-extension-ask-user"
+version = "0.3.12"
+dependencies = [
+ "astrcode-extension-sdk",
+ "async-trait",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

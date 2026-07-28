@@ -6,12 +6,13 @@ license.workspace = true
 description = "First-party bundled extension registration"
 
 [features]
-default = ["agent-tools", "mcp", "skill", "todo-tool", "mode", "goal", "memory", "channels", "web-tools"]
+default = ["agent-tools", "mcp", "skill", "todo-tool", "mode", "ask-user", "goal", "memory", "channels", "web-tools"]
 agent-tools = ["dep:astrcode-extension-agent-tools"]
 mcp = ["dep:astrcode-extension-mcp"]
 skill = ["dep:astrcode-extension-skill"]
 todo-tool = ["dep:astrcode-extension-todo-tool"]
 mode = ["dep:astrcode-extension-mode"]
+ask-user = ["dep:astrcode-extension-ask-user"]
 goal = ["dep:astrcode-extension-goal"]
 memory = ["dep:astrcode-extension-memory"]
 channels = ["dep:astrcode-extension-channels"]
@@ -27,6 +28,7 @@ astrcode-extension-mcp = { path = "../astrcode-extension-mcp", optional = true, 
 astrcode-extension-skill = { path = "../astrcode-extension-skill", optional = true, default-features = false }
 astrcode-extension-todo-tool = { path = "../astrcode-extension-todo-tool", optional = true, default-features = false }
 astrcode-extension-mode = { path = "../astrcode-extension-mode", optional = true, default-features = false }
+astrcode-extension-ask-user = { path = "../astrcode-extension-ask-user", optional = true, default-features = false }
 astrcode-extension-goal = { path = "../astrcode-extension-goal", optional = true, default-features = false }
 astrcode-extension-memory = { path = "../astrcode-extension-memory", optional = true, default-features = false }
 astrcode-extension-channels = { path = "../astrcode-extension-channels", optional = true, default-features = false }

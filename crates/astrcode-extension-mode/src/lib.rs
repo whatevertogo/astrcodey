@@ -11,12 +11,10 @@
 //! Tools:
 //! - `switchMode`: switch between code and plan modes, with exit gate in plan mode
 //! - `upsertSessionPlan`: create or update the session plan artifact (plan mode only)
-//! - `askUser`: structured multiple-choice questions (extension tool; host renders UI)
 //!
 //! Mode state: `<session>/extension_data/astrcode-mode/mode/mode-state.json`
 //! Plan artifact: `<session>/extension_data/astrcode-mode/plan/plan.md`
 
-mod ask_user;
 mod catalog;
 mod prompts;
 mod store;
@@ -24,7 +22,6 @@ mod tools;
 
 use std::{path::PathBuf, sync::Arc};
 
-pub use ask_user::{ASK_USER_TOOL_NAME, ask_user_tool_definition, handle_ask_user};
 use astrcode_extension_sdk::{
     extension::{
         CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
@@ -85,13 +82,6 @@ impl Extension for ModeExtension {
                 catalog: Arc::clone(&catalog),
             }),
         );
-        reg.tool(
-            ask_user_tool_definition(),
-            Arc::new(ModeToolHandler {
-                catalog: Arc::clone(&catalog),
-            }),
-        );
-        reg.tool_ui(crate::ask_user::ask_user_tool_ui_map());
         reg.tool_metadata(mode_tool_metadata());
         reg.on_pre_tool_use(
             HookMode::Blocking,
@@ -177,14 +167,6 @@ impl ToolHandler for ModeToolHandler {
                 }
                 .into())
             },
-            crate::ask_user::ASK_USER_TOOL_NAME => Ok(match handle_ask_user(arguments) {
-                Ok(result) => result,
-                Err(error) => {
-                    let meta = tool_metadata([("error", json!(&error))]);
-                    ToolResult::text(error, true, meta)
-                },
-            }
-            .into()),
             _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
     }
@@ -319,11 +301,6 @@ fn mode_tool_metadata()
     );
     map.insert(
         UPSERT_PLAN_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(String::new())
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map.insert(
-        crate::ask_user::ASK_USER_TOOL_NAME.to_string(),
         ToolPromptMetadata::new(String::new())
             .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );

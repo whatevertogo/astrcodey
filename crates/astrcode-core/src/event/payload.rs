@@ -455,9 +455,22 @@ pub enum EventPayload {
         /// payload schema 版本，用于向前兼容。
         #[serde(default)]
         schema_version: u32,
+        /// 是否写入 durable event log。
+        ///
+        /// `true` 保持既有线缆形状；旧日志未携带该字段时也按 durable 事件恢复。
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        durable: bool,
         /// 不透明事件载荷。
         payload: serde_json::Value,
     },
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl EventPayload {
@@ -466,6 +479,9 @@ impl EventPayload {
     /// 采用「默认持久化」策略：仅排除 live/增量类事件；新增 [`EventPayload`] 变体若未加入
     /// 排除列表会自动持久化（更安全，但新增 live-only 变体时须记得更新此列表）。
     pub fn is_durable(&self) -> bool {
+        if let Self::ExtensionEvent { durable, .. } = self {
+            return *durable;
+        }
         !matches!(
             self,
             Self::ToolCallStarted { .. }

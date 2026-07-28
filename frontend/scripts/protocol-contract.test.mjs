@@ -93,6 +93,21 @@ assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)
 
+const extensionEvent = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '10' },
+  delta: {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: { sessionId: 'session-1', callId: 'call-1', questions: [] },
+  },
+})
+assert.equal(extensionEvent.delta.kind, 'extensionEvent')
+assert.equal(extensionEvent.delta.extensionId, 'astrcode-ask-user')
+assert.equal(extensionEvent.delta.payload.callId, 'call-1')
+
 assert.throws(
   () =>
     decodeConversationStreamEnvelope({

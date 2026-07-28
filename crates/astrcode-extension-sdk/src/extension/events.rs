@@ -145,9 +145,8 @@ impl<'a> ExtensionEventDeclBuilder<'a> {
 }
 
 /// 插件事件发射器。`extension_id` 在构造时由 runtime 绑定，调用方无法伪造身份。
-#[async_trait::async_trait]
 pub trait ExtensionEventSink: Send + Sync {
-    async fn emit(
+    fn emit(
         &self,
         event_type: &str,
         schema_version: u32,

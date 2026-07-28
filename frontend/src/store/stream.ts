@@ -91,6 +91,9 @@ export function startSessionStream(
       updateStatus: (sessionStreamStatus, sessionStreamError) => {
         if (get().activeSessionId !== sessionId) return
         set({ sessionStreamStatus, sessionStreamError })
+        if (sessionStreamStatus === 'connected') {
+          void get().refreshPendingAskUserQuestions()
+        }
       },
     },
   })

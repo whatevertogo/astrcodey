@@ -4,6 +4,7 @@ import type {
   ConversationControlState,
   ExtensionStateView,
   KeybindingInfo,
+  PendingAskUserQuestion,
   Phase,
   SessionListItem,
   SlashCommandInfo,
@@ -51,6 +52,9 @@ export interface AppState {
   extensions: ExtensionStateView[]
   transientHint: string | null
   pendingMessages: PendingMessage[]
+  pendingAskUserQuestions: Record<string, PendingAskUserQuestion>
+  resolvedAskUserCallIds: Record<string, true>
+  askUserEventRevision: number
   composerDeliveryMode: MessageDelivery
 
   initServer: () => Promise<void>
@@ -61,6 +65,7 @@ export interface AppState {
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>
   refreshConversationSnapshot: () => Promise<string | null>
+  refreshPendingAskUserQuestions: () => Promise<void>
   refreshExtensionData: () => Promise<void>
   refreshCommands: () => Promise<void>
   executeExtensionCommand: (

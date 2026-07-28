@@ -6,7 +6,10 @@ import {
   applyCoalescedDeltas,
   coalesceDeltas,
 } from '../../target/frontend-delta/coalesce.js'
-import { reduceConversationDeltas } from '../../target/frontend-delta/applyDelta.js'
+import {
+  mergePendingAskUserSnapshot,
+  reduceConversationDeltas,
+} from '../../target/frontend-delta/applyDelta.js'
 import { ConversationDeltaFrameBuffer } from '../../target/frontend-delta/frameBuffer.js'
 
 const ordered = coalesceDeltas([
@@ -104,6 +107,9 @@ const frameState = {
     },
   ],
   statusItems: {},
+  pendingAskUserQuestions: {},
+  resolvedAskUserCallIds: {},
+  askUserEventRevision: 0,
   transientHint: null,
 }
 const framePatch = reduceConversationDeltas(
@@ -142,6 +148,69 @@ assert.equal(
   'agentSessions' in framePatch,
   false,
   'duplicate child-agent projections should not notify subscribers'
+)
+
+const askUserPending = {
+  sessionId: 'session-1',
+  callId: 'call-1',
+  questions: [
+    {
+      question: 'Which approach?',
+      header: 'Approach',
+      options: [
+        { label: 'A', description: 'First' },
+        { label: 'B', description: 'Second' },
+      ],
+    },
+  ],
+}
+const askUserPatch = reduceConversationDeltas(frameState, [
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: askUserPending,
+  },
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: askUserPending,
+  },
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.resolved',
+    schemaVersion: 1,
+    payload: { sessionId: 'session-1', callId: 'call-1' },
+  },
+])
+assert.deepEqual(askUserPatch.pendingAskUserQuestions, {})
+assert.deepEqual(askUserPatch.resolvedAskUserCallIds, { 'call-1': true })
+
+const pendingDuringSnapshot = {
+  ...askUserPending,
+  callId: 'call-new',
+}
+assert.deepEqual(
+  mergePendingAskUserSnapshot(
+    { 'call-old': askUserPending, 'call-new': pendingDuringSnapshot },
+    { 'call-resolved': true },
+    [
+      { ...askUserPending, callId: 'call-resolved' },
+      { ...askUserPending, callId: 'call-snapshot' },
+    ],
+    'session-1',
+    new Set(['call-old']),
+    true
+  ),
+  {
+    'call-snapshot': { ...askUserPending, callId: 'call-snapshot' },
+    'call-new': pendingDuringSnapshot,
+  },
+  'REST recovery must preserve a pending SSE event that arrived during the request and ignore resolved tombstones'
 )
 
 const frameBuffer = new ConversationDeltaFrameBuffer({
@@ -261,6 +330,9 @@ const reducerInitialState = {
   compactSubmitting: false,
   agentSessions: [],
   statusItems: {},
+  pendingAskUserQuestions: {},
+  resolvedAskUserCallIds: {},
+  askUserEventRevision: 0,
   transientHint: null,
 }
 const reducerPatch = reduceConversationDeltas(
@@ -273,11 +345,17 @@ assert.deepEqual(
     ...reducerInitialState,
     ...reducerPatch,
     compactSubmitting: undefined,
+    pendingAskUserQuestions: undefined,
+    resolvedAskUserCallIds: undefined,
+    askUserEventRevision: undefined,
     transientHint: undefined,
   },
   {
     ...reducerFixture.expected,
     compactSubmitting: undefined,
+    pendingAskUserQuestions: undefined,
+    resolvedAskUserCallIds: undefined,
+    askUserEventRevision: undefined,
     transientHint: undefined,
   },
   'the frontend reducer must converge to the shared wire fixture state'

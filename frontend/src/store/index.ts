@@ -2,7 +2,10 @@ import { create } from 'zustand'
 import * as api from '../services/api'
 import { resolveHostBridge } from '../lib/hostBridge'
 import type { ConversationDelta } from '../services/types'
-import { applyDeltaToState } from './delta/applyDelta'
+import {
+  applyDeltaToState,
+  mergePendingAskUserSnapshot,
+} from './delta/applyDelta'
 import { isRegisteredSlashCommand } from '../lib/keybindings'
 import {
   commandNoteBlock,
@@ -33,6 +36,9 @@ function resetSessionView(): Partial<AppState> {
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
+    pendingAskUserQuestions: {},
+    resolvedAskUserCallIds: {},
+    askUserEventRevision: 0,
     composerDeliveryMode: 'queued',
     slashCommands: [],
     keybindings: [],
@@ -64,6 +70,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   extensions: [],
   transientHint: null,
   pendingMessages: [],
+  pendingAskUserQuestions: {},
+  resolvedAskUserCallIds: {},
+  askUserEventRevision: 0,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
@@ -180,6 +189,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       agentSessions: [],
       transientHint: null,
       pendingMessages: [],
+      pendingAskUserQuestions: {},
+      resolvedAskUserCallIds: {},
+      askUserEventRevision: 0,
       composerDeliveryMode: 'queued',
       slashCommands: [],
       keybindings: [],
@@ -252,6 +264,31 @@ export const useAppStore = create<AppState>((set, get) => ({
         transientHint: err instanceof Error ? err.message : '刷新会话快照失败',
       })
       return null
+    }
+  },
+
+  refreshPendingAskUserQuestions: async () => {
+    const sessionId = get().activeSessionId
+    if (!sessionId) return
+    const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
+    const revisionAtStart = get().askUserEventRevision
+
+    try {
+      const response = await api.listPendingAskUserQuestions(sessionId)
+      if (get().activeSessionId !== sessionId) return
+      set((current) => {
+        const pending = mergePendingAskUserSnapshot(
+          current.pendingAskUserQuestions,
+          current.resolvedAskUserCallIds,
+          response.questions,
+          sessionId,
+          pendingAtStart,
+          current.askUserEventRevision !== revisionAtStart
+        )
+        return { pendingAskUserQuestions: pending }
+      })
+    } catch (error) {
+      console.debug('Failed to refresh pending ask-user questions:', error)
     }
   },
 

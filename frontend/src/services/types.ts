@@ -203,6 +203,30 @@ export interface ConversationStreamEnvelope {
   delta: ConversationDelta
 }
 
+export interface AskUserOption {
+  label: string
+  description: string
+  preview?: string
+}
+
+export interface AskUserQuestion {
+  question: string
+  header: string
+  options: AskUserOption[]
+  multiSelect?: boolean
+}
+
+export interface PendingAskUserQuestion {
+  sessionId: string
+  callId: string
+  questions: AskUserQuestion[]
+  metadata?: { source?: string }
+}
+
+export interface PendingAskUserQuestionsResponse {
+  questions: PendingAskUserQuestion[]
+}
+
 export type ConversationDelta =
   | { kind: 'appendBlock'; block: ConversationBlock }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
@@ -232,6 +256,13 @@ export type ConversationDelta =
   | { kind: 'agentSessionRemoved'; childSessionId: string }
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }
+  | {
+      kind: 'extensionEvent'
+      extensionId: string
+      eventType: string
+      schemaVersion: number
+      payload: Record<string, unknown>
+    }
   | {
       kind: 'patchToolMetadata'
       blockId: string

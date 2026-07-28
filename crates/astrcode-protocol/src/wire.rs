@@ -492,6 +492,7 @@ mod tests {
                 "session_control",
                 "session_inspect",
                 "public_http",
+                "authenticated_http",
                 "public_http_dispatch",
                 "main_model",
                 "small_model",

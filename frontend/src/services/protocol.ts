@@ -13,6 +13,8 @@ import type {
   ConversationDelta,
   ConversationSnapshot,
   ConversationStreamEnvelope,
+  PendingAskUserQuestion,
+  PendingAskUserQuestionsResponse,
   PromptAttachmentWire,
 } from './types'
 
@@ -79,6 +81,14 @@ function optionalObject(
 function optionalNumber(source: JsonObject, name: string): number | undefined {
   const value = source[name]
   if (value == null) return undefined
+  if (typeof value !== 'number') {
+    throw new ProtocolDecodeError(`expected number ${name}`)
+  }
+  return value
+}
+
+function requiredNumber(source: JsonObject, name: string): number {
+  const value = source[name]
   if (typeof value !== 'number') {
     throw new ProtocolDecodeError(`expected number ${name}`)
   }
@@ -277,6 +287,14 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     case 'extensionRegistryChanged':
       return { kind }
+    case 'extensionEvent':
+      return {
+        kind,
+        extensionId: requiredString(object, 'extensionId'),
+        eventType: requiredString(object, 'eventType'),
+        schemaVersion: requiredNumber(object, 'schemaVersion'),
+        payload: decodeObject(object.payload, 'extension event payload'),
+      }
     case 'patchToolMetadata':
       return {
         kind,
@@ -292,6 +310,54 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)
+  }
+}
+
+function decodeAskUserOption(value: unknown) {
+  const object = decodeObject(value, 'ask-user option')
+  return {
+    label: requiredString(object, 'label'),
+    description: requiredString(object, 'description'),
+    preview: optionalString(object, 'preview'),
+  }
+}
+
+function decodeAskUserQuestion(value: unknown) {
+  const object = decodeObject(value, 'ask-user question')
+  return {
+    question: requiredString(object, 'question'),
+    header: requiredString(object, 'header'),
+    options: arrayField(object, 'options').map(decodeAskUserOption),
+    multiSelect:
+      object.multiSelect === undefined
+        ? undefined
+        : requiredBoolean(object, 'multiSelect'),
+  }
+}
+
+export function decodePendingAskUserQuestion(
+  value: unknown
+): PendingAskUserQuestion {
+  const object = decodeObject(value, 'pending ask-user question')
+  const metadata = optionalObject(object, 'metadata')
+  return {
+    sessionId: requiredString(object, 'sessionId'),
+    callId: requiredString(object, 'callId'),
+    questions: arrayField(object, 'questions').map(decodeAskUserQuestion),
+    metadata: metadata
+      ? { source: optionalString(metadata, 'source') }
+      : undefined,
+  }
+}
+
+export function decodePendingAskUserQuestionsResponse(
+  value: unknown
+): PendingAskUserQuestionsResponse {
+  const object = decodeObject(value, 'pending ask-user questions response')
+  return {
+    questions: arrayField(object, 'questions').map(
+      decodePendingAskUserQuestion
+    ),
   }
 }
 

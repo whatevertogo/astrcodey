@@ -207,6 +207,18 @@ pub(in crate::http) fn event_to_deltas(
                 child_session_id: child_session_id.to_string(),
             }]
         },
+        EventPayload::ExtensionEvent {
+            extension_id,
+            event_type,
+            schema_version,
+            payload,
+            ..
+        } => vec![ConversationDeltaDto::ExtensionEvent {
+            extension_id: extension_id.clone(),
+            event_type: event_type.clone(),
+            schema_version: *schema_version,
+            payload: payload.clone(),
+        }],
 
         // Events the client doesn't need as visible deltas
         EventPayload::SystemPromptConfigured { .. }
@@ -393,6 +405,33 @@ mod tests {
             },
             other => panic!("unexpected delta: {other:?}"),
         }
+    }
+
+    #[test]
+    fn extension_event_preserves_namespaced_live_payload() {
+        let event = Event::new(
+            "session-1".into(),
+            None,
+            EventPayload::ExtensionEvent {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                durable: false,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            },
+        );
+
+        assert!(matches!(
+            event_to_deltas(&event, true).as_slice(),
+            [ConversationDeltaDto::ExtensionEvent {
+                extension_id,
+                event_type,
+                schema_version: 1,
+                payload,
+            }] if extension_id == "astrcode-ask-user"
+                && event_type == "ask_user.pending"
+                && payload["callId"] == "call-1"
+        ));
     }
 
     #[test]

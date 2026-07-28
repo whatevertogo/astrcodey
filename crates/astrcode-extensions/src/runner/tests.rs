@@ -562,7 +562,7 @@ impl Extension for StartupEventExtension {
         let sink = ctx
             .event_sink()
             .ok_or_else(|| ExtensionError::Internal("missing startup event sink".into()))?;
-        sink.emit("startup_ready", 1, json!({"ready": true})).await
+        sink.emit("startup_ready", 1, json!({"ready": true}))
     }
 }
 
@@ -693,6 +693,7 @@ async fn start_can_emit_declared_event_through_bound_startup_channel() {
             extension_id,
             event_type,
             schema_version: 1,
+            durable: true,
             payload,
         } if extension_id == "startup-event"
             && event_type == "startup_ready"
