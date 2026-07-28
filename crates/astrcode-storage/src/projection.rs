@@ -7,7 +7,8 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     storage::{
         AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
-        SequencedLlmMessage, SessionReadModel, TranscriptArtifactView,
+        SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+        TranscriptArtifactView,
     },
     types::SessionId,
 };
@@ -195,11 +196,12 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             // Merge into the previous assistant message for this model sub-turn.
             // DeepSeek thinking mode requires reasoning_content and tool_calls to
             // be replayed on the same assistant message after tool use.
-            if let Some(last) = model.messages.last_mut() {
-                if last.message.role == LlmRole::Assistant {
+            match model.messages.last_mut() {
+                Some(last) if last.message.role == LlmRole::Assistant => {
                     last.message.content.push(tool_call);
                     last.updated_seq = event_seq;
-                } else {
+                },
+                _ => {
                     model.messages.push(SequencedLlmMessage {
                         message: LlmMessage {
                             role: LlmRole::Assistant,
@@ -210,18 +212,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                         updated_seq: event_seq,
                         source: None,
                     });
-                }
-            } else {
-                model.messages.push(SequencedLlmMessage {
-                    message: LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: vec![tool_call],
-                        name: None,
-                        reasoning_content: None,
-                    },
-                    updated_seq: event_seq,
-                    source: None,
-                });
+                },
             }
             model.phase = Phase::CallingTool;
         },
@@ -263,30 +254,47 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             result,
             ..
         } => {
-            model.pending_tool_calls.remove(call_id);
-            model.pending_tool_approvals.remove(call_id);
-            model.pending_tool_interactions.remove(call_id);
-
-            // 始终 push（不再 update-in-place）
-            model.messages.push(SequencedLlmMessage {
-                message: LlmMessage {
-                    role: LlmRole::Tool,
-                    content: vec![LlmContent::ToolResult {
-                        tool_call_id: call_id.to_string(),
-                        content: result.content.clone(),
-                        is_error: result.is_error,
-                    }],
-                    name: Some(tool_name.clone()),
-                    reasoning_content: None,
-                },
-                updated_seq: event_seq,
-                source: None,
-            });
-            model.phase = if model.pending_tool_calls.is_empty() {
-                Phase::Thinking
-            } else {
-                Phase::CallingTool
-            };
+            apply_tool_terminal(
+                model,
+                call_id,
+                tool_name,
+                result.content.clone(),
+                result.is_error,
+                None,
+                event_seq,
+            );
+        },
+        EventPayload::ToolCallFailed {
+            call_id,
+            tool_name,
+            error,
+            ..
+        } => {
+            apply_tool_terminal(
+                model,
+                call_id,
+                tool_name,
+                error.clone(),
+                true,
+                Some(TOOL_CALL_FAILED_SOURCE),
+                event_seq,
+            );
+        },
+        EventPayload::ToolCallCancelled {
+            call_id,
+            tool_name,
+            reason,
+            ..
+        } => {
+            apply_tool_terminal(
+                model,
+                call_id,
+                tool_name,
+                format!("Tool cancelled: {reason}"),
+                true,
+                Some(TOOL_CALL_CANCELLED_SOURCE),
+                event_seq,
+            );
         },
         EventPayload::CompactBoundaryCreated {
             trigger,
@@ -394,21 +402,9 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::CompactionStarted => {
             model.phase = Phase::Compacting;
         },
-        EventPayload::CompactionCompleted { .. } => {
-            model.phase = if model.pending_tool_calls.is_empty() {
-                Phase::Idle
-            } else {
-                Phase::CallingTool
-            };
-        },
-        EventPayload::CompactionSkipped { .. } => {
-            model.phase = if model.pending_tool_calls.is_empty() {
-                Phase::Idle
-            } else {
-                Phase::CallingTool
-            };
-        },
-        EventPayload::CompactionFailed { .. } => {
+        EventPayload::CompactionCompleted { .. }
+        | EventPayload::CompactionSkipped { .. }
+        | EventPayload::CompactionFailed { .. } => {
             model.phase = if model.pending_tool_calls.is_empty() {
                 Phase::Idle
             } else {
@@ -451,14 +447,48 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
     }
 }
 
+fn apply_tool_terminal(
+    model: &mut SessionReadModel,
+    call_id: &astrcode_core::types::ToolCallId,
+    tool_name: &str,
+    content: String,
+    is_error: bool,
+    source: Option<&str>,
+    event_seq: u64,
+) {
+    model.pending_tool_calls.remove(call_id);
+    model.pending_tool_approvals.remove(call_id);
+    model.pending_tool_interactions.remove(call_id);
+    model.messages.push(SequencedLlmMessage {
+        message: LlmMessage {
+            role: LlmRole::Tool,
+            content: vec![LlmContent::ToolResult {
+                tool_call_id: call_id.to_string(),
+                content,
+                is_error,
+            }],
+            name: Some(tool_name.to_owned()),
+            reasoning_content: None,
+        },
+        updated_seq: event_seq,
+        source: source.map(str::to_owned),
+    });
+    model.phase = if model.pending_tool_calls.is_empty() {
+        Phase::Thinking
+    } else {
+        Phase::CallingTool
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        event::{Event, EventPayload},
+        event::{Event, EventPayload, Phase},
         extension::CompactStrategy,
-        llm::{LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
+        llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         permission::{ApprovalDecision, ApprovalSource},
-        storage::TranscriptArtifactView,
+        storage::{TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView},
+        tool::ToolResult,
         types::{SessionId, new_message_id},
     };
 
@@ -819,5 +849,118 @@ mod tests {
 
         let model = replay(session_id, &resolved);
         assert!(!model.pending_tool_approvals.contains_key(&call_id));
+    }
+
+    #[test]
+    fn replay_preserves_each_tool_terminal_outcome() {
+        let session_id = SessionId::from("session-tool-outcomes");
+        let requested = ["completed", "failed", "cancelled"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, call_id)| {
+                event(
+                    index as u64 + 1,
+                    &session_id,
+                    EventPayload::ToolCallRequested {
+                        call_id: call_id.into(),
+                        tool_name: "probe".into(),
+                        arguments: serde_json::json!({ "case": call_id }),
+                        raw_arguments: None,
+                    },
+                )
+            });
+        let mut events = requested.collect::<Vec<_>>();
+        events.extend([
+            event(
+                4,
+                &session_id,
+                EventPayload::ToolApprovalRequested {
+                    call_id: "failed".into(),
+                    tool_name: "probe".into(),
+                    prompt: "approve".into(),
+                    rule_key: None,
+                    source: ApprovalSource::Core,
+                    arguments: serde_json::json!({}),
+                },
+            ),
+            event(
+                5,
+                &session_id,
+                EventPayload::ToolCallInteractionPending {
+                    call_id: "cancelled".into(),
+                    content: "waiting".into(),
+                    metadata: Default::default(),
+                },
+            ),
+            event(
+                6,
+                &session_id,
+                EventPayload::ToolCallCompleted {
+                    call_id: "completed".into(),
+                    tool_name: "probe".into(),
+                    result: ToolResult::error("domain error"),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+            ),
+            event(
+                7,
+                &session_id,
+                EventPayload::ToolCallFailed {
+                    call_id: "failed".into(),
+                    tool_name: "probe".into(),
+                    error: "executor failed".into(),
+                    metadata: Default::default(),
+                    duration_ms: Some(7),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+            ),
+            event(
+                8,
+                &session_id,
+                EventPayload::ToolCallCancelled {
+                    call_id: "cancelled".into(),
+                    tool_name: "probe".into(),
+                    reason: "turn aborted".into(),
+                    duration_ms: Some(8),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+            ),
+        ]);
+
+        let model = replay(session_id, &events);
+        let outcomes = model
+            .messages
+            .iter()
+            .filter(|message| message.message.role == LlmRole::Tool)
+            .map(|message| {
+                let LlmContent::ToolResult {
+                    content, is_error, ..
+                } = &message.message.content[0]
+                else {
+                    panic!("expected tool result");
+                };
+                (message.source.as_deref(), content.as_str(), *is_error)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (None, "domain error", true),
+                (Some(TOOL_CALL_FAILED_SOURCE), "executor failed", true),
+                (
+                    Some(TOOL_CALL_CANCELLED_SOURCE),
+                    "Tool cancelled: turn aborted",
+                    true,
+                ),
+            ]
+        );
+        assert_eq!(model.phase, Phase::Thinking);
+        assert!(model.pending_tool_calls.is_empty());
+        assert!(model.pending_tool_approvals.is_empty());
+        assert!(model.pending_tool_interactions.is_empty());
     }
 }

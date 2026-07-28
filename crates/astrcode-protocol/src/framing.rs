@@ -71,14 +71,6 @@ pub fn from_jsonl_line<T: for<'a> Deserialize<'a>>(line: &str) -> Result<T, serd
     serde_json::from_str(line.trim())
 }
 
-/// 构造一个成功确认响应消息。
-pub fn ack_message(id: u64) -> JsonRpcMessage {
-    let mut msg = JsonRpcMessage::new();
-    msg.id = Some(id);
-    msg.result = Some(serde_json::json!({"ok": true}));
-    msg
-}
-
 /// 构造一个错误响应消息。
 pub fn error_message(id: Option<u64>, code: i32, message: &str) -> JsonRpcMessage {
     let mut msg = JsonRpcMessage::new();
@@ -167,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_jsonl() {
-        let msg = ack_message(42);
+        let msg = error_message(Some(42), -32600, "Invalid Request");
         let line = to_jsonl_line(&msg).unwrap();
         let parsed: JsonRpcMessage = from_jsonl_line(&line).unwrap();
         assert_eq!(parsed.id, Some(42));

@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use astrcode_core::{
     extension::{
-        AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
-        CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
-        ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
-        PostToolUseResult, PreToolUseContext, PreToolUseResult, PromptBuildContext,
-        PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
+        CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
+        ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
+        PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
+        PromptBuildContext, PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
         UserMessageEnvelopeContext, UserMessageEnvelopeResult,
     },
     tool::{SessionOperations, Tool},
@@ -113,8 +112,6 @@ pub trait TurnHooks: Send + Sync {
         Ok(CompactResult::Allow)
     }
 
-    async fn emit_post_tool_use_failure(&self, _ctx: PostToolUseFailureContext) {}
-
     async fn emit_continue_after_stop(
         &self,
         _ctx: ContinueAfterStopContext,
@@ -127,13 +124,6 @@ pub trait TurnHooks: Send + Sync {
         _ctx: UserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         Ok(UserMessageEnvelopeResult::Allow)
-    }
-
-    async fn emit_after_tool_results(
-        &self,
-        _ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError> {
-        Ok(AfterToolResultsResult::Continue)
     }
 
     async fn emit_lifecycle(

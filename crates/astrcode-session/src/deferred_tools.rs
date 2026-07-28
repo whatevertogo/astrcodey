@@ -292,7 +292,6 @@ mod tests {
     #[test]
     fn discovered_names_extracts_matches() {
         let result = ToolResult {
-            call_id: "c1".into(),
             content: String::new(),
             is_error: false,
             error: None,
@@ -311,7 +310,6 @@ mod tests {
     #[test]
     fn discovered_names_empty_when_no_metadata() {
         let result = ToolResult {
-            call_id: "c1".into(),
             content: String::new(),
             is_error: false,
             error: None,

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { toolCallIsTerminal } from '../services/types'
 import type { ToolUiContext } from './types'
 import { QuestionnaireApprovalCard } from './components/QuestionnaireApprovalCard'
 import {
@@ -11,15 +12,9 @@ import { readToolUi, readToolUiPhase } from './wire'
 function questionnaireApprovalFromArgs(ctx: ToolUiContext): ReactNode | null {
   const input = parseAskUserInput(ctx.block.argumentsJson ?? ctx.args)
   if (!input || input.questions.length === 0) return null
-  if (ctx.block.status === 'error') return null
+  if (toolCallIsTerminal(ctx.block.status)) return null
   const completed = parseAskUserOutput(ctx.block.text)
   if (completed?.answers && Object.keys(completed.answers).length > 0) {
-    return null
-  }
-  if (
-    ctx.block.status !== 'streaming' &&
-    !isAwaitingUserInput(ctx.block.text)
-  ) {
     return null
   }
   return <QuestionnaireApprovalCard ctx={ctx} />
@@ -30,6 +25,7 @@ function questionnaireApprovalFromArgs(ctx: ToolUiContext): ReactNode | null {
  * 扩展在 Rust `Registrar::tool_ui` 注册，前端不维护 toolName → UI 表。
  */
 export function renderToolApprovalUi(ctx: ToolUiContext): ReactNode | null {
+  if (toolCallIsTerminal(ctx.block.status)) return null
   const wire = readToolUi(ctx.meta)
   const phase = readToolUiPhase(ctx.meta)
   const approval = wire?.approval
@@ -73,11 +69,7 @@ export function toolApprovalShouldAutoExpand(ctx: ToolUiContext): boolean {
   ) {
     return false
   }
-  return (
-    ctx.block.status === 'streaming' ||
-    (typeof ctx.block.text === 'string' &&
-      ctx.block.text.includes('awaiting_user_input'))
-  )
+  return ctx.block.status === 'streaming'
 }
 
 /** askUser 等问卷 UI 是否仍在等待用户提交。 */
@@ -89,13 +81,12 @@ export function toolApprovalPending(ctx: ToolUiContext): boolean {
   const input = parseAskUserInput(ctx.block.argumentsJson ?? ctx.args)
   const hasQuestionnaireArgs = input != null && input.questions.length > 0
   if (!hasQuestionnaireWire && !hasQuestionnaireArgs) return false
-  if (ctx.block.status === 'error') return false
+  if (toolCallIsTerminal(ctx.block.status)) return false
   const completed = parseAskUserOutput(ctx.block.text)
   if (completed?.answers && Object.keys(completed.answers).length > 0) {
     return false
   }
   return (
-    ctx.block.status === 'streaming' ||
     isAwaitingUserInput(ctx.block.text) ||
     (hasQuestionnaireArgs && completed == null)
   )

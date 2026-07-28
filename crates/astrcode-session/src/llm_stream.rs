@@ -114,9 +114,9 @@ pub async fn consume_llm_stream(
                         return Err(TurnError::Aborted);
                     }
                     completed = poll_early_tool(&mut scheduler), if scheduler.as_ref().is_some_and(EarlyToolScheduler::has_pending) => {
-                        if let Some((index, result)) = completed? {
+                        if let Some((index, outcome)) = completed? {
                             if let Some(ref mut scheduler) = scheduler {
-                                scheduler.record_result(index, result);
+                                scheduler.record_outcome(index, outcome);
                             }
                         }
                         continue;
@@ -284,7 +284,7 @@ pub async fn consume_llm_stream(
 
 async fn poll_early_tool(
     scheduler: &mut Option<EarlyToolScheduler>,
-) -> Result<Option<(usize, astrcode_core::tool::ToolResult)>, TurnError> {
+) -> Result<Option<(usize, crate::tool_types::ToolExecutionOutcome)>, TurnError> {
     let Some(scheduler) = scheduler else {
         return Ok(None);
     };

@@ -4,7 +4,7 @@ use astrcode_core::event::{Event, EventPayload, Phase};
 use astrcode_protocol::http::ConversationDeltaDto;
 
 use super::{
-    blocks::{completed_block_from_payload, streaming_assistant_block, streaming_tool_call_block},
+    blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
     cross_session_compact_deltas,
     live::control_from_phase,
     non_empty_metadata,
@@ -29,7 +29,7 @@ pub(in crate::http) fn event_to_replay_deltas(
         return vec![ConversationDeltaDto::RehydrateRequired];
     }
 
-    if let Some(block) = completed_block_from_payload(event) {
+    if let Some(block) = block_from_payload(event) {
         return vec![ConversationDeltaDto::AppendBlock { block }];
     }
     // 子会话重放时，AssistantMessageStarted 应产生流式 AppendBlock，

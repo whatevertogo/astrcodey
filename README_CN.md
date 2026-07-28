@@ -445,7 +445,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 
 1. **预处理** — 解析 JSON 参数（支持修复格式不正确的 LLM 输出）、检查可见性、分发 `PreToolUse` 钩子
 2. **执行** — 通过 `JoinSet` 并行批量执行，串行工具会先刷新当前批次
-3. **提交** — 分发 `PostToolUse` / `PostToolUseFailure` 钩子、持久化大结果、执行消息字符预算、发射事件
+3. **提交** — 对已完成执行分发 `PostToolUse` 钩子、持久化大结果、执行消息字符预算，并分别发射完成 / 失败 / 取消事件
 
 大型工具结果自动持久化到磁盘，替换为预览摘要以保持在消息字符预算内。每个工具声明执行模式：只读工具（glob/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential。
 
@@ -462,7 +462,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 - **状态栏项** — 扩展贡献状态栏条目（如当前模式指示器），通过 `StatusItemUpdate` 通知动态更新
 - **磁盘 s5r 扩展** — stdio 长度前缀帧 + JSON `WireMessage`（`extension.json` 中 `protocol.s5r` + `command`）；Worker 发 `Initialize`、`handler.invoke` 与按能力裁剪的 `astrcode.*` invoke。规范见 [docs/extension-system.md](docs/extension-system.md)
 - **扩展运行时** — 带深度限制的会话派生、工具注册队列、优先级分派
-- **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse` / `PostToolUseFailure`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
+- **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
 - **扩展运行时 API** — `Extension::start()`（携带 `ExtensionCtx`，含 `startup_working_dir`、`event_sink` 和按能力裁剪的宿主服务）、`Extension::stop()`（携带 `StopReason`）、`Extension::health()`（健康探测）、`Extension::on_config_changed()`（热更新配置）
 - **主动健康检查** — `ExtensionRunner::check_health()` 提供采样 API，宿主决定轮询策略
 - **启动阶段事件** — `bind_startup_event_channel()` 绑定进程级事件通道，扩展在 `start()` 阶段即可 emit 自定义事件

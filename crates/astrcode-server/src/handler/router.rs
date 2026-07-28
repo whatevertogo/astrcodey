@@ -3,7 +3,7 @@
 use astrcode_core::types::SessionId;
 use astrcode_protocol::{
     commands::ClientCommand,
-    events::{ClientNotification, SessionListItem},
+    events::{ClientNotification, SessionListItemDto},
 };
 
 use super::{CommandHandler, CommandInvocation, HandlerError, slash};
@@ -33,9 +33,8 @@ impl CommandHandler {
                     Ok(summaries) => {
                         let items: Vec<_> = summaries
                             .into_iter()
-                            .map(|summary| SessionListItem {
+                            .map(|summary| SessionListItemDto {
                                 session_id: summary.session_id.into_string(),
-                                created_at: summary.created_at,
                                 last_active_at: summary.updated_at,
                                 working_dir: summary.working_dir.clone(),
                                 parent_session_id: summary

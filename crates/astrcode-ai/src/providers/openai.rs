@@ -6,16 +6,14 @@ use astrcode_core::{config::OpenAiApiMode, llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
 #[cfg(test)]
-use crate::wire::openai::parser::ChatAccumulator;
-#[cfg(test)]
-use crate::wire::openai::parser::process_sse_line;
+use crate::wire::openai::parser::{StandardAccumulator, process_sse_line};
 use crate::{
     common::{
         HttpPostRequest, apply_auth_header, build_client, report_stream_error,
         retry_policy_from_config,
     },
     strict_tools::{StrictToolProvider, prepare_strict_tools},
-    wire::{openai as openai_wire, openai::parser::StandardAccumulator},
+    wire::openai as openai_wire,
 };
 
 // ─── StandardProvider ───────────────────────────────────────────────────
@@ -119,7 +117,7 @@ impl LlmProvider for StandardProvider {
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
-            let result = openai_wire::transport::stream_request::<StandardAccumulator>(
+            let result = openai_wire::transport::stream_request(
                 client,
                 endpoint,
                 api_key,

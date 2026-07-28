@@ -2,10 +2,9 @@
 //!
 //! 包含工具调用从 LLM 流式响应中积累、预处理、到最终执行各阶段的类型。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use astrcode_core::{
-    extension::AfterToolResult,
     permission::ApprovalSource,
     tool::{ExecutionMode, ToolDefinition, ToolResult},
 };
@@ -28,51 +27,70 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) tool_input: serde_json::Value,
     pub(crate) raw_arguments: Option<String>,
     pub(crate) mode: ExecutionMode,
-    pub(crate) outcome: PreparedToolInvocationOutcome,
+    pub(crate) disposition: PreparedToolDisposition,
 }
 
-pub(crate) struct PreparedToolBatch {
-    pub(crate) prepared: Vec<PreparedToolInvocation>,
-    pub(crate) pre_executed: HashMap<usize, ToolResult>,
+pub(crate) struct ToolBatch {
+    pub(crate) calls: Vec<PreparedToolInvocation>,
+    pub(crate) pre_executed: HashMap<usize, ToolExecutionOutcome>,
 }
 
-pub(crate) struct DeclaredToolBatch {
-    pub(crate) prepared: Vec<PreparedToolInvocation>,
-    pub(crate) pre_executed: HashMap<usize, ToolResult>,
-}
-
-pub(crate) struct ExecuteDeclaredToolBatch<'a> {
-    pub(crate) declared: DeclaredToolBatch,
+pub(crate) struct ExecuteToolBatch<'a> {
+    pub(crate) batch: ToolBatch,
     pub(crate) tools: &'a [ToolDefinition],
     pub(crate) state: &'a mut TurnState,
     pub(crate) publisher: std::sync::Arc<TurnEvents>,
 }
 
-#[derive(Default)]
-pub(crate) struct CommittedToolResults {
-    pub(crate) discovered_tools: Vec<String>,
-    pub(crate) tool_results: Vec<AfterToolResult>,
-}
-
-impl CommittedToolResults {
-    pub(crate) fn extend(&mut self, other: Self) {
-        self.discovered_tools.extend(other.discovered_tools);
-        self.tool_results.extend(other.tool_results);
-    }
-}
-
 #[derive(Clone)]
-pub(crate) enum PreparedToolInvocationOutcome {
-    Ready,
-    Blocked(ToolResult),
+pub(crate) enum PreparedToolDisposition {
+    Execute,
+    Rejected {
+        error: String,
+    },
     /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
-    DuplicateSameStep,
+    ReuseSameStep,
     /// 需用户审批后执行。
-    NeedsApproval {
+    AwaitApproval {
         prompt: String,
         rule_key: Option<String>,
         source: ApprovalSource,
     },
+}
+
+/// 一次工具调用在 session 编排层的终态。
+///
+/// `Completed` 包含工具正常返回的结果，结果本身仍可为业务错误；`Failed`
+/// 表示执行或编排失败；`Cancelled` 只表示显式取消。
+#[derive(Clone, Debug)]
+pub(crate) enum ToolExecutionOutcome {
+    Completed(ToolResult),
+    Failed {
+        error: String,
+        metadata: BTreeMap<String, serde_json::Value>,
+        duration_ms: Option<u64>,
+    },
+    Cancelled {
+        reason: String,
+        duration_ms: Option<u64>,
+    },
+}
+
+impl ToolExecutionOutcome {
+    pub(crate) fn failed(error: impl Into<String>) -> Self {
+        Self::Failed {
+            error: error.into(),
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    pub(crate) fn cancelled(reason: impl Into<String>, duration_ms: Option<u64>) -> Self {
+        Self::Cancelled {
+            reason: reason.into(),
+            duration_ms,
+        }
+    }
 }
 
 #[derive(Clone)]

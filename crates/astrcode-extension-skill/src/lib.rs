@@ -338,7 +338,6 @@ fn handle_skill_tool(
         Err(error) => {
             let msg = format!("invalid Skill input: {error}");
             return ToolResult {
-                call_id: String::new(),
                 // content 必须非空,LLM 只读 content,不读 error 字段。
                 content: msg.clone(),
                 is_error: true,
@@ -365,7 +364,6 @@ fn handle_skill_tool(
             available
         );
         return ToolResult {
-            call_id: String::new(),
             content: msg.clone(),
             is_error: true,
             error: Some(msg),

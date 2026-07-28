@@ -2,7 +2,7 @@
 
 use astrcode_core::event::{Event, EventPayload};
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
+    ClientNotification, ExtensionCommandInfoDto, SessionListItemDto, SessionSnapshot, UiRequestKind,
 };
 use astrcode_support::text::truncate_first_line;
 
@@ -286,23 +286,9 @@ fn apply_event(app: &mut App, event: &Event) {
         } => {
             // Codex style: show one compact line in scrollback for the completed tool.
             // Format: "● Ran <command>" or "✗ <error>" or "● Task completed"
-
-            // Remove the streaming placeholder from messages.
-            if let Some(idx) = app
-                .messages
-                .iter()
-                .rposition(|m| m.key.as_deref() == Some(call_id.as_str()))
-            {
-                app.messages.remove(idx);
-            }
+            close_tool_call_state(app, call_id.as_str());
 
             if tool_name == "agent" {
-                // Sub-agent: flush tracker output and show summary.
-                if let Some(mut tracker) = app.child_agents.remove(call_id.as_str()) {
-                    tracker.flush_on_completion(&mut app.scrollback_queue);
-                }
-                // 清理 child_session_map 中引用该 call_id 的条目
-                app.child_session_map.retain(|_, v| v != call_id.as_str());
                 let summary = if result.is_error {
                     format!(
                         "✗ Task failed: {}",
@@ -373,6 +359,40 @@ fn apply_event(app: &mut App, event: &Event) {
 
             app.status_text = "Ready".into();
             tracing::debug!(call_id = %call_id, tool = %tool_name, is_error = result.is_error, "tool_close");
+        },
+        EventPayload::ToolCallFailed {
+            call_id,
+            tool_name,
+            error,
+            ..
+        } => {
+            close_tool_call_state(app, call_id.as_str());
+            app.push_message(
+                MessageRole::Error,
+                tool_display_name(tool_name).to_string(),
+                format!("✗ Execution failed: {}", truncate_first_line(error, 100)),
+                false,
+                None,
+            );
+            app.status_text = "Ready".into();
+            tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_failed");
+        },
+        EventPayload::ToolCallCancelled {
+            call_id,
+            tool_name,
+            reason,
+            ..
+        } => {
+            close_tool_call_state(app, call_id.as_str());
+            app.push_message(
+                MessageRole::Tool,
+                tool_display_name(tool_name).to_string(),
+                format!("○ Cancelled: {}", truncate_first_line(reason, 100)),
+                false,
+                None,
+            );
+            app.status_text = "Ready".into();
+            tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_cancelled");
         },
         EventPayload::CompactionStarted => {
             app.is_compacting = true;
@@ -503,6 +523,21 @@ fn apply_event(app: &mut App, event: &Event) {
     }
 }
 
+fn close_tool_call_state(app: &mut App, call_id: &str) {
+    if let Some(index) = app
+        .messages
+        .iter()
+        .rposition(|message| message.key.as_deref() == Some(call_id))
+    {
+        app.messages.remove(index);
+    }
+    if let Some(mut tracker) = app.child_agents.remove(call_id) {
+        tracker.flush_on_completion(&mut app.scrollback_queue);
+    }
+    app.child_session_map
+        .retain(|_, mapped_call_id| mapped_call_id != call_id);
+}
+
 fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
     app.child_session_map
         .get(child_session_id)
@@ -530,6 +565,32 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
                     &mut app.scrollback_queue,
                 );
                 app.status_text = format!("● Agent: {tool_name} done");
+            }
+        },
+        EventPayload::ToolCallFailed {
+            tool_name, error, ..
+        } => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                tracker.on_tool_completed(
+                    tool_name,
+                    &truncate_first_line(error, 60),
+                    true,
+                    &mut app.scrollback_queue,
+                );
+                app.status_text = format!("● Agent: {tool_name} failed");
+            }
+        },
+        EventPayload::ToolCallCancelled {
+            tool_name, reason, ..
+        } => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                tracker.on_tool_completed(
+                    tool_name,
+                    &format!("cancelled: {}", truncate_first_line(reason, 50)),
+                    true,
+                    &mut app.scrollback_queue,
+                );
+                app.status_text = format!("● Agent: {tool_name} cancelled");
             }
         },
         EventPayload::ErrorOccurred { message, .. } if app.child_agents.contains_key(call_id) => {
@@ -623,7 +684,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     tracing::debug!(session_id = %session_id, messages = snapshot.messages.len(), "resume_snapshot");
 }
 
-fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
+fn apply_session_list(app: &mut App, sessions: &[SessionListItemDto]) {
     use crate::tui::app::SessionEntry;
     app.available_sessions = sessions
         .iter()
@@ -674,7 +735,7 @@ fn apply_ui_request(
 
 fn apply_extension_command_list(
     app: &mut App,
-    commands: &[ExtensionCommandInfo],
+    commands: &[ExtensionCommandInfoDto],
     keybindings: &[astrcode_core::extension::Keybinding],
     status_items: &[astrcode_protocol::events::StatusItemInfoDto],
 ) {
@@ -819,7 +880,6 @@ mod tests {
 
     fn tool_result(content: &str, is_error: bool) -> ToolResult {
         ToolResult {
-            call_id: "call-1".into(),
             content: content.into(),
             is_error,
             error: None,
@@ -1000,6 +1060,45 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Error);
         assert!(app.messages[0].body.plain_text().contains("✗"));
+    }
+
+    #[test]
+    fn tool_execution_terminal_states_are_distinct() {
+        let cases = [
+            (
+                EventPayload::ToolCallFailed {
+                    call_id: "failed".into(),
+                    tool_name: "shell".into(),
+                    error: "process spawn failed".into(),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                MessageRole::Error,
+                "Execution failed",
+            ),
+            (
+                EventPayload::ToolCallCancelled {
+                    call_id: "cancelled".into(),
+                    tool_name: "shell".into(),
+                    reason: "turn aborted".into(),
+                    duration_ms: None,
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                MessageRole::Tool,
+                "Cancelled",
+            ),
+        ];
+
+        for (payload, expected_role, expected_text) in cases {
+            let mut app = make_app();
+            apply_payload(&mut app, payload);
+            assert_eq!(app.messages.len(), 1);
+            assert_eq!(app.messages[0].role, expected_role);
+            assert!(app.messages[0].body.plain_text().contains(expected_text));
+        }
     }
 
     #[test]

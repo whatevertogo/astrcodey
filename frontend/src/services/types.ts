@@ -44,6 +44,7 @@ import type {
   SlashCommandInfoDto,
   SlashCommandListResponseDto,
   StatusItemDto,
+  ToolCallStatusDto,
   ToolOutputStreamDto,
 } from './generated'
 
@@ -54,13 +55,24 @@ export {
   PHASES,
   PROVIDER_AUTH_SCHEMES,
   PROVIDER_WIRE_FORMATS,
+  TOOL_CALL_STATUSES,
   TOOL_OUTPUT_STREAMS,
 } from './generated'
 
 export type Phase = PhaseDto
 export type ToolOutputStream = ToolOutputStreamDto
 export type BlockStatus = ConversationBlockStatusDto
+export type ToolCallStatus = ToolCallStatusDto
 export type ApprovalMode = ApprovalModeDto
+
+export function toolCallHasError(status: ToolCallStatus): boolean {
+  return status === 'error' || status === 'failed'
+}
+
+export function toolCallIsTerminal(status: ToolCallStatus): boolean {
+  return status !== 'streaming'
+}
+
 export type {
   ApplyProviderPresetRequest,
   CommandInvokeResponse,
@@ -158,7 +170,7 @@ export type ConversationBlock =
       arguments: string
       argumentsJson?: Record<string, unknown>
       text: string
-      status: BlockStatus
+      status: ToolCallStatus
       metadata?: Record<string, unknown>
     }
   | { kind: 'error'; id: string; message: string }

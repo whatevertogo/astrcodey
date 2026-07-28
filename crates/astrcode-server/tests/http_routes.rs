@@ -49,7 +49,6 @@ use astrcode_server::{
     },
 };
 use astrcode_storage::in_memory::InMemoryEventStore;
-use astrcode_support::event_fanout::EventFanout;
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -203,8 +202,7 @@ impl LlmProvider for SummaryLlm {
 #[tokio::test]
 async fn http_routes_require_bearer_token() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let unauthorized = app
         .clone()
@@ -236,8 +234,7 @@ async fn http_routes_require_bearer_token() {
 #[tokio::test]
 async fn cors_allows_supported_tauri_origins_only() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, _token) = router(runtime, event_tx).unwrap();
+    let (app, _token) = router(runtime).unwrap();
 
     for origin in [
         "tauri://localhost",
@@ -298,8 +295,7 @@ async fn cors_allows_supported_tauri_origins_only() {
 #[tokio::test]
 async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let created = post_json_owned(
         app.clone(),
         "/api/sessions",
@@ -392,8 +388,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
         .register(Arc::new(HttpRoutesExtension))
         .await
         .unwrap();
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, _token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, _token) = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
         .clone()
@@ -451,8 +446,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
 #[tokio::test]
 async fn provider_catalog_route_returns_endpoint_presets() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let catalog =
         get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog", &token).await;
@@ -501,8 +495,7 @@ async fn provider_catalog_route_returns_endpoint_presets() {
 #[tokio::test]
 async fn active_selection_rejects_unknown_approval_mode_with_structured_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(runtime, event_tx).unwrap();
+    let (app, token) = router(runtime).unwrap();
 
     let response = post_json(
         app,
@@ -521,8 +514,7 @@ async fn active_selection_rejects_unknown_approval_mode_with_structured_error() 
 #[tokio::test]
 async fn provider_preset_apply_persists_profile_from_catalog() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "qwen",
         "endpointId": "dashscope-compatible",
@@ -567,8 +559,7 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
 #[tokio::test]
 async fn provider_preset_apply_uses_submitted_api_key() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "openai-compatible",
         "baseUrl": "https://api.example.test/v1",
@@ -650,8 +641,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 #[tokio::test]
 async fn model_options_rejects_unknown_profile() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "profileName": "nonexistent",
         "modelId": "test",
@@ -670,8 +660,7 @@ async fn model_options_rejects_unknown_profile() {
 #[tokio::test]
 async fn model_options_rejects_unknown_model() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // First create a profile via provider preset
     let body = serde_json::json!({
@@ -708,8 +697,7 @@ async fn model_options_rejects_unknown_model() {
 #[tokio::test]
 async fn model_options_rejects_thinking_without_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // openai-compatible has no built-in thinking capability
     let body = serde_json::json!({
@@ -746,8 +734,7 @@ async fn model_options_rejects_thinking_without_capability() {
 #[tokio::test]
 async fn model_options_persists_and_clears_legacy_fields() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
     let body = serde_json::json!({
@@ -804,8 +791,7 @@ async fn model_options_persists_and_clears_legacy_fields() {
 #[tokio::test]
 async fn model_options_can_disable_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // Use deepseek which has a built-in thinking capability
     let body = serde_json::json!({
@@ -898,8 +884,7 @@ async fn model_options_can_disable_thinking() {
 #[tokio::test]
 async fn model_options_null_thinking_restores_model_default() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let body = serde_json::json!({
         "providerId": "deepseek",
@@ -944,8 +929,7 @@ async fn model_options_null_thinking_restores_model_default() {
 #[tokio::test]
 async fn get_config_exposes_thinking_and_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat mapping)
     let body = serde_json::json!({
@@ -999,8 +983,7 @@ async fn get_config_exposes_thinking_and_capability() {
 #[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
 
@@ -1045,8 +1028,7 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 #[tokio::test]
 async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let attachment_session_id = create_session(app.clone(), &token).await;
     let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
     let valid_attachment_body = serde_json::json!({
@@ -1083,8 +1065,7 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
 #[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
@@ -1104,8 +1085,7 @@ async fn inject_route_writes_mid_turn_user_message() {
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let inject_uri = format!("/api/sessions/{session_id}/inject");
 
@@ -1116,8 +1096,7 @@ async fn inject_route_without_active_turn_returns_client_error() {
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
@@ -1169,7 +1148,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     assert!(body.contains("hello from http"));
     assert!(body.contains(r#""status":"complete""#));
 
-    let (after_app, after_token) = router(runtime, Arc::new(EventFanout::new(1024))).unwrap();
+    let (after_app, after_token) = router(runtime).unwrap();
     let after = get_json::<ConversationSnapshotResponseDto>(
         after_app,
         &format!("/api/sessions/{session_id}/conversation"),
@@ -1182,8 +1161,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 #[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let stream_response = app
@@ -1216,8 +1194,7 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1259,8 +1236,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 #[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1337,8 +1313,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
 #[tokio::test]
 async fn snapshot_and_replay_preserve_durable_errors() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1446,8 +1421,7 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 #[tokio::test]
 async fn stream_invalid_cursors_request_rehydrate_and_close() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     for cursor in ["invalid", "999999"] {
@@ -1479,8 +1453,7 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
 #[tokio::test]
 async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1518,8 +1491,7 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
 #[tokio::test]
 async fn stream_ignores_events_from_other_sessions() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_a = create_session(app.clone(), &token).await;
     let session_b = create_session(app.clone(), &token).await;
 
@@ -1562,8 +1534,7 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
@@ -1622,8 +1593,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let body = get_json::<SlashCommandListResponseDto>(
@@ -1642,7 +1612,6 @@ async fn command_list_route_exposes_backend_slash_commands() {
     assert!(!compact.needs_argument);
     assert!(compact.requires_idle);
     assert!(!compact.argument_completions);
-    assert!(body.shadowed_commands.is_empty());
 
     let mode_cmd = body
         .commands
@@ -1662,8 +1631,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 #[tokio::test]
 async fn invoke_command_route_toggles_mode() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let http_response = post_json(
@@ -1688,8 +1656,7 @@ async fn invoke_command_route_toggles_mode() {
 #[tokio::test]
 async fn command_completion_route_returns_empty_for_commands_without_completion() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let http_response = post_json(
@@ -1710,8 +1677,7 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 #[tokio::test]
 async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1786,8 +1752,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
     let read_fixture = "target/post-compact-read-fixture.txt";
@@ -1817,7 +1782,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 result: ToolResult {
-                    call_id: "read-call-1".into(),
                     content: "pub fn compact_restore_fixture() {}".into(),
                     is_error: false,
                     error: None,

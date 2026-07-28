@@ -28,7 +28,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::files::{run_blocking, tool_call_id};
+use crate::files::run_blocking;
 
 const MAX_BUFFER_BYTES: usize = 1_024 * 1_024; // 1 MB
 const DEFAULT_READ_WAIT_MS: u64 = 100;
@@ -297,7 +297,6 @@ impl Tool for TerminalTool {
         let (content, metadata, is_error) = result;
 
         Ok(ToolResult {
-            call_id: tool_call_id(ctx),
             content,
             is_error,
             error: None,

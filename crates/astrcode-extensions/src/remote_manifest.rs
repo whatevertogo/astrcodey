@@ -119,10 +119,7 @@ pub fn build_subscriptions(
 }
 
 fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
-    matches!(
-        event,
-        ExtensionEvent::AfterToolResults | ExtensionEvent::UserMessageEnvelope
-    )
+    matches!(event, ExtensionEvent::UserMessageEnvelope)
 }
 
 pub fn handler_id(extension_id: &str, kind: &str, name: &str) -> String {
@@ -321,13 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_registration_rejects_s5r_internal_typed_hooks() {
-        for hook in ["user_message_envelope", "after_tool_results"] {
-            let reg = registration_with_hook(hook, "blocking");
+    fn validate_registration_rejects_s5r_internal_typed_hook() {
+        let reg = registration_with_hook("user_message_envelope", "blocking");
 
-            let err = validate_registration(&reg).unwrap_err();
+        let err = validate_registration(&reg).unwrap_err();
 
-            assert!(err.contains("not supported by s5r manifest"));
-        }
+        assert!(err.contains("not supported by s5r manifest"));
     }
 }

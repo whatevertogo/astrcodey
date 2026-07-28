@@ -14,9 +14,7 @@ use astrcode_protocol::{
     framing::{PROTOCOL_VERSION, notification_to_jsonrpc_message, to_jsonl_line},
     version::negotiate_version,
 };
-use astrcode_server::transport::{
-    ServerTransport, StdioTransport, write_error_response, write_initialize_response,
-};
+use astrcode_server::transport::{StdioTransport, write_error_response, write_initialize_response};
 use astrcode_support::event_fanout::EventFanout;
 
 #[tokio::main]

@@ -6,6 +6,7 @@ import {
 import { cn } from '../../lib/utils'
 import { toolApprovalPending, type ToolUiContext } from '../../tool-ui'
 import { extractRenderSpec } from '../../types/render-spec'
+import { toolCallHasError, toolCallIsTerminal } from '../../services/types'
 import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
 import { Icon, type IconName } from '../ui/Icon'
 import { AssistantMessageContent } from './AssistantMessage'
@@ -30,6 +31,7 @@ function toolNeedsAttention(
   block: ToolActivity['block'],
   sessionId: string | null
 ) {
+  if (toolCallIsTerminal(block.status)) return false
   const args = toolArgs(block)
   const meta = toolMeta(block)
   const ctx: ToolUiContext = {
@@ -63,7 +65,7 @@ function ActivitySummaryContent({ activity }: { activity: ToolActivity }) {
     <span
       className={cn(
         'flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-1 text-[14px] leading-snug',
-        activity.block.status === 'error'
+        toolCallHasError(activity.block.status)
           ? 'text-danger'
           : 'text-text-secondary'
       )}
@@ -122,7 +124,8 @@ function ProcessSummary({
   if (entries.length === 0) return null
   const open = forceOpen || userOpen
   const hasError = entries.some(
-    (entry) => entry.type === 'tool' && entry.activity.block.status === 'error'
+    (entry) =>
+      entry.type === 'tool' && toolCallHasError(entry.activity.block.status)
   )
   const latestEntry = entries[entries.length - 1]
   const latestLabel =

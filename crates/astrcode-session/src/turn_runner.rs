@@ -9,8 +9,8 @@ use std::{sync::Arc, time::Duration};
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        AfterToolResultsContext, AfterToolResultsResult, ContinueAfterStopContext,
-        ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
+        ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
+        ProviderResult,
     },
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
@@ -32,7 +32,7 @@ use crate::{
     tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
-    tool_types::ExecuteDeclaredToolBatch,
+    tool_types::ExecuteToolBatch,
     turn_context::{
         SharedTurnContext, TurnError, end_turn_with_error_typed, on_step_end_best_effort,
     },
@@ -359,36 +359,18 @@ impl TurnLoop {
                     }
 
                     let hook_messages = state.provider_response_messages(request_messages);
-                    let tool_decision = self
-                        .tools_stage(
-                            extension_runner.as_ref(),
-                            &mut state,
-                            &tool_calls,
-                            early_results,
-                            publisher,
-                            hook_messages,
-                        )
-                        .await?;
+                    self.tools_stage(
+                        extension_runner.as_ref(),
+                        &mut state,
+                        &tool_calls,
+                        early_results,
+                        publisher,
+                        hook_messages,
+                    )
+                    .await?;
 
                     state.tool_deduplicator_mut().end_step();
                     on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
-                    if let ToolStageDecision::EndTurn { reason } = tool_decision {
-                        extension_runner
-                            .emit_lifecycle(
-                                ExtensionEvent::TurnEnd,
-                                self.shared().lifecycle_ctx_with_exchange(
-                                    _user_text.to_string(),
-                                    state.final_text().to_string(),
-                                ),
-                            )
-                            .await?;
-                        let (text, tool_results) = state.take_output_parts();
-                        return Ok(TurnOutput {
-                            text,
-                            finish_reason: reason,
-                            tool_results,
-                        });
-                    }
                 },
             }
         }
@@ -598,7 +580,7 @@ impl TurnLoop {
         early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
-    ) -> Result<ToolStageDecision, TurnError> {
+    ) -> Result<(), TurnError> {
         self.dispatch_after_provider_response(extension_runner, hook_messages, state)
             .await?;
 
@@ -608,12 +590,12 @@ impl TurnLoop {
             .tools
             .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
             .await?;
-        let declared = self.tools.declare_tool_batch(plan, publisher).await?;
+        self.tools.declare_tool_batch(&plan, publisher).await?;
 
-        let committed = match self
+        let discovered_tools = match self
             .tools
-            .execute_and_commit(ExecuteDeclaredToolBatch {
-                declared,
+            .execute_and_commit(ExecuteToolBatch {
+                batch: plan,
                 tools: &visible_tools,
                 state,
                 publisher: Arc::clone(publisher),
@@ -625,23 +607,8 @@ impl TurnLoop {
                 return end_turn_with_error_typed(error);
             },
         };
-        state.activate_deferred_tools(committed.discovered_tools);
-        if committed.tool_results.is_empty() {
-            return Ok(ToolStageDecision::Continue);
-        }
-        let decision = extension_runner
-            .emit_after_tool_results(AfterToolResultsContext {
-                session_id: self.shared().session_id.to_string(),
-                working_dir: self.shared().working_dir.clone(),
-                model: self.shared().model_selection(),
-                tool_results: committed.tool_results,
-                session_store_dir: self.shared().session_store_dir.clone(),
-            })
-            .await?;
-        Ok(match decision {
-            AfterToolResultsResult::Continue => ToolStageDecision::Continue,
-            AfterToolResultsResult::EndTurn { reason } => ToolStageDecision::EndTurn { reason },
-        })
+        state.activate_deferred_tools(discovered_tools);
+        Ok(())
     }
 
     async fn postprocess_complete_stage(
@@ -863,11 +830,6 @@ fn extract_last_assistant_text(messages: &[LlmMessage]) -> Option<String> {
 
 fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
     LlmContent::join_text(messages.iter().flat_map(|message| &message.content), "")
-}
-
-enum ToolStageDecision {
-    Continue,
-    EndTurn { reason: String },
 }
 
 #[derive(Debug)]

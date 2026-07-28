@@ -10,7 +10,7 @@ use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use super::shared::{is_unc_path, run_blocking, tool_call_id};
+use super::shared::{is_unc_path, run_blocking};
 // ─── patch ───────────────────────────────────────────────────────────────
 
 /// 统一差异补丁应用工具，支持多文件协调变更、文件创建和删除。
@@ -134,14 +134,13 @@ impl Tool for ApplyPatchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &ToolExecutionContext,
+        _ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid patch args: {e}")))?;
-        let call_id = tool_call_id(ctx);
         let working_dir = self.working_dir.clone();
-        run_blocking(move || execute_patch_sync(working_dir, args, call_id, started_at)).await
+        run_blocking(move || execute_patch_sync(working_dir, args, started_at)).await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -152,16 +151,15 @@ impl Tool for ApplyPatchTool {
 fn execute_patch_sync(
     working_dir: PathBuf,
     args: ApplyPatchArgs,
-    call_id: String,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     if args.patch.trim().is_empty() {
-        return Ok(patch_error(&call_id, started_at, "patch cannot be empty"));
+        return Ok(patch_error(started_at, "patch cannot be empty"));
     }
 
     let file_patches = match parse_patch(&args.patch) {
         Ok(file_patches) => file_patches,
-        Err(error) => return Ok(patch_error(&call_id, started_at, &error)),
+        Err(error) => return Ok(patch_error(started_at, &error)),
     };
 
     let total_files = file_patches.len();
@@ -186,7 +184,6 @@ fn execute_patch_sync(
     };
 
     Ok(ToolResult {
-        call_id,
         content,
         is_error: !ok,
         error: if ok {
@@ -850,9 +847,8 @@ fn build_patch_metadata(
 }
 
 /// 构造一个 patch 错误结果（无文件变更）。
-fn patch_error(call_id: &str, started_at: Instant, error: &str) -> ToolResult {
+fn patch_error(started_at: Instant, error: &str) -> ToolResult {
     ToolResult {
-        call_id: call_id.to_string(),
         // content 必须非空,否则 LLM 看不到错误细节(LLM 只读 content)。
         content: format!("patch failed: {error}"),
         is_error: true,

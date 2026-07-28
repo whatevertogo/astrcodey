@@ -308,7 +308,6 @@ impl ToolHandler for AgentToolHandler {
                     );
                 }
                 Ok(ToolResult {
-                    call_id: String::new(),
                     content,
                     is_error: false,
                     error: None,
@@ -323,7 +322,6 @@ impl ToolHandler for AgentToolHandler {
                 metadata.insert("backgrounded".into(), serde_json::json!(true));
                 metadata.insert("task_id".into(), serde_json::json!(task_id));
                 Ok(ToolResult {
-                    call_id: String::new(),
                     content: format!(
                         "task_id: {task_id}\nstatus: running\nchild_session_id: \
                          {session_id}\nautomatic_notification: true\n\ndescription: \

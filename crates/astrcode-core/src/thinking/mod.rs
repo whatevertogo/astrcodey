@@ -9,7 +9,8 @@ mod catalog;
 mod legacy;
 
 pub use catalog::resolve_thinking_capability;
-pub use legacy::{effort_to_thinking_level, legacy_to_thinking_config, thinking_level_to_effort};
+pub(crate) use legacy::effort_to_thinking_level;
+pub use legacy::legacy_to_thinking_config;
 use serde::{Deserialize, Serialize};
 
 // ── Normalized Thinking Config ──────────────────────────────────────────
@@ -44,7 +45,8 @@ impl ThinkingConfig {
 
     /// Returns `true` when thinking is meaningfully active (enabled with either
     /// an effort level or budget constraint).
-    pub fn is_active(&self) -> bool {
+    #[cfg(test)]
+    fn is_active(&self) -> bool {
         self.enabled && (self.effort.is_some() || self.budget_tokens.is_some())
     }
 }
@@ -374,7 +376,7 @@ mod tests {
             ThinkingLevel::Medium,
             ThinkingLevel::High,
         ] {
-            let effort = thinking_level_to_effort(level);
+            let effort = level.as_wire_value();
             assert_eq!(effort_to_thinking_level(effort), Some(level));
         }
     }

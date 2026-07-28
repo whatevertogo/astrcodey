@@ -29,7 +29,7 @@ pub enum PreToolUseResult {
 /// PostToolUse 钩子结果。
 ///
 /// `ModifyResult` 仅替换 ToolResult 的文本内容（`content` 字段）；其它结构化
-/// 字段——`is_error` / `metadata` / `artifact_ref` / `duration_ms`——保持不变。
+/// 字段——`is_error` / `error` / `metadata` / `duration_ms`——保持不变。
 #[derive(Debug, Clone)]
 pub enum PostToolUseResult {
     Allow,
@@ -74,11 +74,4 @@ pub enum UserMessageEnvelopeResult {
     ReplaceText { text: String },
     AppendText { text: String },
     Block { reason: String },
-}
-
-/// 工具结果批次落盘后的继续/结束决策结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AfterToolResultsResult {
-    Continue,
-    EndTurn { reason: String },
 }

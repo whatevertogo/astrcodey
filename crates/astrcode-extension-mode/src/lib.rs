@@ -173,16 +173,13 @@ impl ToolHandler for ModeToolHandler {
                     },
                 })
             },
-            crate::ask_user::ASK_USER_TOOL_NAME => {
-                let call_id = ctx.scope.tool_call_id.as_deref().unwrap_or("");
-                Ok(match handle_ask_user(arguments, call_id) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let meta = tool_metadata([("error", json!(&error))]);
-                        ToolResult::text(error, true, meta)
-                    },
-                })
-            },
+            crate::ask_user::ASK_USER_TOOL_NAME => Ok(match handle_ask_user(arguments) {
+                Ok(result) => result,
+                Err(error) => {
+                    let meta = tool_metadata([("error", json!(&error))]);
+                    ToolResult::text(error, true, meta)
+                },
+            }),
             _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
     }

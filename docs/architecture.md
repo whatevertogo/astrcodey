@@ -105,7 +105,7 @@ bootstrap_with → ChildSessionCoordinator + TurnScheduler + TurnRegistry
               → ServerEventBus::new(fanout)
               → SessionEventReactor::new(scheduler)
               → SessionManager::bind_event_bus + bind_event_reactor
-              → CommandHandle::spawn
+              → CommandHandler::spawn_actor
 ```
 
 ### 命令路径

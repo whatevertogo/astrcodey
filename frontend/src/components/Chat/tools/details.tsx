@@ -3,6 +3,7 @@ import {
   runningElapsedLabel,
 } from '../../../hooks/useElapsedSeconds'
 import { cn } from '../../../lib/utils'
+import { toolCallHasError } from '../../../services/types'
 import {
   arrayValue,
   boolValue,
@@ -208,7 +209,7 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
       </div>
       <CodePreview
         text={output || '(no output)'}
-        tone={block.status === 'error' ? 'stderr' : 'default'}
+        tone={toolCallHasError(block.status) ? 'stderr' : 'default'}
       />
     </div>
   )

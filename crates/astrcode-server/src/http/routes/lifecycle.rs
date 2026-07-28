@@ -14,17 +14,12 @@ pub(in crate::http) async fn shutdown(State(state): State<HttpState>) -> Respons
     tracing::info!("shutdown requested via HTTP");
     let runtime = Arc::clone(&state.runtime);
     let handler = state.handler;
-    let handle = tokio::spawn(async move {
+    crate::task_utils::spawn_traced("http_shutdown", async move {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         runtime.shutdown_token().cancel();
         handler.shutdown().await;
         runtime.scheduler().drain_detached_tasks().await;
         runtime.shutdown_extensions().await;
-    });
-    tokio::spawn(async move {
-        if let Err(e) = handle.await {
-            tracing::error!("shutdown task panicked: {e}");
-        }
     });
     StatusCode::NO_CONTENT.into_response()
 }

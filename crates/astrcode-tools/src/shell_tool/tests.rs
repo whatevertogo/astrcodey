@@ -212,7 +212,6 @@ async fn shell_captures_stdout_and_stderr_without_live_events() {
         .await
         .expect("shell should execute");
 
-    assert_eq!(result.call_id, "shell-capture");
     assert!(!result.is_error, "{result:?}");
     assert!(result.content.contains("out"));
     assert!(result.content.contains("err"));
@@ -526,10 +525,9 @@ async fn shell_run_in_background_returns_shell_id() {
     assert!(!shell_id.is_empty());
     assert!(result.content.contains(shell_id));
 
-    let status =
-        super::execute_background_shell_wait(shell_id, 0, None, Instant::now(), &empty_ctx())
-            .await
-            .expect("status query");
+    let status = super::execute_background_shell_wait(shell_id, 0, None, Instant::now())
+        .await
+        .expect("status query");
     assert_eq!(status.metadata["running"], serde_json::json!(true));
 }
 

@@ -228,7 +228,7 @@ impl Extension for S5rExtension {
                 ExtensionEvent::PromptBuild => {
                     reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
                 },
-                ExtensionEvent::UserMessageEnvelope | ExtensionEvent::AfterToolResults => {
+                ExtensionEvent::UserMessageEnvelope => {
                     tracing::warn!(
                         extension_id = %ext_id,
                         hook = event_to_name(event),
@@ -452,6 +452,7 @@ impl PreToolUseHandler for S5rPreToolUseHandler {
             "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
+            "call_id": ctx.call_id,
             "tool_name": ctx.tool_name,
             "tool_input": ctx.tool_input,
             "available_tools": ctx.available_tools,
@@ -477,6 +478,7 @@ struct S5rPostToolUseHandler {
 #[async_trait::async_trait]
 impl PostToolUseHandler for S5rPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
+        let is_error = ctx.tool_result.is_error;
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
@@ -490,10 +492,11 @@ impl PostToolUseHandler for S5rPostToolUseHandler {
             "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
+            "call_id": ctx.call_id,
             "tool_name": ctx.tool_name,
             "tool_input": ctx.tool_input,
             "tool_result": ctx.tool_result,
-            "is_error": ctx.is_error,
+            "is_error": is_error,
         });
         let hid = handler_id(&self.ext_id, "hook", "post_tool_use");
         let resp = self

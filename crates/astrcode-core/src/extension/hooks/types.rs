@@ -6,8 +6,6 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use crate::tool::ToolResult;
-
 // ─── Compact types ─────────────────────────────────────────────────────
 
 /// 触发 compact 的来源。
@@ -108,12 +106,6 @@ pub struct UserMessageEnvelopeRegistration<H: ?Sized> {
     pub handler: Arc<H>,
 }
 
-#[derive(Clone)]
-pub struct AfterToolResultsRegistration<H: ?Sized> {
-    pub priority: i32,
-    pub handler: Arc<H>,
-}
-
 // ─── Contribution types ────────────────────────────────────────────────
 
 /// 插件在 PromptBuild hook 中提供的 prompt 片段。
@@ -187,7 +179,7 @@ pub enum ExtensionError {
 
 // ─── Extension tool outcome ────────────────────────────────────────────
 
-/// ToolResult.metadata 中用于携带 [`ExtensionToolOutcome`] 的键名。
+/// `ToolResult.metadata` 中用于携带 [`ExtensionToolOutcome`] 的键名。
 pub const EXTENSION_TOOL_OUTCOME_KEY: &str = "extension_tool_outcome";
 
 /// 扩展工具回调返回的声明式结果。
@@ -385,16 +377,6 @@ pub struct StatusItemUpdatePayload {
 pub struct ExchangeSummary {
     pub user_message: String,
     pub assistant_message: String,
-}
-
-// ─── After tool result ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AfterToolResult {
-    pub call_id: crate::types::ToolCallId,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    pub tool_result: ToolResult,
 }
 
 #[cfg(test)]

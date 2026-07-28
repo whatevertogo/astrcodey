@@ -7,4 +7,10 @@ import type { KeybindingDto } from "./KeybindingDto";
 import type { StatusItemDto } from "./StatusItemDto";
 import type { ToolDefinitionDto } from "./ToolDefinitionDto";
 
+/**
+ * 扩展声明的完整描述。
+ *
+ * 定位为开放 API 的自描述契约：除前端外，第三方调用方也可据此
+ * 了解扩展提供的全部能力，因此各声明字段即使前端未消费也保留。
+ */
 export type ExtensionDeclarationDto = { id: string, capabilities: Array<ExtensionCapabilityDto>, tools: Array<ToolDefinitionDto>, dynamicTools: boolean, commands: Array<ExtensionSlashCommandDto>, dynamicCommands: boolean, keybindings: Array<KeybindingDto>, statusItems: Array<StatusItemDto>, events: Array<ExtensionEventDeclDto>, httpRoutes: Array<ExtensionHttpRouteDto>, };

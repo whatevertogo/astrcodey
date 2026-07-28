@@ -1,15 +1,19 @@
-import type { ConversationBlock } from '../../../services/types'
+import type { ConversationBlock, ToolCallStatus } from '../../../services/types'
 
 export type ToolCall = Extract<ConversationBlock, { kind: 'toolCall' }>
 export type JsonRecord = Record<string, unknown>
 
-export function statusLabel(status: string): string {
+export function statusLabel(status: ToolCallStatus): string {
   switch (status) {
     case 'complete':
       return '完成'
     case 'error':
-      return '失败'
-    default:
+      return '结果错误'
+    case 'failed':
+      return '执行失败'
+    case 'cancelled':
+      return '已取消'
+    case 'streaming':
       return '运行中'
   }
 }

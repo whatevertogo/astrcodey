@@ -17,13 +17,14 @@ use tokio::sync::Mutex;
 
 use crate::{
     projection,
-    tool_artifacts::{slice_tool_result, tool_result_file_name},
+    tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
 };
 
 /// 纯内存 EventStore 实现。
 ///
 /// 这个类型维护完整事件列表和同步投影，因此不是 no-op；测试使用它能覆盖
 /// 文件系统存储相同的读模型语义。
+#[derive(Default)]
 pub struct InMemoryEventStore {
     sessions: Mutex<HashMap<SessionId, InMemorySession>>,
 }
@@ -37,15 +38,7 @@ struct InMemorySession {
 impl InMemoryEventStore {
     /// 创建新的空内存存储。
     pub fn new() -> Self {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl Default for InMemoryEventStore {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 
@@ -181,7 +174,6 @@ impl EventReader for InMemoryEventStore {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        // In-memory storage has no real directory; return None.
         let map = self.sessions.lock().await;
         if map.contains_key(session_id) {
             Ok(None)
@@ -318,12 +310,8 @@ fn format_memory_tool_result_path(
     call_id: &str,
     suffix: usize,
 ) -> String {
-    let file_name = tool_result_file_name(tool_name, call_id);
-    if suffix == 0 {
-        return format!("memory://{session_id}/tool-results/{file_name}");
-    }
-    let stem = file_name.trim_end_matches(".txt");
-    format!("memory://{session_id}/tool-results/{stem}-{suffix}.txt")
+    let file_name = tool_result_file_name_with_suffix(tool_name, call_id, suffix);
+    format!("memory://{session_id}/tool-results/{file_name}")
 }
 
 #[cfg(test)]

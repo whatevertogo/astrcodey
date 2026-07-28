@@ -3,14 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AfterToolResultsHandler, AfterToolResultsRegistration, CommandDiscoveryHandler, CommandHandler,
-    CompactEvent, CompactHandler, ContinueAfterStopHandler, ContinueAfterStopOptions,
-    ContinueAfterStopRegistration, ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder,
-    ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration, HookMode,
-    LifecycleHandler, PostToolUseFailureHandler, PostToolUseHandler, PreToolUseHandler,
-    PromptBuildHandler, ProviderEvent, ProviderHandler, SlashCommand, ToolDiscoveryHandler,
-    ToolHandler, ToolHookRegistration, ToolHookTarget, UserMessageEnvelopeHandler,
-    UserMessageEnvelopeRegistration,
+    CommandDiscoveryHandler, CommandHandler, CompactEvent, CompactHandler,
+    ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
+    ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionHttpHandler,
+    ExtensionHttpRoute, ExtensionHttpRouteRegistration, HookMode, LifecycleHandler,
+    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
+    SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
 };
 use crate::{
     tool::{ToolDefinition, ToolPromptMetadata},
@@ -45,10 +44,8 @@ pub struct Registrar {
     provider: Vec<(ProviderEvent, HookMode, i32, Arc<dyn ProviderHandler>)>,
     prompt_build: Vec<(i32, Arc<dyn PromptBuildHandler>)>,
     compact: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)>,
-    post_tool_use_failure: Vec<(i32, Arc<dyn PostToolUseFailureHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
     user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
-    after_tool_results: Vec<AfterToolResultsRegistration<dyn AfterToolResultsHandler>>,
     lifecycle: Vec<(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
     extension_event_decls: Vec<ExtensionEventDecl>,
     needs_extension_data_dir: bool,
@@ -134,7 +131,7 @@ impl Registrar {
         self.on_post_tool_use_for(ToolHookTarget::All, mode, priority, handler);
     }
 
-    pub fn on_post_tool_use_for(
+    fn on_post_tool_use_for(
         &mut self,
         target: ToolHookTarget,
         mode: HookMode,
@@ -211,14 +208,6 @@ impl Registrar {
         self.compact.push((event, priority, handler));
     }
 
-    pub fn on_post_tool_use_failure(
-        &mut self,
-        priority: i32,
-        handler: Arc<dyn PostToolUseFailureHandler>,
-    ) {
-        self.post_tool_use_failure.push((priority, handler));
-    }
-
     pub fn on_continue_after_stop(
         &mut self,
         priority: i32,
@@ -240,15 +229,6 @@ impl Registrar {
     ) {
         self.user_message_envelope
             .push(UserMessageEnvelopeRegistration { priority, handler });
-    }
-
-    pub fn on_after_tool_results(
-        &mut self,
-        priority: i32,
-        handler: Arc<dyn AfterToolResultsHandler>,
-    ) {
-        self.after_tool_results
-            .push(AfterToolResultsRegistration { priority, handler });
     }
 
     pub fn on_event(
@@ -276,10 +256,8 @@ impl Registrar {
             && self.provider.is_empty()
             && self.prompt_build.is_empty()
             && self.compact.is_empty()
-            && self.post_tool_use_failure.is_empty()
             && self.continue_after_stop.is_empty()
             && self.user_message_envelope.is_empty()
-            && self.after_tool_results.is_empty()
             && self.lifecycle.is_empty()
             && self.extension_event_decls.is_empty()
             && !self.needs_extension_data_dir
@@ -349,10 +327,6 @@ impl Registrar {
         &self.compact
     }
 
-    pub fn post_tool_use_failure(&self) -> &[(i32, Arc<dyn PostToolUseFailureHandler>)] {
-        &self.post_tool_use_failure
-    }
-
     pub fn continue_after_stop(
         &self,
     ) -> &[ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>] {
@@ -363,12 +337,6 @@ impl Registrar {
         &self,
     ) -> &[UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>] {
         &self.user_message_envelope
-    }
-
-    pub fn after_tool_results(
-        &self,
-    ) -> &[AfterToolResultsRegistration<dyn AfterToolResultsHandler>] {
-        &self.after_tool_results
     }
 
     pub fn lifecycle(&self) -> &[(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)] {

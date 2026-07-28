@@ -72,7 +72,7 @@ impl MessageAttachment {
         }
     }
 
-    pub fn is_image(&self) -> bool {
+    pub(crate) fn is_image(&self) -> bool {
         self.media_type.starts_with("image/")
     }
 }

@@ -155,9 +155,44 @@ impl LlmMessage {
         }
     }
 
-    /// 由文本与附件构建用户消息（图片走 [`LlmContent::Image`]）。
+    /// 由文本与附件组装用户消息（图片走 [`LlmContent::Image`]，
+    /// 非图片附件用 XML 分隔符包装为文本块）。
     pub fn user_with_attachments(text: &str, attachments: &[MessageAttachment]) -> Self {
-        user_message_with_attachments(text, attachments)
+        let mut content = Vec::new();
+        for att in attachments {
+            if att.is_image() {
+                content.push(LlmContent::Image {
+                    base64: att.content.clone(),
+                    media_type: att.media_type.clone(),
+                    filename: Some(att.filename.clone()),
+                });
+            } else {
+                content.push(LlmContent::Text {
+                    text: format!(
+                        "<attachment filename=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
+                        xml_escape_attr(&att.filename),
+                        xml_escape_attr(&att.media_type),
+                        att.content
+                    ),
+                });
+            }
+        }
+        if !text.is_empty() {
+            content.push(LlmContent::Text {
+                text: text.to_string(),
+            });
+        }
+        if content.is_empty() {
+            content.push(LlmContent::Text {
+                text: String::new(),
+            });
+        }
+        Self {
+            role: LlmRole::User,
+            content,
+            name: None,
+            reasoning_content: None,
+        }
     }
 
     /// 创建一条助手文本消息。
@@ -204,11 +239,6 @@ impl LlmMessage {
         }
     }
 
-    /// 返回 provider 可见版本，保留需要回传给 provider 的字段（如 reasoning_content）。
-    pub fn provider_visible(self) -> Self {
-        self
-    }
-
     /// 将各 content 块经 [`LlmContent::to_display_text`] 转换后用 `separator` 拼接。
     pub fn joined_display_text(&self, separator: &str) -> String {
         self.content
@@ -243,7 +273,7 @@ fn xml_escape_attr(value: &str) -> String {
     value.replace('&', "&amp;").replace('"', "&quot;")
 }
 
-/// 从用户 LLM 消息中提取附件（与 [`user_message_with_attachments`] 对称）。
+/// 从用户 LLM 消息中提取附件（与 [`LlmMessage::user_with_attachments`] 对称）。
 pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachment> {
     message
         .content
@@ -266,47 +296,8 @@ pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachm
         .collect()
 }
 
-/// 将用户文本与附件组装为 LLM 用户消息。
-pub fn user_message_with_attachments(text: &str, attachments: &[MessageAttachment]) -> LlmMessage {
-    let mut content = Vec::new();
-    for att in attachments {
-        if att.is_image() {
-            content.push(LlmContent::Image {
-                base64: att.content.clone(),
-                media_type: att.media_type.clone(),
-                filename: Some(att.filename.clone()),
-            });
-        } else {
-            content.push(LlmContent::Text {
-                text: format!(
-                    "<attachment filename=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
-                    xml_escape_attr(&att.filename),
-                    xml_escape_attr(&att.media_type),
-                    att.content
-                ),
-            });
-        }
-    }
-    if !text.is_empty() {
-        content.push(LlmContent::Text {
-            text: text.to_string(),
-        });
-    }
-    if content.is_empty() {
-        content.push(LlmContent::Text {
-            text: String::new(),
-        });
-    }
-    LlmMessage {
-        role: LlmRole::User,
-        content,
-        name: None,
-        reasoning_content: None,
-    }
-}
-
 pub const TURN_ABORTED_SOURCE: &str = "turn_aborted";
-pub const TURN_ABORTED_GUIDANCE: &str = concat!(
+const TURN_ABORTED_GUIDANCE: &str = concat!(
     "The user interrupted the previous turn on purpose. ",
     "Any running tools/commands may still be running in the background. ",
     "If any tools/commands were aborted, they may have partially executed."
@@ -327,7 +318,6 @@ pub fn turn_aborted_context_message() -> LlmMessage {
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     let mut messages = messages
         .into_iter()
-        .map(LlmMessage::provider_visible)
         .filter(LlmMessage::has_provider_visible_content)
         .collect::<Vec<_>>();
     normalize_tool_call_messages(&mut messages);
@@ -506,28 +496,6 @@ pub enum LlmEvent {
     Error { message: String },
 }
 
-/// LLM 调用的完整输出结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmOutput {
-    /// 累积的文本内容。
-    pub text: String,
-    /// LLM 请求的工具调用列表（如有）。
-    pub tool_calls: Vec<ParsedToolCall>,
-    /// 提供者返回的完成原因。
-    pub finish_reason: String,
-}
-
-/// 从 LLM 响应中解析出的工具调用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedToolCall {
-    /// 工具调用的唯一标识。
-    pub call_id: String,
-    /// 要调用的工具名称。
-    pub name: String,
-    /// 工具调用参数（JSON 值）。
-    pub arguments: serde_json::Value,
-}
-
 /// LLM 提供者操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
@@ -563,16 +531,6 @@ pub enum PromptCacheRetention {
     /// 请求保留更长的 24 小时缓存。
     #[serde(rename = "24h")]
     TwentyFourHours,
-}
-
-impl PromptCacheRetention {
-    /// 返回 OpenAI 兼容请求体中的 wire 值。
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::InMemory => "in_memory",
-            Self::TwentyFourHours => "24h",
-        }
-    }
 }
 
 /// 推理强度级别（跨模型选项的标准化抽象）。
@@ -652,7 +610,7 @@ pub struct LlmClientConfig {
 }
 
 impl LlmClientConfig {
-    pub fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
+    fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
         match &self.extras {
             ProviderExtras::OpenAi(extras) => Some(extras),
             ProviderExtras::None => None,
@@ -671,13 +629,6 @@ impl LlmClientConfig {
 
     pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
         self.openai_extras().and_then(|e| e.prompt_cache_retention)
-    }
-
-    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
-        self.thinking
-            .effort
-            .as_deref()
-            .and_then(crate::thinking::effort_to_thinking_level)
     }
 }
 
@@ -811,7 +762,7 @@ mod tests {
     #[test]
     fn attachments_round_trip_preserves_image_filename() {
         let attachments = vec![MessageAttachment::image_png("screenshot.png", "abc123")];
-        let message = user_message_with_attachments("hello", &attachments);
+        let message = LlmMessage::user_with_attachments("hello", &attachments);
         let round_trip = attachments_from_user_message(&message);
         assert_eq!(round_trip, attachments);
     }
@@ -823,7 +774,7 @@ mod tests {
             content: "body".into(),
             media_type: "text/plain".into(),
         }];
-        let message = user_message_with_attachments("", &attachments);
+        let message = LlmMessage::user_with_attachments("", &attachments);
         let text = message
             .content
             .iter()

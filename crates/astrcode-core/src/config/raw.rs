@@ -288,17 +288,6 @@ pub struct ConfigOverlay {
 
 // ─── Selection Types ─────────────────────────────────────────────────────
 
-/// 当前激活的配置选择结果，包含可能的警告信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveSelection {
-    /// 激活的配置文件名。
-    pub active_profile: String,
-    /// 激活的模型标识。
-    pub active_model: String,
-    /// 可选的警告信息（如模型不存在时的提示）。
-    pub warning: Option<String>,
-}
-
 /// 模型选择信息，描述当前选择的完整模型上下文。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSelection {

@@ -192,7 +192,6 @@ mod tests {
 
         for (name, tool_name, metadata, expected) in cases {
             let result = ToolResult {
-                call_id: "call-1".into(),
                 content: large_content.clone(),
                 is_error: false,
                 error: None,

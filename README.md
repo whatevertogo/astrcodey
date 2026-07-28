@@ -445,7 +445,7 @@ Tools run in parallel batches (up to 5 concurrent). The pipeline:
 
 1. **Prepare** — parse JSON args (with repair for malformed LLM output), check visibility, dispatch `PreToolUse` hooks
 2. **Execute** — parallel batch via `JoinSet`, sequential tools flush the batch first
-3. **Commit** — dispatch `PostToolUse` / `PostToolUseFailure` hooks, persist large results, enforce message budget, emit events
+3. **Commit** — dispatch `PostToolUse` for completed executions, persist large results, enforce message budget, and emit distinct completed / failed / cancelled events
 
 Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (glob/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
 
@@ -462,7 +462,7 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 - **Status bar items** — extensions contribute status bar entries (e.g. current mode indicator) with runtime updates via `StatusItemUpdate` notifications
 - **Disk s5r extensions** — stdio length-prefixed frames + JSON `WireMessage` (`protocol.s5r` + `command` in `extension.json`); worker `Initialize`, `handler.invoke`, and capability-scoped `astrcode.*` invoke. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
-- **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
+- **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
 - **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)
 - **Active health checks** — `ExtensionRunner::check_health()` provides an on-demand sampling API; polling strategy is decided by the host
 - **Startup event channel** — `bind_startup_event_channel()` binds a process-level event channel so extensions can emit custom events during `start()`

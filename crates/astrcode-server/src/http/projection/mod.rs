@@ -36,7 +36,7 @@ fn cross_session_compact_deltas(
         return Vec::new();
     }
 
-    let mut deltas: Vec<_> = blocks::completed_block_from_payload(event)
+    let mut deltas: Vec<_> = blocks::block_from_payload(event)
         .map(|block| ConversationDeltaDto::AppendBlock { block })
         .into_iter()
         .collect();

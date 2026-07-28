@@ -11,7 +11,6 @@ use std::{
 use astrcode_core::{config::ModelSelection, event::EventPayload, tool_access::ResourceAccess};
 use astrcode_extension_sdk::{
     extension::{
-        AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler, AfterToolResultsResult,
         CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
         ContinueAfterStopResult, DiscoveredTool, Extension, ExtensionCapability,
@@ -155,18 +154,6 @@ struct UserMessageEnvelopeProbeExtension {
 
 struct UserMessageEnvelopeProbe {
     result: UserMessageEnvelopeResult,
-    calls: Arc<AtomicUsize>,
-}
-
-struct AfterToolResultsProbeExtension {
-    id: &'static str,
-    priority: i32,
-    result: AfterToolResultsResult,
-    calls: Arc<AtomicUsize>,
-}
-
-struct AfterToolResultsProbe {
-    result: AfterToolResultsResult,
     calls: Arc<AtomicUsize>,
 }
 
@@ -524,34 +511,6 @@ impl UserMessageEnvelopeHandler for UserMessageEnvelopeProbe {
     }
 }
 
-#[async_trait::async_trait]
-impl Extension for AfterToolResultsProbeExtension {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn register(&self, reg: &mut Registrar) {
-        reg.on_after_tool_results(
-            self.priority,
-            Arc::new(AfterToolResultsProbe {
-                result: self.result.clone(),
-                calls: Arc::clone(&self.calls),
-            }),
-        );
-    }
-}
-
-#[async_trait::async_trait]
-impl AfterToolResultsHandler for AfterToolResultsProbe {
-    async fn handle(
-        &self,
-        _ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.result.clone())
-    }
-}
-
 fn continue_after_stop_ctx(continuations_this_turn: u32) -> ContinueAfterStopContext {
     ContinueAfterStopContext {
         session_id: "session".into(),
@@ -571,21 +530,6 @@ fn user_message_envelope_ctx(text: &str) -> UserMessageEnvelopeContext {
         model: ModelSelection::simple("model"),
         text: text.into(),
         attachments: Vec::new(),
-        session_store_dir: None,
-    }
-}
-
-fn after_tool_results_ctx() -> AfterToolResultsContext {
-    AfterToolResultsContext {
-        session_id: "session".into(),
-        working_dir: "D:/workspace".into(),
-        model: ModelSelection::simple("model"),
-        tool_results: vec![AfterToolResult {
-            call_id: "call-1".into(),
-            tool_name: "probeTool".into(),
-            tool_input: json!({"value": 1}),
-            tool_result: ToolResult::text("ok".into(), false, Default::default()),
-        }],
         session_store_dir: None,
     }
 }
@@ -884,6 +828,7 @@ async fn targeted_pre_tool_hook_only_runs_for_matching_tool() {
         session_id: "session".into(),
         working_dir: "D:/workspace".into(),
         model: astrcode_core::config::ModelSelection::simple("model"),
+        call_id: "call-1".into(),
         tool_name: tool_name.into(),
         tool_input: json!({}),
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,
@@ -1291,47 +1236,6 @@ async fn user_message_envelope_block_short_circuits_later_handlers() {
     );
     assert_eq!(block_calls.load(Ordering::SeqCst), 1);
     assert_eq!(append_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn after_tool_results_end_turn_short_circuits_later_handlers() {
-    let end_calls = Arc::new(AtomicUsize::new(0));
-    let continue_calls = Arc::new(AtomicUsize::new(0));
-    let runner = ExtensionRunner::new(Duration::from_secs(1));
-    runner
-        .register(Arc::new(AfterToolResultsProbeExtension {
-            id: "end-after-tools",
-            priority: 10,
-            result: AfterToolResultsResult::EndTurn {
-                reason: "goal-complete".into(),
-            },
-            calls: Arc::clone(&end_calls),
-        }))
-        .await
-        .unwrap();
-    runner
-        .register(Arc::new(AfterToolResultsProbeExtension {
-            id: "continue-after-end",
-            priority: 0,
-            result: AfterToolResultsResult::Continue,
-            calls: Arc::clone(&continue_calls),
-        }))
-        .await
-        .unwrap();
-
-    let result = runner
-        .emit_after_tool_results(after_tool_results_ctx())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        result,
-        AfterToolResultsResult::EndTurn {
-            reason: "goal-complete".into()
-        }
-    );
-    assert_eq!(end_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(continue_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

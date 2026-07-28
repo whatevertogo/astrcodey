@@ -108,6 +108,7 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ConversationControlStateDto,
         ConversationBlockDto,
         ConversationBlockStatusDto,
+        ToolCallStatusDto,
         ConversationStreamEnvelopeDto,
         ConversationDeltaDto,
         ConversationErrorEnvelopeDto,
@@ -220,6 +221,7 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         "BLOCK_STATUSES",
         ConversationBlockStatusDto::ALL,
     )?;
+    push_wire_values(&mut output, "TOOL_CALL_STATUSES", ToolCallStatusDto::ALL)?;
     fs::write(output_dir.join("wire-values.ts"), output)?;
     Ok(())
 }

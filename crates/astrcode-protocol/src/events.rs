@@ -26,9 +26,9 @@ pub enum ClientNotification {
     },
 
     /// 会话列表（响应 `ListSessions` 命令）。
-    SessionList { sessions: Vec<SessionListItem> },
+    SessionList { sessions: Vec<SessionListItemDto> },
 
-    /// 服务器发起的 UI 交互请求（确认、选择、输入等）。
+    /// 服务器发起的 UI 交互请求（当前仅单选）。
     UiRequest {
         request_id: String,
         kind: UiRequestKind,
@@ -45,7 +45,7 @@ pub enum ClientNotification {
 
     /// 插件注册的斜杠命令列表（响应 `ListExtensionCommands`）。
     ExtensionCommandList {
-        commands: Vec<ExtensionCommandInfo>,
+        commands: Vec<ExtensionCommandInfoDto>,
         /// 插件注册的快捷键绑定。
         #[serde(default)]
         keybindings: Vec<Keybinding>,
@@ -77,22 +77,14 @@ pub enum ClientNotification {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiRequestKind {
-    /// 是/否确认对话框。
-    Confirm,
     /// 从选项列表中单选。
     Select,
-    /// 自由文本输入框。
-    Input,
-    /// 信息性通知（无需用户操作，仅需确认已读）。
-    Notify,
 }
 
 /// 会话列表中的单条会话摘要。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionListItem {
+pub struct SessionListItemDto {
     pub session_id: String,
-    /// ISO 8601 格式。
-    pub created_at: String,
     /// ISO 8601 格式。
     pub last_active_at: String,
     pub working_dir: String,
@@ -124,7 +116,7 @@ pub struct MessageDto {
 
 /// 插件注册的斜杠命令信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionCommandInfo {
+pub struct ExtensionCommandInfoDto {
     /// 命令名称（不含前导斜杠 `/`）。
     pub name: String,
     pub description: String,
@@ -134,7 +126,6 @@ pub struct ExtensionCommandInfo {
     pub priority: i32,
     pub source: CommandSourceDto,
 }
-
 
 /// 状态栏项信息 DTO（通过 ExtensionCommandList 下发到客户端）。
 #[derive(Debug, Clone, Serialize, Deserialize)]

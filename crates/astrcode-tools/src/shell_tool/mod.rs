@@ -12,8 +12,6 @@ use astrcode_support::{hostpaths::resolve_path, shell::resolve_shell};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::files::tool_call_id;
-
 mod background;
 mod definition;
 mod output;
@@ -138,7 +136,6 @@ impl Tool for ShellTool {
                 args.block_until_ms.unwrap_or(0),
                 args.max_output_tokens,
                 started_at,
-                ctx,
             )
             .await;
         }
@@ -227,7 +224,6 @@ impl ShellTool {
             .and_then(|c| c.stderr.take())
             .ok_or_else(|| ToolError::Execution("failed to capture stderr".into()))?;
 
-        let call_id = tool_call_id(ctx);
         let transfer = BackgroundTransfer::new();
         let mut out_h = Some(tokio::spawn(capture_stream_with_background_transfer(
             stdout,
@@ -413,7 +409,6 @@ impl ShellTool {
         };
 
         Ok(ToolResult {
-            call_id,
             content: output,
             is_error,
             error,

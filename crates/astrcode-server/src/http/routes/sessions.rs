@@ -399,7 +399,6 @@ pub(in crate::http) async fn list_commands(
                 .collect();
             Json(SlashCommandListResponseDto {
                 commands: command_list.commands.into_iter().map(Into::into).collect(),
-                shadowed_commands: command_list.shadowed_commands,
                 keybindings,
                 status_items,
             })
@@ -504,13 +503,10 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     SessionListItemDto {
         session_id: summary.session_id.into_string(),
         working_dir: summary.working_dir,
-        display_name: title.clone(),
         title,
         created_at: summary.created_at,
         updated_at: summary.updated_at,
-        parent_session_id: summary.parent_session_id.map(SessionId::into_string),
         phase: summary.phase.into(),
         first_user_message: summary.first_user_message,
-        source_extension: summary.source_extension,
     }
 }

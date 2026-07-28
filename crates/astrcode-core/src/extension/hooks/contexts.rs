@@ -2,7 +2,7 @@
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
-use super::types::{AfterToolResult, CompactTrigger, ExchangeSummary};
+use super::types::{CompactTrigger, ExchangeSummary};
 use crate::{
     config::ModelSelection,
     extension::ExtensionEventSink,
@@ -33,34 +33,13 @@ pub struct UserMessageEnvelopeContext {
     pub session_store_dir: Option<PathBuf>,
 }
 
-/// 工具结果批次落盘后的继续/结束决策上下文。
-#[derive(Debug, Clone)]
-pub struct AfterToolResultsContext {
-    pub session_id: String,
-    pub working_dir: String,
-    pub model: ModelSelection,
-    pub tool_results: Vec<AfterToolResult>,
-    pub session_store_dir: Option<PathBuf>,
-}
-
-/// PostToolUseFailure 钩子上下文。
-#[derive(Debug, Clone)]
-pub struct PostToolUseFailureContext {
-    pub session_id: String,
-    pub working_dir: String,
-    pub model: ModelSelection,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    pub error: String,
-    pub tool_result: ToolResult,
-}
-
 /// PreToolUse 钩子上下文。
 #[derive(Clone)]
 pub struct PreToolUseContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
+    pub call_id: crate::types::ToolCallId,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub approval_mode: crate::permission::ApprovalMode,
@@ -74,6 +53,7 @@ impl fmt::Debug for PreToolUseContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PreToolUseContext")
             .field("session_id", &self.session_id)
+            .field("call_id", &self.call_id)
             .field("tool_name", &self.tool_name)
             .field(
                 "extension_event_sink",
@@ -89,10 +69,10 @@ pub struct PostToolUseContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
+    pub call_id: crate::types::ToolCallId,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,
-    pub is_error: bool,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
     pub extension_event_sink: Option<Arc<dyn ExtensionEventSink>>,
     pub session_store_dir: Option<PathBuf>,
@@ -102,8 +82,9 @@ impl fmt::Debug for PostToolUseContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PostToolUseContext")
             .field("session_id", &self.session_id)
+            .field("call_id", &self.call_id)
             .field("tool_name", &self.tool_name)
-            .field("is_error", &self.is_error)
+            .field("is_error", &self.tool_result.is_error)
             .field(
                 "extension_event_sink",
                 &self.extension_event_sink.as_ref().map(|_| "<sink>"),

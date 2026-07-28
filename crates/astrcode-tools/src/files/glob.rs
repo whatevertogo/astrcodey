@@ -9,7 +9,7 @@ use astrcode_core::{tool::*, tool_access::ResourceAccess};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
-use super::shared::{FileCollectOptions, collect_candidate_files, run_blocking, tool_call_id};
+use super::shared::{FileCollectOptions, collect_candidate_files, run_blocking};
 
 const DEFAULT_GLOB_MAX_RESULTS: usize = 100;
 
@@ -74,14 +74,13 @@ impl Tool for GlobTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &ToolExecutionContext,
+        _ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: GlobArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid glob args: {e}")))?;
-        let call_id = tool_call_id(ctx);
         let working_dir = self.working_dir.clone();
-        run_blocking(move || execute_glob_sync(working_dir, args, call_id, started_at)).await
+        run_blocking(move || execute_glob_sync(working_dir, args, started_at)).await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -92,7 +91,6 @@ impl Tool for GlobTool {
 fn execute_glob_sync(
     working_dir: PathBuf,
     args: GlobArgs,
-    call_id: String,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let root = match args.root {
@@ -161,7 +159,6 @@ fn execute_glob_sync(
         paths.join("\n")
     };
     Ok(ToolResult {
-        call_id,
         content,
         is_error: false,
         error: None,

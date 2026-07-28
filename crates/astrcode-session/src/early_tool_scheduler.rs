@@ -11,13 +11,13 @@
 
 use std::collections::VecDeque;
 
-use astrcode_core::tool::{ExecutionMode, ToolResult};
+use astrcode_core::tool::ExecutionMode;
 use tokio::task::JoinSet;
 
 use crate::{
     ToolRegistry,
     tool_exec::{ToolCallRuntimeContext, execute_tool_call},
-    tool_types::PreparedToolInvocation,
+    tool_types::{PreparedToolDisposition, PreparedToolInvocation, ToolExecutionOutcome},
     turn_context::TurnError,
 };
 
@@ -25,7 +25,7 @@ use crate::{
 struct EarlyExecutionSlot {
     prepared: PreparedToolInvocation,
     /// 执行结果。`None` 表示尚未执行或执行未完成。
-    result: Option<ToolResult>,
+    outcome: Option<ToolExecutionOutcome>,
 }
 
 /// 流式工具执行调度器。
@@ -36,7 +36,7 @@ struct EarlyExecutionSlot {
 pub(crate) struct EarlyToolScheduler {
     tool_registry: std::sync::Arc<ToolRegistry>,
     runtime_ctx: ToolCallRuntimeContext,
-    join_set: JoinSet<(usize, ToolResult)>,
+    join_set: JoinSet<(usize, ToolExecutionOutcome)>,
     slots: Vec<EarlyExecutionSlot>,
     queued: VecDeque<usize>,
     max_parallel: usize,
@@ -67,12 +67,11 @@ impl EarlyToolScheduler {
     /// 只有 `Ready` 的工具会被实际执行；其它结果延迟到 tools_stage 按原顺序处理。
     pub(crate) fn schedule(&mut self, prepared: PreparedToolInvocation) -> usize {
         let index = self.slots.len();
-        let should_execute = matches!(
-            prepared.outcome,
-            crate::tool_types::PreparedToolInvocationOutcome::Ready
-        );
-        let result = None;
-        self.slots.push(EarlyExecutionSlot { prepared, result });
+        let should_execute = matches!(prepared.disposition, PreparedToolDisposition::Execute);
+        self.slots.push(EarlyExecutionSlot {
+            prepared,
+            outcome: None,
+        });
         if should_execute {
             self.queued.push_back(index);
             self.start_ready();
@@ -130,7 +129,7 @@ impl EarlyToolScheduler {
     /// 轮询下一个完成的工具调用。返回 `(slot_index, result)`。
     pub(crate) async fn poll_completed(
         &mut self,
-    ) -> Result<Option<(usize, ToolResult)>, TurnError> {
+    ) -> Result<Option<(usize, ToolExecutionOutcome)>, TurnError> {
         let Some(joined) = self.join_set.join_next().await else {
             return Ok(None);
         };
@@ -145,9 +144,9 @@ impl EarlyToolScheduler {
     pub(crate) async fn drain_all(&mut self) -> Result<(), TurnError> {
         // 先启动所有能启动的
         self.start_ready();
-        while let Some((index, result)) = self.poll_completed().await? {
+        while let Some((index, outcome)) = self.poll_completed().await? {
             if let Some(slot) = self.slots.get_mut(index) {
-                slot.result = Some(result);
+                slot.outcome = Some(outcome);
             }
         }
         Ok(())
@@ -161,9 +160,9 @@ impl EarlyToolScheduler {
     }
 
     /// 将已完成的结果填入对应槽位。
-    pub(crate) fn record_result(&mut self, index: usize, result: ToolResult) {
+    pub(crate) fn record_outcome(&mut self, index: usize, outcome: ToolExecutionOutcome) {
         if let Some(slot) = self.slots.get_mut(index) {
-            slot.result = Some(result);
+            slot.outcome = Some(outcome);
         }
         self.start_ready();
     }
@@ -177,7 +176,7 @@ impl EarlyToolScheduler {
             .into_iter()
             .map(|slot| EarlyExecutionEntry {
                 prepared: slot.prepared,
-                result: slot.result,
+                outcome: slot.outcome,
             })
             .collect()
     }
@@ -189,7 +188,7 @@ pub(crate) struct EarlyExecutionEntry {
     /// 已准备好的工具调用。
     pub prepared: PreparedToolInvocation,
     /// 执行结果。`None` 表示该工具未在调度器中执行。
-    pub result: Option<ToolResult>,
+    pub outcome: Option<ToolExecutionOutcome>,
 }
 
 #[cfg(test)]
@@ -213,15 +212,14 @@ mod tests {
                 tool_input: serde_json::json!({}),
                 raw_arguments: None,
                 mode,
-                outcome: crate::tool_types::PreparedToolInvocationOutcome::Ready,
+                disposition: PreparedToolDisposition::Execute,
             },
-            result,
+            outcome: result.map(ToolExecutionOutcome::Completed),
         }
     }
 
-    fn make_result(call_id: &str) -> ToolResult {
+    fn make_result() -> ToolResult {
         ToolResult {
-            call_id: call_id.to_string(),
             content: "ok".to_string(),
             is_error: false,
             error: None,
@@ -233,24 +231,24 @@ mod tests {
     #[test]
     fn into_entries_preserves_order_and_results() {
         let slots = vec![
-            make_slot("a", ExecutionMode::Parallel, Some(make_result("a"))),
+            make_slot("a", ExecutionMode::Parallel, Some(make_result())),
             make_slot("b", ExecutionMode::Parallel, None),
-            make_slot("c", ExecutionMode::Sequential, Some(make_result("c"))),
+            make_slot("c", ExecutionMode::Sequential, Some(make_result())),
         ];
         let entries: Vec<_> = slots
             .into_iter()
             .map(|s| EarlyExecutionEntry {
                 prepared: s.prepared,
-                result: s.result,
+                outcome: s.outcome,
             })
             .collect();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].prepared.call_id, "a");
-        assert!(entries[0].result.is_some());
+        assert!(entries[0].outcome.is_some());
         assert_eq!(entries[1].prepared.call_id, "b");
-        assert!(entries[1].result.is_none());
+        assert!(entries[1].outcome.is_none());
         assert_eq!(entries[2].prepared.call_id, "c");
-        assert!(entries[2].result.is_some());
+        assert!(entries[2].outcome.is_some());
     }
 
     #[test]

@@ -3,7 +3,11 @@ import {
   useElapsedSeconds,
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
-import type { AgentSessionLink, ConversationBlock } from '../../services/types'
+import {
+  toolCallHasError,
+  type AgentSessionLink,
+  type ConversationBlock,
+} from '../../services/types'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import {
@@ -30,6 +34,7 @@ import {
 import {
   compactPreviewLine,
   numberValue,
+  statusLabel,
   toolArgs,
   toolMeta,
 } from './tools/helpers'
@@ -202,8 +207,10 @@ function ToolCallDetailsPanel({
               <div
                 className={cn(
                   'min-w-0 rounded-lg border border-border bg-surface-soft px-3 py-2',
-                  block.status === 'error' &&
-                    'border-danger/25 bg-danger-soft/40'
+                  toolCallHasError(block.status) &&
+                    'border-danger/25 bg-danger-soft/40',
+                  block.status === 'cancelled' &&
+                    'border-warning/25 bg-warning-soft/30'
                 )}
               >
                 <ToolDetails
@@ -228,19 +235,17 @@ function toolIconName(name: string): IconName {
   return 'plug'
 }
 
-function statusText({
+function streamingStatusText({
   gatePending,
   questionnairePending,
   linkedAgentCurrentTool,
   linkedAgentRunning,
-  streaming,
   elapsed,
 }: {
   gatePending: boolean
   questionnairePending: boolean
   linkedAgentCurrentTool?: string
   linkedAgentRunning: boolean
-  streaming: boolean
   elapsed: number
 }): string {
   if (gatePending) return '待审批'
@@ -250,8 +255,7 @@ function statusText({
       ? `子Agent · ${linkedAgentCurrentTool}`
       : '子Agent运行中'
   }
-  if (streaming) return runningElapsedLabel(elapsed, 'zh')
-  return '完成'
+  return runningElapsedLabel(elapsed, 'zh')
 }
 
 function ToolCallBlock({
@@ -313,25 +317,22 @@ function ToolCallBlock({
   const summaryLine = compactPreviewLine(summarySource)
 
   const gateApproval = readGateApproval(block.metadata)
-  const gatePending = gateApproval?.pending === true
+  const gatePending =
+    block.status === 'streaming' && gateApproval?.pending === true
   const questionnairePending = toolApprovalPending(toolUiCtx)
   const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
   const forceOpen = autoExpand
   const open = forceOpen || isOpen
 
-  const displayStatus =
-    block.status === 'error'
-      ? '失败'
-      : statusText({
-          gatePending,
-          questionnairePending,
-          linkedAgentCurrentTool: linkedAgent?.currentTool,
-          linkedAgentRunning: Boolean(
-            linkedAgent && block.status === 'streaming'
-          ),
-          streaming,
-          elapsed,
-        })
+  const displayStatus = streaming
+    ? streamingStatusText({
+        gatePending,
+        questionnairePending,
+        linkedAgentCurrentTool: linkedAgent?.currentTool,
+        linkedAgentRunning: Boolean(linkedAgent && streaming),
+        elapsed,
+      })
+    : statusLabel(block.status)
   const durationLabel = durationFromMetadata(meta)
   const toolName = block.name || 'tool'
   const summaryIcon = summaryIconName ?? toolIconName(toolName)
@@ -374,9 +375,9 @@ function ToolCallBlock({
           </span>
         )}
         <span className="shrink-0 text-[13px] text-text-muted">
-          {block.status === 'error'
-            ? displayStatus
-            : durationLabel || displayStatus}
+          {block.status === 'complete'
+            ? durationLabel || displayStatus
+            : displayStatus}
         </span>
         <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-text-muted transition-transform duration-150 ease-out group-open:rotate-90">
           <Icon name="chevron-right" size={16} />

@@ -44,6 +44,13 @@ impl Metrics {
                 EventPayload::ToolCallCompleted { tool_name, .. } => {
                     *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
                 },
+                EventPayload::ToolCallFailed { tool_name, .. } => {
+                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
+                    metrics.errors += 1;
+                },
+                EventPayload::ToolCallCancelled { tool_name, .. } => {
+                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
+                },
                 EventPayload::ErrorOccurred { .. } => {
                     metrics.errors += 1;
                 },

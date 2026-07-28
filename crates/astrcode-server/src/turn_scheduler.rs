@@ -37,7 +37,8 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_session::{
-    Session, SessionError, TurnHandle, emit_interrupted_tool_results, emit_turn_aborted_context,
+    InterruptedToolOutcome, Session, SessionError, TurnHandle, emit_interrupted_tool_results,
+    emit_turn_aborted_context,
     payload::{
         TURN_FINISH_ABORTED, TURN_FINISH_INTERRUPTED, agent_run_completed_payload,
         turn_completed_payload,
@@ -697,7 +698,14 @@ impl TurnScheduler {
     async fn emit_turn_aborted(&self, turn_id: &TurnId, session: &Session, session_id: &SessionId) {
         let tool_protocol_settled = match session.read_model().await {
             Ok(state) => {
-                match emit_interrupted_tool_results(session, &state, Some(turn_id)).await {
+                match emit_interrupted_tool_results(
+                    session,
+                    &state,
+                    Some(turn_id),
+                    InterruptedToolOutcome::Cancelled,
+                )
+                .await
+                {
                     Ok(_) => true,
                     Err(e) => {
                         tracing::warn!(
@@ -846,7 +854,7 @@ async fn repair_stale_phase_for_state(
         "repairing stale turn phase"
     );
 
-    emit_interrupted_tool_results(session, state, None)
+    emit_interrupted_tool_results(session, state, None, InterruptedToolOutcome::Failed)
         .await
         .map_err(TurnScheduleError::EventEmit)?;
     emit_turn_aborted_context(session, None)
@@ -868,9 +876,10 @@ async fn repair_incomplete_tool_protocol_for_state(
     session: &Session,
     state: &SessionReadModel,
 ) -> Result<(), TurnScheduleError> {
-    let interrupted = emit_interrupted_tool_results(session, state, None)
-        .await
-        .map_err(TurnScheduleError::EventEmit)?;
+    let interrupted =
+        emit_interrupted_tool_results(session, state, None, InterruptedToolOutcome::Failed)
+            .await
+            .map_err(TurnScheduleError::EventEmit)?;
     if interrupted > 0 {
         emit_turn_aborted_context(session, None)
             .await

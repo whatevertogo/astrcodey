@@ -68,6 +68,41 @@ fn to_session_update(payload: &EventPayload) -> Option<SessionUpdate> {
             ),
         ))),
 
+        EventPayload::ToolCallFailed {
+            call_id,
+            error,
+            metadata,
+            duration_ms,
+            ..
+        } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new(call_id.as_str()),
+            completed_tool_fields(
+                true,
+                serde_json::json!({
+                    "error": error,
+                    "metadata": metadata,
+                    "duration_ms": duration_ms,
+                }),
+            ),
+        ))),
+
+        EventPayload::ToolCallCancelled {
+            call_id,
+            reason,
+            duration_ms,
+            ..
+        } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new(call_id.as_str()),
+            completed_tool_fields(
+                true,
+                serde_json::json!({
+                    "cancelled": true,
+                    "reason": reason,
+                    "duration_ms": duration_ms,
+                }),
+            ),
+        ))),
+
         EventPayload::ToolOutputDelta {
             call_id,
             stream,

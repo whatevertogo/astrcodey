@@ -159,37 +159,6 @@ pub struct ExtensionCtx {
 }
 
 impl ExtensionCtx {
-    pub fn new(tasks: ExtensionTasks) -> Self {
-        Self {
-            tasks,
-            config: ExtensionConfig::default(),
-            startup_working_dir: None,
-            event_sink: None,
-            host_services: None,
-        }
-    }
-
-    pub fn with_config(tasks: ExtensionTasks, config: ExtensionConfig) -> Self {
-        Self::with_startup_working_dir(tasks, config, None)
-    }
-
-    pub fn with_startup_working_dir(
-        tasks: ExtensionTasks,
-        config: ExtensionConfig,
-        startup_working_dir: Option<String>,
-    ) -> Self {
-        Self::with_startup_services(tasks, config, startup_working_dir, None)
-    }
-
-    pub fn with_startup_services(
-        tasks: ExtensionTasks,
-        config: ExtensionConfig,
-        startup_working_dir: Option<String>,
-        event_sink: Option<Arc<dyn ExtensionEventSink>>,
-    ) -> Self {
-        Self::with_host_services(tasks, config, startup_working_dir, event_sink, None)
-    }
-
     pub fn with_host_services(
         tasks: ExtensionTasks,
         config: ExtensionConfig,

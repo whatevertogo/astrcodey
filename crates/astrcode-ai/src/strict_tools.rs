@@ -497,7 +497,7 @@ fn validate_openai_schema(
         }
     }
 
-    validate_openai_schema_type(tool, object, path)?;
+    validate_strict_schema_type(tool, object, path, "OpenAI")?;
     validate_schema_map_keywords(tool, object, path, "OpenAI")?;
     if let Some(any_of) = object.get("anyOf") {
         match any_of {
@@ -637,38 +637,6 @@ fn validate_openai_schema(
     })
 }
 
-fn validate_openai_schema_type(
-    tool: &ToolDefinition,
-    schema: &Map<String, Value>,
-    path: &str,
-) -> Result<(), LlmError> {
-    let Some(schema_type) = schema.get("type") else {
-        return Ok(());
-    };
-    let supported = |value: &str| {
-        matches!(
-            value,
-            "string" | "number" | "boolean" | "integer" | "object" | "array" | "null"
-        )
-    };
-    let valid = match schema_type {
-        Value::String(value) => supported(value),
-        Value::Array(values) if !values.is_empty() => values
-            .iter()
-            .all(|value| value.as_str().is_some_and(supported)),
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(schema_error(
-            tool,
-            &child_path(path, "type"),
-            "OpenAI strict `type` must contain only supported JSON Schema types",
-        ))
-    }
-}
-
 fn add_openai_schema_string_chars(
     tool: &ToolDefinition,
     stats: &mut OpenAiSchemaStats,
@@ -779,7 +747,7 @@ fn validate_anthropic_schema(
         ));
     };
 
-    validate_anthropic_schema_type(tool, object, path)?;
+    validate_strict_schema_type(tool, object, path, "Anthropic")?;
     validate_schema_map_keywords(tool, object, path, "Anthropic")?;
     for keyword in ["anyOf", "allOf"] {
         if let Some(value) = object.get(keyword) {
@@ -931,10 +899,11 @@ fn is_anthropic_union_parameter(
         .is_some_and(|target| is_anthropic_union_parameter(root, target, visited_refs))
 }
 
-fn validate_anthropic_schema_type(
+fn validate_strict_schema_type(
     tool: &ToolDefinition,
     schema: &Map<String, Value>,
     path: &str,
+    provider: &str,
 ) -> Result<(), LlmError> {
     let Some(schema_type) = schema.get("type") else {
         return Ok(());
@@ -958,7 +927,7 @@ fn validate_anthropic_schema_type(
         Err(schema_error(
             tool,
             &child_path(path, "type"),
-            "Anthropic strict `type` must contain only supported JSON Schema types",
+            &format!("{provider} strict `type` must contain only supported JSON Schema types"),
         ))
     }
 }
@@ -1157,15 +1126,7 @@ fn empty_object() -> &'static Map<String, Value> {
 }
 
 fn is_object_schema(schema: &Value) -> bool {
-    let Some(object) = schema.as_object() else {
-        return false;
-    };
-    object.contains_key("properties")
-        || match object.get("type") {
-            Some(Value::String(kind)) => kind == "object",
-            Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "object"),
-            _ => false,
-        }
+    schema.as_object().is_some_and(is_object_schema_object)
 }
 
 fn is_tool_parameters_object(schema: &Value) -> bool {

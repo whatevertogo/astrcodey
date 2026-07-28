@@ -5,13 +5,13 @@ use std::sync::Arc;
 use super::{
     commands::{CommandCompletions, ExtensionCommandResult, SlashCommand},
     contexts::{
-        AfterToolResultsContext, CommandContext, CompactContext, ContinueAfterStopContext,
-        LifecycleContext, PostToolUseContext, PostToolUseFailureContext, PreToolUseContext,
-        PromptBuildContext, ProviderContext, UserMessageEnvelopeContext,
+        CommandContext, CompactContext, ContinueAfterStopContext, LifecycleContext,
+        PostToolUseContext, PreToolUseContext, PromptBuildContext, ProviderContext,
+        UserMessageEnvelopeContext,
     },
     results::{
-        AfterToolResultsResult, CompactResult, ContinueAfterStopResult, HookResult,
-        PostToolUseResult, PreToolUseResult, ProviderResult, UserMessageEnvelopeResult,
+        CompactResult, ContinueAfterStopResult, HookResult, PostToolUseResult, PreToolUseResult,
+        ProviderResult, UserMessageEnvelopeResult,
     },
     types::ExtensionError,
 };
@@ -50,12 +50,6 @@ pub trait CompactHandler: Send + Sync {
     async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError>;
 }
 
-/// PostToolUseFailure 通知型钩子处理器。
-#[async_trait::async_trait]
-pub trait PostToolUseFailureHandler: Send + Sync {
-    async fn handle(&self, ctx: PostToolUseFailureContext) -> Result<(), ExtensionError>;
-}
-
 /// 通用生命周期钩子处理器。
 #[async_trait::async_trait]
 pub trait LifecycleHandler: Send + Sync {
@@ -78,15 +72,6 @@ pub trait UserMessageEnvelopeHandler: Send + Sync {
         &self,
         ctx: UserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError>;
-}
-
-/// 工具结果批次落盘后的继续/结束决策钩子。
-#[async_trait::async_trait]
-pub trait AfterToolResultsHandler: Send + Sync {
-    async fn handle(
-        &self,
-        ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError>;
 }
 
 /// 工具执行处理器。

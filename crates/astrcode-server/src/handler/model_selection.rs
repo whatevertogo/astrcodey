@@ -284,12 +284,8 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
 }
 
 fn parse_select(response: UiResponseValue) -> Result<String, HandlerError> {
-    match response {
-        UiResponseValue::Select { selected } => Ok(selected),
-        _ => Err(HandlerError::InvalidRequest(
-            "Expected select response".into(),
-        )),
-    }
+    let UiResponseValue::Select { selected } = response;
+    Ok(selected)
 }
 
 fn validate_profile_model(

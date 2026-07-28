@@ -1,11 +1,6 @@
 use super::ThinkingConfig;
 use crate::llm::ThinkingLevel;
 
-/// Convert a legacy [`ThinkingLevel`] to its wire-compatible effort value.
-pub fn thinking_level_to_effort(level: ThinkingLevel) -> &'static str {
-    level.as_wire_value()
-}
-
 /// Convert the legacy reasoning fields into the canonical thinking configuration.
 pub fn legacy_to_thinking_config(
     reasoning: bool,

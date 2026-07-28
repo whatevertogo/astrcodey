@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { cn } from '../../../lib/utils'
 import { toolCodePreviewBleed } from '../../../lib/styles'
+import { toolCallHasError, type ToolCallStatus } from '../../../services/types'
 import { DiffCodeLines } from '../DiffCodeLines'
 import { previewText, type ToolCall } from './helpers'
 
@@ -8,16 +9,19 @@ export function StatusIndicatorDot({
   status,
   pendingApproval,
 }: {
-  status: string
+  status: ToolCallStatus
   pendingApproval?: boolean
 }) {
-  const dotColor = pendingApproval
-    ? 'bg-warning animate-pulse'
-    : status === 'complete'
-      ? 'bg-success'
-      : status === 'error'
-        ? 'bg-danger'
-        : 'bg-accent-strong animate-pulse'
+  let dotColor = 'bg-accent-strong animate-pulse'
+  if (pendingApproval) {
+    dotColor = 'bg-warning animate-pulse'
+  } else if (status === 'complete') {
+    dotColor = 'bg-success'
+  } else if (status === 'cancelled') {
+    dotColor = 'bg-warning'
+  } else if (toolCallHasError(status)) {
+    dotColor = 'bg-danger'
+  }
   return <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', dotColor)} />
 }
 

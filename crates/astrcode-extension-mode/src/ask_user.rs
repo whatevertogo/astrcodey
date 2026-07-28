@@ -199,15 +199,15 @@ pub fn validate_ask_user_input(input: &AskUserInput) -> Result<(), String> {
 }
 
 /// Extension tool handler：校验参数后立即返回 awaiting；完成走宿主 command。
-pub fn handle_ask_user(arguments: Value, call_id: &str) -> Result<ToolResult, String> {
+pub fn handle_ask_user(arguments: Value) -> Result<ToolResult, String> {
     let input: AskUserInput = serde_json::from_value(arguments)
         .map_err(|e| format!("invalid args for {ASK_USER_TOOL_NAME}: {e}"))?;
     validate_ask_user_input(&input)?;
-    Ok(ask_user_awaiting_user_input_result(call_id, &input))
+    Ok(ask_user_awaiting_user_input_result(&input))
 }
 
 /// Phase-1 tool result：宿主按 `metadata.toolUi` 渲染 Approval UI；答案由 HTTP/command 写回。
-pub fn ask_user_awaiting_user_input_result(call_id: &str, input: &AskUserInput) -> ToolResult {
+pub fn ask_user_awaiting_user_input_result(input: &AskUserInput) -> ToolResult {
     let content = serde_json::to_string(&json!({
         "status": TOOL_UI_AWAITING_USER_INPUT,
         "questions": &input.questions,
@@ -215,7 +215,6 @@ pub fn ask_user_awaiting_user_input_result(call_id: &str, input: &AskUserInput) 
     .unwrap_or_else(|_| "{}".into());
 
     ToolResult {
-        call_id: call_id.to_string(),
         content,
         is_error: false,
         error: None,

@@ -172,8 +172,6 @@ pub const DEFERRED_TOOLS_METADATA_KEY: &str = "deferredTools";
 /// 工具执行结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// 此结果对应的工具调用 ID。
-    pub call_id: String,
     /// 工具输出的内容文本。
     pub content: String,
     /// 此结果是否表示错误。
@@ -186,6 +184,62 @@ pub struct ToolResult {
     /// 工具执行耗时（毫秒），由调用方测量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+impl ToolResult {
+    /// 构造成功的文本结果。
+    pub fn success(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            error: None,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    /// 构造已正常返回的错误结果。
+    ///
+    /// 这表示工具执行完成，但业务结果为错误；执行基础设施失败由 session
+    /// 的终态模型单独表达。
+    pub fn error(content: impl Into<String>) -> Self {
+        let content = content.into();
+        Self {
+            error: Some(content.clone()),
+            content,
+            is_error: true,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    /// 构造带元数据的文本结果。
+    ///
+    /// `is_error` 为 `true` 时，同时填充结构化错误文本。
+    pub fn text(
+        content: String,
+        is_error: bool,
+        metadata: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        let error = is_error.then(|| content.clone());
+        Self {
+            content,
+            is_error,
+            error,
+            metadata,
+            duration_ms: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, serde_json::Value>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn with_duration_ms(mut self, duration_ms: Option<u64>) -> Self {
+        self.duration_ms = duration_ms;
+        self
+    }
 }
 
 /// 工具执行过程中可能发生的错误。
@@ -608,10 +662,8 @@ pub struct LlmModelIds {
 }
 
 /// 模型档位访问（须在扩展 manifest 声明对应能力后才有值）。
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ToolModelAccess {
-    /// 与 [`Self::main`] 相同；保留供既有调用方。
-    pub model_id: Option<String>,
     /// 主模型 id（`main_model` 能力）。
     pub main: Option<String>,
     /// 小模型 id（`small_model` 能力）。
@@ -735,27 +787,6 @@ pub fn tool_metadata<const N: usize>(
         .collect()
 }
 
-impl ToolResult {
-    /// Convenience constructor for a text ToolResult.
-    ///
-    /// When `is_error` is true, `error` is automatically set to a clone of `content`.
-    pub fn text(
-        content: String,
-        is_error: bool,
-        metadata: BTreeMap<String, serde_json::Value>,
-    ) -> Self {
-        let error = is_error.then(|| content.clone());
-        Self {
-            call_id: String::new(),
-            content,
-            is_error,
-            error,
-            metadata,
-            duration_ms: None,
-        }
-    }
-}
-
 impl std::fmt::Debug for ToolCallScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolCallScope")
@@ -803,17 +834,6 @@ impl std::fmt::Debug for ToolFileServices {
                 "observation_store",
                 &self.observation_store.as_ref().map(|_| "<store>"),
             )
-            .finish()
-    }
-}
-
-impl std::fmt::Debug for ToolModelAccess {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolModelAccess")
-            .field("model_id", &self.model_id)
-            .field("main", &self.main)
-            .field("small", &self.small)
-            .field("tiers", &self.tiers)
             .finish()
     }
 }

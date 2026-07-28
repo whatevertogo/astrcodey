@@ -8,7 +8,7 @@ use astrcode_protocol::{
 
 use super::{
     args::format_args_inline,
-    blocks::{completed_block_from_payload, streaming_assistant_block, streaming_tool_call_block},
+    blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
     cross_session_compact_deltas, non_empty_metadata,
 };
 
@@ -53,18 +53,29 @@ pub(in crate::http) fn event_to_deltas(
             delta: delta.clone(),
         }],
 
-        // Completed blocks — shared construction, different delta wrappers
+        // Visible blocks — shared construction, different delta wrappers
         EventPayload::UserMessage { .. }
         | EventPayload::ErrorOccurred { .. }
-        | EventPayload::RecapGenerated { .. } => completed_block_from_payload(event)
+        | EventPayload::RecapGenerated { .. } => block_from_payload(event)
             .map(|block| ConversationDeltaDto::AppendBlock { block })
             .into_iter()
             .collect(),
-        EventPayload::AssistantMessageCompleted { .. } | EventPayload::ToolCallCompleted { .. } => {
-            completed_block_from_payload(event)
-                .map(|block| ConversationDeltaDto::FinalizeBlock { block })
-                .into_iter()
-                .collect()
+        EventPayload::AssistantMessageCompleted { .. } => block_from_payload(event)
+            .map(|block| ConversationDeltaDto::FinalizeBlock { block })
+            .into_iter()
+            .collect(),
+        EventPayload::ToolCallCompleted { .. }
+        | EventPayload::ToolCallFailed { .. }
+        | EventPayload::ToolCallCancelled { .. } => {
+            let Some(block) = block_from_payload(event) else {
+                return Vec::new();
+            };
+            vec![
+                ConversationDeltaDto::FinalizeBlock { block },
+                ConversationDeltaDto::UpdateControlState {
+                    control: control_from_event(event, has_messages),
+                },
+            ]
         },
         EventPayload::CompactBoundaryCreated {
             continued_session_id,
@@ -219,8 +230,10 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolCallRequested { .. }
         | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::ToolCallInteractionPending { .. }
-        | EventPayload::ToolCallCompleted { .. } => Phase::CallingTool,
+        | EventPayload::ToolCallInteractionPending { .. } => Phase::CallingTool,
+        EventPayload::ToolCallCompleted { .. }
+        | EventPayload::ToolCallFailed { .. }
+        | EventPayload::ToolCallCancelled { .. } => Phase::Thinking,
         EventPayload::CompactionStarted => Phase::Compacting,
         EventPayload::ErrorOccurred { .. } => Phase::Error,
         _ => Phase::Idle,
@@ -277,7 +290,7 @@ fn control_from_state(
 #[cfg(test)]
 mod tests {
     use astrcode_protocol::{
-        http::{ConversationBlockDto, ConversationBlockStatusDto},
+        http::{ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto},
         wire::PhaseDto,
     };
 
@@ -427,48 +440,91 @@ mod tests {
     }
 
     #[test]
-    fn tool_completion_finalizes_with_result_content() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::ToolCallCompleted {
-                call_id: "tool-1".into(),
-                tool_name: "read".into(),
-                result: astrcode_core::tool::ToolResult {
-                    call_id: "tool-1".into(),
-                    content: "file contents".into(),
-                    is_error: false,
-                    error: None,
-                    metadata: Default::default(),
-                    duration_ms: None,
+    fn tool_terminal_events_preserve_status_content_and_duration() {
+        let cases = [
+            (
+                EventPayload::ToolCallCompleted {
+                    call_id: "complete".into(),
+                    tool_name: "read".into(),
+                    result: astrcode_core::tool::ToolResult::success("file contents")
+                        .with_duration_ms(Some(4)),
+                    arguments: String::new(),
+                    arguments_json: None,
                 },
-                arguments: String::new(),
-                arguments_json: None,
-            },
-        );
+                ToolCallStatusDto::Complete,
+                "file contents",
+                Some(4),
+            ),
+            (
+                EventPayload::ToolCallCompleted {
+                    call_id: "error".into(),
+                    tool_name: "read".into(),
+                    result: astrcode_core::tool::ToolResult::error("domain error"),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatusDto::Error,
+                "domain error",
+                None,
+            ),
+            (
+                EventPayload::ToolCallFailed {
+                    call_id: "failed".into(),
+                    tool_name: "read".into(),
+                    error: "executor failed".into(),
+                    metadata: Default::default(),
+                    duration_ms: Some(7),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatusDto::Failed,
+                "executor failed",
+                Some(7),
+            ),
+            (
+                EventPayload::ToolCallCancelled {
+                    call_id: "cancelled".into(),
+                    tool_name: "read".into(),
+                    reason: "turn aborted".into(),
+                    duration_ms: Some(8),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatusDto::Cancelled,
+                "Tool cancelled: turn aborted",
+                Some(8),
+            ),
+        ];
 
-        let deltas = event_to_deltas(&event, true);
-        assert_eq!(deltas.len(), 1, "tool completion should produce one delta");
-        let delta = deltas.into_iter().next().unwrap();
+        for (payload, expected_status, expected_text, expected_duration) in cases {
+            let event = Event::new("session-1".into(), None, payload);
+            let deltas = event_to_deltas(&event, true);
+            let [
+                ConversationDeltaDto::FinalizeBlock {
+                    block:
+                        ConversationBlockDto::ToolCall {
+                            text,
+                            status,
+                            metadata,
+                            ..
+                        },
+                },
+                ConversationDeltaDto::UpdateControlState { control },
+            ] = deltas.as_slice()
+            else {
+                panic!("expected a finalized tool block and updated control state");
+            };
 
-        match delta {
-            ConversationDeltaDto::FinalizeBlock { block } => {
-                let (tool_id, tool_name, tool_text, tool_status) = match block {
-                    ConversationBlockDto::ToolCall {
-                        id,
-                        name,
-                        text,
-                        status,
-                        ..
-                    } => (id, name, text, status),
-                    _ => panic!("expected ToolCall block"),
-                };
-                assert_eq!(tool_id, "tool-1");
-                assert_eq!(tool_name, "read");
-                assert_eq!(tool_text, "file contents");
-                assert!(matches!(tool_status, ConversationBlockStatusDto::Complete));
-            },
-            other => panic!("unexpected delta: {other:?}"),
+            assert_eq!(*status, expected_status);
+            assert_eq!(text, expected_text);
+            assert!(matches!(control.phase, PhaseDto::Thinking));
+            assert_eq!(
+                metadata
+                    .as_ref()
+                    .and_then(|value| value.get("durationMs"))
+                    .and_then(serde_json::Value::as_u64),
+                expected_duration
+            );
         }
     }
 

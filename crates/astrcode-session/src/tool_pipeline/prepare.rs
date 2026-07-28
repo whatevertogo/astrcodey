@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path};
 use astrcode_core::{
     extension::{PreToolUseContext, PreToolUseResult},
     permission::{ApprovalSource, PermissionContext, PermissionDecision},
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    tool::{ExecutionMode, ToolDefinition},
     tool_access::ResourceAccess,
 };
 
@@ -14,8 +14,8 @@ use crate::{
     tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
-        DeclaredToolBatch, PreparedToolBatch, PreparedToolInvocation,
-        PreparedToolInvocationOutcome, StreamedToolCall,
+        PreparedToolDisposition, PreparedToolInvocation, StreamedToolCall, ToolBatch,
+        ToolExecutionOutcome,
     },
     turn_context::TurnError,
     turn_publish::TurnEvents,
@@ -41,14 +41,6 @@ impl ToolCalls {
         if !tool_is_visible(tools, &tc.name) {
             let guidance =
                 unavailable_tool_guidance(&tc.name, tools, &self.tool_registry.list_definitions());
-            let blocked_result = ToolResult {
-                call_id: tc.call_id.clone(),
-                content: guidance,
-                is_error: true,
-                error: Some(format!("tool '{}' is not available", tc.name)),
-                metadata: Default::default(),
-                duration_ms: None,
-            };
             return Ok(PreparedToolInvocation {
                 index,
                 call_id: tc.call_id.clone(),
@@ -56,7 +48,7 @@ impl ToolCalls {
                 tool_input: args,
                 raw_arguments: None,
                 mode: ExecutionMode::Sequential,
-                outcome: PreparedToolInvocationOutcome::Blocked(blocked_result),
+                disposition: PreparedToolDisposition::Rejected { error: guidance },
             });
         }
 
@@ -64,6 +56,7 @@ impl ToolCalls {
             session_id: self.turn.shared.session_id.to_string(),
             working_dir: self.turn.shared.working_dir.clone(),
             model: self.turn.shared.model_selection(),
+            call_id: tc.call_id.clone().into(),
             tool_name: tc.name.clone(),
             tool_input: args.clone(),
             approval_mode: self.turn.shared.approval_mode,
@@ -75,59 +68,53 @@ impl ToolCalls {
 
         let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
 
-        let (tool_input, mut outcome) = match pre_hook_result {
+        let (tool_input, mut disposition) = match pre_hook_result {
             PreToolUseResult::Ask { prompt, rule_key } => (
                 args,
-                PreparedToolInvocationOutcome::NeedsApproval {
+                PreparedToolDisposition::AwaitApproval {
                     prompt,
                     rule_key,
                     source: ApprovalSource::Extension,
                 },
             ),
             PreToolUseResult::ModifyInput { tool_input } => {
-                (tool_input, PreparedToolInvocationOutcome::Ready)
+                (tool_input, PreparedToolDisposition::Execute)
             },
-            PreToolUseResult::Block { reason } => {
-                let outcome = PreparedToolInvocationOutcome::Blocked(ToolResult {
-                    call_id: tc.call_id.clone(),
-                    content: format!("Tool execution blocked by hook: {reason}"),
-                    is_error: true,
-                    error: Some(reason),
-                    metadata: Default::default(),
-                    duration_ms: None,
-                });
-                (args, outcome)
-            },
-            PreToolUseResult::Allow => (args, PreparedToolInvocationOutcome::Ready),
+            PreToolUseResult::Block { reason } => (
+                args,
+                PreparedToolDisposition::Rejected {
+                    error: format!("Tool execution blocked by hook: {reason}"),
+                },
+            ),
+            PreToolUseResult::Allow => (args, PreparedToolDisposition::Execute),
         };
 
-        if matches!(outcome, PreparedToolInvocationOutcome::Ready) {
-            outcome = self.evaluate_permission_chain(&tc.call_id, &tc.name, &tool_input);
+        if matches!(disposition, PreparedToolDisposition::Execute) {
+            disposition = self.evaluate_permission_chain(&tc.name, &tool_input);
         }
 
         let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
-        outcome = match (outcome, same_step) {
-            (_, SameStepCheck::Duplicate) => PreparedToolInvocationOutcome::DuplicateSameStep,
-            (PreparedToolInvocationOutcome::Ready, SameStepCheck::Primary) => {
-                PreparedToolInvocationOutcome::Ready
+        disposition = match (disposition, same_step) {
+            (_, SameStepCheck::Duplicate) => PreparedToolDisposition::ReuseSameStep,
+            (PreparedToolDisposition::Execute, SameStepCheck::Primary) => {
+                PreparedToolDisposition::Execute
             },
-            (blocked @ PreparedToolInvocationOutcome::Blocked(_), SameStepCheck::Primary) => {
-                blocked
+            (rejected @ PreparedToolDisposition::Rejected { .. }, SameStepCheck::Primary) => {
+                rejected
             },
-            (
-                needs @ PreparedToolInvocationOutcome::NeedsApproval { .. },
-                SameStepCheck::Primary,
-            ) => needs,
-            (PreparedToolInvocationOutcome::DuplicateSameStep, SameStepCheck::Primary) => {
-                PreparedToolInvocationOutcome::DuplicateSameStep
+            (approval @ PreparedToolDisposition::AwaitApproval { .. }, SameStepCheck::Primary) => {
+                approval
+            },
+            (PreparedToolDisposition::ReuseSameStep, SameStepCheck::Primary) => {
+                PreparedToolDisposition::ReuseSameStep
             },
         };
 
-        let mode = match &outcome {
-            PreparedToolInvocationOutcome::Ready => self.tool_registry.execution_mode(&tc.name),
-            PreparedToolInvocationOutcome::Blocked(_)
-            | PreparedToolInvocationOutcome::DuplicateSameStep
-            | PreparedToolInvocationOutcome::NeedsApproval { .. } => ExecutionMode::Sequential,
+        let mode = match &disposition {
+            PreparedToolDisposition::Execute => self.tool_registry.execution_mode(&tc.name),
+            PreparedToolDisposition::Rejected { .. }
+            | PreparedToolDisposition::ReuseSameStep
+            | PreparedToolDisposition::AwaitApproval { .. } => ExecutionMode::Sequential,
         };
 
         Ok(PreparedToolInvocation {
@@ -137,7 +124,7 @@ impl ToolCalls {
             tool_input,
             raw_arguments: None,
             mode,
-            outcome,
+            disposition,
         })
     }
 
@@ -147,8 +134,8 @@ impl ToolCalls {
         early_results: Vec<EarlyExecutionEntry>,
         visible_tools: &[ToolDefinition],
         state: &mut TurnState,
-    ) -> Result<PreparedToolBatch, TurnError> {
-        let mut pre_executed: HashMap<usize, ToolResult> = HashMap::new();
+    ) -> Result<ToolBatch, TurnError> {
+        let mut pre_executed: HashMap<usize, ToolExecutionOutcome> = HashMap::new();
         let mut early_entries: HashMap<usize, _> = early_results
             .into_iter()
             .map(|entry| (entry.prepared.index, entry))
@@ -157,8 +144,8 @@ impl ToolCalls {
 
         for (index, tool_call) in tool_calls.iter().enumerate() {
             if let Some(entry) = early_entries.remove(&index) {
-                if let Some(result) = entry.result {
-                    pre_executed.insert(entry.prepared.index, result);
+                if let Some(outcome) = entry.outcome {
+                    pre_executed.insert(entry.prepared.index, outcome);
                 }
                 prepared.push(entry.prepared);
                 continue;
@@ -175,8 +162,8 @@ impl ToolCalls {
             prepared.push(prepared_call);
         }
 
-        Ok(PreparedToolBatch {
-            prepared,
+        Ok(ToolBatch {
+            calls: prepared,
             pre_executed,
         })
     }
@@ -188,18 +175,17 @@ impl ToolCalls {
     /// assistant(tool_calls) -> tool results.
     pub(crate) async fn declare_tool_batch(
         &self,
-        batch: PreparedToolBatch,
+        batch: &ToolBatch,
         publisher: &TurnEvents,
-    ) -> Result<DeclaredToolBatch, TurnError> {
+    ) -> Result<(), TurnError> {
         declare_tool_batch(publisher, batch).await
     }
 
     fn evaluate_permission_chain(
         &self,
-        call_id: &str,
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> PreparedToolInvocationOutcome {
+    ) -> PreparedToolDisposition {
         let accesses = self
             .tool_registry
             .resource_accesses(
@@ -225,47 +211,30 @@ impl ToolCalls {
             tool_selection: self.turn.shared.tool_selection.as_ref(),
         };
         match self.turn.shared.permission_chain.decide(&ctx) {
-            PermissionDecision::Allow => PreparedToolInvocationOutcome::Ready,
+            PermissionDecision::Allow => PreparedToolDisposition::Execute,
             PermissionDecision::Deny { reason } => {
-                PreparedToolInvocationOutcome::Blocked(ToolResult {
-                    call_id: call_id.to_string(),
-                    content: reason.clone(),
-                    is_error: true,
-                    error: Some(reason),
-                    metadata: Default::default(),
-                    duration_ms: None,
-                })
+                PreparedToolDisposition::Rejected { error: reason }
             },
             PermissionDecision::Ask { prompt, rule_key } => {
                 if let Some(key) = rule_key.as_deref() {
                     if self.turn.shared.approval_history.is_allowed_always(key) {
-                        return PreparedToolInvocationOutcome::Ready;
+                        return PreparedToolDisposition::Execute;
                     }
                     if self.turn.shared.approval_history.is_denied_always(key) {
-                        return PreparedToolInvocationOutcome::Blocked(ToolResult {
-                            call_id: call_id.to_string(),
-                            content: format!("Denied by session approval memory ({key})"),
-                            is_error: true,
-                            error: Some(format!("Denied by session approval memory ({key})")),
-                            metadata: Default::default(),
-                            duration_ms: None,
-                        });
+                        return PreparedToolDisposition::Rejected {
+                            error: format!("Denied by session approval memory ({key})"),
+                        };
                     }
                 }
-                PreparedToolInvocationOutcome::NeedsApproval {
+                PreparedToolDisposition::AwaitApproval {
                     prompt,
                     rule_key,
                     source: ApprovalSource::Core,
                 }
             },
-            PermissionDecision::Pass => PreparedToolInvocationOutcome::Blocked(ToolResult {
-                call_id: call_id.to_string(),
-                content: "permission chain returned Pass without resolution".into(),
-                is_error: true,
-                error: Some("permission chain returned Pass without resolution".into()),
-                metadata: Default::default(),
-                duration_ms: None,
-            }),
+            PermissionDecision::Pass => PreparedToolDisposition::Rejected {
+                error: "permission chain returned Pass without resolution".into(),
+            },
         }
     }
 }
@@ -289,14 +258,7 @@ fn reject_malformed_tool_call(
         tool_input: serde_json::Value::String(tool_call.arguments.clone()),
         raw_arguments: Some(tool_call.arguments.clone()),
         mode: ExecutionMode::Sequential,
-        outcome: PreparedToolInvocationOutcome::Blocked(ToolResult {
-            call_id: tool_call.call_id.clone(),
-            content: message.clone(),
-            is_error: true,
-            error: Some(message),
-            metadata: Default::default(),
-            duration_ms: None,
-        }),
+        disposition: PreparedToolDisposition::Rejected { error: message },
     }
 }
 
@@ -320,11 +282,10 @@ mod tests {
         assert_eq!(prepared.index, 3);
         assert_eq!(prepared.tool_input, serde_json::Value::String(raw.into()));
         assert_eq!(prepared.raw_arguments.as_deref(), Some(raw));
-        let PreparedToolInvocationOutcome::Blocked(result) = prepared.outcome else {
+        let PreparedToolDisposition::Rejected { error } = prepared.disposition else {
             panic!("malformed arguments must never be executable");
         };
-        assert!(result.is_error);
-        assert!(result.content.contains("invalid JSON"));
-        assert!(result.content.contains("expected `:`"));
+        assert!(error.contains("invalid JSON"));
+        assert!(error.contains("expected `:`"));
     }
 }

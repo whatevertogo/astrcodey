@@ -9,7 +9,7 @@ use astrcode_core::{tool::*, tool_access::ResourceAccess};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
-use super::shared::{compute_unified_diff, run_blocking, tool_call_id};
+use super::shared::{compute_unified_diff, run_blocking};
 // ─── write ───────────────────────────────────────────────────────────────
 
 /// 文件写入工具，创建新文件或完整覆盖已有文件。
@@ -57,14 +57,13 @@ impl Tool for WriteFileTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &ToolExecutionContext,
+        _ctx: &ToolExecutionContext,
     ) -> Result<ToolResult, ToolError> {
         let started_at = Instant::now();
         let args: WriteFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid write args: {e}")))?;
-        let call_id = tool_call_id(ctx);
         let working_dir = self.working_dir.clone();
-        run_blocking(move || execute_write_sync(working_dir, args, call_id, started_at)).await
+        run_blocking(move || execute_write_sync(working_dir, args, started_at)).await
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -75,7 +74,6 @@ impl Tool for WriteFileTool {
 fn execute_write_sync(
     working_dir: PathBuf,
     args: WriteFileArgs,
-    call_id: String,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let path = resolve_path(&working_dir, &args.path);
@@ -120,7 +118,6 @@ fn execute_write_sync(
         }
     }
     Ok(ToolResult {
-        call_id,
         content: msg,
         is_error: false,
         error: None,

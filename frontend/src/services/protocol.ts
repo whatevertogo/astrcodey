@@ -2,6 +2,7 @@ import {
   AGENT_SESSION_STATUSES,
   BLOCK_STATUSES,
   PHASES,
+  TOOL_CALL_STATUSES,
   TOOL_OUTPUT_STREAMS,
 } from './types'
 import type {
@@ -107,6 +108,10 @@ function stringEnumDecoder<const Values extends readonly string[]>(
 
 const decodePhase = stringEnumDecoder('phase', PHASES)
 const decodeBlockStatus = stringEnumDecoder('block status', BLOCK_STATUSES)
+const decodeToolCallStatus = stringEnumDecoder(
+  'tool call status',
+  TOOL_CALL_STATUSES
+)
 const decodeToolOutputStream = stringEnumDecoder(
   'tool output stream',
   TOOL_OUTPUT_STREAMS
@@ -165,7 +170,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         name: requiredString(object, 'name'),
         arguments: requiredString(object, 'arguments'),
         text: requiredString(object, 'text'),
-        status: decodeBlockStatus(object.status),
+        status: decodeToolCallStatus(object.status),
         metadata: optionalObject(object, 'metadata'),
         argumentsJson:
           object.argumentsJson && typeof object.argumentsJson === 'object'

@@ -20,7 +20,7 @@ use astrcode_core::{
 use tokio::sync::{mpsc, oneshot};
 
 /// `(first_event, last_event, first_user_message)` from a single log scan.
-pub type EventLogEnds = (Option<Event>, Option<Event>, Option<String>);
+pub(crate) type EventLogEnds = (Option<Event>, Option<Event>, Option<String>);
 
 async fn run_blocking_io<F, T>(f: F) -> Result<T, StorageError>
 where
@@ -180,10 +180,6 @@ enum WriteCommand {
         event: Box<Event>,
         done: oneshot::Sender<Result<Event, StorageError>>,
     },
-    AppendBatch {
-        events: Vec<Event>,
-        done: oneshot::Sender<Result<Vec<Event>, StorageError>>,
-    },
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
     },
@@ -227,21 +223,6 @@ impl WriterState {
         self.next_seq += 1;
         self.dirty = true;
         Ok(*event)
-    }
-
-    fn append_batch(&mut self, events: &mut [Event]) -> Result<(), StorageError> {
-        let mut next_seq = self.next_seq;
-        let mut encoded = Vec::new();
-        for event in events.iter_mut() {
-            event.seq = Some(next_seq);
-            next_seq += 1;
-            serde_json::to_writer(&mut encoded, event)?;
-            encoded.push(b'\n');
-        }
-        self.write_committed_record(&encoded)?;
-        self.next_seq = next_seq;
-        self.dirty = true;
-        Ok(())
     }
 
     fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
@@ -321,13 +302,6 @@ fn write_loop(
                     next_seq.store(state.next_seq, Ordering::Release);
                 }
                 let _ = done.send(result);
-            },
-            WriteCommand::AppendBatch { mut events, done } => {
-                let result = state.append_batch(&mut events);
-                if result.is_ok() {
-                    next_seq.store(state.next_seq, Ordering::Release);
-                }
-                let _ = done.send(result.map(|_| events));
             },
             WriteCommand::FlushSync { done } => {
                 let _ = done.send(state.flush_and_sync());
@@ -535,23 +509,6 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
-    /// Append multiple events in a single writer-thread command.
-    ///
-    /// The writer thread assigns sequential `seq` numbers, serializes,
-    /// and writes the pre-encoded batch with one file write/flush transaction.
-    pub async fn append_batch(&self, events: Vec<Event>) -> Result<Vec<Event>, StorageError> {
-        if events.is_empty() {
-            return Ok(events);
-        }
-        let (done, rx) = oneshot::channel();
-        self.tx
-            .send(WriteCommand::AppendBatch { events, done })
-            .await
-            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
-        rx.await
-            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
-    }
-
     /// Replay all events from the beginning.
     pub async fn replay_all(&self) -> Result<Vec<Event>, StorageError> {
         let path = self.path.clone();
@@ -569,7 +526,7 @@ impl EventLog {
 
     /// Replay at most `max_events` events after `seq`, stopping the file scan
     /// once the limit is reached.
-    pub async fn replay_after_limited(
+    pub(crate) async fn replay_after_limited(
         &self,
         seq: u64,
         max_events: usize,
@@ -579,7 +536,7 @@ impl EventLog {
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
-    pub async fn count(&self) -> Result<usize, StorageError> {
+    pub(crate) async fn count(&self) -> Result<usize, StorageError> {
         Ok(self.next_seq.load(Ordering::Acquire) as usize)
     }
 
@@ -587,7 +544,7 @@ impl EventLog {
     ///
     /// Called at turn boundaries to ensure all events written since the last
     /// sync are durable (power-loss-safe). No-op if nothing is pending.
-    pub async fn force_sync(&self) -> Result<(), StorageError> {
+    pub(crate) async fn force_sync(&self) -> Result<(), StorageError> {
         let (done, rx) = oneshot::channel();
         self.tx
             .send(WriteCommand::FlushSync { done })
@@ -599,7 +556,7 @@ impl EventLog {
 
     /// Read the first event, last event, and first user message from the log
     /// in a single pass. Returns `(first, last, first_user_message)`.
-    pub async fn read_first_and_last(path: &Path) -> Result<EventLogEnds, StorageError> {
+    pub(crate) async fn read_first_and_last(path: &Path) -> Result<EventLogEnds, StorageError> {
         let path = path.to_path_buf();
         run_blocking_io(move || read_first_and_last_at_path(&path)).await
     }
@@ -634,15 +591,12 @@ fn last_seq_from_path(path: &Path) -> Result<u64, StorageError> {
     })?;
 
     // Check if the tail starts mid-line by examining the byte before offset.
-    let started_mid_line = if offset == 0 {
-        false
-    } else {
-        file.seek(std::io::SeekFrom::Start(offset - 1))
-            .map_err(StorageError::Io)?;
-        let mut previous = [0u8; 1];
-        file.read_exact(&mut previous).map_err(StorageError::Io)?;
-        previous[0] != b'\n'
-    };
+    // offset is always > 0 here: the early return above guarantees file_size > TAIL_THRESHOLD.
+    file.seek(std::io::SeekFrom::Start(offset - 1))
+        .map_err(StorageError::Io)?;
+    let mut previous = [0u8; 1];
+    file.read_exact(&mut previous).map_err(StorageError::Io)?;
+    let started_mid_line = previous[0] != b'\n';
     file.seek(std::io::SeekFrom::Start(offset))
         .map_err(StorageError::Io)?;
 
@@ -661,7 +615,7 @@ fn last_seq_from_path(path: &Path) -> Result<u64, StorageError> {
 
     // Walk backwards through lines looking for the last valid seq.
     for line in tail_bytes.rsplit(|b| *b == b'\n') {
-        let trimmed = trim_ascii_whitespace(line);
+        let trimmed = line.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
@@ -686,18 +640,6 @@ fn scan_full_file_for_last_seq(path: &Path) -> Result<u64, StorageError> {
 fn parse_seq_from_line(line: &[u8]) -> Option<u64> {
     let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
     v.get("seq")?.as_u64()
-}
-
-fn trim_ascii_whitespace(line: &[u8]) -> &[u8] {
-    let start = line
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(line.len());
-    let end = line
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map_or(start, |i| i + 1);
-    &line[start..end]
 }
 
 fn enhance_open_error(path: &Path, e: std::io::Error) -> String {
@@ -979,61 +921,6 @@ mod tests {
 
         let content = std::fs::read_to_string(path).unwrap();
         assert_eq!(content.lines().count(), 2);
-    }
-
-    #[tokio::test]
-    async fn append_batch_writes_multiple_events() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("batch.jsonl");
-        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-
-        assert_eq!(start.seq, Some(0));
-
-        let stored = log
-            .append_batch(vec![
-                Event::new(
-                    "s1".into(),
-                    Some("turn-1".into()),
-                    EventPayload::TurnStarted,
-                ),
-                Event::new(
-                    "s1".into(),
-                    Some("turn-1".into()),
-                    EventPayload::TurnCompleted {
-                        finish_reason: "stop".into(),
-                    },
-                ),
-            ])
-            .await
-            .unwrap();
-
-        assert_eq!(stored.len(), 2);
-        assert_eq!(stored[0].seq, Some(1));
-        assert_eq!(stored[1].seq, Some(2));
-
-        let events = log.replay_all().await.unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].seq, Some(0));
-        assert_eq!(events[1].seq, Some(1));
-        assert_eq!(events[2].seq, Some(2));
-    }
-
-    #[tokio::test]
-    async fn append_batch_empty_is_noop() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("empty.jsonl");
-        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-
-        let stored = log.append_batch(vec![]).await.unwrap();
-        assert!(stored.is_empty());
-
-        let events = log.replay_all().await.unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].seq, Some(start.seq.unwrap()));
     }
 
     #[tokio::test]

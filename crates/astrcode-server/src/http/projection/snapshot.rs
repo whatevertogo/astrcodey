@@ -7,8 +7,8 @@ use astrcode_core::{
     types::ToolCallId,
 };
 use astrcode_protocol::http::{
-    AgentSessionLinkDto, ConversationBlockDto, ConversationBlockStatusDto, ConversationCursorDto,
-    ConversationSnapshotResponseDto,
+    AgentSessionLinkDto, ConversationBlockDto, ConversationCursorDto,
+    ConversationSnapshotResponseDto, ToolCallStatusDto,
 };
 
 use super::{
@@ -110,7 +110,7 @@ fn apply_pending_tool_state(
         }
         if let Some(interaction) = interaction {
             *text = interaction.content.clone();
-            *status = ConversationBlockStatusDto::Streaming;
+            *status = ToolCallStatusDto::Streaming;
             merged.extend(
                 interaction
                     .metadata
@@ -125,7 +125,7 @@ fn apply_pending_tool_state(
 #[cfg(test)]
 mod tests {
     use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
-    use astrcode_protocol::http::ConversationBlockStatusDto;
+    use astrcode_protocol::http::ToolCallStatusDto;
 
     use super::*;
 
@@ -208,7 +208,7 @@ mod tests {
                 assert_eq!(name, "read");
                 assert_eq!(arguments, "Cargo.toml");
                 assert_eq!(text, "file contents");
-                assert!(matches!(status, ConversationBlockStatusDto::Complete));
+                assert!(matches!(status, ToolCallStatusDto::Complete));
             },
             other => panic!("unexpected block: {other:?}"),
         }
@@ -250,7 +250,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(text, "awaiting confirmation");
-                assert!(matches!(status, ConversationBlockStatusDto::Streaming));
+                assert!(matches!(status, ToolCallStatusDto::Streaming));
                 let approval = metadata
                     .get("toolGateApproval")
                     .expect("toolGateApproval metadata");

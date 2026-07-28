@@ -2,8 +2,8 @@
 
 use std::{path::Path, sync::Arc};
 
+#[cfg(feature = "testing")]
 use astrcode_protocol::events::ClientNotification;
-use astrcode_support::event_fanout::EventFanout;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -53,27 +53,20 @@ pub enum HttpServerError {
 ///
 /// Returns `(Router, auth_token)` — the token must be passed to the frontend
 /// so it can include it in `Authorization: Bearer <token>` headers.
-pub fn router(
-    runtime: Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
-) -> Result<(Router, String), HttpServerError> {
-    let (app, auth_token, _) = router_parts(runtime, event_tx)?;
+pub fn router(runtime: Arc<ServerRuntime>) -> Result<(Router, String), HttpServerError> {
+    let (app, auth_token, _) = router_parts(runtime)?;
     Ok((app, auth_token))
 }
 
 #[cfg(feature = "testing")]
 pub fn router_with_event_publisher(
     runtime: Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
 ) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
-    let (app, auth_token, event_bus) = router_parts(runtime, event_tx)?;
+    let (app, auth_token, event_bus) = router_parts(runtime)?;
     Ok((app, auth_token, TestEventPublisher { event_bus }))
 }
 
-fn router_parts(
-    runtime: Arc<ServerRuntime>,
-    _event_tx: Arc<EventFanout<ClientNotification>>,
-) -> Result<RouterParts, HttpServerError> {
+fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerError> {
     let auth_token = configured_auth_token();
     let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
     let event_bus = Arc::clone(&server_system.event_bus);
@@ -206,10 +199,9 @@ pub async fn run_http_server(
     runtime: Arc<ServerRuntime>,
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
-    let event_tx = Arc::new(EventFanout::new(1024));
     let shutdown_token = runtime.shutdown_token().clone();
     let runtime_for_shutdown = Arc::clone(&runtime);
-    let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
+    let (app, auth_token) = router(Arc::clone(&runtime))?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
@@ -239,7 +231,7 @@ pub async fn run_http_server(
 /// 将运行时端口写入 `~/.astrcode/run.json`，供前端 dev server 发现后端地址。
 ///
 /// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
-pub fn write_run_info(port: u16, auth_token: &str) {
+fn write_run_info(port: u16, auth_token: &str) {
     let dir = astrcode_support::hostpaths::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
@@ -270,11 +262,6 @@ fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
 }
 
 /// 退出时清理 `run.json`。
-pub fn remove_run_info() {
-    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
-    let _ = std::fs::remove_file(path);
-}
-
 fn remove_run_info_if_current(port: u16, auth_token: &str) {
     let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
     remove_run_info_if_current_at(&path, port, auth_token);

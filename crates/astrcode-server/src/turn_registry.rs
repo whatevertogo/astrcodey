@@ -18,6 +18,7 @@ struct TurnEntry {
     session: Arc<Session>,
 }
 
+#[derive(Default)]
 pub struct TurnRegistry {
     entries: Mutex<HashMap<SessionId, TurnEntry>>,
 }
@@ -156,12 +157,6 @@ impl TurnRegistry {
             .lock()
             .get(session_id)
             .map(|e| (e.turn_id.clone(), Arc::clone(&e.session)))
-    }
-}
-
-impl Default for TurnRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

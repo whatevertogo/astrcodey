@@ -335,7 +335,6 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
             | ClientNotification::ExtensionCommandResult { .. } => {
                 buffered.push(LiveInput::Notification(Box::new(notification)));
             },
-            ClientNotification::Event(_) => {},
             _ => {},
         }
     }

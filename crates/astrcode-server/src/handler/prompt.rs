@@ -10,6 +10,21 @@ fn validate_prompt_attachments(attachments: &[MessageAttachment]) -> Result<(), 
         .map_err(|error| HandlerError::InvalidRequest(error.to_string()))
 }
 
+/// DeliveryOutcome → PromptSubmission 的统一映射。
+pub(in crate::handler) fn prompt_submission_from_delivery(
+    outcome: DeliveryOutcome,
+) -> PromptSubmission {
+    match outcome {
+        DeliveryOutcome::Queued { .. } => PromptSubmission::Handled {
+            message: "queued for next turn".into(),
+        },
+        DeliveryOutcome::Started { turn_id } => PromptSubmission::Accepted { turn_id },
+        DeliveryOutcome::Injected { .. } => PromptSubmission::Handled {
+            message: "injected into active turn".into(),
+        },
+    }
+}
+
 impl CommandHandler {
     pub(super) async fn submit_prompt(
         &mut self,
@@ -74,11 +89,12 @@ impl CommandHandler {
             )
             .await?
         {
-            DeliveryOutcome::Injected { .. } => Ok(PromptSubmission::Handled {
-                message: "injected into active turn".into(),
-            }),
-            DeliveryOutcome::Started { turn_id } => Ok(PromptSubmission::Accepted { turn_id }),
-            DeliveryOutcome::Queued { .. } => unreachable!("inject delivery never enqueues"),
+            // inject 投递从不出队（见 TurnScheduler::deliver_input_gated），防御性返回错误而非
+            // panic。
+            DeliveryOutcome::Queued { .. } => Err(HandlerError::InvalidRequest(
+                "inject delivery unexpectedly enqueued input".into(),
+            )),
+            outcome => Ok(prompt_submission_from_delivery(outcome)),
         }
     }
 

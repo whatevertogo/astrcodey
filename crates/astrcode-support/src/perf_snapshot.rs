@@ -85,6 +85,8 @@ fn payload_type(payload: &EventPayload) -> &'static str {
         EventPayload::ToolOutputDelta { .. } => "tool_output_delta",
         EventPayload::ToolCallInteractionPending { .. } => "tool_call_interaction_pending",
         EventPayload::ToolCallCompleted { .. } => "tool_call_completed",
+        EventPayload::ToolCallFailed { .. } => "tool_call_failed",
+        EventPayload::ToolCallCancelled { .. } => "tool_call_cancelled",
         EventPayload::CompactionStarted => "compaction_started",
         EventPayload::CompactionCompleted { .. } => "compaction_completed",
         EventPayload::CompactionSkipped { .. } => "compaction_skipped",
@@ -137,6 +139,12 @@ fn payload_details(payload: &EventPayload) -> String {
             call_id, tool_name, ..
         }
         | EventPayload::ToolCallCompleted {
+            call_id, tool_name, ..
+        }
+        | EventPayload::ToolCallFailed {
+            call_id, tool_name, ..
+        }
+        | EventPayload::ToolCallCancelled {
             call_id, tool_name, ..
         } => {
             format!("tool={tool_name} call={call_id}")

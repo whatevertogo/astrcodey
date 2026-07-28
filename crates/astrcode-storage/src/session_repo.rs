@@ -351,9 +351,8 @@ async fn restore_from_snapshot(
     log: &EventLog,
     snapshot: crate::snapshot::SessionProjectionSnapshot,
 ) -> Result<SessionReadModel, StorageError> {
-    // For v2 snapshots, `latest_seq` is derived from the embedded model.
-    // For v1 snapshots, it's duplicated in the payload and validated by snapshot.rs.
-    let Some(latest_seq) = snapshot.model().latest_seq else {
+    // `latest_seq` is derived from the embedded model (snapshots are v2 only).
+    let Some(latest_seq) = snapshot.model.latest_seq else {
         return Err(StorageError::InvalidId(
             "snapshot model.latest_seq is missing".into(),
         ));
@@ -367,7 +366,7 @@ async fn restore_from_snapshot(
         )));
     }
 
-    let mut model = snapshot.model().clone();
+    let mut model = snapshot.model;
     // Reapply only the events that occurred after the snapshot. The snapshot
     // serves as a recovery checkpoint, not as an authoritative source of truth.
     for event in log.replay_after(latest_seq).await? {
@@ -444,8 +443,8 @@ impl EventReader for FileSystemSessionRepository {
                 // 已打开的会话直接使用内存中的投影
                 summaries.push(meta.projection.read().await.to_summary());
             } else {
-                // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
-                if let Some(summary) = self.read_summary_from_first_event(&session_id).await? {
+                // 未打开的会话只读首行和末行事件构造轻量摘要
+                if let Some(summary) = self.read_summary_from_event_ends(&session_id).await? {
                     summaries.push(summary);
                 }
             }
@@ -619,7 +618,7 @@ impl EventStore for FileSystemSessionRepository {
                 "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
             )));
         }
-        meta.snapshot_mgr.create_snapshot(&model).await?;
+        meta.snapshot_mgr.create_snapshot(model).await?;
         Ok(())
     }
 
@@ -791,6 +790,14 @@ fn is_subagent_dir(dir: &Path) -> bool {
         .any(|a| a.file_name().is_some_and(|n| n == "subagents"))
 }
 
+/// 会话目录内由存储层维护的元数据目录，扫描会话目录时必须跳过。
+fn is_session_metadata_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".recycled" | "subagents" | "snapshots" | "compact-snapshots" | "tool-results"
+    )
+}
+
 impl FileSystemSessionRepository {
     /// 在所有项目的 subagents/.recycled/{extension}/ 目录中搜索指定 session。
     async fn find_recycled_session_dir(&self, id: &SessionId) -> Option<PathBuf> {
@@ -818,12 +825,7 @@ impl FileSystemSessionRepository {
                     continue;
                 }
                 let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str == ".recycled"
-                    || name_str == "snapshots"
-                    || name_str == "compact-snapshots"
-                    || name_str == "tool-results"
-                {
+                if is_session_metadata_dir(&name.to_string_lossy()) {
                     continue;
                 }
                 let session_dir = entry.path();
@@ -889,12 +891,7 @@ impl FileSystemSessionRepository {
             }
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == "subagents"
-                || name_str == "snapshots"
-                || name_str == "compact-snapshots"
-                || name_str == "tool-results"
-                || name_str == ".recycled"
-            {
+            if is_session_metadata_dir(&name_str) {
                 continue;
             }
             let id = SessionId::from(name_str.to_string());
@@ -907,7 +904,7 @@ impl FileSystemSessionRepository {
     /// 单次遍历读取首行获取 SessionStarted 元数据（working_dir, model_id 等），
     /// 末行获取更准确的 updated_at 和 latest_cursor。
     /// 避免为未打开的会话重放整个事件日志。
-    async fn read_summary_from_first_event(
+    async fn read_summary_from_event_ends(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
@@ -1785,7 +1782,6 @@ mod tests {
                 call_id: ToolCallId::from("call_1"),
                 tool_name: "read".into(),
                 result: astrcode_core::tool::ToolResult {
-                    call_id: "call_1".into(),
                     content: "a".into(),
                     is_error: false,
                     error: None,
@@ -1805,7 +1801,6 @@ mod tests {
                 call_id: ToolCallId::from("call_2"),
                 tool_name: "read".into(),
                 result: astrcode_core::tool::ToolResult {
-                    call_id: "call_2".into(),
                     content: "b".into(),
                     is_error: false,
                     error: None,

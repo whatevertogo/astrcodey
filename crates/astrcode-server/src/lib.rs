@@ -3,7 +3,6 @@
 pub mod acp;
 pub mod bootstrap;
 pub mod default_host;
-pub mod handler;
 pub mod http;
 pub mod task_utils;
 pub mod transport;
@@ -13,6 +12,7 @@ pub mod test_support;
 
 mod child_session;
 mod config_manager;
+mod handler;
 mod server_event_bus;
 mod session_manager;
 mod session_operations;

@@ -1,6 +1,6 @@
 //! Tool 前端贡献的线缆契约（宿主 Web/TUI 按此选组件，不发给 LLM）。
 //!
-//! 扩展在 `Registrar::tool_ui` 注册；宿主在 `ToolCallCompleted.metadata.toolUi`
+//! 扩展在 `Registrar::tool_ui` 注册；宿主在工具终态的 `metadata.toolUi`
 //! 及 SSE `patchMetadata` 中投影给前端。
 
 use serde::{Deserialize, Serialize};

@@ -378,6 +378,11 @@ pub struct CompactBoundaryView {
     pub strategy: crate::extension::CompactStrategy,
 }
 
+/// 工具执行失败消息的读模型来源标记。
+pub const TOOL_CALL_FAILED_SOURCE: &str = "tool_call_failed";
+/// 工具调用取消消息的读模型来源标记。
+pub const TOOL_CALL_CANCELLED_SOURCE: &str = "tool_call_cancelled";
+
 /// 会话读模型里带有 durable seq 的消息载体。
 ///
 /// compact 需要按时间边界冻结历史前缀，并将 compact 期间到达的事件归类为尾部增量。
@@ -393,6 +398,7 @@ pub struct SequencedLlmMessage {
     ///
     /// - `None`：正常消息（用户输入、LLM 回复等）
     /// - `Some("turn_aborted")`：上一轮中断标记（仅 provider 可见）
+    /// - `Some("tool_call_failed" | "tool_call_cancelled")`：工具异常终态
     ///
     /// `source` 本身不进入 LLM payload；对应 `.message` 会作为 User 消息送入 provider。
     #[serde(default)]
@@ -427,7 +433,7 @@ impl TranscriptArtifactView {
 
 /// 插件事件索引条目——不存 payload，按需从 event log 取。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtensionEventEntry {
+struct ExtensionEventEntry {
     /// 事件在 event log 中的 seq。
     pub seq: u64,
     /// 插件 ID。
@@ -470,39 +476,6 @@ impl ExtensionEventIndex {
             event_type,
             schema_version,
         });
-    }
-
-    /// 查询某个插件的全部事件（按 seq 排序）。
-    pub fn events_for(&self, extension_id: &str) -> Vec<&ExtensionEventEntry> {
-        self.by_extension
-            .get(extension_id)
-            .map(|indices| indices.iter().map(|&i| &self.entries[i]).collect())
-            .unwrap_or_default()
-    }
-
-    /// 按插件 ID + 事件类型过滤。
-    pub fn events_of_type<'a>(
-        &'a self,
-        extension_id: &str,
-        event_type: &str,
-    ) -> Vec<&'a ExtensionEventEntry> {
-        self.events_for(extension_id)
-            .into_iter()
-            .filter(|e| e.event_type == event_type)
-            .collect()
-    }
-
-    /// 某个插件的最后一条匹配事件。
-    pub fn last_event(&self, extension_id: &str, event_type: &str) -> Option<&ExtensionEventEntry> {
-        self.events_for(extension_id)
-            .into_iter()
-            .rev()
-            .find(|e| e.event_type == event_type)
-    }
-
-    /// 某个插件的全部事件数量。
-    pub fn count_for(&self, extension_id: &str) -> usize {
-        self.by_extension.get(extension_id).map_or(0, |v| v.len())
     }
 }
 

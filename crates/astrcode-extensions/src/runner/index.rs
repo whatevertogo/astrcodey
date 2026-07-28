@@ -36,11 +36,9 @@ pub(super) struct HandlerIndex {
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
     pub(super) prompt_build: Vec<Arc<dyn PromptBuildHandler>>,
     pub(super) compact: HashMap<CompactEvent, Vec<Arc<dyn CompactHandler>>>,
-    pub(super) post_tool_use_failure: Vec<Arc<dyn PostToolUseFailureHandler>>,
     pub(super) continue_after_stop:
         Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
-    pub(super) after_tool_results: Vec<SimpleExtensionHandler<dyn AfterToolResultsHandler>>,
     pub(super) lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
     pub(super) tool_metadata: HashMap<String, ToolPromptMetadata>,
@@ -80,10 +78,8 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut provider = Vec::new();
     let mut prompt_build = Vec::new();
     let mut compact = Vec::new();
-    let mut post_tool_use_failure = Vec::new();
     let mut continue_after_stop = Vec::new();
     let mut user_message_envelope = Vec::new();
-    let mut after_tool_results = Vec::new();
     let mut lifecycle = Vec::new();
     let mut tool_metadata = HashMap::new();
     let mut tool_ui = HashMap::new();
@@ -135,9 +131,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         for (event, priority, handler) in record.reg.compact() {
             compact.push((*event, *priority, Arc::clone(handler)));
         }
-        for (priority, handler) in record.reg.post_tool_use_failure() {
-            post_tool_use_failure.push((*priority, Arc::clone(handler)));
-        }
         for registration in record.reg.continue_after_stop() {
             continue_after_stop.push((
                 registration.priority,
@@ -150,12 +143,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         }
         for registration in record.reg.user_message_envelope() {
             user_message_envelope.push((
-                registration.priority,
-                (record.id.clone(), Arc::clone(&registration.handler)),
-            ));
-        }
-        for registration in record.reg.after_tool_results() {
-            after_tool_results.push((
                 registration.priority,
                 (record.id.clone(), Arc::clone(&registration.handler)),
             ));
@@ -224,10 +211,8 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         provider: handlers_by_event(provider),
         prompt_build: handlers_by_priority(prompt_build),
         compact: handlers_by_event(compact),
-        post_tool_use_failure: handlers_by_priority(post_tool_use_failure),
         continue_after_stop: handlers_by_priority(continue_after_stop),
         user_message_envelope: handlers_by_priority(user_message_envelope),
-        after_tool_results: handlers_by_priority(after_tool_results),
         lifecycle: handlers_by_event(lifecycle),
         tool_metadata,
         tool_ui,

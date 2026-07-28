@@ -13,8 +13,8 @@ pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 use crate::wire::{
     ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
     ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
-    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto,
-    ThinkingLevelDto, ToolOriginDto, ToolOutputStreamDto,
+    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto,
+    ToolOutputStreamDto, impl_wire_values,
 };
 
 /// 新建会话请求。
@@ -93,16 +93,6 @@ impl From<MessageAttachment> for PromptAttachmentDto {
             filename: attachment.filename,
             content: attachment.content,
             media_type: attachment.media_type,
-        }
-    }
-}
-
-impl From<&MessageAttachment> for PromptAttachmentDto {
-    fn from(attachment: &MessageAttachment) -> Self {
-        Self {
-            filename: attachment.filename.clone(),
-            content: attachment.content.clone(),
-            media_type: attachment.media_type.clone(),
         }
     }
 }
@@ -261,9 +251,6 @@ pub struct CommandCompletionItemDto {
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandListResponseDto {
     pub commands: Vec<SlashCommandInfoDto>,
-    /// 被更高优先级命令遮蔽的同名命令诊断。
-    #[serde(default)]
-    pub shadowed_commands: Vec<ShadowedSlashCommandDto>,
     /// 插件注册的快捷键绑定。
     #[serde(default)]
     pub keybindings: Vec<KeybindingDto>,
@@ -341,8 +328,8 @@ pub struct SlashCommandInfoDto {
     pub source: CommandSourceDto,
 }
 
-impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
-    fn from(cmd: crate::events::ExtensionCommandInfo) -> Self {
+impl From<crate::events::ExtensionCommandInfoDto> for SlashCommandInfoDto {
+    fn from(cmd: crate::events::ExtensionCommandInfoDto) -> Self {
         Self {
             name: cmd.name,
             description: cmd.description,
@@ -387,19 +374,13 @@ pub struct ForkSessionRequest {
 pub struct SessionListItemDto {
     pub session_id: String,
     pub working_dir: String,
-    pub display_name: String,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
     pub phase: PhaseDto,
     /// 首条用户消息内容，无消息时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_user_message: Option<String>,
-    /// 创建该子 session 的扩展 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_extension: Option<String>,
 }
 
 /// 会话列表响应。
@@ -479,7 +460,7 @@ pub enum ConversationBlockDto {
         arguments: String,
         /// 工具执行结果（展开后显示）。
         text: String,
-        status: ConversationBlockStatusDto,
+        status: ToolCallStatusDto,
         /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
@@ -508,7 +489,7 @@ pub enum ConversationBlockDto {
 
 /// conversation 块状态。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationBlockStatusDto {
     Streaming,
@@ -516,8 +497,33 @@ pub enum ConversationBlockStatusDto {
     Error,
 }
 
-impl ConversationBlockStatusDto {
-    pub const ALL: &'static [Self] = &[Self::Streaming, Self::Complete, Self::Error];
+impl_wire_values!(ConversationBlockStatusDto {
+    Streaming,
+    Complete,
+    Error,
+});
+
+/// 工具调用状态。`Error` 表示工具正常返回了语义错误，
+/// `Failed` 表示执行基础设施失败，`Cancelled` 表示调用被取消。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolCallStatusDto {
+    Streaming,
+    Complete,
+    Error,
+    Failed,
+    Cancelled,
+}
+
+impl ToolCallStatusDto {
+    pub const ALL: &'static [Self] = &[
+        Self::Streaming,
+        Self::Complete,
+        Self::Error,
+        Self::Failed,
+        Self::Cancelled,
+    ];
 }
 
 /// SSE 信封。
@@ -638,8 +644,6 @@ pub struct ConfigViewResponseDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
     #[serde(default)]
-    pub extension_states: std::collections::BTreeMap<String, bool>,
-    #[serde(default)]
     pub approval_mode: ApprovalModeDto,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
@@ -709,6 +713,10 @@ impl From<ExtensionEventDecl> for ExtensionEventDeclDto {
     }
 }
 
+/// 扩展声明的完整描述。
+///
+/// 定位为开放 API 的自描述契约：除前端外，第三方调用方也可据此
+/// 了解扩展提供的全部能力，因此各声明字段即使前端未消费也保留。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -728,6 +736,10 @@ pub struct ExtensionDeclarationDto {
     pub http_routes: Vec<ExtensionHttpRouteDto>,
 }
 
+/// 扩展注册的工具定义。
+///
+/// 字段保留既有 snake_case 嵌套 wire 形状（冻结形状），
+/// 嵌套在 camelCase 的 [`ExtensionDeclarationDto`] 中是有意偏离。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinitionDto {
@@ -991,9 +1003,7 @@ impl From<ThinkingConfigDto> for astrcode_core::thinking::ThinkingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionsDto {
-    pub reasoning: Option<bool>,
-    pub thinking_level: Option<ThinkingLevelDto>,
-    /// 标准化 thinking 配置（新字段）。
+    /// 标准化 thinking 配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfigDto>,
 }
@@ -1004,8 +1014,6 @@ pub struct ModelOptionsDto {
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {
     pub id: String,
-    pub max_tokens: Option<u32>,
-    pub context_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_options: Option<ModelOptionsDto>,
     /// 当前模型的标准化 thinking 配置（归一化后）。

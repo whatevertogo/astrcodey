@@ -6,15 +6,12 @@ use astrcode_core::{
     types::SessionId,
 };
 use astrcode_extensions::runner::CommandSource;
-use astrcode_protocol::{
-    events::ExtensionCommandInfo, http::ShadowedSlashCommandDto, wire::CommandSourceDto,
-};
+use astrcode_protocol::{events::ExtensionCommandInfoDto, wire::CommandSourceDto};
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
 
 pub struct CommandList {
-    pub commands: Vec<ExtensionCommandInfo>,
-    pub shadowed_commands: Vec<ShadowedSlashCommandDto>,
+    pub commands: Vec<ExtensionCommandInfoDto>,
 }
 
 impl CommandHandler {
@@ -192,7 +189,6 @@ impl CommandHandler {
         working_dir: &str,
     ) -> CommandList {
         let mut commands = builtin_commands();
-        let mut shadowed_commands = Vec::new();
 
         for resolved in self
             .runtime
@@ -201,33 +197,15 @@ impl CommandHandler {
             .await
         {
             let source = command_source_dto(resolved.source);
-            if let Some(active) = commands
+            // 与既有命令同名时被遮蔽，不下发。
+            if commands
                 .iter()
-                .find(|command| command.name == resolved.command.name)
+                .any(|command| command.name == resolved.command.name)
             {
-                shadowed_commands.push(ShadowedSlashCommandDto {
-                    name: resolved.command.name,
-                    active_source: active.source,
-                    active_priority: active.priority,
-                    shadowed_source: source,
-                    shadowed_priority: resolved.command.priority,
-                    shadowed_extension_id: resolved.extension_id,
-                });
                 continue;
             }
 
-            for shadowed in resolved.shadowed {
-                shadowed_commands.push(ShadowedSlashCommandDto {
-                    name: resolved.command.name.clone(),
-                    active_source: source,
-                    active_priority: resolved.command.priority,
-                    shadowed_source: command_source_dto(shadowed.source),
-                    shadowed_priority: shadowed.priority,
-                    shadowed_extension_id: shadowed.extension_id,
-                });
-            }
-
-            commands.push(ExtensionCommandInfo {
+            commands.push(ExtensionCommandInfoDto {
                 name: resolved.command.name,
                 description: resolved.command.description,
                 needs_argument: resolved.command.args_schema.is_some(),
@@ -238,10 +216,7 @@ impl CommandHandler {
             });
         }
 
-        CommandList {
-            commands,
-            shadowed_commands,
-        }
+        CommandList { commands }
     }
 
     async fn command_context(
@@ -317,9 +292,9 @@ fn command_source_dto(source: CommandSource) -> CommandSourceDto {
     }
 }
 
-fn builtin_commands() -> Vec<ExtensionCommandInfo> {
+fn builtin_commands() -> Vec<ExtensionCommandInfoDto> {
     vec![
-        ExtensionCommandInfo {
+        ExtensionCommandInfoDto {
             name: "compact".into(),
             description: "Compact the current session context".into(),
             needs_argument: false,
@@ -328,7 +303,7 @@ fn builtin_commands() -> Vec<ExtensionCommandInfo> {
             priority: 0,
             source: CommandSourceDto::Builtin,
         },
-        ExtensionCommandInfo {
+        ExtensionCommandInfoDto {
             name: "model".into(),
             description: "Select the active AI model".into(),
             needs_argument: false,

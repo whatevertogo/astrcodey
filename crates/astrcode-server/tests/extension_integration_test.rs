@@ -115,7 +115,6 @@ impl ToolHandler for EchoToolHandler {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         Ok(ToolResult {
-            call_id: String::new(),
             content: format!("{working_dir}:{text}"),
             is_error: false,
             error: None,
@@ -178,7 +177,6 @@ impl ToolHandler for FixedToolHandler {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
         Ok(ToolResult {
-            call_id: String::new(),
             content: self.content.clone(),
             is_error: false,
             error: None,
@@ -225,6 +223,7 @@ fn pre_tool_use_context(command: &str) -> PreToolUseContext {
         session_id: "test-session".into(),
         working_dir: "/tmp".into(),
         model: astrcode_core::config::ModelSelection::simple("test-model"),
+        call_id: "call-1".into(),
         tool_name: "shell".into(),
         tool_input: serde_json::json!({ "command": command }),
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,

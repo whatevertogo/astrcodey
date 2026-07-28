@@ -111,6 +111,7 @@ impl ConfigManager {
     }
 
     /// 测试用构造：调用方负责传入预先组装好的 session runtime services。
+    #[cfg(any(test, feature = "testing"))]
     pub fn new(
         config_store: Arc<dyn ConfigStore>,
         raw_config: Config,

@@ -23,6 +23,8 @@ macro_rules! impl_wire_values {
     };
 }
 
+pub(crate) use impl_wire_values;
+
 macro_rules! impl_domain_to_wire_conversion {
     ($domain:ty => $wire:ty { $($variant:ident),+ $(,)? }) => {
         impl_wire_values!($wire { $($variant),+ });

@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     bootstrap::ServerRuntime,
-    turn_scheduler::{DeliveryOutcome, InputDelivery, PromptInput, TurnScheduler},
+    turn_scheduler::{InputDelivery, PromptInput, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -45,15 +45,6 @@ impl CommandHandle {
         let (reply, rx) = oneshot::channel();
         self.post(message(reply)).await?;
         rx.await.map_err(|_| HandlerError::ActorUnavailable)?
-    }
-
-    /// 启动 CommandHandler Actor，返回可克隆的句柄。
-    pub fn spawn(
-        runtime: Arc<ServerRuntime>,
-        scheduler: Arc<TurnScheduler>,
-        event_bus: Arc<crate::server_event_bus::ServerEventBus>,
-    ) -> Self {
-        CommandHandler::spawn_actor(runtime, scheduler, event_bus)
     }
 
     /// 发送客户端命令，等待执行完成。
@@ -321,20 +312,11 @@ impl CommandHandler {
         session_id: SessionId,
         input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        match self
-            .scheduler
+        self.scheduler
             .deliver_input(session_id, input, InputDelivery::QueueIfRunningElseStart)
             .await
-        {
-            Ok(DeliveryOutcome::Queued { .. }) => Ok(PromptSubmission::Handled {
-                message: "queued for next turn".into(),
-            }),
-            Ok(DeliveryOutcome::Started { turn_id }) => Ok(PromptSubmission::Accepted { turn_id }),
-            Ok(DeliveryOutcome::Injected { .. }) => Ok(PromptSubmission::Handled {
-                message: "injected into active turn".into(),
-            }),
-            Err(e) => Err(HandlerError::from(e)),
-        }
+            .map(super::prompt::prompt_submission_from_delivery)
+            .map_err(HandlerError::from)
     }
 
     /// 创建新的 Handler 实例。
@@ -364,20 +346,15 @@ impl CommandHandler {
     ) -> CommandHandle {
         let (tx, rx) = mpsc::channel(COMMAND_ACTOR_CAPACITY);
         let mut handler = Self::new(runtime, scheduler, event_bus, tx.clone());
-        let handle = tokio::spawn(async move {
+        crate::task_utils::spawn_traced("command_handler_actor", async move {
             handler.run(rx).await;
-        });
-        tokio::spawn(async move {
-            if let Err(e) = handle.await {
-                tracing::error!("command handler actor panicked: {e}");
-            }
         });
         CommandHandle { tx }
     }
 
     /// Actor 主循环：接收并处理消息直到通道关闭。
     ///
-    /// 内置空闲 recap 机制：turn 完成后若 3 分钟内无新 prompt 提交，
+    /// 内置空闲 recap 机制：turn 完成后若 5 分钟内无新 prompt 提交，
     /// 自动生成 recap 摘要推送给所有客户端。
     async fn run(&mut self, mut rx: mpsc::Receiver<CommandMessage>) {
         use std::time::Duration;

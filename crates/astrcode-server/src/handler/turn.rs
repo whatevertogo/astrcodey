@@ -40,7 +40,7 @@ impl CommandHandler {
             text: user_text,
             attachments,
         };
-        let crate::turn_scheduler::StartedExecution { turn_id, handle } = self
+        let StartedExecution { turn_id, handle } = self
             .scheduler
             .start_with_completion(sid.clone(), input)
             .await

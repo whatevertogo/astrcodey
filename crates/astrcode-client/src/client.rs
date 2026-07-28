@@ -87,7 +87,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     pub async fn submit_prompt(
         &self,
         text: &str,
-        attachments: Vec<astrcode_protocol::commands::Attachment>,
+        attachments: Vec<astrcode_core::message_attachment::MessageAttachment>,
     ) -> Result<(), ClientError> {
         let cmd = ClientCommand::SubmitPrompt {
             text: text.into(),
@@ -100,7 +100,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     /// 列出所有会话。
     ///
     /// 返回会话列表，每项包含会话 ID 等摘要信息。
-    pub async fn list_sessions(&self) -> Result<Vec<SessionListItem>, ClientError> {
+    pub async fn list_sessions(&self) -> Result<Vec<SessionListItemDto>, ClientError> {
         let cmd = ClientCommand::ListSessions;
         let notification = self
             .wait_for(&cmd, |n| {

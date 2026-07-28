@@ -45,8 +45,8 @@
 `continue_after_stop` 是 typed decision hook，必须为 `blocking`，可通过
 `options.max_per_turn` 声明每 turn 自动续跑上限；缺省与 `-1` 都表示不限制，非负数表示限制次数。
 
-`user_message_envelope` 与 `after_tool_results` 目前只支持进程内 Rust 扩展的
-`Registrar` typed API，不支持 s5r manifest 声明。
+`user_message_envelope` 目前只支持进程内 Rust 扩展的 `Registrar` typed API，
+不支持 s5r manifest 声明。
 
 ## extension.json（发现阶段）
 

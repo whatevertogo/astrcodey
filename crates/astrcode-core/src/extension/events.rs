@@ -40,11 +40,6 @@ pub enum ExtensionEvent {
     PreToolUse,
     /// 工具执行后。
     PostToolUse,
-    /// 工具执行失败后（is_error = true）。
-    ///
-    /// 在 `PostToolUse` 之后触发，仅当工具结果标记为错误时。
-    /// 扩展可以用于错误日志、告警通知、自动重试策略等。
-    PostToolUseFailure,
 
     // ── LLM 提供者钩子 ──
     /// LLM 请求发送前。
@@ -53,8 +48,6 @@ pub enum ExtensionEvent {
     AfterProviderResponse,
     /// LLM 自然结束（无 tool call）后是否再跑一个 agent step。
     ContinueAfterStop,
-    /// 一批工具结果落盘后是否继续 agent loop。
-    AfterToolResults,
 
     // ── 用户输入 ──
     /// 用户提交提示词。

@@ -7,11 +7,12 @@ use astrcode_support::event_fanout::EventFanout;
 
 use super::ServerRuntime;
 use crate::{
-    handler::CommandHandle, server_event_bus::ServerEventBus, turn_scheduler::TurnScheduler,
+    handler::{CommandHandle, CommandHandler},
+    server_event_bus::ServerEventBus,
+    turn_scheduler::TurnScheduler,
 };
 
 pub struct ServerSystem {
-    pub event_tx: Option<Arc<EventFanout<ClientNotification>>>,
     pub event_bus: Arc<ServerEventBus>,
     pub handler: CommandHandle,
     pub scheduler: Arc<TurnScheduler>,
@@ -43,14 +44,13 @@ fn spawn_server_system_with_legacy(
         .session_manager()
         .bind_event_bus(Arc::clone(&event_bus));
 
-    let handler = CommandHandle::spawn(
+    let handler = CommandHandler::spawn_actor(
         Arc::clone(runtime),
         Arc::clone(&scheduler),
         Arc::clone(&event_bus),
     );
 
     ServerSystem {
-        event_tx,
         event_bus,
         handler,
         scheduler,

@@ -174,10 +174,8 @@ handler 注册表。宿主在安装时校验 scope capability、路径格式、�
 | Hook | 用途 |
 |------|------|
 | `on_user_message_envelope(priority, handler)` | 用户消息写入 durable transcript 前的改写或阻断。 |
-| `on_after_tool_results(priority, handler)` | 工具结果批次已提交后的继续/结束决策。 |
 
-这两个 hook 不接收 `HookMode`，宿主总是按优先级同步等待。它们暂不暴露给磁盘
-s5r manifest；s5r manifest 中声明 `user_message_envelope` 或
-`after_tool_results` 会在握手校验阶段失败。
+该 hook 不接收 `HookMode`，宿主总是按优先级同步等待。它暂不暴露给磁盘
+s5r manifest；s5r manifest 中声明 `user_message_envelope` 会在握手校验阶段失败。
 
 协议细节见 [s5r-protocol.md](s5r-protocol.md)。

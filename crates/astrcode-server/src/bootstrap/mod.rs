@@ -151,8 +151,8 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 ///
 /// 启动顺序：
 /// 1. 加载并解析配置
-/// 2. 构建提示词组装器
-/// 3. 确定启动工作目录
+/// 2. 确定启动工作目录
+/// 3. 构建提示词组装器
 /// 4. 初始化存储后端
 /// 5. 创建空的扩展运行器
 /// 6. 组装 ConfigManager（内部构建 providers）
@@ -218,6 +218,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         )?;
     let config_manager = Arc::new(config_manager);
 
+    // 7. 创建 session manager、turn scheduler 与 session ops。
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&config_manager),
@@ -239,7 +240,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     });
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
 
-    // 7. 加载扩展。
+    // 8. 加载扩展。
     //
     // HostServices 从 runtime services 获取 LLM，并携带 session ops 给声明了
     // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。

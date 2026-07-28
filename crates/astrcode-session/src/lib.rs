@@ -38,15 +38,14 @@ pub use payload::{
     session_continued_from_compaction_payload, system_prompt_configured_payload,
 };
 pub use session::{
-    Session, SessionCreateParams, SessionError, emit_interrupted_tool_results,
-    emit_lifecycle_for_read_model, emit_turn_aborted_context,
+    InterruptedToolOutcome, Session, SessionCreateParams, SessionError,
+    emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
 };
 pub use session_extension_ports::SessionExtensionPorts;
 pub use session_runtime::{
     SessionModelBinding, SessionRuntimeState, ToolApprovalResolveError, ToolUiResponseResolveError,
 };
 pub use session_runtime_services::{SessionHostServices, SessionRuntimeServices};
-pub use tool_exec::interrupted_tool_result;
 pub use tool_registry::ToolRegistry;
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::{TurnHandle, TurnShutdownHandle};

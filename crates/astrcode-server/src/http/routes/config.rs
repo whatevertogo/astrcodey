@@ -51,11 +51,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                 .iter()
                 .map(|m| ModelDto {
                     id: m.id.clone(),
-                    max_tokens: m.max_tokens,
-                    context_limit: m.context_limit,
                     model_options: m.model_options.as_ref().map(|o| ModelOptionsDto {
-                        reasoning: o.reasoning,
-                        thinking_level: o.thinking_level.map(Into::into),
                         thinking: o.thinking.clone().map(Into::into),
                     }),
                     thinking: m
@@ -93,7 +89,6 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
         active_model: raw.active_model.clone(),
         active_small_profile: raw.active_small_profile.clone(),
         active_small_model: raw.active_small_model,
-        extension_states: effective.extensions.extension_states.clone(),
         approval_mode: effective.agent.approval_mode.into(),
         profiles,
         warning: None,

@@ -314,11 +314,11 @@ mod tests {
         },
         event::EventPayload,
         extension::{
-            AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
-            CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
-            ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
-            PostToolUseResult, PreToolUseContext, PreToolUseResult, ProviderContext, ProviderEvent,
-            ProviderResult, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
+            ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
+            PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
+            ProviderContext, ProviderEvent, ProviderResult, UserMessageEnvelopeContext,
+            UserMessageEnvelopeResult,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
@@ -610,8 +610,6 @@ mod tests {
             Ok(CompactResult::Allow)
         }
 
-        async fn emit_post_tool_use_failure(&self, _ctx: PostToolUseFailureContext) {}
-
         async fn emit_continue_after_stop(
             &self,
             _ctx: ContinueAfterStopContext,
@@ -624,13 +622,6 @@ mod tests {
             _ctx: UserMessageEnvelopeContext,
         ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
             Ok(UserMessageEnvelopeResult::Allow)
-        }
-
-        async fn emit_after_tool_results(
-            &self,
-            _ctx: AfterToolResultsContext,
-        ) -> Result<AfterToolResultsResult, ExtensionError> {
-            Ok(AfterToolResultsResult::Continue)
         }
 
         async fn emit_lifecycle(
@@ -661,6 +652,7 @@ mod tests {
             session_id: session.id().to_string(),
             working_dir: shared.working_dir.clone(),
             model: shared.model_selection(),
+            call_id: "call-1".into(),
             tool_name: "any".into(),
             tool_input: serde_json::json!({}),
             approval_mode: shared.approval_mode,

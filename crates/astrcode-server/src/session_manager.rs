@@ -225,8 +225,6 @@ impl SessionManager {
         self.emit_session_shutdown(session_id).await?;
         self.event_store.delete_session(session_id).await?;
         self.cleanup_session_resources(session_id);
-        // 清理本 session 关联的持久化终端。
-        // 已通过 SessionResourceCleanup trait 注入，见 TerminalCleanup。
         Ok(())
     }
 

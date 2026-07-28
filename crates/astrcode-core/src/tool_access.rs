@@ -73,7 +73,7 @@ impl ResourceAccess {
 }
 
 /// 将路径转为用于冲突判定的词法字符串（不访问文件系统）。
-pub fn path_to_access_string(path: &Path) -> String {
+fn path_to_access_string(path: &Path) -> String {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

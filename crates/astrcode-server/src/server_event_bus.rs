@@ -142,10 +142,6 @@ impl ServerEventBus {
     }
 
     pub fn attach(self: &Arc<Self>, session: &Session) {
-        self.attach_client_fanout(session);
-    }
-
-    fn attach_client_fanout(self: &Arc<Self>, session: &Session) {
         let session_id = session.id().clone();
         if !self.attached.lock().insert(session_id) {
             return;
@@ -292,7 +288,9 @@ pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, O
         | EventPayload::ToolCallRequested { tool_name, .. } => {
             Some((Phase::CallingTool, Some(tool_name.clone())))
         },
-        EventPayload::ToolCallCompleted { .. } => Some((Phase::Thinking, None)),
+        EventPayload::ToolCallCompleted { .. }
+        | EventPayload::ToolCallFailed { .. }
+        | EventPayload::ToolCallCancelled { .. } => Some((Phase::Thinking, None)),
         EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
             Some((Phase::Idle, None))
         },

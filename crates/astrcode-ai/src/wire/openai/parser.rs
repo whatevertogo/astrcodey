@@ -13,26 +13,6 @@ use crate::{
     stream_decoder::clean_json_fragment,
 };
 
-// ─── ChatAccumulator trait ──────────────────────────────────────────────
-
-/// Chat Completions / Responses 流的内容累积器。
-///
-/// 每个提供商可以实现自己的累积策略（标准 OpenAI、Kimi 内联令牌等），
-/// HTTP/SSE 基础设施通过此 trait 做静态分发。
-pub(crate) trait ChatAccumulator: Default + Send + Sync + 'static {
-    fn ingest_chat_completion(
-        &mut self,
-        event: &serde_json::Value,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-    );
-    fn ingest_responses(&mut self, event: &serde_json::Value, tx: &mpsc::UnboundedSender<LlmEvent>);
-    fn done_sent(&self) -> bool;
-    fn finish_reason(&self) -> Option<&str>;
-    fn mark_done(&mut self);
-    /// 发射所有已开始但尚未发射 `ToolCallCompleted` 的工具调用完成事件。
-    fn emit_pending_tool_completions(&mut self, tx: &mpsc::UnboundedSender<LlmEvent>);
-}
-
 // ─── StandardAccumulator ────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -194,8 +174,8 @@ impl StandardAccumulator {
     }
 }
 
-impl ChatAccumulator for StandardAccumulator {
-    fn ingest_chat_completion(
+impl StandardAccumulator {
+    pub(crate) fn ingest_chat_completion(
         &mut self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
@@ -257,7 +237,7 @@ impl ChatAccumulator for StandardAccumulator {
         }
     }
 
-    fn ingest_responses(
+    pub(crate) fn ingest_responses(
         &mut self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<LlmEvent>,
@@ -402,7 +382,7 @@ impl ChatAccumulator for StandardAccumulator {
         }
     }
 
-    fn done_sent(&self) -> bool {
+    pub(crate) fn done_sent(&self) -> bool {
         self.done_sent
     }
 
@@ -444,7 +424,7 @@ impl ChatAccumulator for StandardAccumulator {
 
 pub(crate) fn process_sse_line(
     line: &str,
-    accumulator: &mut impl ChatAccumulator,
+    accumulator: &mut StandardAccumulator,
     api_mode: OpenAiApiMode,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) {
@@ -465,7 +445,7 @@ pub(crate) fn process_sse_line(
 }
 
 pub(crate) fn emit_done_once(
-    accumulator: &mut impl ChatAccumulator,
+    accumulator: &mut StandardAccumulator,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) {
     if accumulator.done_sent() {
@@ -479,7 +459,7 @@ pub(crate) fn emit_done_once(
 
 fn process_sse_data(
     data: &str,
-    accumulator: &mut impl ChatAccumulator,
+    accumulator: &mut StandardAccumulator,
     api_mode: OpenAiApiMode,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) {
@@ -510,7 +490,7 @@ fn process_sse_data(
 
 fn ingest_sse_event(
     event: &serde_json::Value,
-    accumulator: &mut impl ChatAccumulator,
+    accumulator: &mut StandardAccumulator,
     api_mode: OpenAiApiMode,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) {
@@ -527,7 +507,7 @@ fn ingest_sse_event(
 
 fn emit_stream_error(
     event: &serde_json::Value,
-    accumulator: &mut impl ChatAccumulator,
+    accumulator: &mut StandardAccumulator,
     tx: &mpsc::UnboundedSender<LlmEvent>,
 ) -> bool {
     if !is_stream_error_event(event) {

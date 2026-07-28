@@ -910,23 +910,6 @@ impl ExtensionRunner {
         }
     }
 
-    /// PostToolUseFailure 通知型钩子分发。
-    pub async fn emit_post_tool_use_failure(&self, ctx: PostToolUseFailureContext) {
-        let index = self.load_index();
-
-        for handler in &index.post_tool_use_failure {
-            match tokio::time::timeout(self.timeout, handler.handle(ctx.clone())).await {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "post tool use failure handler failed");
-                },
-                Err(_) => {
-                    tracing::warn!("post tool use failure handler timed out");
-                },
-            }
-        }
-    }
-
     /// LLM 自然结束（无 tool call）后询问扩展是否再跑一个 step。
     ///
     /// 按优先级降序；首个返回 [`ContinueAfterStopResult::ContinueOneStep`] 的 blocking
@@ -995,29 +978,6 @@ impl ExtensionRunner {
         } else {
             Ok(UserMessageEnvelopeResult::Allow)
         }
-    }
-
-    /// 一批工具结果落盘后的继续/结束决策。
-    pub async fn emit_after_tool_results(
-        &self,
-        ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError> {
-        let index = self.load_index();
-        for (extension_id, handler) in &index.after_tool_results {
-            let result = self
-                .run_recorded_blocking_hook(
-                    extension_id,
-                    "after_tool_results",
-                    handler.handle(ctx.clone()),
-                )
-                .await?;
-
-            if let AfterToolResultsResult::EndTurn { reason } = result {
-                return Ok(AfterToolResultsResult::EndTurn { reason });
-            }
-        }
-
-        Ok(AfterToolResultsResult::Continue)
     }
 
     /// 通用生命周期事件分发。
@@ -1140,10 +1100,6 @@ impl TurnHooks for ExtensionRunner {
         ExtensionRunner::emit_compact(self, event, ctx).await
     }
 
-    async fn emit_post_tool_use_failure(&self, ctx: PostToolUseFailureContext) {
-        ExtensionRunner::emit_post_tool_use_failure(self, ctx).await;
-    }
-
     async fn emit_continue_after_stop(
         &self,
         ctx: ContinueAfterStopContext,
@@ -1156,13 +1112,6 @@ impl TurnHooks for ExtensionRunner {
         ctx: UserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         ExtensionRunner::emit_user_message_envelope(self, ctx).await
-    }
-
-    async fn emit_after_tool_results(
-        &self,
-        ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError> {
-        ExtensionRunner::emit_after_tool_results(self, ctx).await
     }
 
     async fn emit_lifecycle(

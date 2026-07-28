@@ -13,7 +13,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use patch::ApplyPatchTool;
 pub use read::ReadFileTool;
-pub(crate) use shared::{run_blocking, tool_call_id};
+pub(crate) use shared::run_blocking;
 pub use write::WriteFileTool;
 
 #[cfg(test)]

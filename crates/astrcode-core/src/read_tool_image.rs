@@ -5,9 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// read 工具内联图片载荷的 `type` 判别值。
-pub const READ_TOOL_INLINE_IMAGE_TYPE: &str = "image";
-
 /// read 工具内联载荷；当前仅 [`Self::Image`]，扩展新 variant 会强制更新消费方 match。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -54,7 +51,7 @@ mod tests {
         let payload = ReadToolInlinePayload::image("image/png", "aGVsbG8=");
         let json = payload.to_content_string().expect("serialize");
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse json");
-        assert_eq!(value["type"], READ_TOOL_INLINE_IMAGE_TYPE);
+        assert_eq!(value["type"], "image");
         assert_eq!(value["mediaType"], "image/png");
         assert_eq!(value["data"], "aGVsbG8=");
     }

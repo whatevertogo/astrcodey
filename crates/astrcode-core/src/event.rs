@@ -20,7 +20,7 @@ use crate::{
 ///
 /// v2 wire format 将事件事实放入 `payload` 子对象，顶层只保留 envelope。
 /// 该常量用于测试与插件动态载荷的保留字文档；新增顶层字段请同步更新。
-pub const EVENT_ENVELOPE_KEYS: &[&str] =
+pub(crate) const EVENT_ENVELOPE_KEYS: &[&str] =
     &["seq", "id", "session_id", "turn_id", "timestamp", "payload"];
 
 /// 会话的执行阶段。
@@ -309,10 +309,10 @@ pub enum EventPayload {
         detail: Option<String>,
     },
 
-    /// 工具调用进入等待用户交互阶段（durable；在 `ToolCallCompleted` 之前写入）。
+    /// 工具调用进入等待用户交互阶段（durable；在工具终态之前写入）。
     ///
     /// 用于 askUser 等 Approval UI：execute 已返回 `awaiting_user_input`，
-    /// turn 阻塞等待用户提交后才写入 `ToolCallCompleted`。
+    /// turn 阻塞等待用户提交后才写入工具终态事件。
     ToolCallInteractionPending {
         call_id: ToolCallId,
         /// 工具结果正文（如 `{"status":"awaiting_user_input",...}`）。
@@ -329,6 +329,47 @@ pub enum EventPayload {
         tool_name: String,
         /// 工具执行结果。
         result: ToolResult,
+        /// 原始调用参数的折叠摘要文本。
+        #[serde(default)]
+        arguments: String,
+        /// 原始调用参数的 JSON 值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
+    },
+
+    /// 工具执行或编排失败。
+    ToolCallFailed {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 提供给用户和模型的失败说明。
+        error: String,
+        /// 失败附带的结构化元数据。
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
+        /// 工具执行耗时（毫秒）；准备阶段失败时为空。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// 原始调用参数的折叠摘要文本。
+        #[serde(default)]
+        arguments: String,
+        /// 原始调用参数的 JSON 值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
+    },
+
+    /// 工具调用被显式取消。
+    ToolCallCancelled {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 取消原因。
+        reason: String,
+        /// 取消前已执行的耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         /// 原始调用参数的折叠摘要文本。
         #[serde(default)]
         arguments: String,
@@ -705,7 +746,6 @@ mod tests {
                 call_id: "c1".into(),
                 tool_name: "shell".into(),
                 result: ToolResult {
-                    call_id: "c1".into(),
                     content: "ok".into(),
                     is_error: false,
                     error: None,
@@ -1020,13 +1060,29 @@ mod tests {
                 call_id: "c".into(),
                 tool_name: "t".into(),
                 result: ToolResult {
-                    call_id: "c".into(),
                     content: "ok".into(),
                     is_error: false,
                     error: None,
                     metadata: BTreeMap::new(),
                     duration_ms: Some(10),
                 },
+                arguments: String::new(),
+                arguments_json: None,
+            },
+            EventPayload::ToolCallFailed {
+                call_id: "c".into(),
+                tool_name: "t".into(),
+                error: "failed".into(),
+                metadata: BTreeMap::new(),
+                duration_ms: Some(10),
+                arguments: String::new(),
+                arguments_json: None,
+            },
+            EventPayload::ToolCallCancelled {
+                call_id: "c".into(),
+                tool_name: "t".into(),
+                reason: "cancelled".into(),
+                duration_ms: Some(10),
                 arguments: String::new(),
                 arguments_json: None,
             },

@@ -33,13 +33,12 @@ pub fn create_provider(
     max_tokens: Option<u32>,
     context_limit: Option<usize>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let instance = provider_catalog::ProviderInstance::resolve(
+    provider_catalog::build_provider(
         provider_kind,
         wire_format,
         config,
         model_id,
         max_tokens,
         context_limit,
-    );
-    provider_catalog::build_provider(instance)
+    )
 }

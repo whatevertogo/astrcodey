@@ -8,12 +8,9 @@ impl From<TurnScheduleError> for HandlerError {
         match error {
             TurnScheduleError::TurnAlreadyRunning => HandlerError::TurnAlreadyRunning,
             TurnScheduleError::NoActiveTurn => HandlerError::NoActiveTurn,
-            TurnScheduleError::QueueFull { max } => {
-                HandlerError::InvalidRequest(format!("pending input queue is full ({max} items)"))
+            TurnScheduleError::QueueFull { .. } | TurnScheduleError::InputTooLarge { .. } => {
+                HandlerError::InvalidRequest(error.to_string())
             },
-            TurnScheduleError::InputTooLarge { actual, max } => HandlerError::InvalidRequest(
-                format!("prompt text is too large ({actual} bytes, max {max} bytes)"),
-            ),
             TurnScheduleError::SessionNotFound(msg) => HandlerError::SessionNotFound(msg),
             TurnScheduleError::SessionManager(e) => HandlerError::SessionManager(e),
             TurnScheduleError::Session(e) => HandlerError::Session(e),

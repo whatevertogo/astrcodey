@@ -181,7 +181,6 @@ async fn read_file_reports_text_pagination_metadata() {
         .await
         .expect("read should execute");
 
-    assert_eq!(result.call_id, "read-page");
     assert!(!result.is_error, "{result:?}");
     assert_eq!(result.metadata["totalLines"], serde_json::json!(3));
     assert_eq!(result.metadata["shownLines"], serde_json::json!(1));
@@ -223,7 +222,6 @@ async fn read_file_reads_persisted_tool_result_path() {
         .await
         .expect("read should read persisted result");
 
-    assert_eq!(result.call_id, "read-result");
     assert!(result.content.starts_with("cde"));
     assert!(result.content.contains("charOffset=5"));
     assert_eq!(result.metadata["path"], serde_json::json!(artifact_path));

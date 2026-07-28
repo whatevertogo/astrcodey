@@ -15,61 +15,39 @@ use crate::providers::{
     anthropic::AnthropicProvider, openai::StandardProvider as OpenAiStandardProvider,
 };
 
-pub(crate) struct ProviderInstance {
-    provider_kind: String,
+pub(crate) fn build_provider(
+    provider_kind: &str,
     wire_format: ProviderWireFormat,
     config: LlmClientConfig,
     model_id: String,
     max_tokens: Option<u32>,
     context_limit: Option<usize>,
-}
-
-impl ProviderInstance {
-    pub(crate) fn resolve(
-        provider_kind: &str,
-        wire_format: ProviderWireFormat,
-        config: LlmClientConfig,
-        model_id: String,
-        max_tokens: Option<u32>,
-        context_limit: Option<usize>,
-    ) -> Self {
-        tracing::debug!(
-            provider_kind,
-            ?wire_format,
-            "resolved LLM provider wire format"
-        );
-        Self {
-            provider_kind: provider_kind.to_string(),
-            wire_format,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    tracing::debug!(
+        provider_kind,
+        ?wire_format,
+        "resolved LLM provider wire format"
+    );
+    let provider: Arc<dyn LlmProvider> = match wire_format {
+        ProviderWireFormat::AnthropicMessages => Arc::new(AnthropicProvider::new(
             config,
             model_id,
             max_tokens,
             context_limit,
-        }
-    }
-}
-
-pub(crate) fn build_provider(instance: ProviderInstance) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let provider: Arc<dyn LlmProvider> = match instance.wire_format {
-        ProviderWireFormat::AnthropicMessages => Arc::new(AnthropicProvider::new(
-            instance.config,
-            instance.model_id,
-            instance.max_tokens,
-            instance.context_limit,
         )?),
         ProviderWireFormat::OpenAiChatCompletions | ProviderWireFormat::OpenAiResponses => {
-            let api_mode = instance.wire_format.openai_api_mode().ok_or_else(|| {
+            let api_mode = wire_format.openai_api_mode().ok_or_else(|| {
                 LlmError::Unsupported(format!(
                     "provider '{}' does not use an OpenAI wire format",
-                    instance.provider_kind
+                    provider_kind
                 ))
             })?;
             Arc::new(OpenAiStandardProvider::new(
-                instance.config,
+                config,
                 api_mode,
-                instance.model_id,
-                instance.max_tokens,
-                instance.context_limit,
+                model_id,
+                max_tokens,
+                context_limit,
             )?)
         },
     };

@@ -690,7 +690,6 @@ fn text_result(
     metadata: BTreeMap<String, Value>,
 ) -> ToolResult {
     ToolResult {
-        call_id: String::new(),
         content,
         is_error,
         error,

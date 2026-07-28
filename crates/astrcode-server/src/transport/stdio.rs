@@ -13,7 +13,7 @@ use astrcode_protocol::{
 use astrcode_support::channel_policy::STDIO_MESSAGE_CAPACITY;
 use tokio::sync::mpsc;
 
-use super::{ServerTransport, TransportError};
+use super::TransportError;
 
 /// stdio transport: JSON-RPC 2.0 over stdin/stdout.
 pub struct StdioTransport {
@@ -112,11 +112,9 @@ impl StdioTransport {
     pub fn initialize_request_id(&self) -> Option<u64> {
         self.initialize_request_id
     }
-}
 
-#[async_trait::async_trait]
-impl ServerTransport for StdioTransport {
-    async fn read_command(&mut self) -> Option<ClientCommand> {
+    /// Read the next command from the transport.
+    pub async fn read_command(&mut self) -> Option<ClientCommand> {
         while let Some(message) = self.rx.recv().await {
             match message {
                 StdioMessage::Command { command, .. } => return Some(command),
@@ -126,7 +124,8 @@ impl ServerTransport for StdioTransport {
         None
     }
 
-    async fn initialize(&mut self) -> Result<InitializeRequest, TransportError> {
+    /// Initialize the connection with version negotiation.
+    pub async fn initialize(&mut self) -> Result<InitializeRequest, TransportError> {
         while let Some(message) = self.rx.recv().await {
             match message {
                 StdioMessage::Initialize { id, request } => {

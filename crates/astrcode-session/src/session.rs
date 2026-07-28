@@ -28,7 +28,6 @@ use crate::{
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
     session_tools::{BaseToolRegistryKey, ToolCacheLookup},
-    tool_exec::interrupted_tool_result,
     turn_context::{SharedTurnContext, TurnError},
     turn_handle::TurnHandle,
     turn_runner::{RunTurnResult, TurnLoop, run_turn},
@@ -1052,7 +1051,14 @@ impl Session {
 async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
     match session.read_model().await {
         Ok(state) => {
-            if let Err(e) = emit_interrupted_tool_results(session, &state, Some(turn_id)).await {
+            if let Err(e) = emit_interrupted_tool_results(
+                session,
+                &state,
+                Some(turn_id),
+                InterruptedToolOutcome::Cancelled,
+            )
+            .await
+            {
                 tracing::warn!(
                     session_id = %session.id(),
                     turn_id = %turn_id,
@@ -1081,30 +1087,40 @@ async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptedToolOutcome {
+    Failed,
+    Cancelled,
+}
+
 pub async fn emit_interrupted_tool_results(
     session: &Session,
     state: &SessionReadModel,
     turn_id: Option<&TurnId>,
+    outcome: InterruptedToolOutcome,
 ) -> Result<usize, SessionError> {
     let mut emitted = 0;
     for pending in state.tool_calls_needing_interruption() {
-        let result = interrupted_tool_result(
-            pending.call_id.clone(),
-            &pending.tool_name,
-            std::time::Duration::ZERO,
-        );
-        session
-            .emit_durable(
-                turn_id,
-                EventPayload::ToolCallCompleted {
-                    call_id: pending.call_id.into(),
-                    tool_name: pending.tool_name,
-                    result,
-                    arguments: String::new(),
-                    arguments_json: None,
-                },
-            )
-            .await?;
+        let payload = match outcome {
+            InterruptedToolOutcome::Failed => EventPayload::ToolCallFailed {
+                call_id: pending.call_id.into(),
+                tool_name: pending.tool_name,
+                error: "tool execution interrupted before completion".into(),
+                metadata: Default::default(),
+                duration_ms: None,
+                arguments: String::new(),
+                arguments_json: None,
+            },
+            InterruptedToolOutcome::Cancelled => EventPayload::ToolCallCancelled {
+                call_id: pending.call_id.into(),
+                tool_name: pending.tool_name,
+                reason: "turn aborted".into(),
+                duration_ms: None,
+                arguments: String::new(),
+                arguments_json: None,
+            },
+        };
+        session.emit_durable(turn_id, payload).await?;
         emitted += 1;
     }
     Ok(emitted)
