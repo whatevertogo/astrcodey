@@ -5,13 +5,14 @@ use std::collections::HashMap;
 use astrcode_extension_sdk::{
     extension::{
         CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
-        EXTENSION_TOOL_OUTCOME_KEY, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-        ExtensionEventDecl, ExtensionHttpResponse, ExtensionToolOutcome, HookMode, HookResult,
-        PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult, SlashCommand,
+        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionEventDecl,
+        ExtensionHttpResponse, HookMode, HookResult, PostToolUseResult, PreToolUseResult,
+        PromptContributions, ProviderResult, SlashCommand,
     },
     s5r::{effects::HandlerResult, event_from_name, mode_from_name},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::extension_manifest::{ExtensionRegistration, manifest_types::ManifestHook};
@@ -136,15 +137,13 @@ pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionEr
                 .data_value("outcome")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let outcome: ExtensionToolOutcome = serde_json::from_value(raw)
+            let outcome: ExtensionToolOutput = serde_json::from_value(raw)
                 .map_err(|e| ExtensionError::Internal(format!("parse tool_outcome: {e}")))?;
-            let outcome_json = serde_json::to_value(&outcome)
-                .map_err(|e| ExtensionError::Internal(format!("serialize outcome: {e}")))?;
-            Ok(ToolResult::text(
-                String::new(),
-                false,
-                tool_metadata([(EXTENSION_TOOL_OUTCOME_KEY, outcome_json)]),
-            ))
+            match outcome {
+                ExtensionToolOutput::Text { content, is_error } => {
+                    Ok(ToolResult::text(content, is_error, Default::default()))
+                },
+            }
         },
         _ => {
             let content = resp
@@ -155,6 +154,12 @@ pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionEr
             Ok(ToolResult::text(content, false, Default::default()))
         },
     }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExtensionToolOutput {
+    Text { content: String, is_error: bool },
 }
 
 pub fn parse_command_result(

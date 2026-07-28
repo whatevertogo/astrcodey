@@ -104,7 +104,7 @@ impl ToolHandler for EchoToolHandler {
         arguments: serde_json::Value,
         working_dir: &str,
         _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != "extensionEcho" {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -118,7 +118,8 @@ impl ToolHandler for EchoToolHandler {
             error: None,
             metadata: BTreeMap::new(),
             duration_ms: None,
-        })
+        }
+        .into())
     }
 }
 
@@ -170,7 +171,7 @@ impl ToolHandler for FixedToolHandler {
         _arguments: serde_json::Value,
         _working_dir: &str,
         _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != self.tool_name {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -180,7 +181,8 @@ impl ToolHandler for FixedToolHandler {
             error: None,
             metadata: BTreeMap::new(),
             duration_ms: None,
-        })
+        }
+        .into())
     }
 }
 

@@ -167,7 +167,7 @@ impl ToolHandler for WebSearchToolHandler {
         arguments: serde_json::Value,
         _working_dir: &str,
         _ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != config::WEB_SEARCH_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -204,13 +204,15 @@ impl ToolHandler for WebSearchToolHandler {
                         (UI_RENDER_METADATA_KEY, json!(ui_render)),
                         (UI_SUMMARY_METADATA_KEY, json!(ui_summary)),
                     ]),
-                ))
+                )
+                .into())
             },
             Err(error) => Ok(ToolResult::text(
                 error.to_string(),
                 true,
                 tool_metadata([("query", json!(query)), ("error", json!(error.to_string()))]),
-            )),
+            )
+            .into()),
         }
     }
 }
@@ -227,7 +229,7 @@ impl ToolHandler for FetchUrlToolHandler {
         arguments: serde_json::Value,
         _working_dir: &str,
         _ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != config::FETCH_URL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -271,7 +273,8 @@ impl ToolHandler for FetchUrlToolHandler {
                         (UI_RENDER_METADATA_KEY, json!(ui_render)),
                         (UI_SUMMARY_METADATA_KEY, json!(ui_summary)),
                     ]),
-                ))
+                )
+                .into())
             },
             Ok(FetchUrlResult::Redirect(outcome)) => Ok(ToolResult::text(
                 render_fetch_redirect(&outcome),
@@ -283,7 +286,8 @@ impl ToolHandler for FetchUrlToolHandler {
                     ("durationMs", json!(outcome.duration_ms)),
                     ("prompt", json!(prompt)),
                 ]),
-            )),
+            )
+            .into()),
             Err(error) => Ok(ToolResult::text(
                 error.to_string(),
                 true,
@@ -292,7 +296,8 @@ impl ToolHandler for FetchUrlToolHandler {
                     ("prompt", json!(prompt)),
                     ("error", json!(error.to_string())),
                 ]),
-            )),
+            )
+            .into()),
         }
     }
 }

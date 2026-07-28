@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{config::ModelSelection, event::EventPayload, tool_access::ResourceAccess};
+use astrcode_core::{config::ModelSelection, event::EventPayload, tool::access::ResourceAccess};
 use astrcode_extension_sdk::{
     extension::{
         CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
@@ -234,12 +234,13 @@ impl ToolHandler for StateProbeTool {
         _arguments: serde_json::Value,
         _working_dir: &str,
         ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
             ctx.capabilities.paths.store_dir.is_some().to_string(),
             false,
             Default::default(),
-        ))
+        )
+        .into())
     }
 }
 
@@ -360,12 +361,13 @@ impl ToolHandler for SmallModelProbeTool {
         _arguments: serde_json::Value,
         _working_dir: &str,
         ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
             ctx.capabilities.models.small.is_some().to_string(),
             false,
             Default::default(),
-        ))
+        )
+        .into())
     }
 }
 
@@ -769,7 +771,7 @@ async fn timed_out_discovery_returns_partial_catalog_with_static_tools() {
             .any(|tool| tool.definition().name == "stateProbe")
     );
     assert_eq!(snapshot.diagnostics.len(), 1);
-    assert_eq!(snapshot.diagnostics[0].extension_id, "slow-discovery");
+    assert_eq!(snapshot.diagnostics[0].source, "slow-discovery");
 }
 
 #[tokio::test]

@@ -6,12 +6,9 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::{
-    tool::{
-        ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolPromptMetadata, ToolResult,
-    },
-    tool_access::ResourceAccess,
+use astrcode_core::tool::{
+    ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
+    ToolExecutionResult, ToolPromptMetadata, access::ResourceAccess,
 };
 use serde_json::Value;
 
@@ -75,7 +72,7 @@ impl ToolRegistry {
         name: &str,
         mut args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         match self.tools.get(name) {
             Some(entry) => {
                 if entry.definition.strict {
@@ -112,6 +109,47 @@ impl ToolRegistry {
 
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
         self.tools.get(name).map(|entry| entry.definition.clone())
+    }
+
+    pub(crate) fn find_prompt_metadata(&self, name: &str) -> Option<ToolPromptMetadata> {
+        self.tools
+            .get(name)
+            .and_then(|entry| entry.prompt_metadata.clone())
+    }
+
+    pub(crate) fn validate_discovered_tools(
+        &self,
+        source_tool: &str,
+        gate: Option<&str>,
+        tool_names: &[String],
+    ) -> Result<(), String> {
+        if tool_names.is_empty() {
+            return Ok(());
+        }
+        let Some(gate) = gate else {
+            return Err(format!(
+                "tool `{source_tool}` returned discovered tools without declaring a discovery gate"
+            ));
+        };
+
+        let mut seen = HashSet::new();
+        for name in tool_names {
+            let group = self
+                .find_prompt_metadata(name)
+                .and_then(|metadata| metadata.deferred_discovery_group);
+            if group.as_deref() != Some(gate) {
+                return Err(format!(
+                    "tool `{source_tool}` cannot activate unknown or unauthorized deferred tool \
+                     `{name}`"
+                ));
+            }
+            if !seen.insert(name) {
+                return Err(format!(
+                    "tool `{source_tool}` returned duplicate deferred tool `{name}`"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn filtered(&self, selection: &SessionToolSelection) -> Self {
@@ -238,6 +276,7 @@ mod tests {
     use super::*;
 
     struct NamedTool(&'static str, ExecutionMode);
+    struct DeferredTool(&'static str, &'static str);
 
     #[async_trait::async_trait]
     impl Tool for NamedTool {
@@ -260,7 +299,33 @@ mod tests {
             &self,
             _arguments: serde_json::Value,
             _ctx: &ToolExecutionContext,
-        ) -> Result<ToolResult, ToolError> {
+        ) -> Result<ToolExecutionResult, ToolError> {
+            unreachable!("registry tests do not execute tools")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for DeferredTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.0.into(),
+                description: String::new(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: false,
+                origin: astrcode_core::tool::ToolOrigin::Extension,
+                execution_mode: ExecutionMode::Sequential,
+            }
+        }
+
+        fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
+            Some(ToolPromptMetadata::default().deferred_discovery_group(self.1))
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            _ctx: &ToolExecutionContext,
+        ) -> Result<ToolExecutionResult, ToolError> {
             unreachable!("registry tests do not execute tools")
         }
     }
@@ -279,6 +344,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, ["alpha", "middle", "zeta"]);
+    }
+
+    #[test]
+    fn discovered_tools_must_be_unique_known_members_of_the_declared_gate() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DeferredTool("mcp_a", "mcp")));
+        registry.register(Arc::new(DeferredTool("other_a", "other")));
+
+        let cases = [
+            (Some("mcp"), vec!["mcp_a".into()], true),
+            (None, vec!["mcp_a".into()], false),
+            (Some("mcp"), vec!["missing".into()], false),
+            (Some("mcp"), vec!["other_a".into()], false),
+            (Some("mcp"), vec!["mcp_a".into(), "mcp_a".into()], false),
+        ];
+        for (gate, names, expected) in cases {
+            assert_eq!(
+                registry
+                    .validate_discovered_tools("discover", gate, &names)
+                    .is_ok(),
+                expected,
+                "gate={gate:?}, names={names:?}"
+            );
+        }
     }
 
     #[test]

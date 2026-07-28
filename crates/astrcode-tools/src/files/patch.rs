@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_core::tool::{access::ResourceAccess, *};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -135,12 +135,14 @@ impl Tool for ApplyPatchTool {
         &self,
         args: serde_json::Value,
         _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: ApplyPatchArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid patch args: {e}")))?;
         let working_dir = self.working_dir.clone();
-        run_blocking(move || execute_patch_sync(working_dir, args, started_at)).await
+        run_blocking(move || execute_patch_sync(working_dir, args, started_at))
+            .await
+            .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {

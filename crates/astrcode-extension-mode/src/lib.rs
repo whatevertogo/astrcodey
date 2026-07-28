@@ -149,21 +149,24 @@ impl ToolHandler for ModeToolHandler {
         arguments: serde_json::Value,
         _working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let base = require_session_base(&ctx.capabilities.paths.store_dir)?;
         let mode_root = store::mode_dir_from_base(&base);
         let plan_dir = store::plan_dir_from_base(&base);
 
         match tool_name {
-            SWITCH_MODE_TOOL_NAME => Ok(
-                match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let meta = tool_metadata([("error", json!(&error))]);
-                        ToolResult::text(error, true, meta)
-                    },
-                },
-            ),
+            SWITCH_MODE_TOOL_NAME => {
+                Ok(
+                    match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let meta = tool_metadata([("error", json!(&error))]);
+                            ToolResult::text(error, true, meta)
+                        },
+                    }
+                    .into(),
+                )
+            },
             UPSERT_PLAN_TOOL_NAME => {
                 Ok(match handle_upsert_plan(arguments, &mode_root, &plan_dir) {
                     Ok(result) => result,
@@ -171,7 +174,8 @@ impl ToolHandler for ModeToolHandler {
                         let meta = tool_metadata([("error", json!(&error))]);
                         ToolResult::text(error, true, meta)
                     },
-                })
+                }
+                .into())
             },
             crate::ask_user::ASK_USER_TOOL_NAME => Ok(match handle_ask_user(arguments) {
                 Ok(result) => result,
@@ -179,7 +183,8 @@ impl ToolHandler for ModeToolHandler {
                     let meta = tool_metadata([("error", json!(&error))]);
                     ToolResult::text(error, true, meta)
                 },
-            }),
+            }
+            .into()),
             _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
     }

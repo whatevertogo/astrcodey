@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_core::tool::{access::ResourceAccess, *};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
@@ -80,7 +80,7 @@ impl Tool for EditFileTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: EditFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
@@ -98,6 +98,7 @@ impl Tool for EditFileTool {
             )
         })
         .await
+        .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {

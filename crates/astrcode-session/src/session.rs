@@ -15,7 +15,7 @@ use astrcode_extension_sdk::{
     extension::{
         ExtensionError, ExtensionEvent, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
     },
-    runtime_ports::RuntimeSnapshotState,
+    runtime_ports::{RuntimeSnapshotState, ToolCatalogScope},
 };
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
@@ -447,6 +447,7 @@ struct PreparedRuntimeSnapshot {
 struct ResolvedToolRegistrySnapshot {
     registry: Arc<ToolRegistry>,
     base_key: BaseToolRegistryKey,
+    runtime_generation: u64,
 }
 
 async fn retry_runtime_snapshot(
@@ -465,6 +466,10 @@ impl Session {
         tool_selection: Option<&SessionToolSelection>,
         stability: &mut RuntimeStabilityBudget,
     ) -> Result<ResolvedToolRegistrySnapshot, SessionError> {
+        let scope = ToolCatalogScope {
+            working_dir: working_dir.to_owned(),
+            session_store_dir: self.session_store_dir().await,
+        };
         loop {
             let RuntimeSnapshotState::Stable(runtime_generation) =
                 self.runtime_services.runtime_snapshot_state()
@@ -472,12 +477,16 @@ impl Session {
                 retry_runtime_snapshot(stability).await?;
                 continue;
             };
-            let base_key = self.base_tool_registry_key(working_dir, runtime_generation);
+            let base_key = self.base_tool_registry_key(&scope);
             let cache = self.runtime.tool_registry_cache();
             let build = match cache.lookup_or_reserve(&base_key) {
                 ToolCacheLookup::Hit(base_registry) => {
                     let registry = cache.filtered_registry(base_registry, tool_selection);
-                    return Ok(ResolvedToolRegistrySnapshot { registry, base_key });
+                    return Ok(ResolvedToolRegistrySnapshot {
+                        registry,
+                        base_key,
+                        runtime_generation,
+                    });
                 },
                 ToolCacheLookup::Wait(mut notification) => {
                     let _ = notification.changed().await;
@@ -488,33 +497,33 @@ impl Session {
 
             let built = crate::session_setup::build_base_tool_registry(
                 self.runtime_services.tool_catalog(),
-                self.runtime_services.tool_packs(),
-                working_dir,
+                &scope,
             )
             .await?;
             let base_registry = Arc::new(built.registry);
             if self.runtime_services.runtime_snapshot_state()
                 == RuntimeSnapshotState::Stable(runtime_generation)
-                && self.runtime_services.tool_pack_versions() == base_key.tool_pack_versions
+                && self.runtime_services.tool_catalog().revision() == base_key.catalog_revision
+                && built.revision == base_key.catalog_revision
             {
                 build.complete(Arc::clone(&base_registry), built.completeness);
                 let registry = cache.filtered_registry(base_registry, tool_selection);
-                return Ok(ResolvedToolRegistrySnapshot { registry, base_key });
+                return Ok(ResolvedToolRegistrySnapshot {
+                    registry,
+                    base_key,
+                    runtime_generation,
+                });
             }
             drop(build);
             retry_runtime_snapshot(stability).await?;
         }
     }
 
-    fn base_tool_registry_key(
-        &self,
-        working_dir: &str,
-        runtime_generation: u64,
-    ) -> BaseToolRegistryKey {
+    fn base_tool_registry_key(&self, scope: &ToolCatalogScope) -> BaseToolRegistryKey {
         BaseToolRegistryKey {
-            runtime_generation,
-            tool_pack_versions: self.runtime_services.tool_pack_versions(),
-            working_dir: working_dir.to_owned(),
+            catalog_revision: self.runtime_services.tool_catalog().revision(),
+            working_dir: scope.working_dir.clone(),
+            session_store_dir: scope.session_store_dir.clone(),
         }
     }
 
@@ -588,9 +597,9 @@ impl Session {
                 )
                 .await?;
             if self.runtime_services.runtime_snapshot_state()
-                == RuntimeSnapshotState::Stable(tool_snapshot.base_key.runtime_generation)
-                && self.runtime_services.tool_pack_versions()
-                    == tool_snapshot.base_key.tool_pack_versions
+                == RuntimeSnapshotState::Stable(tool_snapshot.runtime_generation)
+                && self.runtime_services.tool_catalog().revision()
+                    == tool_snapshot.base_key.catalog_revision
             {
                 return Ok(PreparedRuntimeSnapshot {
                     registry: tool_snapshot.registry,

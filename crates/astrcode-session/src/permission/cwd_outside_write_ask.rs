@@ -1,4 +1,4 @@
-use astrcode_core::{permission::ApprovalMode, tool_access::ResourceAccess};
+use astrcode_core::{permission::ApprovalMode, tool::access::ResourceAccess};
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 

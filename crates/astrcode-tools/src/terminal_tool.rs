@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_core::tool::{access::ResourceAccess, *};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
@@ -272,7 +272,7 @@ impl Tool for TerminalTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = std::time::Instant::now();
         let args: TerminalArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid terminal args: {e}")))?;
@@ -302,7 +302,8 @@ impl Tool for TerminalTool {
             error: None,
             metadata,
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        })
+        }
+        .into())
     }
 }
 

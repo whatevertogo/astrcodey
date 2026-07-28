@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::tool::SessionToolSelection;
 use astrcode_extension_sdk::runtime_ports::ToolCatalogCompleteness;
@@ -11,9 +11,9 @@ const PARTIAL_CATALOG_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct BaseToolRegistryKey {
-    pub(crate) runtime_generation: u64,
-    pub(crate) tool_pack_versions: Vec<u64>,
+    pub(crate) catalog_revision: u64,
     pub(crate) working_dir: String,
+    pub(crate) session_store_dir: Option<PathBuf>,
 }
 
 struct CachedBaseToolRegistry {
@@ -171,9 +171,9 @@ mod tests {
 
     fn cache_key() -> BaseToolRegistryKey {
         BaseToolRegistryKey {
-            runtime_generation: 1,
-            tool_pack_versions: Vec::new(),
+            catalog_revision: 1,
             working_dir: ".".into(),
+            session_store_dir: None,
         }
     }
 

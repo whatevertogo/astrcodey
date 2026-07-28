@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use astrcode_core::{
-    permission::ApprovalMode, tool::SessionToolSelection, tool_access::ResourceAccess,
+    permission::ApprovalMode,
+    tool::{SessionToolSelection, access::ResourceAccess},
 };
 
 /// 权限策略的评估结果。

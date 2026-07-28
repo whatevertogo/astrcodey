@@ -42,13 +42,13 @@ pub mod session_query;
 pub mod tool {
     pub use astrcode_core::{
         tool::{
-            CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY,
-            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionOperations, SessionStatus,
-            SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities,
-            ToolDefinition, ToolError, ToolExecutionContext, ToolFileServices, ToolHostServices,
-            ToolModelAccess, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-            ToolSessionControl, ToolSessionPaths, tool_metadata,
+            CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, SessionAccess,
+            SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
+            SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool,
+            ToolCallScope, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
+            ToolExecutionResult, ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin,
+            ToolPromptMetadata, ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths,
+            tool_metadata,
         },
         tool_ui::{
             TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire, ToolInputUiWire,
@@ -110,7 +110,6 @@ pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
 pub mod session_inspect;
-pub mod tool_pack;
 pub mod worker;
 
 /// Namespaced persistence locations for session-scoped extension data.

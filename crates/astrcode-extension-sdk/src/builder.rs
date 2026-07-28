@@ -4,7 +4,10 @@ use std::{future::Future, sync::Arc};
 
 use crate::{
     extension::{ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError, ToolHandler},
-    tool::{ExecutionMode, ExtensionToolContext, ToolDefinition, ToolOrigin, ToolResult},
+    tool::{
+        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolExecutionResult, ToolOrigin,
+        ToolResult,
+    },
 };
 
 // ─── handler_fn ──────────────────────────────────────────────────────────
@@ -47,8 +50,10 @@ where
         arguments: serde_json::Value,
         working_dir: &str,
         ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
-        (self.f)(tool_name, arguments, working_dir, ctx).await
+    ) -> Result<ToolExecutionResult, ExtensionError> {
+        (self.f)(tool_name, arguments, working_dir, ctx)
+            .await
+            .map(Into::into)
     }
 }
 
@@ -210,8 +215,10 @@ mod tests {
             .execute("test", serde_json::json!({}), "", &ctx)
             .await
             .unwrap();
+        let (result, discovered) = result.into_parts();
         assert_eq!(result.content, "ok");
         assert!(!result.is_error);
+        assert!(discovered.is_empty());
     }
 
     #[tokio::test]

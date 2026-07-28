@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use astrcode_core::{
     llm::LlmMessage,
-    tool::{DEFERRED_TOOLS_METADATA_KEY, ToolDefinition, ToolPromptMetadata, ToolResult},
+    tool::{ToolDefinition, ToolPromptMetadata},
 };
 
 #[derive(Clone)]
@@ -78,19 +78,6 @@ pub fn activate_deferred_tools(
         }
     }
     changed
-}
-
-pub fn discovered_deferred_tool_names(result: &ToolResult) -> Vec<String> {
-    result
-        .metadata
-        .get(DEFERRED_TOOLS_METADATA_KEY)
-        .and_then(|value| value.get("matches"))
-        .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|match_value| match_value.as_str())
-        .map(str::to_string)
-        .collect()
 }
 
 pub fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
@@ -188,9 +175,7 @@ fn is_deferred_gate(tool: &ToolSnapshot) -> bool {
 mod tests {
     use std::collections::HashSet;
 
-    use astrcode_core::tool::{
-        DEFERRED_TOOLS_METADATA_KEY, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolResult,
-    };
+    use astrcode_core::tool::{ToolDefinition, ToolOrigin, ToolPromptMetadata};
 
     use super::*;
 
@@ -287,36 +272,6 @@ mod tests {
         active.insert("a".into());
         let changed = activate_deferred_tools(&mut active, &tools, vec!["a".into()]);
         assert!(!changed);
-    }
-
-    #[test]
-    fn discovered_names_extracts_matches() {
-        let result = ToolResult {
-            content: String::new(),
-            is_error: false,
-            error: None,
-            metadata: vec![(
-                DEFERRED_TOOLS_METADATA_KEY.into(),
-                serde_json::json!({ "matches": ["tool_a", "tool_b"] }),
-            )]
-            .into_iter()
-            .collect(),
-            duration_ms: None,
-        };
-        let names = discovered_deferred_tool_names(&result);
-        assert_eq!(names, vec!["tool_a", "tool_b"]);
-    }
-
-    #[test]
-    fn discovered_names_empty_when_no_metadata() {
-        let result = ToolResult {
-            content: String::new(),
-            is_error: false,
-            error: None,
-            metadata: Default::default(),
-            duration_ms: None,
-        };
-        assert!(discovered_deferred_tool_names(&result).is_empty());
     }
 
     #[test]

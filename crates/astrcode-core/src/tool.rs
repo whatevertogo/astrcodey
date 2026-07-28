@@ -18,10 +18,12 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{event::EventPayload, tool_access::ResourceAccess, types::SessionId};
+use crate::{event::EventPayload, types::SessionId};
 
+pub mod access;
 pub mod selection;
 
+use access::ResourceAccess;
 pub use selection::SessionToolSelection;
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
@@ -30,7 +32,7 @@ pub use selection::SessionToolSelection;
 pub enum ToolOrigin {
     /// First-party core tools required by the coding runtime.
     Builtin,
-    /// First-party tool packs shipped with the server but not fundamental to the tool trait.
+    /// First-party tools shipped with the server but not fundamental to the tool trait.
     Bundled,
     /// Tools contributed by user or project extensions.
     Extension,
@@ -171,8 +173,6 @@ impl ToolPromptMetadata {
     }
 }
 
-pub const DEFERRED_TOOLS_METADATA_KEY: &str = "deferredTools";
-
 /// 工具执行结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -277,6 +277,64 @@ impl ToolResult {
     pub fn with_duration_ms(mut self, duration_ms: Option<u64>) -> Self {
         self.duration_ms = duration_ms;
         self
+    }
+}
+
+/// 工具执行的显式终态。
+///
+/// 工具发现是唯一会改变当前 turn 工具可见性的执行结果。普通 metadata
+/// 只用于展示和诊断，运行时不得据此改变控制流。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolExecutionResult {
+    Completed(ToolResult),
+    CompletedWithDiscoveredTools {
+        result: ToolResult,
+        tool_names: Vec<String>,
+    },
+}
+
+impl ToolExecutionResult {
+    pub fn completed(result: ToolResult) -> Self {
+        Self::Completed(result)
+    }
+
+    pub fn completed_with_discovered_tools(result: ToolResult, tool_names: Vec<String>) -> Self {
+        Self::CompletedWithDiscoveredTools { result, tool_names }
+    }
+
+    pub fn result_mut(&mut self) -> &mut ToolResult {
+        match self {
+            Self::Completed(result) | Self::CompletedWithDiscoveredTools { result, .. } => result,
+        }
+    }
+
+    pub fn into_parts(self) -> (ToolResult, Vec<String>) {
+        match self {
+            Self::Completed(result) => (result, Vec::new()),
+            Self::CompletedWithDiscoveredTools { result, tool_names } => (result, tool_names),
+        }
+    }
+}
+
+impl From<ToolResult> for ToolExecutionResult {
+    fn from(result: ToolResult) -> Self {
+        Self::Completed(result)
+    }
+}
+
+impl std::ops::Deref for ToolExecutionResult {
+    type Target = ToolResult;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Completed(result) | Self::CompletedWithDiscoveredTools { result, .. } => result,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ToolExecutionResult {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.result_mut()
     }
 }
 
@@ -890,7 +948,7 @@ pub trait Tool: Send + Sync {
         self.definition().execution_mode
     }
 
-    /// 声明本次调用将访问的资源，供冲突图调度器判定并行性。
+    /// 声明本次调用将访问的资源，供权限策略判断。
     ///
     /// 默认保守返回 [`ResourceAccess::All`]。内置工具应基于参数动态解析路径。
     fn resource_accesses(
@@ -921,5 +979,5 @@ pub trait Tool: Send + Sync {
         &self,
         arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError>;
+    ) -> Result<ToolExecutionResult, ToolError>;
 }

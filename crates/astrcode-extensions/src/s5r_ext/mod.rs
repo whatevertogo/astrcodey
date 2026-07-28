@@ -18,7 +18,7 @@ use astrcode_extension_sdk::{
         ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
     },
     s5r::event_to_name,
-    tool::{ToolDefinition, ToolResult},
+    tool::ToolDefinition,
 };
 pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
@@ -355,7 +355,7 @@ impl ToolHandler for S5rToolHandler {
         arguments: Value,
         working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let invoke_ctx = InvokeContext {
             extension_id: self.extension_id.clone(),
             session_id: Some(ctx.scope.session_id.to_string()),
@@ -384,7 +384,7 @@ impl ToolHandler for S5rToolHandler {
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx)
             .await?;
-        parse_tool_result(&resp)
+        parse_tool_result(&resp).map(Into::into)
     }
 }
 

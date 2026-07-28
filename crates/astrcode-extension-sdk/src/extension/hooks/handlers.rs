@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     extension::ExtensionToolContext,
-    tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
+    tool::{ToolDefinition, ToolExecutionResult, ToolPromptMetadata},
 };
 
 /// PreToolUse 钩子处理器。
@@ -86,7 +86,7 @@ pub trait ToolHandler: Send + Sync {
         arguments: serde_json::Value,
         working_dir: &str,
         ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError>;
+    ) -> Result<ToolExecutionResult, ExtensionError>;
 }
 
 /// 命令执行处理器。

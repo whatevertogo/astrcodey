@@ -107,7 +107,7 @@ impl ToolHandler for SkillToolHandler {
         arguments: Value,
         working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != SKILL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -117,7 +117,8 @@ impl ToolHandler for SkillToolHandler {
             working_dir,
             ctx.scope.session_id.as_str(),
             &self.shared,
-        ))
+        )
+        .into())
     }
 }
 

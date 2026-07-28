@@ -15,11 +15,10 @@ use astrcode_core::{
     context::{ContextAssembler, NoopPostCompactEnricher, PostCompactEnricher},
     llm::LlmProvider,
     prompt::{PromptFileProvider, PromptProvider},
-    tool_pack::ToolPack,
 };
 use astrcode_extension_sdk::runtime_ports::{
-    PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState, SessionOperationsProvider,
-    ToolCatalogProvider, TurnHooks,
+    NoopRuntimePorts, PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
+    SessionOperationsProvider, ToolCatalogProvider, TurnHooks,
 };
 
 use crate::SessionExtensionPorts;
@@ -34,7 +33,7 @@ pub struct SessionRuntimeServices {
     prompt_provider: Arc<dyn PromptProvider>,
     prompt_file_provider: Arc<dyn PromptFileProvider>,
     effective_config: ArcSwap<EffectiveConfig>,
-    tool_packs: Arc<[Arc<dyn ToolPack>]>,
+    tool_catalog: Arc<dyn ToolCatalogProvider>,
 }
 
 pub struct SessionHostServices {
@@ -43,13 +42,13 @@ pub struct SessionHostServices {
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
     prompt_provider: Arc<dyn PromptProvider>,
     prompt_file_provider: Arc<dyn PromptFileProvider>,
-    tool_packs: Vec<Arc<dyn ToolPack>>,
+    tool_catalog: Arc<dyn ToolCatalogProvider>,
 }
 
 impl SessionHostServices {
     /// Build a minimal embeddable host surface from the required core services.
     ///
-    /// Extension runtime, post-compact enrichment, and tool packs default to
+    /// Extension runtime, post-compact enrichment, and tool catalog default to
     /// no-op/empty implementations so alternate hosts can opt in explicitly.
     pub fn embedded(
         context_assembler: Arc<dyn ContextAssembler>,
@@ -62,14 +61,13 @@ impl SessionHostServices {
             post_compact_enricher: Arc::new(NoopPostCompactEnricher),
             prompt_provider,
             prompt_file_provider,
-            tool_packs: Vec::new(),
+            tool_catalog: Arc::new(NoopRuntimePorts),
         }
     }
 
     pub fn with_extension_adapter<T>(mut self, adapter: Arc<T>) -> Self
     where
-        T: ToolCatalogProvider
-            + PromptContributor
+        T: PromptContributor
             + RuntimeSnapshotProvider
             + TurnHooks
             + SessionOperationsProvider
@@ -92,8 +90,8 @@ impl SessionHostServices {
         self
     }
 
-    pub fn with_tool_packs(mut self, tool_packs: Vec<Arc<dyn ToolPack>>) -> Self {
-        self.tool_packs = tool_packs;
+    pub fn with_tool_catalog(mut self, tool_catalog: Arc<dyn ToolCatalogProvider>) -> Self {
+        self.tool_catalog = tool_catalog;
         self
     }
 }
@@ -120,7 +118,7 @@ impl SessionRuntimeServices {
             prompt_provider: host_services.prompt_provider,
             prompt_file_provider: host_services.prompt_file_provider,
             effective_config: ArcSwap::from_pointee(effective_config),
-            tool_packs: Arc::from(host_services.tool_packs),
+            tool_catalog: host_services.tool_catalog,
         }
     }
 
@@ -146,7 +144,7 @@ impl SessionRuntimeServices {
     }
 
     pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
-        self.extension_ports.tool_catalog()
+        self.tool_catalog.as_ref()
     }
 
     pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
@@ -183,17 +181,6 @@ impl SessionRuntimeServices {
 
     pub(crate) fn prompt_file_provider(&self) -> &dyn PromptFileProvider {
         self.prompt_file_provider.as_ref()
-    }
-
-    pub(crate) fn tool_packs(&self) -> &[Arc<dyn ToolPack>] {
-        &self.tool_packs
-    }
-
-    pub(crate) fn tool_pack_versions(&self) -> Vec<u64> {
-        self.tool_packs
-            .iter()
-            .map(|pack| pack.snapshot_version())
-            .collect()
     }
 
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {

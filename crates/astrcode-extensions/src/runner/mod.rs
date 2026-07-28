@@ -11,7 +11,8 @@ use astrcode_extension_sdk::{
     extension::*,
     runtime_ports::{
         PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-        SessionOperationsProvider, ToolCatalogProvider, ToolCatalogSnapshot, TurnHooks,
+        SessionOperationsProvider, ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot,
+        TurnHooks,
     },
     tool::SessionOperations,
     trusted::ExtensionHostServices,
@@ -1135,8 +1136,16 @@ impl PromptContributor for ExtensionRunner {
 
 #[async_trait::async_trait]
 impl ToolCatalogProvider for ExtensionRunner {
-    async fn tool_catalog(&self, working_dir: &str) -> Result<ToolCatalogSnapshot, ExtensionError> {
-        Ok(ExtensionRunner::tool_catalog_snapshot_typed(self, working_dir).await)
+    fn revision(&self) -> u64 {
+        self.runtime_publication.lock().generation
+    }
+
+    async fn tool_catalog(
+        &self,
+        scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
+        let revision = self.revision();
+        Ok(ExtensionRunner::tool_catalog_snapshot_for_scope(self, scope, revision).await)
     }
 }
 

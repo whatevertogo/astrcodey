@@ -78,7 +78,7 @@ impl ToolHandler for TodoWriteToolHandler {
         arguments: Value,
         _working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -96,7 +96,8 @@ impl ToolHandler for TodoWriteToolHandler {
                 let meta = tool_metadata([("error", json!(&error))]);
                 ToolResult::text(error, true, meta)
             },
-        })
+        }
+        .into())
     }
 }
 

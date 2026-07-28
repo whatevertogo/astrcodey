@@ -24,8 +24,11 @@ use astrcode_core::{
     types::new_session_id,
 };
 use astrcode_extension_sdk::{
-    runtime_ports::{NoopRuntimePorts, ToolCatalogProvider, ToolCatalogSnapshot},
-    tool_pack::{ToolPack, ToolPackScope},
+    extension::ExtensionError,
+    runtime_ports::{
+        CompositeToolCatalogProvider, NoopRuntimePorts, ToolCatalogProvider, ToolCatalogScope,
+        ToolCatalogSnapshot,
+    },
 };
 use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionHostServices,
@@ -113,10 +116,10 @@ impl PromptFileProvider for EmbeddedPromptFiles {
     }
 }
 
-struct EmbeddedToolPack {
+struct EmbeddedHostToolCatalog {
     calls: Arc<AtomicUsize>,
 }
-struct EmbeddedToolCatalog {
+struct EmbeddedExtensionToolCatalog {
     calls: Arc<AtomicUsize>,
 }
 struct EmbeddedEchoTool {
@@ -124,33 +127,51 @@ struct EmbeddedEchoTool {
     origin: ToolOrigin,
 }
 
-impl ToolPack for EmbeddedToolPack {
-    fn tools(&self, _scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
+#[async_trait::async_trait]
+impl ToolCatalogProvider for EmbeddedHostToolCatalog {
+    fn revision(&self) -> u64 {
+        1
+    }
+
+    async fn tool_catalog(
+        &self,
+        _scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        vec![Arc::new(EmbeddedEchoTool {
-            name: "embeddedEcho",
-            origin: ToolOrigin::Sdk,
-        })]
+        Ok(ToolCatalogSnapshot::complete(
+            self.revision(),
+            vec![Arc::new(EmbeddedEchoTool {
+                name: "embeddedEcho",
+                origin: ToolOrigin::Sdk,
+            })],
+        ))
     }
 }
 
 #[async_trait::async_trait]
-impl ToolCatalogProvider for EmbeddedToolCatalog {
+impl ToolCatalogProvider for EmbeddedExtensionToolCatalog {
+    fn revision(&self) -> u64 {
+        2
+    }
+
     async fn tool_catalog(
         &self,
-        _working_dir: &str,
-    ) -> Result<ToolCatalogSnapshot, astrcode_extension_sdk::extension::ExtensionError> {
+        _scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ToolCatalogSnapshot::complete(vec![
-            Arc::new(EmbeddedEchoTool {
-                name: "embeddedEcho",
-                origin: ToolOrigin::Extension,
-            }),
-            Arc::new(EmbeddedEchoTool {
-                name: "catalogOnly",
-                origin: ToolOrigin::Extension,
-            }),
-        ]))
+        Ok(ToolCatalogSnapshot::complete(
+            self.revision(),
+            vec![
+                Arc::new(EmbeddedEchoTool {
+                    name: "embeddedEcho",
+                    origin: ToolOrigin::Extension,
+                }),
+                Arc::new(EmbeddedEchoTool {
+                    name: "catalogOnly",
+                    origin: ToolOrigin::Extension,
+                }),
+            ],
+        ))
     }
 }
 
@@ -171,12 +192,8 @@ impl Tool for EmbeddedEchoTool {
         &self,
         _arguments: serde_json::Value,
         _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
-        Ok(ToolResult::text(
-            "embedded".into(),
-            false,
-            Default::default(),
-        ))
+    ) -> Result<astrcode_core::tool::ToolExecutionResult, ToolError> {
+        Ok(ToolResult::text("embedded".into(), false, Default::default()).into())
     }
 }
 
@@ -184,17 +201,26 @@ impl Tool for EmbeddedEchoTool {
 async fn embedded_host_initializes_session_with_custom_services() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(EmbeddedLlm);
-    let tool_pack_calls = Arc::new(AtomicUsize::new(0));
-    let tool_catalog_calls = Arc::new(AtomicUsize::new(0));
+    let host_catalog_calls = Arc::new(AtomicUsize::new(0));
+    let extension_catalog_calls = Arc::new(AtomicUsize::new(0));
     let noop = Arc::new(NoopRuntimePorts);
-    let extension_ports = SessionExtensionPorts::from_immutable_ports(
-        Arc::new(EmbeddedToolCatalog {
-            calls: Arc::clone(&tool_catalog_calls),
-        }),
-        noop.clone(),
-        noop.clone(),
-        noop,
-    );
+    let extension_ports =
+        SessionExtensionPorts::from_immutable_ports(noop.clone(), noop.clone(), noop);
+    let tool_catalog: Arc<dyn ToolCatalogProvider> =
+        Arc::new(CompositeToolCatalogProvider::new(vec![
+            (
+                "extensions".into(),
+                Arc::new(EmbeddedExtensionToolCatalog {
+                    calls: Arc::clone(&extension_catalog_calls),
+                }),
+            ),
+            (
+                "host".into(),
+                Arc::new(EmbeddedHostToolCatalog {
+                    calls: Arc::clone(&host_catalog_calls),
+                }),
+            ),
+        ]));
     let caps = Arc::new(SessionRuntimeServices::new(
         Arc::clone(&llm),
         llm,
@@ -207,9 +233,7 @@ async fn embedded_host_initializes_session_with_custom_services() {
             Arc::new(EmbeddedPromptFiles),
         )
         .with_extension_ports(extension_ports)
-        .with_tool_packs(vec![Arc::new(EmbeddedToolPack {
-            calls: Arc::clone(&tool_pack_calls),
-        })]),
+        .with_tool_catalog(tool_catalog),
     ));
     let runtime = Arc::new(SessionRuntimeState::new(
         caps.llm(),
@@ -237,8 +261,8 @@ async fn embedded_host_initializes_session_with_custom_services() {
     let registry = registry.unwrap();
     let cached_registry = cached_registry.unwrap();
     assert!(Arc::ptr_eq(&registry, &cached_registry));
-    assert_eq!(tool_pack_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(tool_catalog_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(host_catalog_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(extension_catalog_calls.load(Ordering::SeqCst), 1);
 
     session
         .initialize_runtime("memory://workspace")
@@ -267,8 +291,8 @@ async fn embedded_host_initializes_session_with_custom_services() {
             .collect::<Vec<_>>(),
         ["embeddedEcho"],
     );
-    assert_eq!(tool_pack_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(tool_catalog_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(host_catalog_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(extension_catalog_calls.load(Ordering::SeqCst), 1);
 
     let tool_names = registry
         .list_definitions()
@@ -279,7 +303,7 @@ async fn embedded_host_initializes_session_with_custom_services() {
     assert_eq!(
         registry.find_definition("embeddedEcho").unwrap().origin,
         ToolOrigin::Extension,
-        "extension tools must override host-pack tools with the same name",
+        "extension tools must override host tools with the same name",
     );
 
     let model = store.session_read_model(session.id()).await.unwrap();

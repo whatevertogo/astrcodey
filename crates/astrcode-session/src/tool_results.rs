@@ -3,8 +3,6 @@
 use astrcode_core::tool::ToolResult;
 use astrcode_storage::ToolResultArtifactRef;
 
-pub const PERSISTED_TOOL_RESULT_METADATA_KEY: &str = "persistedToolResult";
-
 /// 默认允许内联到 LLM history 的工具结果字节数。
 pub const DEFAULT_TOOL_RESULT_INLINE_LIMIT: usize = 50_000;
 
@@ -24,9 +22,6 @@ pub const MAX_TOOL_RESULTS_PER_MESSAGE_CHARS: usize = 200_000;
 /// 摘要中保留的预览字符数（与 Claude Code PREVIEW_SIZE_BYTES ≈ 2000 对齐）。
 pub const TOOL_RESULT_PREVIEW_CHARS: usize = 2_000;
 
-/// 持久化摘要正文的前缀，用于识别已是 artifact 引用的内容。
-const PERSISTED_SUMMARY_PREFIX: &str = "Tool result was persisted because it is large";
-
 /// 工具结果摘要预览。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultPreview {
@@ -41,19 +36,6 @@ pub fn should_persist_tool_result(content: &str, inline_limit: usize) -> bool {
     content.len() > inline_limit
 }
 
-/// 内容是否已是持久化 artifact 的 LLM Facing 摘要（避免二次 persist）。
-pub fn is_persisted_tool_result_summary(content: &str) -> bool {
-    content.starts_with(PERSISTED_SUMMARY_PREFIX)
-}
-
-/// 路径是否指向 session 的 tool-results artifact 文件。
-///
-/// 同时处理 `/`（POSIX）和 `\`（Windows）分隔符，确保跨平台一致。
-pub fn is_tool_result_artifact_path(path: &str) -> bool {
-    path.split(&['/', '\\'])
-        .any(|segment| segment == "tool-results")
-}
-
 /// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
 pub fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
     match tool_name {
@@ -66,27 +48,12 @@ pub fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
 
 /// 是否可以把结果自动替换为持久化 artifact 摘要。
 ///
-/// read 自身的结果、已经持久化的结果，以及读取 artifact 得到的内容都必须保持原样，
-/// 避免产生循环引用或重复写盘。
+/// read 自身的结果不自动持久化；是否已持久化由 session 私有提交状态判断。
 pub fn should_auto_persist_tool_result(tool_name: &str, result: &ToolResult) -> bool {
     let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
         return false;
     };
     should_persist_tool_result(&result.content, inline_limit)
-        && !result
-            .metadata
-            .contains_key(PERSISTED_TOOL_RESULT_METADATA_KEY)
-        && result
-            .metadata
-            .get("source")
-            .and_then(|value| value.as_str())
-            != Some("toolResultArtifact")
-        && !result
-            .metadata
-            .get("path")
-            .and_then(|value| value.as_str())
-            .is_some_and(is_tool_result_artifact_path)
-        && !is_persisted_tool_result_summary(&result.content)
 }
 
 /// 为大工具结果生成摘要预览。
@@ -127,8 +94,6 @@ pub fn persisted_tool_result_summary(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     #[test]
@@ -162,32 +127,28 @@ mod tests {
     }
 
     #[test]
-    fn auto_persist_eligibility_excludes_inline_and_artifact_results() {
+    fn auto_persist_eligibility_ignores_legacy_metadata_control_keys() {
         let large_content = "a".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
-        let metadata = |key: &str, value| BTreeMap::from([(key.into(), value)]);
         let cases = [
-            ("eligible", "example", BTreeMap::new(), true),
-            ("read result", "read", BTreeMap::new(), false),
+            ("eligible", "example", Default::default(), true),
+            ("read result", "read", Default::default(), false),
             (
-                "already persisted",
+                "legacy persisted key",
                 "example",
-                metadata(PERSISTED_TOOL_RESULT_METADATA_KEY, serde_json::json!(true)),
-                false,
+                std::collections::BTreeMap::from([(
+                    ["persistedTool", "Result"].concat(),
+                    serde_json::json!(true),
+                )]),
+                true,
             ),
             (
-                "artifact read",
+                "legacy artifact source",
                 "example",
-                metadata("source", serde_json::json!("toolResultArtifact")),
-                false,
-            ),
-            (
-                "artifact path",
-                "example",
-                metadata(
-                    "path",
-                    serde_json::json!("/sessions/1/tool-results/call-1.txt"),
-                ),
-                false,
+                std::collections::BTreeMap::from([(
+                    "source".into(),
+                    serde_json::json!("toolResultArtifact"),
+                )]),
+                true,
             ),
         ];
 
@@ -213,29 +174,6 @@ mod tests {
 
         assert_eq!(preview.content, "abc");
         assert!(preview.has_more);
-    }
-
-    #[test]
-    fn detects_persisted_summary_prefix() {
-        assert!(is_persisted_tool_result_summary(
-            "Tool result was persisted because it is large (999 bytes).\nFull output saved to: /x"
-        ));
-        assert!(!is_persisted_tool_result_summary(
-            "Tool result was truncated"
-        ));
-    }
-
-    #[test]
-    fn detects_tool_result_artifact_paths() {
-        assert!(is_tool_result_artifact_path(
-            r"C:\Users\me\.astrcode\projects\foo\sessions\abc\tool-results\shell-call-1.txt"
-        ));
-        assert!(is_tool_result_artifact_path(
-            "memory://session-1/tool-results/shell-call-1.txt"
-        ));
-        assert!(!is_tool_result_artifact_path(
-            r"C:\Users\me\projects\foo\src\main.rs"
-        ));
     }
 
     #[test]

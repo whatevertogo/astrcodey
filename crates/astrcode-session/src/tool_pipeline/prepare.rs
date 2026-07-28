@@ -2,8 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use astrcode_core::{
     permission::ApprovalSource,
-    tool::{ExecutionMode, ToolDefinition},
-    tool_access::ResourceAccess,
+    tool::{ExecutionMode, ToolDefinition, access::ResourceAccess},
 };
 use astrcode_extension_sdk::extension::{PreToolUseContext, PreToolUseResult};
 
@@ -49,6 +48,7 @@ impl ToolCalls {
                 tool_input: args,
                 raw_arguments: None,
                 mode: ExecutionMode::Sequential,
+                discovery_gate: None,
                 disposition: PreparedToolDisposition::Rejected { error: guidance },
             });
         }
@@ -125,6 +125,10 @@ impl ToolCalls {
             tool_input,
             raw_arguments: None,
             mode,
+            discovery_gate: self
+                .tool_registry
+                .find_prompt_metadata(&tc.name)
+                .and_then(|metadata| metadata.deferred_discovery_gate),
             disposition,
         })
     }
@@ -258,6 +262,7 @@ fn reject_malformed_tool_call(
         tool_input: serde_json::Value::String(tool_call.arguments.clone()),
         raw_arguments: Some(tool_call.arguments.clone()),
         mode: ExecutionMode::Sequential,
+        discovery_gate: None,
         disposition: PreparedToolDisposition::Rejected { error: message },
     }
 }

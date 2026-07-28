@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::tool::ToolResult;
 use astrcode_extension_sdk::extension::{PostToolUseContext, PostToolUseResult};
 
 use super::{
@@ -11,14 +10,15 @@ use super::{
     events::{finish_tool_call, missing_tool_outcome, tool_result_for_output},
 };
 use crate::{
-    deferred_tools::discovered_deferred_tool_names,
     llm_request_history::committed_tool_result_content_len,
     tool_results::{
-        MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, PERSISTED_TOOL_RESULT_METADATA_KEY,
-        TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary, should_auto_persist_tool_result,
-        tool_result_preview,
+        MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS,
+        persisted_tool_result_summary, should_auto_persist_tool_result, tool_result_preview,
     },
-    tool_types::{PreparedToolDisposition, PreparedToolInvocation, ToolExecutionOutcome},
+    tool_types::{
+        PreparedToolDisposition, PreparedToolInvocation, ToolExecutionOutcome,
+        ToolResultArtifactState, ToolResultCommit,
+    },
     turn_context::TurnError,
     turn_publish::TurnEvents,
     turn_stages::TurnState,
@@ -49,6 +49,7 @@ impl ToolCalls {
             let mut outcome = outcomes
                 .remove(&call.index)
                 .unwrap_or_else(|| missing_tool_outcome(call));
+            self.validate_discovered_tools(call, &mut outcome);
             self.apply_post_tool_use(call, &mut outcome).await?;
 
             if !matches!(&call.disposition, PreparedToolDisposition::ReuseSameStep) {
@@ -76,7 +77,7 @@ impl ToolCalls {
         let mut discovered_tools = Vec::new();
         for item in pending {
             if let ToolExecutionOutcome::Completed(result) = &item.outcome {
-                discovered_tools.extend(discovered_deferred_tool_names(result));
+                discovered_tools.extend(result.discovered_tool_names.clone());
             }
             let (arguments, arguments_json) = crate::tool_types::tool_call_completion_arguments(
                 item.call.tool_input.clone(),
@@ -120,7 +121,7 @@ impl ToolCalls {
             call_id: call.call_id.clone().into(),
             tool_name: call.name.clone(),
             tool_input: call.tool_input.clone(),
-            tool_result: result.clone(),
+            tool_result: result.result.clone(),
             event_tx: self.turn.shared.turn_event_tx(),
             extension_event_sink: None,
             session_store_dir: self.turn.shared.session_store_dir.clone(),
@@ -142,14 +143,36 @@ impl ToolCalls {
         Ok(())
     }
 
+    fn validate_discovered_tools(
+        &self,
+        call: &PreparedToolInvocation,
+        outcome: &mut ToolExecutionOutcome,
+    ) {
+        let ToolExecutionOutcome::Completed(commit) = outcome else {
+            return;
+        };
+        if commit.discovered_tool_names.is_empty() {
+            return;
+        }
+        if let Err(error) = self.tool_registry.validate_discovered_tools(
+            &call.name,
+            call.discovery_gate.as_deref(),
+            &commit.discovered_tool_names,
+        ) {
+            *outcome = ToolExecutionOutcome::failed(error);
+        }
+    }
+
     /// 检查工具结果是否超过 inline 限制，超限则持久化到磁盘并替换为摘要引用。
     async fn persist_large_tool_result(
         &self,
         tool_name: &str,
         call_id: &str,
-        result: &mut ToolResult,
+        result: &mut ToolResultCommit,
     ) -> Result<(), TurnError> {
-        if !should_auto_persist_tool_result(tool_name, result) {
+        if result.artifact_state == ToolResultArtifactState::Persisted
+            || !should_auto_persist_tool_result(tool_name, &result.result)
+        {
             return Ok(());
         }
         self.persist_tool_result(tool_name, call_id, result).await
@@ -160,7 +183,7 @@ impl ToolCalls {
         &self,
         tool_name: &str,
         call_id: &str,
-        result: &mut ToolResult,
+        result: &mut ToolResultCommit,
     ) -> Result<(), TurnError> {
         let original_content = result.content.clone();
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
@@ -172,14 +195,16 @@ impl ToolCalls {
                 content: original_content,
             })
             .await?;
-        result.metadata.insert(
-            PERSISTED_TOOL_RESULT_METADATA_KEY.into(),
-            serde_json::json!({
-                "bytes": reference.bytes,
-                "path": &reference.path,
-            }),
-        );
+        result
+            .metadata
+            .insert("artifactBytes".into(), serde_json::json!(reference.bytes));
+        if let Some(path) = &reference.path {
+            result
+                .metadata
+                .insert("artifactPath".into(), serde_json::json!(path));
+        }
         result.content = persisted_tool_result_summary(&reference, &preview);
+        result.artifact_state = ToolResultArtifactState::Persisted;
         if result.is_error {
             result.error = Some(result.content.clone());
         }
@@ -212,7 +237,9 @@ impl ToolCalls {
                 let ToolExecutionOutcome::Completed(result) = &item.outcome else {
                     return None;
                 };
-                should_auto_persist_tool_result(&item.call.name, result).then_some(index)
+                (result.artifact_state == ToolResultArtifactState::Inline
+                    && should_auto_persist_tool_result(&item.call.name, &result.result))
+                .then_some(index)
             })
             .collect();
         candidates.sort_by(|left, right| {

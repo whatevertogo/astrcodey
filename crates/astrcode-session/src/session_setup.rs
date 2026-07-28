@@ -13,11 +13,12 @@ use astrcode_core::{
         SystemPromptInput,
     },
     tool::{ToolDefinition, ToolPromptMetadata},
-    tool_pack::{ToolPack, ToolPackScope},
 };
 use astrcode_extension_sdk::{
     extension::{ExtensionError, PromptBuildContext},
-    runtime_ports::{PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider},
+    runtime_ports::{
+        PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
+    },
 };
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 
@@ -26,6 +27,7 @@ use crate::{ToolRegistry, session::normalize_extra_system_prompt};
 pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
     pub completeness: ToolCatalogCompleteness,
+    pub revision: u64,
 }
 
 /// 构建一个工作目录绑定的工具表快照。
@@ -36,29 +38,20 @@ pub(crate) struct BuiltBaseToolRegistry {
 /// 不可变 registry，使工具边界变化不必重新执行动态工具发现。
 pub(crate) async fn build_base_tool_registry(
     tool_catalog: &dyn ToolCatalogProvider,
-    tool_packs: &[std::sync::Arc<dyn ToolPack>],
-    working_dir: &str,
+    scope: &ToolCatalogScope,
 ) -> Result<BuiltBaseToolRegistry, ExtensionError> {
     let mut tool_registry = ToolRegistry::new();
-    let scope = ToolPackScope { working_dir };
-
-    for pack in tool_packs {
-        for tool in pack.tools(&scope) {
-            tool_registry.register(tool);
-        }
-    }
-
-    // Extensions override host tool packs, and earlier registered extensions
-    // keep precedence over later registered extensions with the same tool name.
-    let catalog = tool_catalog.tool_catalog(working_dir).await?;
+    let catalog = tool_catalog.tool_catalog(scope).await?;
     for diagnostic in &catalog.diagnostics {
         tracing::warn!(
-            working_dir,
-            extension_id = diagnostic.extension_id,
-            error = diagnostic.message,
-            "extension tool catalog is partial"
+            working_dir = scope.working_dir,
+            source = diagnostic.source,
+            message = diagnostic.message,
+            "tool catalog diagnostic"
         );
     }
+    // Catalog tools are ordered from highest to lowest priority. Registering in
+    // reverse preserves the first provider's value on duplicate names.
     for tool in catalog.tools.into_iter().rev() {
         tool_registry.register(tool);
     }
@@ -66,6 +59,7 @@ pub(crate) async fn build_base_tool_registry(
     Ok(BuiltBaseToolRegistry {
         registry: tool_registry,
         completeness: catalog.completeness,
+        revision: catalog.revision,
     })
 }
 

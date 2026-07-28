@@ -196,7 +196,7 @@ impl ToolHandler for AgentToolHandler {
         arguments: serde_json::Value,
         working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != "agent" {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -314,7 +314,8 @@ impl ToolHandler for AgentToolHandler {
                     error: None,
                     metadata,
                     duration_ms: None,
-                })
+                }
+                .into())
             },
             astrcode_extension_sdk::tool::SubmitTurnResult::Backgrounded {
                 task_id,
@@ -335,7 +336,8 @@ impl ToolHandler for AgentToolHandler {
                     error: None,
                     metadata,
                     duration_ms: None,
-                })
+                }
+                .into())
             },
         }
     }

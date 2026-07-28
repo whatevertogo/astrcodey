@@ -15,8 +15,11 @@ use astrcode_core::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,
     },
-    tool_pack::{ToolPack, ToolPackScope},
     types::new_session_id,
+};
+use astrcode_extension_sdk::{
+    extension::ExtensionError,
+    runtime_ports::{ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot},
 };
 use astrcode_session::{
     Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
@@ -105,12 +108,23 @@ impl PromptFileProvider for EmbeddedPromptFiles {
     }
 }
 
-struct EmbeddedToolPack;
+struct EmbeddedToolCatalog;
 struct EmbeddedEchoTool;
 
-impl ToolPack for EmbeddedToolPack {
-    fn tools(&self, _scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(EmbeddedEchoTool)]
+#[async_trait::async_trait]
+impl ToolCatalogProvider for EmbeddedToolCatalog {
+    fn revision(&self) -> u64 {
+        1
+    }
+
+    async fn tool_catalog(
+        &self,
+        _scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
+        Ok(ToolCatalogSnapshot::complete(
+            self.revision(),
+            vec![Arc::new(EmbeddedEchoTool)],
+        ))
     }
 }
 
@@ -131,12 +145,8 @@ impl Tool for EmbeddedEchoTool {
         &self,
         _arguments: serde_json::Value,
         _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
-        Ok(ToolResult::text(
-            "embedded".into(),
-            false,
-            Default::default(),
-        ))
+    ) -> Result<astrcode_core::tool::ToolExecutionResult, ToolError> {
+        Ok(ToolResult::text("embedded".into(), false, Default::default()).into())
     }
 }
 
@@ -155,7 +165,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Arc::new(EmbeddedPromptProvider),
             Arc::new(EmbeddedPromptFiles),
         )
-        .with_tool_packs(vec![Arc::new(EmbeddedToolPack)]),
+        .with_tool_catalog(Arc::new(EmbeddedToolCatalog)),
     ));
     let runtime = Arc::new(SessionRuntimeState::new(
         runtime_services.llm(),
@@ -184,7 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
     if tool_names != vec!["embeddedEcho"] {
-        return Err(std::io::Error::other("embedded tool pack was not registered").into());
+        return Err(std::io::Error::other("embedded tool catalog was not registered").into());
     }
 
     let model = store.session_read_model(session.id()).await?;

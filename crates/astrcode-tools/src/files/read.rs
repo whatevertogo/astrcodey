@@ -5,10 +5,7 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{
-    tool::{ToolResultArtifactError, *},
-    tool_access::ResourceAccess,
-};
+use astrcode_core::tool::{ToolResultArtifactError, access::ResourceAccess, *};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
@@ -73,7 +70,7 @@ impl Tool for ReadFileTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
@@ -82,16 +79,16 @@ impl Tool for ReadFileTool {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
             {
-                return Ok(result);
+                return Ok(result.into());
             }
         }
         if !path.exists() {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
             {
-                return Ok(result);
+                return Ok(result.into());
             }
-            return Ok(not_found_result(started_at, &path));
+            return Ok(not_found_result(started_at, &path).into());
         }
 
         let file_observation_store = ctx.capabilities.files.observation_store.clone();
@@ -100,6 +97,7 @@ impl Tool for ReadFileTool {
             read_existing_file_sync(working_dir, args, file_observation_store, started_at)
         })
         .await
+        .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {

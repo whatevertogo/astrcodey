@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     deferred_tools::suggest_tool_alias,
     session::Session,
-    tool_types::{ExecutableToolInvocation, ToolExecutionOutcome},
+    tool_types::{ExecutableToolInvocation, ToolExecutionOutcome, ToolResultCommit},
 };
 use crate::ToolRegistry;
 
@@ -263,8 +263,9 @@ async fn execute_tool_call_blocking(
         result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => {
             match result {
                 Ok(mut result) => {
-                    result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
-                    ToolExecutionOutcome::Completed(result)
+                    result.result_mut().duration_ms =
+                        Some(started_at.elapsed().as_millis() as u64);
+                    ToolExecutionOutcome::Completed(ToolResultCommit::from_execution_result(result))
                 },
                 Err(error) => tool_failure_outcome(&tool_name, error, started_at.elapsed()),
             }

@@ -212,9 +212,12 @@ mod tests {
                 tool_input: serde_json::json!({}),
                 raw_arguments: None,
                 mode,
+                discovery_gate: None,
                 disposition: PreparedToolDisposition::Execute,
             },
-            outcome: result.map(ToolExecutionOutcome::Completed),
+            outcome: result
+                .map(crate::tool_types::ToolResultCommit::completed)
+                .map(ToolExecutionOutcome::Completed),
         }
     }
 

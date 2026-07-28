@@ -7,7 +7,7 @@ use std::{
 use astrcode_core::{
     event::EventPayload,
     permission::{ApprovalDecision, ApprovalSource},
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    tool::{ExecutionMode, ToolDefinition},
     tool_ui::{complete_questionnaire_content, is_awaiting_user_input_content},
     types::ToolCallId,
 };
@@ -22,7 +22,7 @@ use crate::{
     tool_exec::execute_tool_call,
     tool_types::{
         ExecutableToolInvocation, ExecuteToolBatch, PreparedToolDisposition,
-        PreparedToolInvocation, ToolExecutionOutcome,
+        PreparedToolInvocation, ToolExecutionOutcome, ToolResultCommit,
     },
     turn_context::TurnError,
     turn_publish::TurnEvents,
@@ -453,7 +453,7 @@ impl ToolCalls {
     async fn await_tool_ui_response(
         &self,
         call: &PreparedToolInvocation,
-        mut result: ToolResult,
+        mut result: ToolResultCommit,
         publisher: Arc<TurnEvents>,
     ) -> Result<ToolExecutionOutcome, TurnError> {
         publisher

@@ -654,6 +654,7 @@ name = "astrcode-tools"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
+ "astrcode-extension-sdk",
  "astrcode-support",
  "async-trait",
  "base64 0.22.1",

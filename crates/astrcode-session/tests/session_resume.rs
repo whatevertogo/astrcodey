@@ -7,14 +7,16 @@ use astrcode_core::{
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{
         ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolOrigin, ToolResult,
+        ToolOrigin,
     },
     types::{ToolCallId, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     extension::{ExtensionError, PromptBuildContext, PromptContributions},
-    runtime_ports::{NoopRuntimePorts, PromptContributor},
-    tool_pack::{ToolPack, ToolPackScope},
+    runtime_ports::{
+        NoopRuntimePorts, PromptContributor, ToolCatalogProvider, ToolCatalogScope,
+        ToolCatalogSnapshot,
+    },
 };
 use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
@@ -29,12 +31,23 @@ struct UnusedLlm;
 
 struct FailingPromptContributor;
 
-struct ReadWriteToolPack;
+struct ReadWriteToolCatalog;
 struct NamedTool(&'static str);
 
-impl ToolPack for ReadWriteToolPack {
-    fn tools(&self, _scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(NamedTool("read")), Arc::new(NamedTool("write"))]
+#[async_trait::async_trait]
+impl ToolCatalogProvider for ReadWriteToolCatalog {
+    fn revision(&self) -> u64 {
+        1
+    }
+
+    async fn tool_catalog(
+        &self,
+        _scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
+        Ok(ToolCatalogSnapshot::complete(
+            self.revision(),
+            vec![Arc::new(NamedTool("read")), Arc::new(NamedTool("write"))],
+        ))
     }
 }
 
@@ -55,7 +68,7 @@ impl Tool for NamedTool {
         &self,
         _arguments: serde_json::Value,
         _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<astrcode_core::tool::ToolExecutionResult, ToolError> {
         unreachable!("selection test does not execute tools")
     }
 }
@@ -179,8 +192,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
 async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    let caps =
-        common::test_runtime_services_with_tool_packs(llm, vec![Arc::new(ReadWriteToolPack)]);
+    let caps = common::test_runtime_services_with_tool_catalog(llm, Arc::new(ReadWriteToolCatalog));
     let parent_selection = SessionToolSelection::Only {
         names: vec!["write".into(), "read".into()],
     };
@@ -304,7 +316,6 @@ async fn turn_setup_failure_returns_session_to_idle() {
     let caps = common::test_runtime_services_with_extensions(
         Arc::clone(&llm),
         SessionExtensionPorts::from_immutable_ports(
-            noop.clone(),
             Arc::new(FailingPromptContributor),
             noop.clone(),
             noop,

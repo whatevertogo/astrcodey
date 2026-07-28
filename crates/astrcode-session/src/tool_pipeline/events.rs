@@ -44,7 +44,7 @@ pub(super) async fn finish_tool_call(
         ToolExecutionOutcome::Completed(result) => EventPayload::ToolCallCompleted {
             call_id: call_id.into(),
             tool_name,
-            result: result.clone(),
+            result: result.result.clone(),
             arguments,
             arguments_json,
         },
@@ -78,7 +78,7 @@ pub(super) async fn finish_tool_call(
 
 pub(super) fn tool_result_for_output(outcome: &ToolExecutionOutcome) -> ToolResult {
     match outcome {
-        ToolExecutionOutcome::Completed(result) => result.clone(),
+        ToolExecutionOutcome::Completed(result) => result.result.clone(),
         ToolExecutionOutcome::Failed {
             error,
             metadata,

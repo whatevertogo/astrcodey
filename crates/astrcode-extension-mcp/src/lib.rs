@@ -21,8 +21,8 @@ use astrcode_extension_sdk::{
         ToolDiscoveryHandler, ToolHandler,
     },
     tool::{
-        DEFERRED_TOOLS_METADATA_KEY, ExecutionMode, ExtensionToolContext, ToolDefinition,
-        ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
+        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolExecutionResult, ToolOrigin,
+        ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use serde_json::{Value, json};
@@ -392,7 +392,7 @@ impl ToolHandler for McpToolHandler {
         arguments: Value,
         working_dir: &str,
         _ctx: &ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<ToolExecutionResult, ExtensionError> {
         if tool_name == TOOL_SEARCH_TOOL_NAME {
             return Ok(self.handle_tool_search(arguments, working_dir).await);
         }
@@ -409,33 +409,36 @@ impl ToolHandler for McpToolHandler {
             .call_tool(server, original_tool, arguments)
             .await
         {
-            Ok(result) => Ok(call_result(&server.name, original_tool, result)),
+            Ok(result) => Ok(call_result(&server.name, original_tool, result).into()),
             Err(error) => Ok(error_result(
                 format!("failed to call MCP tool '{original_tool}': {error}"),
                 tool_metadata([
                     ("server", json!(server.name)),
                     ("tool", json!(original_tool)),
                 ]),
-            )),
+            )
+            .into()),
         }
     }
 }
 
 impl McpToolHandler {
-    async fn handle_tool_search(&self, arguments: Value, working_dir: &str) -> ToolResult {
+    async fn handle_tool_search(&self, arguments: Value, working_dir: &str) -> ToolExecutionResult {
         let args = match serde_json::from_value::<ToolSearchArgs>(arguments) {
             Ok(args) if !args.query.trim().is_empty() => args,
             Ok(_) => {
                 return error_result(
                     "invalid tool_search_tool input: query must not be empty".into(),
                     BTreeMap::new(),
-                );
+                )
+                .into();
             },
             Err(error) => {
                 return error_result(
                     format!("invalid tool_search_tool input: {error}"),
                     BTreeMap::new(),
-                );
+                )
+                .into();
             },
         };
 
@@ -447,22 +450,19 @@ impl McpToolHandler {
 
         warn_diagnostics(&diagnostics);
         let output = search_mcp_tools(&candidates, args);
+        let tool_names = output
+            .matches
+            .iter()
+            .map(|candidate| candidate.definition.name.clone())
+            .collect();
         let mut metadata = BTreeMap::new();
-        metadata.insert(
-            DEFERRED_TOOLS_METADATA_KEY.into(),
-            json!({
-                "group": MCP_DEFERRED_GROUP,
-                "matches": output
-                    .matches
-                    .iter()
-                    .map(|candidate| candidate.definition.name.clone())
-                    .collect::<Vec<_>>(),
-            }),
-        );
         if !diagnostics.is_empty() {
             metadata.insert("diagnostics".into(), json!(diagnostics));
         }
-        text_result(search::render_search_output(&output), false, None, metadata)
+        ToolExecutionResult::completed_with_discovered_tools(
+            text_result(search::render_search_output(&output), false, None, metadata),
+            tool_names,
+        )
     }
 }
 

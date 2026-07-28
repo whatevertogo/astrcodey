@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_core::tool::{access::ResourceAccess, *};
 use astrcode_support::{hostpaths::resolve_path, shell::resolve_shell};
 use serde::Deserialize;
 use tokio::process::Command;
@@ -108,7 +108,7 @@ impl Tool for ShellTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: ShellArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid shell args: {e}")))?;
@@ -137,7 +137,8 @@ impl Tool for ShellTool {
                 args.max_output_tokens,
                 started_at,
             )
-            .await;
+            .await
+            .map(Into::into);
         }
 
         if args.max_output_tokens.is_some() {
@@ -149,7 +150,8 @@ impl Tool for ShellTool {
         if args.run_in_background == Some(true) {
             return self
                 .execute_background_shell_spawn(args, started_at, ctx)
-                .await;
+                .await
+                .map(Into::into);
         }
 
         if args.command.trim().is_empty() {
@@ -157,7 +159,9 @@ impl Tool for ShellTool {
                 "command cannot be empty".into(),
             ));
         }
-        return self.execute_foreground_shell(args, started_at, ctx).await;
+        self.execute_foreground_shell(args, started_at, ctx)
+            .await
+            .map(Into::into)
     }
 }
 

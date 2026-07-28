@@ -140,18 +140,6 @@ pub enum ExtensionError {
     Internal(String),
 }
 
-// ─── Extension tool outcome ────────────────────────────────────────────
-
-/// `ToolResult.metadata` 中用于携带 [`ExtensionToolOutcome`] 的键名。
-pub const EXTENSION_TOOL_OUTCOME_KEY: &str = "extension_tool_outcome";
-
-/// 扩展工具回调返回的声明式结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ExtensionToolOutcome {
-    Text { content: String, is_error: bool },
-}
-
 // ─── ContinueAfterStop limit ───────────────────────────────────────────
 
 /// 单个 `ContinueAfterStop` hook 在同一个 turn 内可请求的续跑上限。

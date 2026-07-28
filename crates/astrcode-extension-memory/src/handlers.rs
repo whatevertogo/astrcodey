@@ -133,7 +133,7 @@ impl ToolHandler for MemorySaveHandler {
         arguments: serde_json::Value,
         working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = args.content;
@@ -154,7 +154,8 @@ impl ToolHandler for MemorySaveHandler {
                     "Memory unchanged (content identical)."
                 }
                 .to_string(),
-            ));
+            )
+            .into());
         }
 
         // 正常新增路径
@@ -179,7 +180,7 @@ impl ToolHandler for MemorySaveHandler {
                         );
                     }
                 }
-                Ok(ok_text("Memory saved.".to_string()))
+                Ok(ok_text("Memory saved.".to_string()).into())
             },
             AppendResult::SimilarExists(similar) => Ok(ok_text(format!(
                 "Similar memories exist:\n{}\n\nRetry with replace_match to update in place.",
@@ -188,7 +189,8 @@ impl ToolHandler for MemorySaveHandler {
                     .map(|s| format!("- {s}"))
                     .collect::<Vec<_>>()
                     .join("\n")
-            ))),
+            ))
+            .into()),
         }
     }
 }
@@ -213,11 +215,11 @@ impl ToolHandler for MemoryDeleteHandler {
         arguments: serde_json::Value,
         working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: DeleteArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         if args.match_pattern.trim().is_empty() {
-            return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()));
+            return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
@@ -237,13 +239,14 @@ impl ToolHandler for MemoryDeleteHandler {
         }
 
         if removed.is_empty() {
-            Ok(ok_text("No matching memories found to delete.".to_string()))
+            Ok(ok_text("No matching memories found to delete.".to_string()).into())
         } else {
             Ok(ok_text(format!(
                 "Deleted {} entries:\n{}",
                 removed.len(),
                 removed.join("\n")
-            )))
+            ))
+            .into())
         }
     }
 }
@@ -273,7 +276,7 @@ impl ToolHandler for MemoryListHandler {
         arguments: serde_json::Value,
         working_dir: &str,
         _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: ListArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
@@ -291,13 +294,14 @@ impl ToolHandler for MemoryListHandler {
             .await?;
 
         if entries.is_empty() {
-            Ok(ok_text("No memories found.".to_string()))
+            Ok(ok_text("No memories found.".to_string()).into())
         } else {
             Ok(ok_text(format!(
                 "{} entries:\n{}",
                 entries.len(),
                 entries.join("\n")
-            )))
+            ))
+            .into())
         }
     }
 }

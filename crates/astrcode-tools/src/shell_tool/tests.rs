@@ -36,7 +36,7 @@ async fn poll_background_shell_to_terminal(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut polls = Vec::new();
         loop {
-            let poll = tool
+            let (poll, discovered) = tool
                 .execute(
                     serde_json::json!({
                         "shellId": shell_id,
@@ -45,7 +45,9 @@ async fn poll_background_shell_to_terminal(
                     ctx,
                 )
                 .await
-                .expect("background shell poll should succeed");
+                .expect("background shell poll should succeed")
+                .into_parts();
+            assert!(discovered.is_empty());
             let running = poll.metadata["running"] == serde_json::json!(true);
             polls.push(poll);
             if !running {

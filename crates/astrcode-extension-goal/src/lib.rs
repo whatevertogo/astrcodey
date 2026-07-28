@@ -213,7 +213,7 @@ impl ToolHandler for GoalToolHandler {
         arguments: Value,
         _working_dir: &str,
         ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
-    ) -> Result<ToolResult, ExtensionError> {
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let root = ctx
             .capabilities
             .paths
@@ -252,7 +252,8 @@ impl ToolHandler for GoalToolHandler {
                 .await
             },
             _ => return Err(ExtensionError::NotFound(tool_name.into())),
-        })
+        }
+        .into())
     }
 }
 

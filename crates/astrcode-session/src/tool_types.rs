@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use astrcode_core::{
     permission::ApprovalSource,
-    tool::{ExecutionMode, ToolDefinition, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolResult},
 };
 
 use super::turn_publish::TurnEvents;
@@ -27,6 +27,7 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) tool_input: serde_json::Value,
     pub(crate) raw_arguments: Option<String>,
     pub(crate) mode: ExecutionMode,
+    pub(crate) discovery_gate: Option<String>,
     pub(crate) disposition: PreparedToolDisposition,
 }
 
@@ -64,7 +65,7 @@ pub(crate) enum PreparedToolDisposition {
 /// 表示执行或编排失败；`Cancelled` 只表示显式取消。
 #[derive(Clone, Debug)]
 pub(crate) enum ToolExecutionOutcome {
-    Completed(ToolResult),
+    Completed(ToolResultCommit),
     Failed {
         error: String,
         metadata: BTreeMap<String, serde_json::Value>,
@@ -74,6 +75,54 @@ pub(crate) enum ToolExecutionOutcome {
         reason: String,
         duration_ms: Option<u64>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolResultArtifactState {
+    Inline,
+    Persisted,
+}
+
+/// Session-private commit state kept outside the wire-facing [`ToolResult`].
+#[derive(Clone, Debug)]
+pub(crate) struct ToolResultCommit {
+    pub(crate) result: ToolResult,
+    pub(crate) discovered_tool_names: Vec<String>,
+    pub(crate) artifact_state: ToolResultArtifactState,
+}
+
+impl ToolResultCommit {
+    #[cfg(test)]
+    pub(crate) fn completed(result: ToolResult) -> Self {
+        Self {
+            result,
+            discovered_tool_names: Vec::new(),
+            artifact_state: ToolResultArtifactState::Inline,
+        }
+    }
+
+    pub(crate) fn from_execution_result(result: ToolExecutionResult) -> Self {
+        let (result, discovered_tool_names) = result.into_parts();
+        Self {
+            result,
+            discovered_tool_names,
+            artifact_state: ToolResultArtifactState::Inline,
+        }
+    }
+}
+
+impl std::ops::Deref for ToolResultCommit {
+    type Target = ToolResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
+}
+
+impl std::ops::DerefMut for ToolResultCommit {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.result
+    }
 }
 
 impl ToolExecutionOutcome {

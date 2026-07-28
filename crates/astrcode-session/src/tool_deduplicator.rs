@@ -218,7 +218,9 @@ mod tests {
     }
 
     fn completed(content: &str) -> ToolExecutionOutcome {
-        ToolExecutionOutcome::Completed(ToolResult::success(content))
+        ToolExecutionOutcome::Completed(crate::tool_types::ToolResultCommit::completed(
+            ToolResult::success(content),
+        ))
     }
 
     #[test]
@@ -310,9 +312,9 @@ mod tests {
 
         dedup.finalize_outcome(
             "primary",
-            &ToolExecutionOutcome::Completed(
+            &ToolExecutionOutcome::Completed(crate::tool_types::ToolResultCommit::completed(
                 ToolResult::success("file contents").with_duration_ms(Some(12)),
-            ),
+            )),
         );
 
         let ToolExecutionOutcome::Completed(duplicate) =
